@@ -34,7 +34,15 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/tenkai-release-dry-run.$$.XXXXXX")"
 trap "rm -rf $(printf '%q' "$tmp")" EXIT
 
 workflow=.github/workflows/release-binaries.yml
+dispatcher=.github/workflows/release-dispatch.yml
 grep -Eq '^[[:space:]]+pull_request' "$workflow" && fail "${workflow} must not run on pull requests"
+grep -E '^  push:|^[[:space:]]+tags:' "$workflow" >/dev/null \
+  && fail "${workflow} must not run on push; ${dispatcher} starts it from main"
+grep -F 'tags: ["v*"]' "$dispatcher" >/dev/null || fail "${dispatcher} must trigger on v* tags"
+grep -F 'gh workflow run release-binaries.yml --ref main -f tag="$TAG"' "$dispatcher" >/dev/null \
+  || fail "${dispatcher} must dispatch release-binaries.yml from main"
+grep -F '[[ "$WORKFLOW_REF" == refs/heads/main ]]' "$workflow" >/dev/null \
+  || fail "${workflow} must refuse tagged runs that are not from main"
 sed -n '1,/^jobs:/p' "$workflow" | grep -Eq 'attestations: write|id-token: write' \
   && fail "${workflow} must grant attestation permissions per job, not workflow-wide"
 

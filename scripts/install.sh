@@ -310,7 +310,7 @@ for file in $binaries $applier_files; do
     /*) ;;
     *) file="${prefix}/${file}" ;;
   esac
-  say "  gh attestation verify ${file} --repo ${REPO} --signer-workflow ${REPO}/.github/workflows/release-binaries.yml --source-ref refs/tags/${tag}"
+  say "  gh attestation verify ${file} --repo ${REPO} --signer-workflow ${REPO}/.github/workflows/release-binaries.yml --source-ref refs/heads/main"
 done
 # A relative prefix (the quickstart's --prefix .) is used by path, not PATH.
 case "$prefix" in

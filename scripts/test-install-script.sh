@@ -98,7 +98,7 @@ self_test() {
   [[ "$("${prefix}/tenkaictl")" == "tenkaictl ${VERSION}" ]] || fail "cli install did not run"
   grep -Fq "gh attestation verify ${prefix}/tenkaictl --repo Sannrox/tenkai" <<<"$out" \
     || fail "no attestation command: ${out}"
-  grep -Fq -- "--source-ref refs/tags/v${VERSION}" <<<"$out" || fail "attestation command lacks the tag"
+  grep -Fq -- "--source-ref refs/heads/main" <<<"$out" || fail "attestation command must pin the main workflow run"
 
   # The guard lands beside the server. --role server writes client.toml.
   prefix="${tmp}/server"

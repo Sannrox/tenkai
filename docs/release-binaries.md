@@ -102,7 +102,7 @@ attestation, so it can be checked before it runs:
 curl -fsSL -O https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh
 gh attestation verify install.sh --repo Sannrox/tenkai \
   --signer-workflow Sannrox/tenkai/.github/workflows/release-binaries.yml \
-  --source-ref refs/tags/vX.Y.Z
+  --source-ref refs/heads/main
 sudo sh install.sh --role server
 ```
 
@@ -126,7 +126,7 @@ curl -fsSL -O "${base}/tenkaictl-${platform}"
 gh attestation verify "tenkaictl-${platform}" \
   --repo Sannrox/tenkai \
   --signer-workflow Sannrox/tenkai/.github/workflows/release-binaries.yml \
-  --source-ref "refs/tags/${tag}"
+  --source-ref refs/heads/main
 grep " tenkaictl-${platform}$" SHA256SUMS | sha256sum -c -
 # macOS: grep " tenkaictl-${platform}$" SHA256SUMS | shasum -a 256 -c
 chmod 0755 "tenkaictl-${platform}"
@@ -151,7 +151,7 @@ for binary in tenkai-server tenkai-executor-guard; do
   gh attestation verify "${binary}-${platform}" \
     --repo Sannrox/tenkai \
     --signer-workflow Sannrox/tenkai/.github/workflows/release-binaries.yml \
-    --source-ref "refs/tags/${tag}"
+    --source-ref refs/heads/main
   grep " ${binary}-${platform}$" SHA256SUMS | sha256sum -c -
   sudo install -m 0755 "${binary}-${platform}" "/usr/local/bin/${binary}"
 done
@@ -196,14 +196,18 @@ Spoke and embedded CLI continue to refuse `TENKAI_POSTGRES_URL`.
 
 ## Packaging path
 
-Tag `vX.Y.Z` or `vX.Y.Z-rc.N` starts `.github/workflows/release-binaries.yml`.
-The first job fetches the tag object and runs
-`scripts/verify-release-tag.sh verify-signed`: the tag must be annotated,
-signed by a key listed in `security/release-tag-fingerprints`
-(public key in `security/release-tag-key.asc`), resolve to the triggering
-commit, and equal the workspace version. Lightweight and unsigned tags stop
-the workflow before anything is built. The tag's CHANGELOG section must exist
-and carry its `Gate flags:` line.
+A `v*` tag push starts `.github/workflows/release-dispatch.yml`, which only
+runs `gh workflow run release-binaries.yml --ref main -f tag=<tag>`. The
+release always uses main's workflow and tag verifier; a failed run is fixed
+on main and re-run for the same tag. `release-binaries.yml` refuses a tagged
+run that is not from main, checks out the tag, and runs main's
+`scripts/verify-release-tag.sh verify-signed` against main's
+`security/release-tag-fingerprints` (public key in
+`security/release-tag-key.asc`): the tag must be annotated, signed by an
+allowed key, resolve to a commit on main, and equal the tagged commit's
+workspace version. Lightweight and unsigned tags stop the workflow before
+anything is built. The tag's CHANGELOG section must exist and carry its
+`Gate flags:` line. Manifest `git_sha` is that tagged commit.
 
 The workflow then builds the five community hosts with `--workspace --features tenkai-server/ui`
 (Linux hosts inside the glibc 2.28 image, with `tenkai-host-applier`),
@@ -225,16 +229,17 @@ validated digest. The attest job then creates:
 - `tenkai-release.json`, the [family release manifest](family-release-manifests.md),
   and a provenance attestation for it.
 
-The upload job checks that the live tag resolves to the triggering commit,
+The upload job checks that the live tag resolves to the tagged commit,
 creates a draft GitHub Release whose body is the tag's `CHANGELOG.md`
 section, attaches the assets, and publishes it: marked latest for `vX.Y.Z`,
-as a pre-release not marked latest for `vX.Y.Z-rc.N`. A rerun resumes a draft. An
-already published Release is refused, not edited. A tag mismatch fails
-closed before assets are uploaded. Pull requests build
+as a pre-release not marked latest for a tag that contains `-`. A rerun
+resumes a draft. An already published Release is refused, not edited. A tag
+mismatch fails closed before assets are uploaded. Pull requests build
 the Linux hosts the same way, run them on older distributions, and run
 `scripts/release-dry-run.sh --linux-hosts` instead, which writes the same
 notes, SBOM, and manifest (macOS hosts are stubs) and never attests or
-publishes.
+publishes. `workflow_dispatch` without a tag dry-runs that packaging path
+on the dispatched ref.
 
 Verify the SBOM and manifest like a host:
 
@@ -244,7 +249,7 @@ for asset in tenkai.cdx.json tenkai-release.json; do
   gh attestation verify "$asset" \
     --repo Sannrox/tenkai \
     --signer-workflow Sannrox/tenkai/.github/workflows/release-binaries.yml \
-    --source-ref "refs/tags/${tag}"
+    --source-ref refs/heads/main
 done
 gh attestation verify "tenkaictl-${platform}" --repo Sannrox/tenkai \
   --predicate-type https://cyclonedx.org/bom
