@@ -5,9 +5,12 @@
 //! call this module; they do not invent a second protocol or reuse spoke
 //! runtime HTTP.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
 use crate::auth_context::PrincipalKind;
@@ -17,8 +20,78 @@ use crate::release_signing::{SignatureEnvelope, TrustRoots};
 /// Wire and Rust contract version for `tenkai.management-lifecycle.v1`.
 pub const MANAGEMENT_LIFECYCLE_API_VERSION: u32 = 1;
 
+/// Total decoded deploy-input bytes a remote publish may carry.
+pub const MAX_REMOTE_PUBLISH_INPUT_BYTES: u64 = 32 * 1024 * 1024;
+
+/// HTTP body cap for `POST /v1/releases`: decoded inputs plus base64 and envelope.
+pub const MAX_REMOTE_PUBLISH_HTTP_BYTES: usize =
+    (MAX_REMOTE_PUBLISH_INPUT_BYTES as usize).saturating_mul(2);
+
 /// Stable contract name recorded on the wire and in operator docs.
 pub const MANAGEMENT_LIFECYCLE_CONTRACT: &str = "tenkai.management-lifecycle.v1";
+
+/// Durable catalog snapshot directory for a remote publish.
+/// Staging is deleted after admission, so this path must sit outside it.
+pub fn remote_catalog_state_dir() -> Result<PathBuf> {
+    let dir = if let Ok(path) = crate::host_env::var("TENKAI_STATE_DIR")
+        && !path.is_empty()
+    {
+        PathBuf::from(path)
+    } else if let Ok(path) = crate::host_env::var("STATE_DIRECTORY")
+        && let Some(first) = path.split(':').map(str::trim).find(|part| !part.is_empty())
+    {
+        PathBuf::from(first)
+    } else {
+        std::env::current_dir()?.join(".tenkai-state")
+    };
+    prepare_catalog_state_dir(&dir)?;
+    Ok(dir)
+}
+
+fn prepare_catalog_state_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+    loop {
+        match std::fs::symlink_metadata(dir) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    bail!(
+                        "catalog state directory cannot be a symlink: {}",
+                        dir.display()
+                    );
+                }
+                if !metadata.is_dir() {
+                    bail!(
+                        "catalog state directory is not a directory: {}",
+                        dir.display()
+                    );
+                }
+                // SAFETY: geteuid has no preconditions and cannot fail.
+                if metadata.uid() != unsafe { libc::geteuid() } {
+                    bail!(
+                        "catalog state directory is not owned by the server's user: {}",
+                        dir.display()
+                    );
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+                    Ok(()) => return Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("creating catalog state directory {}", dir.display())
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("reading catalog state directory {}", dir.display()));
+            }
+        }
+    }
+}
 
 /// Closed lifecycle vocabulary accepted by version 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +360,29 @@ pub struct PublishRequest {
     pub manifest: String,
     pub signature: SignatureEnvelope,
     pub trust_roots: TrustRoots,
+    /// Declared deploy inputs next to the manifest, with modes the signature binds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<PublishInputEntry>,
+}
+
+/// One file or directory from the release workdir, relative to the manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PublishInputEntry {
+    pub path: String,
+    pub kind: PublishInputKind,
+    /// Unix mode bits the artifact digest binds (`mode & 0o7777`).
+    pub mode: u32,
+    /// Standard base64 file bytes. Empty for directories.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishInputKind {
+    File,
+    Dir,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -429,28 +525,44 @@ impl RemotePublishFiles {
         manifest: &str,
         signature: &SignatureEnvelope,
         trust_roots: &TrustRoots,
+        inputs: &[PublishInputEntry],
     ) -> Result<Self> {
         if manifest.trim().is_empty() {
             bail!("publish manifest must not be empty");
         }
+        let signature_bytes = serde_json::to_vec(signature)?;
+        let trust_roots_text = toml::to_string(trust_roots)?;
         let dir = std::env::temp_dir().join(format!(
             "tenkai-remote-publish-{}-{}-{}",
             std::process::id(),
             crate::now_millis(),
             uuid::Uuid::new_v4()
         ));
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("creating publish staging directory {}", dir.display()))?;
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&dir)
+                .with_context(|| format!("creating publish staging directory {}", dir.display()))?;
+        }
         let manifest_path = dir.join("tenkai.toml");
         let signature_path = dir.join("signature.json");
         let trust_roots_path = dir.join("trust-roots.toml");
+        let cleanup = |dir: &Path| {
+            let _ = std::fs::remove_dir_all(dir);
+        };
+        // Inputs first, then contract files, so a declared `tenkai.toml` cannot
+        // replace the admitted manifest.
+        write_publish_inputs(&dir, manifest, inputs).inspect_err(|_| cleanup(&dir))?;
         std::fs::write(&manifest_path, manifest)
-            .with_context(|| format!("writing staged manifest {}", manifest_path.display()))?;
-        std::fs::write(&signature_path, serde_json::to_vec(signature)?)
-            .with_context(|| format!("writing staged signature {}", signature_path.display()))?;
-        std::fs::write(&trust_roots_path, toml::to_string(trust_roots)?).with_context(|| {
-            format!("writing staged trust roots {}", trust_roots_path.display())
-        })?;
+            .with_context(|| format!("writing staged manifest {}", manifest_path.display()))
+            .inspect_err(|_| cleanup(&dir))?;
+        std::fs::write(&signature_path, signature_bytes)
+            .with_context(|| format!("writing staged signature {}", signature_path.display()))
+            .inspect_err(|_| cleanup(&dir))?;
+        std::fs::write(&trust_roots_path, trust_roots_text)
+            .with_context(|| format!("writing staged trust roots {}", trust_roots_path.display()))
+            .inspect_err(|_| cleanup(&dir))?;
         Ok(Self {
             _dir: dir,
             manifest: manifest_path,
@@ -1013,14 +1125,200 @@ pub fn load_publish_request(
     signature: &Path,
     trust_roots: &Path,
 ) -> Result<PublishRequest> {
+    let loaded = crate::manifest::load(manifest)?;
     Ok(PublishRequest {
         version: MANAGEMENT_LIFECYCLE_API_VERSION,
         operation: ManagementLifecycleOperation::Publish.as_str().into(),
-        manifest: std::fs::read_to_string(manifest)
-            .with_context(|| format!("reading publish manifest {}", manifest.display()))?,
+        manifest: loaded.raw,
         signature: SignatureEnvelope::load(signature)?,
         trust_roots: TrustRoots::load(trust_roots)?,
+        inputs: collect_publish_inputs(&loaded.workdir, &loaded.manifest.immutable_inputs())?,
     })
+}
+
+fn require_relative_publish_path(path: &str) -> Result<()> {
+    let relative = Path::new(path);
+    if path.is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        bail!("deploy input must be a relative path without '..': {path}");
+    }
+    Ok(())
+}
+
+fn require_publish_workdir(path: &str) -> Result<()> {
+    let relative = Path::new(path);
+    if path.is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        bail!("deploy.workdir must be a relative path without '..': {path}");
+    }
+    Ok(())
+}
+
+fn collect_publish_inputs(workdir: &Path, declared: &[String]) -> Result<Vec<PublishInputEntry>> {
+    let mut entries = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut total = 0u64;
+    let mut declared = declared.to_vec();
+    declared.sort();
+    for input in declared {
+        require_relative_publish_path(&input)?;
+        collect_publish_entry(workdir, &input, &mut entries, &mut seen, &mut total)?;
+    }
+    Ok(entries)
+}
+
+fn collect_publish_entry(
+    workdir: &Path,
+    relative: &str,
+    entries: &mut Vec<PublishInputEntry>,
+    seen: &mut BTreeSet<String>,
+    total: &mut u64,
+) -> Result<()> {
+    if !seen.insert(relative.to_string()) {
+        return Ok(());
+    }
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = workdir.join(relative);
+    let metadata = std::fs::symlink_metadata(&path)
+        .with_context(|| format!("reading deploy input {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!("deploy input cannot be a symlink: {relative}");
+    }
+    let mode = metadata.permissions().mode() & 0o7777;
+    if metadata.is_dir() {
+        entries.push(PublishInputEntry {
+            path: relative.to_string(),
+            kind: PublishInputKind::Dir,
+            mode,
+            content: String::new(),
+        });
+        let mut children: Vec<_> = std::fs::read_dir(&path)
+            .with_context(|| format!("reading deploy input {}", path.display()))?
+            .collect::<Result<Vec<_>, _>>()?;
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            let name = child
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("deploy input is not UTF-8: {relative}"))?;
+            collect_publish_entry(workdir, &format!("{relative}/{name}"), entries, seen, total)?;
+        }
+        return Ok(());
+    }
+    if metadata.is_file() {
+        let remaining = MAX_REMOTE_PUBLISH_INPUT_BYTES.saturating_sub(*total);
+        if metadata.len() > remaining {
+            bail!("publish inputs exceed {MAX_REMOTE_PUBLISH_INPUT_BYTES} bytes");
+        }
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("reading deploy input {}", path.display()))?;
+        *total = total.saturating_add(bytes.len() as u64);
+        if *total > MAX_REMOTE_PUBLISH_INPUT_BYTES {
+            bail!("publish inputs exceed {MAX_REMOTE_PUBLISH_INPUT_BYTES} bytes");
+        }
+        entries.push(PublishInputEntry {
+            path: relative.to_string(),
+            kind: PublishInputKind::File,
+            mode,
+            content: STANDARD.encode(bytes),
+        });
+        return Ok(());
+    }
+    bail!("deploy input is not a file or directory: {relative}")
+}
+
+fn write_publish_inputs(
+    dir: &Path,
+    manifest_text: &str,
+    inputs: &[PublishInputEntry],
+) -> Result<()> {
+    let manifest: crate::manifest::Manifest =
+        toml::from_str(manifest_text).context("parsing publish manifest for deploy inputs")?;
+    require_publish_workdir(&manifest.deploy.workdir)?;
+    let input_root = dir.join(&manifest.deploy.workdir);
+    std::fs::create_dir_all(&input_root)
+        .with_context(|| format!("staging deploy workdir {}", input_root.display()))?;
+    let declared = manifest.immutable_inputs();
+    let mut total = 0u64;
+    let mut seen = BTreeSet::new();
+    let mut dir_modes = Vec::new();
+    for entry in inputs {
+        require_relative_publish_path(&entry.path)?;
+        if !seen.insert(entry.path.clone()) {
+            bail!("duplicate publish input {}", entry.path);
+        }
+        let covered = declared
+            .iter()
+            .any(|input| entry.path == *input || entry.path.starts_with(&format!("{input}/")));
+        if !covered {
+            bail!(
+                "publish input {} is not a declared deploy input",
+                entry.path
+            );
+        }
+        let dest = input_root.join(&entry.path);
+        match entry.kind {
+            PublishInputKind::Dir => {
+                if !entry.content.is_empty() {
+                    bail!(
+                        "directory publish input {} must not carry content",
+                        entry.path
+                    );
+                }
+                std::fs::create_dir_all(&dest)
+                    .with_context(|| format!("staging deploy input {}", dest.display()))?;
+                dir_modes.push((dest, entry.mode));
+            }
+            PublishInputKind::File => {
+                let encoded = entry.content.trim();
+                let decoded_upper = (encoded.len() as u64 / 4).saturating_mul(3);
+                total = total.saturating_add(decoded_upper);
+                if total > MAX_REMOTE_PUBLISH_INPUT_BYTES {
+                    bail!("publish inputs exceed {MAX_REMOTE_PUBLISH_INPUT_BYTES} bytes");
+                }
+                let bytes = STANDARD
+                    .decode(encoded)
+                    .with_context(|| format!("decoding publish input {}", entry.path))?;
+                total = total
+                    .saturating_sub(decoded_upper)
+                    .saturating_add(bytes.len() as u64);
+                if total > MAX_REMOTE_PUBLISH_INPUT_BYTES {
+                    bail!("publish inputs exceed {MAX_REMOTE_PUBLISH_INPUT_BYTES} bytes");
+                }
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("staging deploy input {}", dest.display()))?;
+                }
+                std::fs::write(&dest, bytes)
+                    .with_context(|| format!("staging deploy input {}", dest.display()))?;
+                set_publish_mode(&dest, entry.mode)?;
+            }
+        }
+    }
+    dir_modes.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
+    for (path, mode) in dir_modes {
+        set_publish_mode(&path, mode)?;
+    }
+    for input in &declared {
+        if !input_root.join(input).exists() {
+            bail!("publish is missing declared deploy input {input}");
+        }
+    }
+    Ok(())
+}
+
+fn set_publish_mode(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777))
+        .with_context(|| format!("setting mode on staged deploy input {}", path.display()))
 }
 
 pub fn load_approve_request(
@@ -1308,5 +1606,308 @@ mod tests {
             plan_environment_from_id("tenkai:plan:stage:1:abc").unwrap(),
             "stage"
         );
+    }
+
+    #[test]
+    fn remote_catalog_state_dir_uses_systemd_state_directory() {
+        let root = unique_temp("state-dir");
+        let _guard = crate::host_env::overlay::set([
+            ("TENKAI_STATE_DIR", None),
+            ("STATE_DIRECTORY", Some(root.as_os_str())),
+        ]);
+        assert_eq!(remote_catalog_state_dir().unwrap(), root);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn unique_temp(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-remote-publish-{label}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn signed_release_with_inputs(root: &Path) -> (PublishRequest, PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let workdir = root.join("release");
+        std::fs::create_dir_all(workdir.join("manifests")).unwrap();
+        std::fs::write(
+            workdir.join("tenkai.toml"),
+            "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\ninputs = [\"deploy.sh\", \"manifests\"]\n",
+        )
+        .unwrap();
+        let script = workdir.join("deploy.sh");
+        std::fs::write(&script, b"#!/bin/sh\ntrue\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(workdir.join("manifests/app.yaml"), "kind: ConfigMap\n").unwrap();
+        std::fs::set_permissions(
+            workdir.join("manifests"),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+        let keys = root.join("keys");
+        let signature = root.join("signature.json");
+        let trust_roots = root.join("trust-roots.toml");
+        crate::dev_sign::sign_release(
+            &keys,
+            &workdir.join("tenkai.toml"),
+            &signature,
+            &trust_roots,
+        )
+        .unwrap();
+        (
+            load_publish_request(&workdir.join("tenkai.toml"), &signature, &trust_roots).unwrap(),
+            workdir,
+        )
+    }
+
+    #[test]
+    fn remote_publish_round_trips_declared_inputs_and_modes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = unique_temp("roundtrip");
+        let (request, workdir) = signed_release_with_inputs(&root);
+        assert!(
+            request.inputs.iter().any(|entry| entry.path == "deploy.sh"
+                && entry.kind == PublishInputKind::File
+                && entry.mode & 0o111 != 0
+                && !entry.content.is_empty()),
+            "{:?}",
+            request.inputs
+        );
+        assert!(
+            request
+                .inputs
+                .iter()
+                .any(|entry| { entry.path == "manifests" && entry.kind == PublishInputKind::Dir }),
+            "{:?}",
+            request.inputs
+        );
+        assert!(
+            request.inputs.iter().any(|entry| {
+                entry.path == "manifests/app.yaml" && entry.kind == PublishInputKind::File
+            }),
+            "{:?}",
+            request.inputs
+        );
+
+        let files = RemotePublishFiles::materialize(
+            &request.manifest,
+            &request.signature,
+            &request.trust_roots,
+            &request.inputs,
+        )
+        .unwrap();
+        let staged = files.manifest.parent().unwrap();
+        assert_eq!(
+            std::fs::metadata(staged).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let declared = ["deploy.sh".into(), "manifests".into()];
+        assert_eq!(
+            std::fs::metadata(staged.join("manifests"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o555
+        );
+        assert!(staged.join("manifests/app.yaml").is_file());
+        assert_eq!(
+            crate::manifest::artifact_digest(&workdir, &declared).unwrap(),
+            crate::manifest::artifact_digest(staged, &declared).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_publish_restores_inputs_under_deploy_workdir() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = unique_temp("workdir");
+        let workdir = root.join("release");
+        std::fs::create_dir_all(workdir.join("payload")).unwrap();
+        std::fs::write(
+            workdir.join("tenkai.toml"),
+            "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\nworkdir = \"payload\"\ninputs = [\"deploy.sh\"]\n",
+        )
+        .unwrap();
+        let script = workdir.join("payload/deploy.sh");
+        std::fs::write(&script, b"#!/bin/sh\ntrue\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let keys = root.join("keys");
+        let signature = root.join("signature.json");
+        let trust_roots = root.join("trust-roots.toml");
+        crate::dev_sign::sign_release(
+            &keys,
+            &workdir.join("tenkai.toml"),
+            &signature,
+            &trust_roots,
+        )
+        .unwrap();
+        let request =
+            load_publish_request(&workdir.join("tenkai.toml"), &signature, &trust_roots).unwrap();
+        assert_eq!(request.inputs.len(), 1);
+        assert_eq!(request.inputs[0].path, "deploy.sh");
+        let files = RemotePublishFiles::materialize(
+            &request.manifest,
+            &request.signature,
+            &request.trust_roots,
+            &request.inputs,
+        )
+        .unwrap();
+        let staged = files.manifest.parent().unwrap();
+        assert!(staged.join("payload/deploy.sh").is_file());
+        let declared = ["deploy.sh".into()];
+        assert_eq!(
+            crate::manifest::artifact_digest(&workdir.join("payload"), &declared).unwrap(),
+            crate::manifest::artifact_digest(&staged.join("payload"), &declared).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_publish_keeps_admitted_manifest_when_inputs_name_tenkai_toml() {
+        let root = unique_temp("overwrite");
+        let (mut request, _) = signed_release_with_inputs(&root);
+        request.inputs.push(PublishInputEntry {
+            path: "tenkai.toml".into(),
+            kind: PublishInputKind::File,
+            mode: 0o644,
+            content: STANDARD.encode(
+                b"[product]\nname = \"other\"\nversion = \"9.9.9\"\n\n[deploy]\ninstall = \"true\"\n",
+            ),
+        });
+        let err = RemotePublishFiles::materialize(
+            &request.manifest,
+            &request.signature,
+            &request.trust_roots,
+            &request.inputs,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not a declared deploy input"), "{err}");
+
+        let workdir = root.join("collide");
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::write(
+            workdir.join("tenkai.toml"),
+            "[product]\nname = \"api\"\nversion = \"3.0.0\"\n\n[deploy]\ninstall = \"true\"\ninputs = [\"tenkai.toml\"]\n",
+        )
+        .unwrap();
+        let keys = root.join("collide-keys");
+        let signature = root.join("collide-signature.json");
+        let trust_roots = root.join("collide-trust.toml");
+        crate::dev_sign::sign_release(
+            &keys,
+            &workdir.join("tenkai.toml"),
+            &signature,
+            &trust_roots,
+        )
+        .unwrap();
+        let request =
+            load_publish_request(&workdir.join("tenkai.toml"), &signature, &trust_roots).unwrap();
+        let files = RemotePublishFiles::materialize(
+            &request.manifest,
+            &request.signature,
+            &request.trust_roots,
+            &request.inputs,
+        )
+        .unwrap();
+        let staged = std::fs::read_to_string(&files.manifest).unwrap();
+        assert!(staged.contains("name = \"api\""), "{staged}");
+        assert!(!staged.contains("other"), "{staged}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_publish_refuses_path_escape_undeclared_and_missing_inputs() {
+        let root = unique_temp("refuse");
+        let (request, _) = signed_release_with_inputs(&root);
+
+        let mut escaped = request.clone();
+        escaped.inputs.push(PublishInputEntry {
+            path: "../escape".into(),
+            kind: PublishInputKind::File,
+            mode: 0o644,
+            content: STANDARD.encode(b"no"),
+        });
+        let err = RemotePublishFiles::materialize(
+            &escaped.manifest,
+            &escaped.signature,
+            &escaped.trust_roots,
+            &escaped.inputs,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("relative path without '..'"), "{err}");
+
+        let mut undeclared = request.clone();
+        undeclared.inputs.push(PublishInputEntry {
+            path: "extra.txt".into(),
+            kind: PublishInputKind::File,
+            mode: 0o644,
+            content: STANDARD.encode(b"no"),
+        });
+        let err = RemotePublishFiles::materialize(
+            &undeclared.manifest,
+            &undeclared.signature,
+            &undeclared.trust_roots,
+            &undeclared.inputs,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not a declared deploy input"), "{err}");
+
+        let mut missing = request.clone();
+        missing.inputs.clear();
+        let err = RemotePublishFiles::materialize(
+            &missing.manifest,
+            &missing.signature,
+            &missing.trust_roots,
+            &missing.inputs,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("missing declared deploy input"), "{err}");
+
+        let mut duplicate = request.clone();
+        duplicate.inputs.push(duplicate.inputs[0].clone());
+        let err = RemotePublishFiles::materialize(
+            &duplicate.manifest,
+            &duplicate.signature,
+            &duplicate.trust_roots,
+            &duplicate.inputs,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("duplicate publish input"), "{err}");
+
+        let link_dir = root.join("symlink");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        std::fs::write(
+            link_dir.join("tenkai.toml"),
+            "[product]\nname = \"api\"\nversion = \"2.0.0\"\n\n[deploy]\ninstall = \"true\"\ninputs = [\"link\"]\n",
+        )
+        .unwrap();
+        std::fs::write(link_dir.join("link"), b"ok\n").unwrap();
+        let keys = root.join("symlink-keys");
+        let signature = root.join("symlink-signature.json");
+        let trust_roots = root.join("symlink-trust.toml");
+        crate::dev_sign::sign_release(
+            &keys,
+            &link_dir.join("tenkai.toml"),
+            &signature,
+            &trust_roots,
+        )
+        .unwrap();
+        std::fs::remove_file(link_dir.join("link")).unwrap();
+        std::os::unix::fs::symlink("missing", link_dir.join("link")).unwrap();
+        let err = load_publish_request(&link_dir.join("tenkai.toml"), &signature, &trust_roots)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symlink"), "{err}");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -228,17 +228,10 @@ subscription() {
 }
 
 echo "== publish and promote the signed releases"
-# Remote publish carries the manifest only (#976), so releases with deploy
-# inputs are published on the server host, into the server's store and state
-# directory, as the tenkai user.
-sudo install -o tenkai -g tenkai -m 0700 -d /var/lib/tenkai/incoming
 for release in cluster-1.0.0 cluster-1.1.0 app-1.0.0; do
-  sudo cp -R "$releases/$release" "$releases/$release.sig.json" /var/lib/tenkai/incoming/
-  sudo chown -R tenkai:tenkai "/var/lib/tenkai/incoming/$release" "/var/lib/tenkai/incoming/$release.sig.json"
-  (cd / && sudo -u tenkai env TENKAI_STATE_DIR=/var/lib/tenkai/state \
-    /usr/local/bin/tenkaictl --database "$database" publish "/var/lib/tenkai/incoming/$release/tenkai.toml" \
-    --signature "/var/lib/tenkai/incoming/$release.sig.json" \
-    --trust-roots /etc/tenkai/release-trust-roots.toml >/dev/null)
+  remote publish "$releases/$release/tenkai.toml" \
+    --signature "$releases/$release.sig.json" \
+    --trust-roots "$work/release-trust.toml" >/dev/null
 done
 remote promote cluster@1.0.0 stable >/dev/null
 remote promote app@1.0.0 stable >/dev/null

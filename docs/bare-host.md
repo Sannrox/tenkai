@@ -131,24 +131,14 @@ tenkaictl status --env edge
 ## 4. Publish and subscribe
 
 Sign both releases with your release key on a machine that holds it. Remote
-`publish` sends only the manifest, not deploy inputs
-([#976](https://github.com/Sannrox/tenkai/issues/976)), so publish releases
-that carry inputs on the server host, as the `tenkai` user, into the server's
-store and state directory. Copy each release directory and its signature
-where that user can read them first:
+`publish` uploads the manifest and the declared deploy inputs, covered by the
+same digests the signature binds:
 
 ```bash
-sudo -u tenkai env TENKAI_STATE_DIR=/var/lib/tenkai/state \
-  tenkaictl --database /var/lib/tenkai/tenkai.db publish /var/lib/tenkai/incoming/cluster/tenkai.toml \
-  --signature /var/lib/tenkai/incoming/cluster.sig.json --trust-roots /etc/tenkai/release-trust-roots.toml
-sudo -u tenkai env TENKAI_STATE_DIR=/var/lib/tenkai/state \
-  tenkaictl --database /var/lib/tenkai/tenkai.db publish /var/lib/tenkai/incoming/app/tenkai.toml \
-  --signature /var/lib/tenkai/incoming/app.sig.json --trust-roots /etc/tenkai/release-trust-roots.toml
-```
-
-Then promote and subscribe through the server:
-
-```bash
+tenkaictl --target remote publish ./cluster/tenkai.toml \
+  --signature ./cluster.sig.json --trust-roots /etc/tenkai/release-trust-roots.toml
+tenkaictl --target remote publish ./app/tenkai.toml \
+  --signature ./app.sig.json --trust-roots /etc/tenkai/release-trust-roots.toml
 tenkaictl --target remote promote cluster@1.0.0 stable
 tenkaictl --target remote promote app@1.0.0 stable
 tenkaictl --target remote env subscribe edge cluster=stable --generation <generation>

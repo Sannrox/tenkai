@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post, put};
 use serde::Serialize;
 
@@ -193,7 +194,14 @@ pub fn router(
             "/v1/environments",
             get(list_environments).post(register_environment),
         )
-        .route("/v1/releases", get(list_releases).post(publish_release))
+        .route(
+            "/v1/releases",
+            get(list_releases)
+                .post(publish_release)
+                .layer(DefaultBodyLimit::max(
+                    tenkai::management_lifecycle::MAX_REMOTE_PUBLISH_HTTP_BYTES,
+                )),
+        )
         .route("/v1/exposures", get(query_exposures))
         .route("/v1/advisory-feed", get(inspect_advisory_feed))
         .route("/v1/criticality/derived", post(import_derived_criticality))

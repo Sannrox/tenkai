@@ -1446,6 +1446,7 @@ impl ManagementOperations {
             &request.manifest,
             &request.signature,
             &trusted_roots,
+            &request.inputs,
         )
         .map_err(map_lifecycle_error)?;
         let actor = &context.audit_principal();
@@ -1458,6 +1459,10 @@ impl ManagementOperations {
                 signature: Some(files.signature.clone()),
                 trust_roots: Some(release_trust_roots.clone()),
                 allow_unsigned_development: false,
+                state_dir: Some(
+                    management_lifecycle::remote_catalog_state_dir()
+                        .map_err(map_lifecycle_error)?,
+                ),
                 ..Default::default()
             },
         )
@@ -3355,6 +3360,53 @@ mod tests {
             matches!(error, ManagementError::Forbidden(ref msg) if msg.contains("capability")),
             "{error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn publish_release_keeps_nested_workdir_inputs_after_staging_cleanup() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-publish-nested-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join("payload")).unwrap();
+        std::fs::write(
+            root.join("tenkai.toml"),
+            "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\nworkdir = \"payload\"\ninputs = [\"deploy.sh\"]\n",
+        )
+        .unwrap();
+        let script = root.join("payload/deploy.sh");
+        std::fs::write(&script, b"#!/bin/sh\ntrue\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let keys = root.join("keys");
+        let signature = root.join("signature.json");
+        let trust_roots = root.join("trust-roots.toml");
+        crate::dev_sign::sign_release(&keys, &root.join("tenkai.toml"), &signature, &trust_roots)
+            .unwrap();
+        let request = crate::management_lifecycle::load_publish_request(
+            &root.join("tenkai.toml"),
+            &signature,
+            &trust_roots,
+        )
+        .unwrap();
+        let ops = catalog_ops(&root, grant_auth([DeliveryCapability::Publish], [])).await;
+        ops.publish_release(&grant_credential(), request)
+            .await
+            .unwrap();
+        let mut ctx = ops.application_ctx().unwrap();
+        let release = ctx
+            .get(&crate::ontology::release_id("api", "1.0.0"))
+            .await
+            .unwrap()
+            .unwrap();
+        let workdir = std::path::PathBuf::from(release.properties.get("workdir").unwrap());
+        assert!(
+            workdir.join("deploy.sh").is_file(),
+            "snapshot {} was deleted with publish staging",
+            workdir.display()
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

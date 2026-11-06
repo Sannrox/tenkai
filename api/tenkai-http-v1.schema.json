@@ -4669,9 +4669,51 @@
       ],
       "type": "object"
     },
+    "PublishInputEntry": {
+      "additionalProperties": false,
+      "description": "One file or directory from the release workdir, relative to the manifest.",
+      "properties": {
+        "content": {
+          "description": "Standard base64 file bytes. Empty for directories.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/PublishInputKind"
+        },
+        "mode": {
+          "description": "Unix mode bits the artifact digest binds (`mode & 0o7777`).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "PublishInputKind": {
+      "enum": [
+        "file",
+        "dir"
+      ],
+      "type": "string"
+    },
     "PublishRequest": {
       "additionalProperties": false,
       "properties": {
+        "inputs": {
+          "description": "Declared deploy inputs next to the manifest, with modes the signature binds.",
+          "items": {
+            "$ref": "#/$defs/PublishInputEntry"
+          },
+          "type": "array"
+        },
         "manifest": {
           "type": "string"
         },
