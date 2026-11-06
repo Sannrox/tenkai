@@ -3058,6 +3058,7 @@ dependencies = [
  "tenkai-executor",
  "tenkai-http",
  "tokio",
+ "toml",
  "url",
  "uuid",
 ]

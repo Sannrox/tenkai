@@ -265,6 +265,13 @@ fn parses_emergency_override_reason() {
 }
 
 #[test]
+fn status_without_target_or_env_stays_unspecified() {
+    let cli = Cli::try_parse_from(["tenkaictl", "status"]).unwrap();
+    assert_eq!(cli.target, None);
+    assert!(matches!(cli.command, Command::Status { env: None }));
+}
+
+#[test]
 fn remote_target_is_explicit_and_carries_no_cli_secret() {
     let cli = Cli::try_parse_from([
         "tenkaictl",
@@ -276,7 +283,7 @@ fn remote_target_is_explicit_and_carries_no_cli_secret() {
         "--once",
     ])
     .unwrap();
-    assert_eq!(cli.target, Target::Remote);
+    assert_eq!(cli.target, Some(Target::Remote));
     assert_eq!(
         cli.server_url.as_deref(),
         Some("https://tenkai.example.test")

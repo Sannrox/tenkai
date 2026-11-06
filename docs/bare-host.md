@@ -45,7 +45,9 @@ sudo sh install.sh --role server --with-host-applier
 
 This installs `tenkai-server`, `tenkaictl`, and `tenkai-executor-guard`, plus
 the host applier, its systemd template unit, and its polkit rule, every file
-checked against the release's `SHA256SUMS`. It starts nothing.
+checked against the release's `SHA256SUMS`. It also writes
+`/etc/tenkai/client.toml` (`target = "remote"`, loopback URL) and a root-only
+`/etc/tenkai/management.token`. It starts nothing.
 
 ## 2. Set up the host applier
 
@@ -82,13 +84,46 @@ Run the server as the `tenkai` user, as in
 host executor enabled ([run host releases](run-tenkai-server.md#run-host-releases)):
 
 ```bash
-# /etc/tenkai/server.env, mode 0600
-TENKAI_MANAGEMENT_TOKEN=replace-from-secret-store
+# /etc/tenkai/server.env, mode 0600, written as root. systemd EnvironmentFile
+# does not expand command substitution: copy the contents of
+# /etc/tenkai/management.token into the TENKAI_MANAGEMENT_TOKEN key. The
+# tenkai user cannot read that root-only token file; sudo tenkaictl can.
 TENKAI_RELEASE_TRUST_ROOTS=/etc/tenkai/release-trust-roots.toml
 TENKAI_HOST_SPOOL_DIR=/var/lib/tenkai/host-spool
 # With an unattended approval policy:
 TENKAI_PLAN_APPROVAL_TRUST_ROOTS=/etc/tenkai/plan-approval-trust.toml
 TENKAI_PLAN_APPROVAL_DIR=/var/lib/tenkai/approvals
+```
+
+Once the server is listening on loopback, status needs no extra flags:
+
+```bash
+sudo tenkaictl status --env edge
+```
+
+If this host has exactly one environment, `sudo tenkaictl status` is enough.
+`tenkaictl` reads `/etc/tenkai/client.toml` (then
+`$XDG_CONFIG_HOME/tenkai/client.toml`). Flags and environment variables
+override both. The token stays in `token_file`; it is never in the config and
+never on argv. A token file readable by group or others is refused.
+
+From a workstation, do not copy the token off the host. Either run the CLI on
+the host:
+
+```bash
+ssh -t user@host sudo tenkaictl status --env edge
+```
+
+or keep the token on the host and tunnel loopback, then sign in with OIDC on
+the workstation (`tenkaictl login`) instead of a management token:
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 user@host
+# workstation $XDG_CONFIG_HOME/tenkai/client.toml:
+#   target = "remote"
+#   server_url = "http://127.0.0.1:8080"
+tenkaictl login
+tenkaictl status --env edge
 ```
 
 `/readyz` lists `host_executor:v1` once the host executor is usable.

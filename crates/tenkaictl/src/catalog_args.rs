@@ -72,8 +72,8 @@ pub(crate) enum ApprovalCommand {
     /// Record signed approval evidence without executing the plan.
     Submit {
         plan_id: String,
-        #[arg(long, default_value = "local")]
-        env: String,
+        #[arg(long, env = "TENKAI_ENVIRONMENT")]
+        env: Option<String>,
         #[arg(long)]
         approval: PathBuf,
         #[arg(long)]

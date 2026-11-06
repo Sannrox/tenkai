@@ -126,6 +126,10 @@ Wants=network-online.target
 User=tenkai
 Group=tenkai
 # Holds the management and runtime tokens; owner-only mode 0600.
+# `install.sh --role server` writes /etc/tenkai/management.token for
+# `sudo tenkaictl`. Copy that value into TENKAI_MANAGEMENT_TOKEN here;
+# systemd injects it. Do not point TENKAI_MANAGEMENT_TOKEN_FILE at the
+# root-only token: this unit runs as `tenkai` and cannot read it.
 EnvironmentFile=/etc/tenkai/server.env
 StateDirectory=tenkai
 ExecStart=/usr/local/bin/tenkai-server \

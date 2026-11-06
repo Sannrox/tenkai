@@ -74,6 +74,7 @@ pub(crate) async fn run(
             recovery_reason,
             generation,
         } => {
+            let env = crate::client_config::require_env(env)?;
             if bypass.allow_unapproved_development || bypass.development_reason.is_some() {
                 bail!(
                     "the local-development rollback bypass is available only with --target embedded"
@@ -142,6 +143,7 @@ pub(crate) async fn run_migrate(
             declaration,
             backup_receipt_digest,
         } => {
+            let env = crate::client_config::require_env(env)?;
             let declaration = package_migration::MigrationDeclaration::load(&declaration)?;
             let result = client
                 .preview_package_migration(
@@ -165,6 +167,7 @@ pub(crate) async fn run_migrate(
             expected_generation,
             approval,
         } => {
+            let env = crate::client_config::require_env(env)?;
             reject_remote_migration_bypass(approval.allow_unapproved_development)?;
             let expected_generation = expected_generation.ok_or_else(|| {
                 anyhow::anyhow!("remote package migration apply requires --expected-generation")

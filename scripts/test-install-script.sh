@@ -100,10 +100,33 @@ self_test() {
     || fail "no attestation command: ${out}"
   grep -Fq -- "--source-ref refs/tags/v${VERSION}" <<<"$out" || fail "attestation command lacks the tag"
 
-  # The guard lands beside the server.
+  # The guard lands beside the server. --role server writes client.toml.
   prefix="${tmp}/server"
-  run_install "$script" --base-url "$base" --prefix "$prefix" --role server >/dev/null
+  sysconf="${tmp}/sysconf"
+  out="$(run_install "$script" --base-url "$base" --prefix "$prefix" --role server --sysconfdir "$sysconf")"
   expect_files "$prefix" tenkaictl tenkai-server tenkai-executor-guard
+  expect_files "${sysconf}/tenkai" client.toml management.token
+  grep -Fq 'target = "remote"' "${sysconf}/tenkai/client.toml" || fail "client.toml missing target: $(cat "${sysconf}/tenkai/client.toml")"
+  grep -Fq "token_file = \"${sysconf}/tenkai/management.token\"" "${sysconf}/tenkai/client.toml" \
+    || fail "client.toml missing token_file: $(cat "${sysconf}/tenkai/client.toml")"
+  grep -Fq "TENKAI_MANAGEMENT_TOKEN in ${sysconf}/tenkai/server.env" <<<"$out" \
+    || fail "install did not name TENKAI_MANAGEMENT_TOKEN: ${out}"
+  [[ "$(stat -c '%a' "${sysconf}/tenkai/management.token" 2>/dev/null || stat -f '%OLp' "${sysconf}/tenkai/management.token")" == *600 ]] \
+    || fail "management.token is not mode 0600"
+  # Re-run keeps the token and client.toml.
+  token="$(cat "${sysconf}/tenkai/management.token")"
+  run_install "$script" --base-url "$base" --prefix "$prefix" --role server --sysconfdir "$sysconf" >/dev/null
+  [[ "$(cat "${sysconf}/tenkai/management.token")" == "$token" ]] || fail "reinstall replaced the management token"
+  # Relative --sysconfdir becomes absolute in client.toml and does not hang.
+  rel_sysconf="${tmp}/rel-sysconf"
+  mkdir -p "$rel_sysconf"
+  (
+    cd "$tmp"
+    run_install "$script" --base-url "$base" --prefix "${tmp}/rel-prefix" --role server --sysconfdir rel-sysconf >/dev/null
+  )
+  expect_files "${rel_sysconf}/tenkai" client.toml management.token
+  grep -Fq "token_file = \"${rel_sysconf}/tenkai/management.token\"" "${rel_sysconf}/tenkai/client.toml" \
+    || fail "relative sysconfdir did not become an absolute token_file: $(cat "${rel_sysconf}/tenkai/client.toml")"
   prefix="${tmp}/runtime"
   run_install "$script" --base-url "$base" --prefix "$prefix" --role runtime >/dev/null
   expect_files "$prefix" tenkai-runtime tenkai-runtime-guard

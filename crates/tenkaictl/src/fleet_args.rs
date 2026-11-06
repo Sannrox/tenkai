@@ -101,7 +101,7 @@ mod tests {
             "status",
         ])
         .unwrap();
-        assert_eq!(remote.target, Target::Remote);
+        assert_eq!(remote.target, Some(Target::Remote));
         assert!(matches!(
             remote.command,
             Command::Fleet {

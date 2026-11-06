@@ -9,8 +9,8 @@ pub(crate) enum MigrateCommand {
     /// Preview admission without persisting a migration record.
     Preview {
         name: String,
-        #[arg(long, default_value = "local")]
-        env: String,
+        #[arg(long, env = "TENKAI_ENVIRONMENT")]
+        env: Option<String>,
         /// tenkai.package_migration.v1 JSON declaration.
         #[arg(long)]
         declaration: PathBuf,
@@ -21,8 +21,8 @@ pub(crate) enum MigrateCommand {
     /// Admit, approve, and execute a package migration until it is blocked or terminal.
     Apply {
         name: String,
-        #[arg(long, default_value = "local")]
-        env: String,
+        #[arg(long, env = "TENKAI_ENVIRONMENT")]
+        env: Option<String>,
         #[arg(long)]
         declaration: PathBuf,
         #[arg(long)]

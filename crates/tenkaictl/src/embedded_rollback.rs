@@ -21,6 +21,7 @@ pub(crate) async fn run(
             recovery_reason,
             generation: _,
         } => {
+            let env = crate::client_config::require_env(env)?;
             if output == OutputFormat::JsonV1 {
                 tenkai::command_result::validate_resource_reference(
                     "plan",
@@ -108,6 +109,7 @@ pub(crate) async fn run(
             bypass,
             emergency_reason,
         } => {
+            let env = crate::client_config::require_env(env)?;
             let step = plan::restart_step(ctx, &env, &product).await?;
             let stored = plan::create_from_steps(ctx, &env, vec![step]).await?;
             if output == OutputFormat::Human {

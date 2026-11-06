@@ -17,14 +17,22 @@ use crate::upgrade_args::UpgradeCommand;
 use crate::wave_args::WaveCommand;
 
 #[derive(Parser)]
-#[command(name = "tenkaictl", version, about = "Constraint-based local delivery")]
+#[command(
+    name = "tenkaictl",
+    version,
+    about = "Constraint-based local delivery",
+    after_help = "Client config: /etc/tenkai/client.toml, then $XDG_CONFIG_HOME/tenkai/client.toml (target, server_url, default_environment, token_file). Flags and environment variables override both. The token is never in the file or on argv."
+)]
 pub(crate) struct Cli {
     /// Select the embedded application core or an authenticated remote server.
-    #[arg(long, value_enum, default_value_t = Target::Embedded, global = true)]
-    pub(crate) target: Target,
+    #[arg(long, env = "TENKAI_TARGET", value_enum, global = true)]
+    pub(crate) target: Option<Target>,
     /// Tenkai server URL; required with --target remote.
     #[arg(long, env = "TENKAI_SERVER_URL", global = true)]
     pub(crate) server_url: Option<String>,
+    /// File holding the management token. The token itself is never on argv.
+    #[arg(long, global = true)]
+    pub(crate) token_file: Option<PathBuf>,
     /// Embedded SQLite state file. Ignored by remote mode.
     #[arg(
         long,
@@ -274,8 +282,8 @@ pub(crate) enum Command {
     },
     /// Show the steps that would converge the environment (dry run).
     Plan {
-        #[arg(long, default_value = "local")]
-        env: String,
+        #[arg(long, env = "TENKAI_ENVIRONMENT")]
+        env: Option<String>,
         /// Current fencing generation; required with --target remote.
         #[arg(long)]
         generation: Option<u64>,
@@ -297,8 +305,8 @@ pub(crate) enum Command {
     },
     /// Deployed vs channel head, per subscribed product.
     Status {
-        #[arg(long, default_value = "local")]
-        env: String,
+        #[arg(long, env = "TENKAI_ENVIRONMENT")]
+        env: Option<String>,
     },
     /// Inspect the embedded control-plane state without distributed diagnostics.
     Inspect,
@@ -352,8 +360,8 @@ pub(crate) enum Command {
     /// Roll a product back to its previously deployed version.
     Rollback {
         product: String,
-        #[arg(long, default_value = "local")]
-        env: String,
+        #[arg(long, env = "TENKAI_ENVIRONMENT")]
+        env: Option<String>,
         #[command(flatten)]
         bypass: DevelopmentBypassFlags,
         /// Start outside maintenance policy and record this reason with the authenticated principal.
@@ -372,8 +380,8 @@ pub(crate) enum Command {
     /// Bounce the currently deployed release of a product without changing version.
     Restart {
         product: String,
-        #[arg(long, default_value = "local")]
-        env: String,
+        #[arg(long, env = "TENKAI_ENVIRONMENT")]
+        env: Option<String>,
         #[command(flatten)]
         bypass: DevelopmentBypassFlags,
         #[arg(long)]

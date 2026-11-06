@@ -58,6 +58,11 @@ impl CliDrill {
             .env("TENKAI_STATE_DIR", &self.state_dir)
             .env("TENKAI_EXECUTOR_GUARD", executor_guard_bin())
             .env("TMPDIR", &self.root)
+            .env(
+                "TENKAI_SYSTEM_CLIENT_CONFIG",
+                self.root.join("no-system-client.toml"),
+            )
+            .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env_remove("TENKAI_PLAN_APPROVAL_DIR")
             .env_remove("TENKAI_PLAN_APPROVAL_TRUST_ROOTS")
             .env_remove("TENKAI_SOFTWARE_EXECUTOR")

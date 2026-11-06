@@ -2,17 +2,39 @@ use anyhow::{Context as _, Result, bail};
 use tenkai::plan;
 
 use crate::args::{Cli, Command, OutputFormat};
+use crate::client_config::{self, ClientConfig};
 use crate::env_args::EnvCommand;
 use crate::fleet_args::FleetCommand;
 use crate::fleet_watch::{FleetWatchOptions, print_fleet_status, run_fleet_watch};
 use crate::output::{print_machine_result, print_reconcile_report};
 
-pub(crate) async fn run(cli: Cli) -> Result<()> {
+pub(crate) async fn run(
+    mut cli: Cli,
+    config: &ClientConfig,
+    token_file_required: bool,
+) -> Result<()> {
     let server_url = crate::login::require_server_url(cli.server_url.as_deref())?;
-    let runtime = crate::login::LoginRuntime::from_env()?;
+    let runtime = crate::login::LoginRuntime::from_env_with_token_file(
+        cli.token_file.as_deref(),
+        token_file_required,
+    )?;
     let token = crate::login::bearer_token(&runtime, &server_url).await?;
     let client = tenkai_http::RemoteClient::new(&server_url, token)?;
     let output = cli.output;
+    let fill_env = client_config::needs_env_resolution(&mut cli.command);
+    if fill_env {
+        let names = if config.default_environment.is_some() {
+            Vec::new()
+        } else {
+            client
+                .list_environments()
+                .await?
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect()
+        };
+        client_config::apply_resolved_environment(&mut cli.command, config, &names)?;
+    }
     match cli.command {
         Command::Reconcile {
             once: true, bypass, ..
@@ -213,6 +235,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Status { env } => {
+            let env = crate::client_config::require_env(env)?;
             let rows = client.environment_status(&env).await?;
             if output == OutputFormat::JsonV1 {
                 return print_machine_result(&crate::output::status_result(&env, rows.len()));

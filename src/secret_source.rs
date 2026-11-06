@@ -37,6 +37,11 @@ pub fn require(name: &str) -> Result<String> {
     })
 }
 
+/// Read a secret from an explicit path using the same owner-only rules as `_FILE`.
+pub fn read_from_path(name: &str, path: &Path) -> Result<String> {
+    read_secret_file(name, path)
+}
+
 /// Whether any source names the secret setting `name`, without reading it:
 /// for guards that refuse a setting a host must not have.
 pub fn is_configured(name: &str) -> bool {

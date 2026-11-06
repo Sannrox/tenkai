@@ -159,6 +159,7 @@ pub(crate) async fn run(
                 approval_trust_roots,
                 generation: _,
             } => {
+                let env = crate::client_config::require_env(env)?;
                 let stored = plan::load(ctx, &plan_id).await?;
                 if stored.environment != env {
                     bail!(

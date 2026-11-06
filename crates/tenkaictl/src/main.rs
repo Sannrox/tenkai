@@ -4,6 +4,7 @@ mod args;
 mod authorization;
 mod bundle_args;
 mod catalog_args;
+mod client_config;
 mod dark_site;
 mod dev_args;
 mod embedded;
@@ -52,7 +53,7 @@ mod wave_args;
 
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 use clap::error::ErrorKind;
 use tenkai::command_result::{CommandName, CommandResultV1, RetryGuidance};
@@ -95,7 +96,8 @@ async fn main() -> ExitCode {
         }
     };
     let output = cli.output;
-    let machine_command = command_name(&cli.command, cli.target).unwrap_or(CommandName::Invocation);
+    let machine_command = command_name(&cli.command, cli.target.unwrap_or(Target::Embedded))
+        .unwrap_or(CommandName::Invocation);
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -126,7 +128,7 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli) -> Result<()> {
+async fn run(mut cli: Cli) -> Result<()> {
     tenkai::key_revocation::load_configured()?;
     if let Some(operation_id) = cli
         .operation_id
@@ -136,8 +138,23 @@ async fn run(cli: Cli) -> Result<()> {
     {
         tenkai::telemetry::bind_process_operation_id(operation_id);
     }
-    if cli.output == OutputFormat::JsonV1 && command_name(&cli.command, cli.target).is_none() {
-        let (code, message) = match cli.target {
+    let config = client_config::ClientConfig::load()?;
+    // `--database PATH` names a local store. It overrides client.toml
+    // `target = "remote"` so `sudo -u tenkai tenkaictl --database … init`
+    // still writes the server's file.
+    if cli.target.is_none() && client_config::argv_has_database_flag(std::env::args_os().skip(1)) {
+        cli.target = Some(Target::Embedded);
+    }
+    let token_file_from_flag = cli.token_file.is_some();
+    // Login and logout manage the OIDC session. A root-only token_file from
+    // client.toml would refuse non-root login before the session is used.
+    // Overriding the server URL leaves the config token behind so it is not
+    // sent to a different host.
+    client_config::apply_server_and_token(&mut cli, &config);
+    let target_configured = cli.target.is_some() || config.target.is_some();
+    let target = cli.target.or(config.target).unwrap_or(Target::Embedded);
+    if cli.output == OutputFormat::JsonV1 && command_name(&cli.command, target).is_none() {
+        let (code, message) = match target {
             Target::Embedded => (
                 "unsupported_command",
                 "This command does not support tenkai.command-result/v1",
@@ -387,16 +404,30 @@ async fn run(cli: Cli) -> Result<()> {
         );
         return Ok(());
     }
-    if cli.target == Target::Remote {
-        return remote::run(cli).await;
-    }
+    // Local only: keys, signatures, and restore never talk to a server.
+    // client.toml `target = "remote"` must not hijack them on a server host.
     if matches!(cli.command, Command::Restore { .. }) {
         return embedded_dev::restore(&cli).await;
     }
     if matches!(cli.command, Command::Dev { .. }) {
         return embedded_dev::run_dev(&cli).await;
     }
-    embedded::run(cli).await
+    if target == Target::Remote {
+        return remote::run(cli, &config, token_file_from_flag).await;
+    }
+    if !target_configured {
+        let default = std::path::PathBuf::from(client_config::DEFAULT_DATABASE);
+        if cli.database == default
+            && !cli.database.exists()
+            && !client_config::command_creates_store(&cli.command)
+        {
+            bail!(
+                "{}",
+                client_config::missing_default_store_message(&cli.database)
+            );
+        }
+    }
+    embedded::run(cli, &config).await
 }
 
 /// Write a new runner CA into `dir`, refusing to replace an existing one.
