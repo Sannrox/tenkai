@@ -243,6 +243,17 @@ TENKAI_POSTGRES_URL='postgresql://…?sslmode=disable' \
   cargo test -p tenkai-postgres --features postgres --lib -- --ignored live_failover_drill
 ```
 
+The hub HA qualification drill (#903) extends this to two environments, a
+repeat after replacing replica processes on the same store with the current
+binary, and a negative run with the writer fence unset. It is the gate for
+a later `high_availability` claim; the claim stays unadvertised. CI runs it
+in the same job. Locally:
+
+```bash
+TENKAI_POSTGRES_URL='postgresql://…?sslmode=disable' \
+  bash scripts/hub-ha-qualification-drill.sh
+```
+
 ## Durable tick fence (#135)
 
 With `--features postgres` and `TENKAI_POSTGRES_URL`, multi-replica hosts use

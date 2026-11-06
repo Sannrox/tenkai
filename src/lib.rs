@@ -204,6 +204,7 @@ pub mod host_apply;
 pub mod host_env;
 pub mod host_executor;
 pub mod host_preflight;
+pub mod hub_ha_qualification;
 pub mod import_progress;
 pub mod import_scanner;
 pub mod inventory;

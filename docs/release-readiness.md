@@ -81,7 +81,15 @@ cargo build --all-targets --locked
 - [ ] Explicit “not in backup” items still true (payloads, weight caches)
 - [ ] Rollback: previous binary + restore DB procedure stated when needed
 
-## 8. Go / no-go
+## 8. Hub HA qualification
+
+Product `high_availability` stays unclaimed. Before a release advertises it:
+
+- [ ] `TENKAI_POSTGRES_URL=… bash scripts/hub-ha-qualification-drill.sh` passed on this commit
+- [ ] Evidence file verified offline (`bash scripts/hub-ha-qualification-drill.sh --verify <file>`)
+- [ ] Measured takeover is within the bound in [qualification criteria](ha-failover-runbook.md#qualification-criteria-903)
+
+## 9. Go / no-go
 
 Release is **go** only when:
 
