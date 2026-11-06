@@ -224,6 +224,76 @@ async fn remote_catalog_lifecycle_publish_promote_subscribe_and_recall() {
 }
 
 #[tokio::test]
+async fn remote_publish_uploads_declared_deploy_inputs() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-remote-publish-inputs-{}-{}",
+        std::process::id(),
+        tenkai::now_millis()
+    ));
+    std::fs::create_dir_all(root.join("manifests")).unwrap();
+    std::fs::write(
+        root.join("tenkai.toml"),
+        "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\ninputs = [\"deploy.sh\", \"manifests\"]\n",
+    )
+    .unwrap();
+    let script = root.join("deploy.sh");
+    std::fs::write(&script, b"#!/bin/sh\ntrue\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(root.join("manifests/app.yaml"), "kind: ConfigMap\n").unwrap();
+    let (app, _config) = catalog_router(&root).await;
+    let keys = root.join("keys");
+    let signature = root.join("signature.json");
+    let trust_roots = root.join("trust-roots.toml");
+    tenkai::dev_sign::sign_release(&keys, &root.join("tenkai.toml"), &signature, &trust_roots)
+        .unwrap();
+    let request = tenkai::management_lifecycle::load_publish_request(
+        &root.join("tenkai.toml"),
+        &signature,
+        &trust_roots,
+    )
+    .unwrap();
+    assert!(!request.inputs.is_empty());
+
+    let published = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/releases")
+                .header("authorization", "Bearer management-secret")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(published.status(), StatusCode::OK);
+
+    let mut missing = request;
+    missing.inputs.clear();
+    let refused = app
+        .oneshot(
+            Request::post("/v1/releases")
+                .header("authorization", "Bearer management-secret")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&missing).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(
+        axum::body::to_bytes(refused.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("missing declared deploy input"), "{body}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn remote_environment_retirement_hides_listing_and_stops_runtime_polling() {
     let root = std::env::temp_dir().join(format!(
         "tenkai-remote-environment-retirement-{}-{}",
