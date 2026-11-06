@@ -30,8 +30,9 @@ and signed release identity.
    candidate uses its full version, `## v0.7.0-rc.1 (date)`); its body is the
    GitHub Release body. List gate markers on one required line,
    `Gate flags: breaking, migration, realm` (any subset, or `none`), from the
-   `risk:breaking` and `risk:migration` pull requests and any realm change in
-   the range. The release manifest copies them.
+   `risk:breaking` and `risk:migration` pull requests and any realm change
+   since the previous final tag (an rc never starts the range). The release
+   manifest copies them.
 3. Walk [release readiness](docs/release-readiness.md). Pair with the
    project-local `prepare-release` skill.
 4. Land the version-bump pull request. Crate versions move in lockstep.
@@ -60,9 +61,9 @@ Cut `vX.Y.Z-rc.N` (N from 1, no leading zeros) before the final tag:
 
 A failed release candidate costs only an rc number. A final tag on a commit
 whose workspace version is still `X.Y.Z-rc.N` is refused. The workflow
-accepts no other suffix (no `-beta.N` yet). Fix on `main` first. A
-`release/vX.Y` line is still maintained per ADR 0040; this workflow
-releases only a tag whose commit is on `main`.
+accepts no other suffix (no `-beta.N` yet). Fix on `main` first. The tagged
+commit must be on `main`, so a tag whose commit lives only on `release/vX.Y`
+is not releasable.
 
 ## Start, retry, and dry-run
 
