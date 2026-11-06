@@ -6,8 +6,9 @@
 //! Model: **schema-per-tenant** plus hub schema `tenkai_hub` inside one
 //! Tenkai-owned database (never co-located with the identity plane). Claims
 //! `shared_replica_state` under the single-active-writer model and durable tick
-//! fencing. Does **not** claim `high_availability` until ADR 0009's remaining HA
-//! drills and criteria land. SQLite is not opened in this profile.
+//! fencing. Does **not** claim `high_availability`; the qualification drill
+//! (#903) is the gate before a release advertises it. SQLite is not opened
+//! in this profile.
 //!
 //! Connection strings come from env/config only — never argv secrets.
 //!

@@ -8,10 +8,51 @@ standby, which happens on its own. This runbook is how to see it, check it,
 and undo it.
 
 Status: the procedure is exercised by the kill-the-leader drill
-([#749](https://github.com/Sannrox/tenkai/issues/749)) on every change. The
-`enterprise-experimental` profile it belongs to is selectable
+([#749](https://github.com/Sannrox/tenkai/issues/749)) on every change, and
+by the hub HA qualification drill ([#903](https://github.com/Sannrox/tenkai/issues/903)).
+The `enterprise-experimental` profile it belongs to is selectable
 (`--require-enterprise-profile`) and remains experimental (ADR 0010,
 amendment of 2026-10-29, #647). Product `high_availability` is not claimed.
+A release must pass the qualification drill before advertising it.
+
+## Qualification criteria (#903)
+
+The hub qualifies for a later `high_availability` claim only when all of
+these hold on the current build:
+
+1. Two replica processes share one PostgreSQL hub and apply two environments.
+2. Killing the active writer mid-step, the standby takes the lease within
+   the writer lifetime plus one renewal (the same bound as #749).
+3. Each in-flight step finishes or rolls back exactly once: one receipt per
+   step, no double-apply.
+4. Replacing the replica processes on the same store and repeating the
+   drill still passes. The automated drill uses the current binary; it
+   proves the store remains usable after process replacement. Rolling a
+   host back to a previous release binary is the operator procedure
+   below, not this command.
+5. A fenced stop/resume of the writer refuses the superseded commit as
+   `not the active hub writer`. The same run with the writer fence left
+   unset lets the stalled step commit.
+
+CI runs this on every change (`Failover drill` job). One command, ephemeral
+ports via `TENKAI_POSTGRES_URL`, and a per-run database:
+
+```bash
+TENKAI_POSTGRES_URL='postgresql://…?sslmode=disable' \
+  bash scripts/hub-ha-qualification-drill.sh
+```
+
+The command writes signed evidence (`tenkai.hub-ha-qualification.v1`) and
+the run's public key beside it (`<file>.pub`). The signature binds this
+drill's statement; it is not a release-signing key. Verify offline,
+without Postgres:
+
+```bash
+bash scripts/hub-ha-qualification-drill.sh --verify "$TENKAI_HA_DRILL_OUT"
+```
+
+Soft: #874 and #870 can make takeover timing noisy; record the measured
+`takeover_ms` against `takeover_bound_ms` with those Issues open.
 
 ## Before you start
 
@@ -96,6 +137,7 @@ replica clock skew does not change who leads.
 | --- | --- |
 | One fenced writer, takeover at the next generation, stale writes refused | `live_writer_lease` test (#748) |
 | Leader killed, and stopped then resumed, inside a write; takeover within the bound; one receipt per step; the resumed commit refused | `live_failover_drill` (#749), CI job `Failover drill` |
+| Two environments; kill the writer; takeover; exactly-once receipts; repeat after replacing current-binary replica processes; unfenced stall step commits | `live_ha_qualification_drill` (#903), `bash scripts/hub-ha-qualification-drill.sh` |
 | Standby is live and not ready | `a_standby_replica_is_live_but_not_ready` (#748) |
 | PostgreSQL is the sole store; catalog and terminal-outcome export live in each tenant schema; startup names any missing surface | `--require-enterprise-profile` (#747, #764, #765) |
 

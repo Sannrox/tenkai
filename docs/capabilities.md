@@ -85,6 +85,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Multi-host reconcile tick fencing | [Tick fencing](reconcile-tick-fencing.md); #129 |
 | Fenced multi-replica delivery effects | [Conformance](delivery-effect-conformance.md); #180 |
 | Hub failover runbook | [Hub failover](ha-failover-runbook.md); #647, #750 |
+| Hub HA qualification drill (gate; product claim unadvertised) | [Qualification criteria](ha-failover-runbook.md#qualification-criteria-903); `bash scripts/hub-ha-qualification-drill.sh`; #903 |
 | Multi-replica hub compose steps | [Multi-replica hub runbook](multi-replica-hub-runbook.md); #130 |
 | Durable Postgres tick fence + inventory heartbeat + OpenMetrics + outcome priors | #135–#138; [tick fencing](reconcile-tick-fencing.md), [plan priors](plan-priors.md) |
 | Local minikube dogfood (embedded, no remote server) | [ops note](local-dogfood-minikube.md); #145–#146, #152 |
@@ -118,7 +119,7 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 | Track | Intent |
 | --- | --- |
 | OS packaging | `linux-aarch64` hosts, OS packages, a package-manager tap, and a macOS boot service; #917 |
-| Hub HA product claim | Criteria + automated drills before advertising `high_availability` (fence already shipped #135); #903 |
+| Hub HA product claim | Qualification drill shipped (#903); do not advertise `high_availability` until a release records a passing run |
 | Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
 | Executor / model depth | Peer/regional weight caches; additional engines (vLLM, TGI and NIM on Kubernetes and MLX shipped: [research](research/additional-model-serving-executors.md)) |
 | Enterprise host | Live IdP drills, tenant-isolated prior stores (OIDC JWKS discovery and key rotation shipped in #468) |

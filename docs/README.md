@@ -65,6 +65,7 @@ will be split over time. Contributor and agent workflow live in
 | --- | --- |
 | Tag a release | [RELEASING.md](../RELEASING.md), [release-readiness.md](release-readiness.md) |
 | Fail over a multi-replica Postgres hub | [ha-failover-runbook.md](ha-failover-runbook.md) |
+| Run the hub HA qualification drill | [ha-failover-runbook.md#qualification-criteria-903](ha-failover-runbook.md#qualification-criteria-903) |
 | Promote a one- or two-node SQLite spoke standby | [spoke-standby.md](spoke-standby.md) |
 | Compose two local Postgres hubs | [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) |
 | Run the 1,000-environment scale drill | [fleet-workload.md](fleet-workload.md) |

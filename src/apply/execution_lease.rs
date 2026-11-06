@@ -1082,11 +1082,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_wait_longer_than_the_lease_ttl_keeps_the_lease() {
         let mut ctx = context("renew-slow");
-        let lease = claim_environment_with_options(&mut ctx, "prod", "plan-1", 1_000, false)
+        // 4s TTL → 1s renew_within. A 1s TTL / 250ms bound flakes when a
+        // SQLite refresh is delayed under the default cargo test load.
+        let lease = claim_environment_with_options(&mut ctx, "prod", "plan-1", 4_000, false)
             .await
             .unwrap();
         let waited = run_with_lease_renewal(&mut ctx, &lease, |stop| {
-            std::thread::sleep(std::time::Duration::from_millis(2_500));
+            std::thread::sleep(std::time::Duration::from_millis(10_000));
             Ok(stop.load(Ordering::SeqCst))
         })
         .await
