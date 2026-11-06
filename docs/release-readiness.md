@@ -6,7 +6,7 @@ version number; the maintainer chooses the target version. Family policy is
 maintainer procedure is [RELEASING.md](../RELEASING.md). Pair with the
 project-local `prepare-release` skill for notes and evidence assembly.
 
-Latest milestone notes: [docs/releases/0.7.0.md](releases/0.7.0.md).
+Latest milestone notes: [docs/releases/0.7.1.md](releases/0.7.1.md).
 
 ## 1. Scope
 

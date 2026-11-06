@@ -33,8 +33,7 @@ git clone https://github.com/Sannrox/tenkai && cd tenkai
 curl -fsSL https://github.com/Sannrox/tenkai/releases/latest/download/install.sh | sh -s -- --prefix .
 ```
 
-Releases before v0.7.0 ship no `install.sh`. Until v0.7.0 is out, build from
-source with `cargo build --bin tenkaictl && cp target/debug/tenkaictl .`
+Releases before v0.7.0 ship no `install.sh`.
 
 Deploy the example product, which writes its version to a file:
 

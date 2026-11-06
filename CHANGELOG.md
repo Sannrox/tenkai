@@ -6,6 +6,29 @@ pull request body, which becomes the squash commit; at release,
 
 ## [Unreleased]
 
+## v0.7.1 (2026-11-06)
+
+Gate flags: none
+
+Patch on 0.7.0: `kubernetes-inprocess` waits renew the apply lease, wait for
+the applied revision, and keep diagnosed causes if the lease is lost.
+Unknown `TENKAI_SOFTWARE_EXECUTOR` refuses at start. Full operator notes:
+[docs/releases/0.7.1.md](https://github.com/Sannrox/tenkai/blob/v0.7.1/docs/releases/0.7.1.md).
+
+### What's Changed
+- fix(executor): keep diagnosed causes when an in-process wait loses the apply lease (#999)
+- fix(executor): refuse unknown TENKAI_SOFTWARE_EXECUTOR instead of falling back to shell (#998)
+- fix(executor): wait for the applied kubernetes revision, not merely Available (#996)
+- fix(executor): renew the apply lease during in-process waits and name the workload failure cause (#986)
+- fix(examples): keep the service load balancer and local-path storage in the reference cluster (#984)
+
+### Upgrade
+- Install 0.7.1 hosts from the GitHub Release after verifying `SHA256SUMS` and the attestation, or with `install.sh`. The SQLite schema stays 13; no store migration. `tenkaictl --version` reports `tenkaictl 0.7.1`.
+- kubernetes-inprocess (#986, #996, #999): a wait longer than the apply lease TTL keeps the lease. An upgrade waits until the applied revision is the one serving, not merely `Available` on leftover pods. If the lease is still lost, the error names the last workload causes first. Diagnosis of ReplicaSets and pods needs `list` in the environment namespace; without it the wait continues on conditions and names the read error.
+- `TENKAI_SOFTWARE_EXECUTOR` (#998): an unknown or uninstalled value refuses `tenkai-server` and embedded hosts at start instead of running undeclared releases as shell. Unset (or `shell`) remains the process default. `/readyz` advertises `software_executor:<kind>` for the default that actually runs.
+- Reference cluster example (#984): the bundled k3s unit keeps the service load balancer and local-path storage. An operator who already installed that product publishes a newer version and applies it as an upgrade.
+- Rollback to 0.7.0: the previous binary plus the existing store. No schema change. 0.7.0 ignores `failed_target_error.<product>` and still treats an unknown `TENKAI_SOFTWARE_EXECUTOR` as shell. A 0.7.0 host can report an in-process upgrade complete while old pods keep the Deployment Available.
+
 ## v0.7.0 (2026-11-04)
 
 Gate flags: breaking, migration
