@@ -164,6 +164,19 @@ impl SqliteStore {
     }
 }
 
+fn prune_execution_claim_history_in(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<()> {
+    let cutoff = now.saturating_sub(crate::storage::CATALOG_HISTORY_RETENTION_MS);
+    tx.execute(
+        "DELETE FROM catalog_changes
+         WHERE timestamp < ?1
+           AND object_id IN (
+               SELECT id FROM catalog_objects WHERE kind = ?2
+           )",
+        params![cutoff, crate::ontology::KIND_ENVIRONMENT_EXECUTION],
+    )?;
+    Ok(())
+}
+
 pub(super) fn record_changes(
     tx: &Transaction<'_>,
     previous: &Object,
@@ -171,6 +184,10 @@ pub(super) fn record_changes(
     principal: &str,
 ) -> AnyResult<()> {
     let timestamp = crate::now_millis();
+    prune_execution_claim_history_in(tx, timestamp)?;
+    if crate::storage::skip_execution_claim_heartbeat(previous, next) {
+        return Ok(());
+    }
     for key in previous
         .properties
         .keys()

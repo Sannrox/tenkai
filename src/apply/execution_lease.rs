@@ -416,38 +416,72 @@ pub(crate) async fn refresh_environment_lease(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
 ) -> Result<()> {
-    for held in ctx.held_execution_leases.clone() {
-        if let Err(error) = ctx
-            .refresh_lease(&held.namespace, &held.key, &held.fencing_token, held.ttl_ms)
-            .await
-        {
-            return Err(ExecutionFenceLost {
-                namespace: held.namespace,
-                key: held.key,
-                detail: error.to_string(),
-            }
-            .into());
-        }
+    Box::pin(refresh_environment_lease_inner(ctx, lease)).await
+}
+
+async fn refresh_environment_lease_inner(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
+    let now = crate::now_millis();
+    let mut refreshes = Vec::new();
+    let mut held_slots = Vec::new();
+    for (idx, held) in ctx.held_execution_leases.iter().enumerate() {
+        refreshes.push(crate::storage::LeaseRefresh {
+            namespace: held.namespace.clone(),
+            key: held.key.clone(),
+            fencing_token: held.fencing_token.clone(),
+            ttl_ms: held.ttl_ms,
+            extend: held.due_for_refresh(now),
+        });
+        held_slots.push(idx);
     }
-    let refreshed = ctx
-        .refresh_lease(
+    refreshes.push(crate::storage::LeaseRefresh {
+        namespace: ENVIRONMENT_LEASE_NAMESPACE.into(),
+        key: lease.environment.clone(),
+        fencing_token: lease.fencing_token.clone(),
+        ttl_ms: lease.ttl_ms,
+        extend: true,
+    });
+    let claim = object_environment_claim_for_lease(lease, now.saturating_add(lease.ttl_ms));
+    let (refreshed, _) = ctx
+        .refresh_leases_and_guarded_put(
+            refreshes,
+            claim,
             ENVIRONMENT_LEASE_NAMESPACE,
             &lease.environment,
             &lease.fencing_token,
-            lease.ttl_ms,
         )
-        .await?;
-    if refreshed.generation != lease.generation || refreshed.owner != lease.owner {
+        .await
+        .map_err(|error| map_held_lease_error(ctx, error))?;
+    let Some(env) = refreshed.last() else {
+        bail!("Tenkai refreshed no environment lease");
+    };
+    if env.generation != lease.generation || env.owner != lease.owner {
         bail!("Tenkai refreshed a different environment lease generation");
     }
-    ctx.guarded_update(
-        object_environment_claim_for_lease(lease, refreshed.expires_at_ms),
-        ENVIRONMENT_LEASE_NAMESPACE,
-        &lease.environment,
-        &lease.fencing_token,
-    )
-    .await?;
+    for (slot, updated) in held_slots.iter().zip(refreshed.iter()) {
+        ctx.held_execution_leases[*slot].expires_at_ms = updated.expires_at_ms;
+    }
     Ok(())
+}
+
+fn map_held_lease_error(ctx: &Ctx, error: anyhow::Error) -> anyhow::Error {
+    let Some(first) = ctx.held_execution_leases.first() else {
+        return error;
+    };
+    let detail = error.to_string();
+    let held = ctx
+        .held_execution_leases
+        .iter()
+        .find(|held| {
+            detail.contains(&format!("{}/{}", held.namespace, held.key))
+                || detail.contains(&held.key)
+        })
+        .unwrap_or(first);
+    ExecutionFenceLost {
+        namespace: held.namespace.clone(),
+        key: held.key.clone(),
+        detail,
+    }
+    .into()
 }
 
 struct ApplyMutationFence<'a> {
@@ -980,12 +1014,12 @@ mod tests {
             .acquire_lease("tenkai/topology-availability", "ledger-ha", "wave", 60_000)
             .await
             .unwrap();
-        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease {
-            namespace: "tenkai/topology-availability".into(),
-            key: "ledger-ha".into(),
-            fencing_token: held.fencing_token.clone(),
-            ttl_ms: 120_000,
-        }];
+        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease::new(
+            "tenkai/topology-availability",
+            "ledger-ha",
+            held.fencing_token.clone(),
+            120_000,
+        )];
         let before = ctx
             .get_lease("tenkai/topology-availability", "ledger-ha")
             .await
@@ -1030,12 +1064,12 @@ mod tests {
         )
         .await
         .unwrap();
-        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease {
-            namespace: "tenkai/topology-availability".into(),
-            key: "ledger-ha".into(),
-            fencing_token: held.fencing_token,
-            ttl_ms: 60_000,
-        }];
+        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease::new(
+            "tenkai/topology-availability",
+            "ledger-ha",
+            held.fencing_token,
+            60_000,
+        )];
         let lease = claim_environment(&mut ctx, "prod", "plan-1").await.unwrap();
         let err = refresh_environment_lease(&mut ctx, &lease)
             .await
@@ -1066,12 +1100,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lost_lease_stops_the_work_before_reporting_it() {
         let mut ctx = context("renew-lost");
-        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease {
-            namespace: "tenkai/topology-availability".into(),
-            key: "ledger-ha".into(),
-            fencing_token: "stale".into(),
-            ttl_ms: 60_000,
-        }];
+        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease::new(
+            "tenkai/topology-availability",
+            "ledger-ha",
+            "stale",
+            60_000,
+        )];
         let lease = claim_environment_with_options(&mut ctx, "prod", "plan-1", 300, false)
             .await
             .unwrap();
@@ -1133,6 +1167,99 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn a_held_lease_is_due_when_less_than_a_third_of_ttl_remains() {
+        let held = crate::client::HeldExecutionLease::new(
+            "tenkai/wave-execution",
+            "roll",
+            "token",
+            120_000,
+        );
+        assert!(held.due_for_refresh(1_000), "unknown expiry must refresh");
+        let held = held.until(1_000 + 80_000);
+        assert!(
+            !held.due_for_refresh(1_000),
+            "two-thirds of TTL remaining must skip"
+        );
+        let held = held.until(1_000 + 30_000);
+        assert!(held.due_for_refresh(1_000), "ttl/4 remaining must refresh");
+    }
+
+    #[tokio::test]
+    async fn a_held_execution_lease_with_ttl_remaining_is_not_refreshed() {
+        let mut ctx = context("held-skip");
+        let held = ctx
+            .acquire_lease("tenkai/topology-availability", "ledger-ha", "wave", 120_000)
+            .await
+            .unwrap();
+        ctx.held_execution_leases = vec![
+            crate::client::HeldExecutionLease::new(
+                "tenkai/topology-availability",
+                "ledger-ha",
+                held.fencing_token.clone(),
+                120_000,
+            )
+            .until(held.expires_at_ms),
+        ];
+        let before = ctx
+            .get_lease("tenkai/topology-availability", "ledger-ha")
+            .await
+            .unwrap()
+            .unwrap();
+        let lease = claim_environment(&mut ctx, "prod", "plan-1").await.unwrap();
+        refresh_environment_lease(&mut ctx, &lease).await.unwrap();
+        let after = ctx
+            .get_lease("tenkai/topology-availability", "ledger-ha")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.expires_at_ms, before.expires_at_ms,
+            "a 2h-class lease must not refresh on the 10s fence"
+        );
+        release_environment(&mut ctx, &lease).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn environment_execution_heartbeat_does_not_record_catalog_changes() {
+        let mut ctx = context("heartbeat-history");
+        let lease = claim_environment(&mut ctx, "prod", "plan-1").await.unwrap();
+        let claim_id = object_environment_claim_id("prod");
+        let before = ctx
+            .embedded_arc()
+            .expect("embedded store")
+            .changes(&claim_id)
+            .unwrap()
+            .len();
+        refresh_environment_lease(&mut ctx, &lease).await.unwrap();
+        refresh_environment_lease(&mut ctx, &lease).await.unwrap();
+        let after = ctx
+            .embedded_arc()
+            .expect("embedded store")
+            .changes(&claim_id)
+            .unwrap()
+            .len();
+        assert_eq!(
+            after, before,
+            "expires_at-only heartbeats must not grow catalog_changes"
+        );
+        release_environment(&mut ctx, &lease).await.unwrap();
+    }
+
+    #[test]
+    fn a_batch_refresh_failure_while_holding_leases_is_fence_loss() {
+        let mut ctx = context("map-held-err");
+        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease::new(
+            "tenkai/wave-execution",
+            "roll",
+            "token",
+            60_000,
+        )];
+        let err = map_held_lease_error(&ctx, anyhow::anyhow!("catalog writer unavailable"));
+        assert!(is_execution_fence_lost(&err), "{err:#}");
+        assert!(err.to_string().contains("roll"), "{err:#}");
     }
 
     #[test]

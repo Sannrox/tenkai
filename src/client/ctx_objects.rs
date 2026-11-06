@@ -1,13 +1,14 @@
 //! Object create, update, delete, and fenced write methods on `Ctx`.
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, ensure};
 
 use sekai_client::CallOptions;
 
 use super::{
     Ctx, block_embedded, canonical_create_request, canonical_update_request, lease_precondition,
 };
-use crate::pb::sekai::{CreateObjectResponse, Object, UpdateObjectResponse};
+use crate::pb::sekai::{CreateObjectResponse, Lease, Object, UpdateObjectResponse};
+use crate::storage::LeaseRefresh;
 
 impl Ctx {
     fn with_feedback_export_events(
@@ -176,6 +177,104 @@ impl Ctx {
         response
             .object
             .context("Sekai returned an empty canonical create result")
+    }
+
+    pub(crate) async fn refresh_leases_and_guarded_put(
+        &mut self,
+        refreshes: Vec<LeaseRefresh>,
+        object: Object,
+        lease_namespace: &str,
+        lease_key: &str,
+        fencing_token: &str,
+    ) -> Result<(Vec<Lease>, Object)> {
+        Box::pin(self.refresh_leases_and_guarded_put_inner(
+            refreshes,
+            object,
+            lease_namespace,
+            lease_key,
+            fencing_token,
+        ))
+        .await
+    }
+
+    async fn refresh_leases_and_guarded_put_inner(
+        &mut self,
+        refreshes: Vec<LeaseRefresh>,
+        object: Object,
+        lease_namespace: &str,
+        lease_key: &str,
+        fencing_token: &str,
+    ) -> Result<(Vec<Lease>, Object)> {
+        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+            let lease_namespace = lease_namespace.to_string();
+            let lease_key = lease_key.to_string();
+            let fencing_token = fencing_token.to_string();
+            return super::block_catalog(catalog, move |catalog| {
+                catalog.refresh_leases_and_guarded_put(
+                    Some(&tenant),
+                    &refreshes,
+                    object,
+                    &lease_namespace,
+                    &lease_key,
+                    &fencing_token,
+                )
+            })
+            .await;
+        }
+        if let Some(store) = self.embedded_arc() {
+            let lease_namespace = lease_namespace.to_string();
+            let lease_key = lease_key.to_string();
+            let fencing_token = fencing_token.to_string();
+            return block_embedded(store, move |store| {
+                store.refresh_leases_and_guarded_put(
+                    &refreshes,
+                    object,
+                    &lease_namespace,
+                    &lease_key,
+                    &fencing_token,
+                )
+            })
+            .await;
+        }
+        let mut leases = Vec::with_capacity(refreshes.len());
+        for refresh in &refreshes {
+            if refresh.extend {
+                leases.push(
+                    self.refresh_lease(
+                        &refresh.namespace,
+                        &refresh.key,
+                        &refresh.fencing_token,
+                        refresh.ttl_ms,
+                    )
+                    .await?,
+                );
+            } else {
+                let lease = self
+                    .get_lease(&refresh.namespace, &refresh.key)
+                    .await?
+                    .with_context(|| {
+                        format!(
+                            "embedded lease {}/{} does not exist",
+                            refresh.namespace, refresh.key
+                        )
+                    })?;
+                ensure!(
+                    lease.status == "active"
+                        && lease.fencing_token == refresh.fencing_token
+                        && lease.expires_at_ms > crate::now_millis(),
+                    "embedded lease {}/{} is not the active fenced holder",
+                    refresh.namespace,
+                    refresh.key
+                );
+                leases.push(lease);
+            }
+        }
+        let mut object = object;
+        crate::storage::stamp_claim_expiry(&mut object, &leases, lease_namespace, lease_key);
+        let object = self
+            .guarded_update(object, lease_namespace, lease_key, fencing_token)
+            .await?;
+        Ok((leases, object))
     }
 
     pub(crate) async fn guarded_update(

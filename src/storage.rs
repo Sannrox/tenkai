@@ -13,6 +13,9 @@ use thiserror::Error;
 
 pub const SCHEMA_VERSION: u32 = 13;
 
+/// Retention cutoff for environment-execution claim change rows (#874).
+pub const CATALOG_HISTORY_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
 mod audit;
 mod catalog;
 mod catalog_graph;
@@ -40,7 +43,10 @@ mod sqlite_store;
 #[cfg(test)]
 mod tests;
 
-pub use catalog_graph::{CatalogGraph, MemoryCatalogGraph};
+pub use catalog_graph::{
+    CatalogGraph, LeaseRefresh, MemoryCatalogGraph, skip_execution_claim_heartbeat,
+    stamp_claim_expiry,
+};
 pub use error::*;
 pub use operational_store::OperationalStore;
 pub use provider_claims::provider_event_payloads_match;

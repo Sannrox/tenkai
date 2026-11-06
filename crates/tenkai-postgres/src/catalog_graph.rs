@@ -2,7 +2,7 @@ use anyhow::Context as _;
 use tenkai::feedback_observation::FeedbackObservation;
 use tenkai::pb::graph_action::{ActionResult, ActionTypeDef};
 use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
-use tenkai::storage::{CatalogGraph, ProviderEventRecord, Result, StoreError};
+use tenkai::storage::{CatalogGraph, LeaseRefresh, ProviderEventRecord, Result, StoreError};
 
 use super::PostgresTenantOperationalStore;
 use super::tenant_schema_name;
@@ -258,6 +258,41 @@ impl CatalogGraph for PostgresTenantOperationalStore {
         #[cfg(not(feature = "postgres"))]
         {
             let _ = (schema, namespace, key, fencing_token, ttl_ms);
+            Err(postgres_disabled().into())
+        }
+    }
+
+    fn refresh_leases_and_guarded_put(
+        &self,
+        tenant: Option<&str>,
+        refreshes: &[LeaseRefresh],
+        object: Object,
+        object_namespace: &str,
+        object_key: &str,
+        object_fencing_token: &str,
+    ) -> anyhow::Result<(Vec<Lease>, Object)> {
+        let schema = self.catalog_schema(tenant)?;
+        #[cfg(feature = "postgres")]
+        {
+            Ok(self.inner.catalog_refresh_leases_and_guarded_put(
+                &schema,
+                refreshes.to_vec(),
+                object,
+                object_namespace,
+                object_key,
+                object_fencing_token,
+            )?)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (
+                schema,
+                refreshes,
+                object,
+                object_namespace,
+                object_key,
+                object_fencing_token,
+            );
             Err(postgres_disabled().into())
         }
     }

@@ -6,8 +6,9 @@ use tenkai::pb::graph_action::{ActionResult, ActionTypeDef};
 use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use tenkai::plan::Plan;
 use tenkai::storage::{
-    ChannelRecord, PlanStatus, encode_object, environment_record_to_object, plan_record_to_object,
-    release_record_to_object,
+    CATALOG_HISTORY_RETENTION_MS, ChannelRecord, LeaseRefresh, PlanStatus, encode_object,
+    environment_record_to_object, plan_record_to_object, release_record_to_object,
+    skip_execution_claim_heartbeat, stamp_claim_expiry,
 };
 
 use super::provider_queue::enqueue_provider_event_in;
@@ -319,12 +320,76 @@ impl Inner {
         let fencing_token = fencing_token.to_owned();
         self.with_writer_schema(schema, move |tx| {
             lock_catalog_lease(tx, &namespace, &key)?;
-            let mut lease = require_active_lease_in(tx, &namespace, &key, &fencing_token)?;
-            let now = tenkai::now_millis();
-            lease.refreshed_at_ms = now;
-            lease.expires_at_ms = now.saturating_add(ttl_ms);
-            save_lease_in(tx, &lease)?;
-            Ok(lease)
+            refresh_lease_in(tx, &namespace, &key, &fencing_token, ttl_ms)
+        })
+    }
+
+    pub fn catalog_refresh_leases_and_guarded_put(
+        &self,
+        schema: &str,
+        refreshes: Vec<LeaseRefresh>,
+        mut object: Object,
+        object_namespace: &str,
+        object_key: &str,
+        object_fencing_token: &str,
+    ) -> Result<(Vec<Lease>, Object)> {
+        let object_namespace = object_namespace.to_owned();
+        let object_key = object_key.to_owned();
+        let object_fencing_token = object_fencing_token.to_owned();
+        self.with_writer_schema(schema, move |tx| {
+            let mut lock_keys: Vec<(String, String)> = refreshes
+                .iter()
+                .map(|refresh| (refresh.namespace.clone(), refresh.key.clone()))
+                .collect();
+            lock_keys.push((object_namespace.clone(), object_key.clone()));
+            lock_keys.sort();
+            lock_keys.dedup();
+            if lock_keys
+                .iter()
+                .any(|(namespace, _)| namespace == ENVIRONMENT_LEASE_NAMESPACE)
+            {
+                for (_, key) in lock_keys
+                    .iter()
+                    .filter(|(namespace, _)| namespace == ENVIRONMENT_LEASE_NAMESPACE)
+                {
+                    lock_typed_environment_if_present(tx, key)?;
+                    lock_catalog_apply_leases(tx, key)?;
+                }
+            }
+            for (namespace, key) in &lock_keys {
+                if namespace != ENVIRONMENT_LEASE_NAMESPACE {
+                    lock_catalog_lease(tx, namespace, key)?;
+                }
+            }
+            let mut leases = Vec::with_capacity(refreshes.len());
+            for refresh in &refreshes {
+                if refresh.extend {
+                    leases.push(refresh_lease_in(
+                        tx,
+                        &refresh.namespace,
+                        &refresh.key,
+                        &refresh.fencing_token,
+                        refresh.ttl_ms,
+                    )?);
+                } else {
+                    leases.push(require_active_lease_in(
+                        tx,
+                        &refresh.namespace,
+                        &refresh.key,
+                        &refresh.fencing_token,
+                    )?);
+                }
+            }
+            stamp_claim_expiry(&mut object, &leases, &object_namespace, &object_key);
+            lock_catalog_object(tx, &object.id)?;
+            require_active_lease_in(tx, &object_namespace, &object_key, &object_fencing_token)?;
+            let previous = catalog_get_in(tx, &object.id)?.ok_or_else(|| StoreError::NotFound {
+                kind: "object",
+                id: object.id.clone(),
+            })?;
+            catalog_put_in(tx, &object)?;
+            record_changes_in(tx, &previous, &object)?;
+            Ok((leases, object))
         })
     }
 
@@ -1688,6 +1753,40 @@ fn save_lease_in(tx: &mut Transaction<'_>, lease: &Lease) -> Result<()> {
     Ok(())
 }
 
+fn refresh_lease_in(
+    tx: &mut Transaction<'_>,
+    namespace: &str,
+    key: &str,
+    fencing_token: &str,
+    ttl_ms: i64,
+) -> Result<Lease> {
+    if ttl_ms <= 0 {
+        return Err(StoreError::InvalidData {
+            kind: "lease",
+            detail: "embedded lease TTL must be positive".into(),
+        });
+    }
+    let mut lease = require_active_lease_in(tx, namespace, key, fencing_token)?;
+    let now = tenkai::now_millis();
+    lease.refreshed_at_ms = now;
+    lease.expires_at_ms = now.saturating_add(ttl_ms);
+    save_lease_in(tx, &lease)?;
+    Ok(lease)
+}
+
+fn prune_execution_claim_history_in(tx: &mut Transaction<'_>, now: i64) -> Result<()> {
+    let cutoff = now.saturating_sub(CATALOG_HISTORY_RETENTION_MS);
+    let kind = tenkai::ontology::KIND_ENVIRONMENT_EXECUTION;
+    tx.execute(
+        "DELETE FROM catalog_changes
+         WHERE timestamp < $1
+           AND object_id IN (SELECT id FROM catalog_objects WHERE kind = $2)",
+        &[&cutoff, &kind],
+    )
+    .map_err(pg)?;
+    Ok(())
+}
+
 fn record_decision_in(
     tx: &mut Transaction<'_>,
     action: &str,
@@ -1726,6 +1825,10 @@ fn record_decision_in(
 
 fn record_changes_in(tx: &mut Transaction<'_>, previous: &Object, next: &Object) -> Result<()> {
     let timestamp = tenkai::now_millis();
+    prune_execution_claim_history_in(tx, timestamp)?;
+    if skip_execution_claim_heartbeat(previous, next) {
+        return Ok(());
+    }
     for key in previous
         .properties
         .keys()
