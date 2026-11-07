@@ -27,6 +27,8 @@ pub struct MutationCommand<'a> {
     pub workdir: &'a Path,
     pub environment: &'a str,
     pub product: &'a str,
+    /// Instance this command applies to. Empty means the product.
+    pub instance: &'a str,
     pub command: &'a str,
 }
 
@@ -110,9 +112,10 @@ fn is_executable_file(path: &Path) -> bool {
 pub fn deploy_child_environment(
     environment: &str,
     product: &str,
+    instance: &str,
     fencing_generation: Option<u64>,
 ) -> BTreeMap<OsString, OsString> {
-    deploy_child_environment_from(environment, product, fencing_generation, |key| {
+    deploy_child_environment_from(environment, product, instance, fencing_generation, |key| {
         std::env::var_os(key)
     })
 }
@@ -121,6 +124,7 @@ pub fn deploy_child_environment(
 fn deploy_child_environment_from(
     environment: &str,
     product: &str,
+    instance: &str,
     fencing_generation: Option<u64>,
     parent: impl Fn(&str) -> Option<OsString>,
 ) -> BTreeMap<OsString, OsString> {
@@ -130,12 +134,23 @@ fn deploy_child_environment_from(
             env.insert(OsString::from(*key), value);
         }
     }
-    let identity_digest = crate::manifest::digest(&format!("{environment}\0{product}"));
+    let instance_name = if instance.is_empty() {
+        product
+    } else {
+        instance
+    };
+    // Default instance (name = product) keeps today's digest so Compose
+    // projects do not move (ADR 0044 §2).
+    let identity_digest = crate::manifest::digest(&format!("{environment}\0{instance_name}"));
     env.insert(
         OsString::from("TENKAI_ENVIRONMENT"),
         OsString::from(environment),
     );
     env.insert(OsString::from("TENKAI_PRODUCT"), OsString::from(product));
+    env.insert(
+        OsString::from("TENKAI_INSTANCE"),
+        OsString::from(instance_name),
+    );
     env.insert(
         OsString::from("COMPOSE_PROJECT_NAME"),
         OsString::from(format!("tenkai-{}", &identity_digest[..16])),
@@ -153,10 +168,12 @@ fn configure_deploy_child_env(
     command: &mut tokio::process::Command,
     environment: &str,
     product: &str,
+    instance: &str,
     fencing_generation: Option<u64>,
 ) {
     command.env_clear();
-    for (key, value) in deploy_child_environment(environment, product, fencing_generation) {
+    for (key, value) in deploy_child_environment(environment, product, instance, fencing_generation)
+    {
         command.env(key, value);
     }
 }
@@ -184,6 +201,7 @@ pub async fn run(
         &mut guard_command,
         mutation.environment,
         mutation.product,
+        mutation.instance,
         Some(fence.generation()),
     );
     guard_command
@@ -194,7 +212,11 @@ pub async fn run(
         .arg("--environment")
         .arg(mutation.environment)
         .arg("--product")
-        .arg(mutation.product)
+        .arg(mutation.product);
+    if !mutation.instance.is_empty() {
+        guard_command.arg("--instance").arg(mutation.instance);
+    }
+    guard_command
         .arg("--generation")
         .arg(fence.generation().to_string())
         .arg("--command")
@@ -407,6 +429,7 @@ pub async fn supervise(
         &mut child,
         mutation.environment,
         mutation.product,
+        mutation.instance,
         Some(generation),
     );
     child.as_std_mut().process_group(0);
@@ -525,7 +548,7 @@ mod tests {
             ("PATH", "/usr/bin:/bin"),
         ];
         let parent: BTreeMap<&str, &str> = keys.into_iter().collect();
-        let env = deploy_child_environment_from("lab", "app", Some(7), |key| {
+        let env = deploy_child_environment_from("lab", "app", "", Some(7), |key| {
             parent.get(key).map(OsString::from)
         });
         let env_keys: Vec<String> = env
@@ -550,6 +573,11 @@ mod tests {
             Some(OsStr::new("app"))
         );
         assert_eq!(
+            env.get(OsStr::new("TENKAI_INSTANCE"))
+                .map(|value| value.as_os_str()),
+            Some(OsStr::new("app"))
+        );
+        assert_eq!(
             env.get(OsStr::new("TENKAI_FENCING_GENERATION"))
                 .map(|value| value.as_os_str()),
             Some(OsStr::new("7"))
@@ -563,6 +591,7 @@ mod tests {
                 DEPLOY_CHILD_INHERITED_ENV.contains(&key.as_str())
                     || key == "TENKAI_ENVIRONMENT"
                     || key == "TENKAI_PRODUCT"
+                    || key == "TENKAI_INSTANCE"
                     || key == "TENKAI_FENCING_GENERATION"
                     || key == "COMPOSE_PROJECT_NAME"
             }),
@@ -596,7 +625,7 @@ mod tests {
             .env("SEKAI_AUTH_TOKEN", "sekai-should-not-leak")
             .env("TENKAI_OUTCOME_PROVIDER_TOKEN", "outcome-should-not-leak")
             .env("TENKAI_FEEDBACK_PROVIDER_TOKEN", "feedback-should-not-leak");
-        configure_deploy_child_env(&mut child, "lab", "app", Some(3));
+        configure_deploy_child_env(&mut child, "lab", "app", "", Some(3));
         let status = child.status().await.unwrap();
         assert!(status.success());
 
@@ -620,8 +649,33 @@ mod tests {
         }
         assert!(dumped.contains("TENKAI_ENVIRONMENT=lab"));
         assert!(dumped.contains("TENKAI_PRODUCT=app"));
+        assert!(dumped.contains("TENKAI_INSTANCE=app"));
         assert!(dumped.contains("TENKAI_FENCING_GENERATION=3"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn named_instance_changes_compose_project_and_keeps_default_digest() {
+        let default = deploy_child_environment("lab", "database", "", None);
+        let same = deploy_child_environment("lab", "database", "database", None);
+        let named = deploy_child_environment("lab", "database", "db-a", None);
+        let compose = |env: &BTreeMap<OsString, OsString>| {
+            env.get(OsStr::new("COMPOSE_PROJECT_NAME")).unwrap().clone()
+        };
+        assert_eq!(compose(&default), compose(&same));
+        assert_ne!(compose(&default), compose(&named));
+        assert_eq!(
+            named
+                .get(OsStr::new("TENKAI_INSTANCE"))
+                .map(|v| v.as_os_str()),
+            Some(OsStr::new("db-a"))
+        );
+        assert_eq!(
+            named
+                .get(OsStr::new("TENKAI_PRODUCT"))
+                .map(|v| v.as_os_str()),
+            Some(OsStr::new("database"))
+        );
     }
 
     struct StaticFence;
@@ -659,6 +713,7 @@ mod tests {
                         workdir: &workdir,
                         environment: "lab",
                         product: "app",
+                        instance: "",
                         command: &command,
                     },
                 )

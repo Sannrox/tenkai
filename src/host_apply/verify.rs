@@ -38,6 +38,8 @@ pub struct VerifiedHostStep {
     pub plan_digest: String,
     pub environment: String,
     pub product: String,
+    /// Product instance this step applies to. Empty means the product.
+    pub product_instance: String,
     pub step_id: String,
     /// The planner's action for the step; `rollback` selects the rollback
     /// quorum when the target is not newer than the high-water release.
@@ -188,6 +190,7 @@ pub fn verify_request(
         plan_digest,
         environment: plan.environment.clone(),
         product: name.clone(),
+        product_instance: step.instance_name().to_string(),
         step_id: step.id.clone(),
         step_action: step.action,
         action: host.action,

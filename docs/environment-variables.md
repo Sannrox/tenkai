@@ -202,7 +202,8 @@ environment. They inherit only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`,
 | --- | --- |
 | `TENKAI_ENVIRONMENT` | The environment being deployed |
 | `TENKAI_PRODUCT` | The product being deployed |
-| `COMPOSE_PROJECT_NAME` | `tenkai-<digest>`, stable per environment and product |
+| `TENKAI_INSTANCE` | The instance being deployed (the product when the instance is not named) |
+| `COMPOSE_PROJECT_NAME` | `tenkai-<digest>`, stable per environment and instance. When the instance is the product, the digest matches today |
 | `TENKAI_FENCING_GENERATION` | The current lease generation, for mutation commands |
 
 Control-plane secrets are never passed to deploy commands.

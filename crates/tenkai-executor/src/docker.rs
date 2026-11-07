@@ -1103,12 +1103,12 @@ fn volume_runtime_name(request: &SoftwareApplyRequest, name: &str) -> String {
     format!("{}-vol-{name}", scope_prefix(request))
 }
 
-/// Content-addressed prefix so hyphenated environment or product values cannot collide.
+/// Content-addressed prefix so hyphenated environment or instance values cannot collide.
 fn scope_prefix(request: &SoftwareApplyRequest) -> String {
     let mut hasher = Sha256::new();
     hasher.update(request.environment.as_bytes());
     hasher.update([0]);
-    hasher.update(request.product.as_bytes());
+    hasher.update(request.instance_name().as_bytes());
     let hex = format!("{:x}", hasher.finalize());
     format!("t{}", &hex[..12])
 }
@@ -1116,6 +1116,7 @@ fn scope_prefix(request: &SoftwareApplyRequest) -> String {
 fn ownership_labels(request: &SoftwareApplyRequest, container: &str) -> Vec<String> {
     vec![
         format!("tenkai.product={}", request.product),
+        format!("tenkai.instance={}", request.instance_name()),
         format!("tenkai.version={}", request.version),
         format!("tenkai.release-id={}", request.release_id),
         format!("tenkai.config-digest={}", request.config_digest),
@@ -2161,6 +2162,12 @@ fn remove_unowned_containers(
             continue;
         }
         let inspected = inspect_container(executor, name)?;
+        if inspected
+            .as_ref()
+            .is_some_and(|inspected| !labels_owned_by(request, &inspected.labels))
+        {
+            continue;
+        }
         if retain_completed_jobs
             && desired.contains(name)
             && let Some(job) = inspected.as_ref().filter(|job| successful_job(job))
@@ -2218,7 +2225,13 @@ fn remove_unowned_containers(
 }
 
 fn labels_owned_by(request: &SoftwareApplyRequest, labels: &BTreeMap<String, String>) -> bool {
+    let instance = labels
+        .get("tenkai.instance")
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(request.product.as_str());
     labels.get("tenkai.product").map(String::as_str) == Some(request.product.as_str())
+        && instance == request.instance_name()
         && labels.get("tenkai.environment").map(String::as_str)
             == Some(request.environment.as_str())
 }
@@ -2338,6 +2351,7 @@ fn docker_output(executor: &DockerHostExecutor, args: &[&str]) -> Result<Output>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use tenkai::auth_context::{
         AuthenticatedRequestContextBuilder, PrincipalIdentity, PrincipalKind,
@@ -2502,6 +2516,42 @@ inputs = ["docker"]
         );
         request.secret_dir_path = Some(secret_dir.to_path_buf());
         request
+    }
+
+    #[test]
+    fn named_instance_does_not_share_docker_scope_with_the_default() {
+        let root = std::env::temp_dir().join(format!("tenkai-scope-{}", uuid::Uuid::new_v4()));
+        let secret = root.join("secrets");
+        std::fs::create_dir_all(&secret).unwrap();
+        let default = request_for(&root, &secret, "1.0.0");
+        let mut named = default.clone();
+        named.instance = "db-a".into();
+        let mut same = default.clone();
+        same.instance = "edge-app".into();
+        assert_eq!(scope_prefix(&default), scope_prefix(&same));
+        assert_ne!(scope_prefix(&default), scope_prefix(&named));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unlabeled_pre_upgrade_container_is_owned_by_the_default_instance() {
+        let root = std::env::temp_dir().join(format!("tenkai-owned-{}", uuid::Uuid::new_v4()));
+        let secret = root.join("secrets");
+        std::fs::create_dir_all(&secret).unwrap();
+        let default = request_for(&root, &secret, "1.0.0");
+        let mut named = default.clone();
+        named.instance = "db-a".into();
+        let mut labels = BTreeMap::new();
+        labels.insert("tenkai.product".into(), "edge-app".into());
+        labels.insert("tenkai.environment".into(), "local".into());
+        assert!(labels_owned_by(&default, &labels));
+        assert!(!labels_owned_by(&named, &labels));
+        labels.insert("tenkai.instance".into(), "edge-app".into());
+        assert!(labels_owned_by(&default, &labels));
+        labels.insert("tenkai.instance".into(), "db-a".into());
+        assert!(!labels_owned_by(&default, &labels));
+        assert!(labels_owned_by(&named, &labels));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn executor_for(script: &Path, state: &Path, unhealthy: &[&str]) -> DockerHostExecutor {

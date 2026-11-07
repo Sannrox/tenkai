@@ -96,6 +96,11 @@ pub fn install_in_process_software_executor(factory: fn() -> Box<dyn SoftwareExe
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SoftwareApplyRequest {
     pub product: String,
+    /// Instance this request applies to. Empty means the product name
+    /// (ADR 0044 §1), omitted from JSON so default-instance payloads stay
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instance: String,
     pub version: String,
     pub environment: String,
     pub workdir: PathBuf,
@@ -130,6 +135,81 @@ pub struct SoftwareApplyRequest {
     /// field; new ones treat empty as no document.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dependency_document: String,
+}
+
+/// Literal substituted in native/in-process Kubernetes YAML at apply, and
+/// nowhere else (ADR 0044 §2). Helm charts get `--set tenkai.instance` instead.
+pub const INSTANCE_PLACEHOLDER: &str = "${TENKAI_INSTANCE}";
+
+impl SoftwareApplyRequest {
+    /// Instance this request applies to. Empty `instance` means the product.
+    pub fn instance_name(&self) -> &str {
+        if self.instance.is_empty() {
+            &self.product
+        } else {
+            &self.instance
+        }
+    }
+}
+
+/// Replace [`INSTANCE_PLACEHOLDER`] with `instance`. Other bytes are unchanged.
+pub fn substitute_instance_placeholder(text: &str, instance: &str) -> String {
+    text.replace(INSTANCE_PLACEHOLDER, instance)
+}
+
+/// Kubernetes label selector that isolates one instance of a product.
+pub fn instance_selector(request: &SoftwareApplyRequest) -> String {
+    format!(
+        "tenkai.product={},tenkai.instance={}",
+        k8s_label_value(&request.product),
+        k8s_label_value(request.instance_name()),
+    )
+}
+
+/// Temporary copy of `{workdir}/manifests` with [`INSTANCE_PLACEHOLDER`] replaced.
+pub struct MaterializedManifests {
+    pub dir: PathBuf,
+}
+
+impl Drop for MaterializedManifests {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Copy native manifests and substitute the instance placeholder. The signed
+/// workdir is not rewritten.
+pub fn materialize_kubernetes_manifests(
+    request: &SoftwareApplyRequest,
+) -> Result<MaterializedManifests> {
+    let src = kubernetes_manifests_dir(&request.workdir)?;
+    let dest = std::env::temp_dir().join(format!(
+        "tenkai-k8s-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let files = list_manifest_files(&src)?;
+    if files.is_empty() {
+        bail!(
+            "native kubernetes apply requires at least one .yaml/.yml under {}",
+            src.display()
+        );
+    }
+    for path in &files {
+        let rel = path.strip_prefix(&src).with_context(|| {
+            format!("manifest {} is not under {}", path.display(), src.display())
+        })?;
+        let out = dest.join(rel);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading manifest {}", path.display()))?;
+        let rendered = substitute_instance_placeholder(&raw, request.instance_name());
+        std::fs::write(&out, rendered).with_context(|| format!("writing {}", out.display()))?;
+    }
+    Ok(MaterializedManifests { dir: dest })
 }
 
 /// An executor cannot reach its target, found before anything was applied:
@@ -806,13 +886,20 @@ fn process_default_from_value(value: Option<&str>) -> Result<ProcessDefault> {
 fn request_key(request: &SoftwareApplyRequest) -> String {
     let mut key = if request.config_digest.is_empty() {
         format!(
-            "{}|{}|{}",
-            request.environment, request.product, request.version
+            "{}|{}|{}|{}",
+            request.environment,
+            request.product,
+            request.instance_name(),
+            request.version
         )
     } else {
         format!(
-            "{}|{}|{}|{}",
-            request.environment, request.product, request.version, request.config_digest
+            "{}|{}|{}|{}|{}",
+            request.environment,
+            request.product,
+            request.instance_name(),
+            request.version,
+            request.config_digest
         )
     };
     if !request.dependency_document.is_empty() {
@@ -837,6 +924,14 @@ pub fn validate_request(request: &SoftwareApplyRequest) -> Result<()> {
             bail!("software apply {label} must not contain path separators or NULs");
         }
     }
+    // Empty instance means the product, already checked above.
+    if !request.instance.is_empty()
+        && (request.instance.contains('/')
+            || request.instance.contains('\\')
+            || request.instance.contains('\0'))
+    {
+        bail!("software apply instance must not contain path separators or NULs");
+    }
     Ok(())
 }
 
@@ -850,6 +945,7 @@ pub fn request_from_parts(
 ) -> SoftwareApplyRequest {
     SoftwareApplyRequest {
         product: product.into(),
+        instance: String::new(),
         version: version.into(),
         environment: environment.into(),
         workdir: workdir.as_ref().to_path_buf(),
@@ -882,6 +978,7 @@ mod tests {
         std::fs::create_dir_all(root).unwrap();
         SoftwareApplyRequest {
             product: "api".into(),
+            instance: String::new(),
             version: "1.0.0".into(),
             environment: "prod".into(),
             workdir: root.to_path_buf(),
@@ -1120,6 +1217,30 @@ mod tests {
         assert_eq!(names, vec!["a-ns.yaml", "b-deploy.yaml", "c.yaml"]);
         assert!(kubernetes_manifests_dir(&root.join("nope")).is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn instance_placeholder_and_default_name() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-instance-req-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let mut request = sample_request(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(request.instance_name(), "api");
+        request.instance = "db-a".into();
+        assert_eq!(request.instance_name(), "db-a");
+        assert_eq!(
+            substitute_instance_placeholder("name: ${TENKAI_INSTANCE}\nkeep: ${OTHER}", "db-a"),
+            "name: db-a\nkeep: ${OTHER}"
+        );
+        let selector = instance_selector(&request);
+        assert!(selector.contains("tenkai.instance=db-a"), "{selector}");
+        assert!(selector.contains("tenkai.product=api"), "{selector}");
+        request.instance = "db/a".into();
+        let err = validate_request(&request).unwrap_err().to_string();
+        assert!(err.contains("instance"), "{err}");
     }
 
     #[test]

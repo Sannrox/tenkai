@@ -7,8 +7,8 @@ use anyhow::{Context as _, Result, bail};
 
 use tenkai::software_executor::{
     SoftwareApplyRequest, SoftwareDeployPhase, SoftwareExecutor, SoftwareObserveStatus,
-    k8s_label_value, kubernetes_manifests_dir, list_manifest_files, run_captured_command,
-    validate_request,
+    instance_selector, k8s_label_value, kubernetes_manifests_dir, list_manifest_files,
+    materialize_kubernetes_manifests, run_captured_command, validate_request,
 };
 
 /// Native Kubernetes apply via `kubectl` (plain manifests, not Helm charts).
@@ -32,14 +32,9 @@ impl Default for KubernetesSoftwareExecutor {
 impl SoftwareExecutor for KubernetesSoftwareExecutor {
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
-        let manifests = kubernetes_manifests_dir(&request.workdir)?;
+        let materialized = materialize_kubernetes_manifests(request)?;
+        let manifests = materialized.dir.clone();
         let files = list_manifest_files(&manifests)?;
-        if files.is_empty() {
-            bail!(
-                "native kubernetes apply requires at least one .yaml/.yml under {}",
-                manifests.display()
-            );
-        }
         ensure_namespace(self, &request.environment)?;
         apply_dependency_configmap(self, request, SoftwareDeployPhase::Apply)?;
         for path in &files {
@@ -89,14 +84,8 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
 
     fn remove(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
-        let manifests = kubernetes_manifests_dir(&request.workdir)?;
-        let files = list_manifest_files(&manifests)?;
-        if files.is_empty() {
-            bail!(
-                "native kubernetes remove requires manifests under {}",
-                manifests.display()
-            );
-        }
+        let materialized = materialize_kubernetes_manifests(request)?;
+        let files = list_manifest_files(&materialized.dir)?;
         // Delete in reverse order for safer teardown of dependent resources.
         for path in files.iter().rev() {
             let path_s = path.to_string_lossy();
@@ -123,8 +112,12 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
 
     fn observe(&self, request: &SoftwareApplyRequest) -> Result<SoftwareObserveStatus> {
         validate_request(request)?;
-        let manifests = kubernetes_manifests_dir(&request.workdir)?;
-        let files = list_manifest_files(&manifests)?;
+        let src = kubernetes_manifests_dir(&request.workdir)?;
+        if list_manifest_files(&src)?.is_empty() {
+            return Ok(SoftwareObserveStatus::Unknown);
+        }
+        let materialized = materialize_kubernetes_manifests(request)?;
+        let files = list_manifest_files(&materialized.dir)?;
         if files.is_empty() {
             return Ok(SoftwareObserveStatus::Unknown);
         }
@@ -155,11 +148,12 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
         validate_request(request)?;
         // Re-apply first so Absent live targets are reinstalled, not bounce-only.
         self.apply(request)?;
-        let selector = format!("tenkai.product={}", k8s_label_value(&request.product));
+        let selector = instance_selector(request);
         if !kubernetes_labeled_workloads_exist(self, request, &selector)? {
             bail!(
-                "no Deployment or StatefulSet labeled tenkai.product={} in namespace {}",
+                "no Deployment or StatefulSet labeled tenkai.product={},tenkai.instance={} in namespace {}",
                 request.product,
+                request.instance_name(),
                 request.environment
             );
         }
@@ -189,8 +183,9 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
         }
         if !restarted {
             bail!(
-                "no Deployment or StatefulSet labeled tenkai.product={} in namespace {}",
+                "no Deployment or StatefulSet labeled tenkai.product={},tenkai.instance={} in namespace {}",
                 request.product,
+                request.instance_name(),
                 request.environment
             );
         }
@@ -230,6 +225,10 @@ fn ensure_namespace(executor: &KubernetesSoftwareExecutor, namespace: &str) -> R
 fn ownership_label_args(request: &SoftwareApplyRequest) -> Vec<String> {
     vec![
         format!("tenkai.product={}", k8s_label_value(&request.product)),
+        format!(
+            "tenkai.instance={}",
+            k8s_label_value(request.instance_name())
+        ),
         format!("tenkai.version={}", k8s_label_value(&request.version)),
         format!("tenkai.release-id={}", k8s_label_value(&request.release_id)),
     ]
@@ -320,6 +319,20 @@ fn kubernetes_labeled_workloads_exist(
         .any(|line| !line.iter().all(|b| b.is_ascii_whitespace())))
 }
 
+fn item_owned_by_instance(item: &serde_json::Value, request: &SoftwareApplyRequest) -> bool {
+    let expected = k8s_label_value(request.instance_name());
+    match item
+        .get("metadata")
+        .and_then(|metadata| metadata.get("labels"))
+        .and_then(|labels| labels.get("tenkai.instance"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+    {
+        Some(live) => live == expected,
+        None => expected == k8s_label_value(&request.product),
+    }
+}
+
 fn kubernetes_items_mismatch(items_json: &str, request: &SoftwareApplyRequest) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(items_json) else {
         return false;
@@ -329,6 +342,9 @@ fn kubernetes_items_mismatch(items_json: &str, request: &SoftwareApplyRequest) -
     };
     let expected_version = k8s_label_value(&request.version);
     items.iter().any(|item| {
+        if !item_owned_by_instance(item, request) {
+            return false;
+        }
         let version_mismatch = item
             .get("metadata")
             .and_then(|metadata| metadata.get("labels"))
@@ -380,7 +396,7 @@ fn delete_dependency_configmap(
     executor: &KubernetesSoftwareExecutor,
     request: &SoftwareApplyRequest,
 ) -> Result<()> {
-    let name = tenkai::dependency_document::configmap_name(&request.product);
+    let name = tenkai::dependency_document::configmap_name(request.instance_name());
     run_kubectl(
         &executor.kubectl_binary,
         &[
@@ -403,7 +419,7 @@ fn annotate_config_digest(
     request: &SoftwareApplyRequest,
     phase: SoftwareDeployPhase,
 ) -> Result<()> {
-    let selector = format!("tenkai.product={}", k8s_label_value(&request.product));
+    let selector = instance_selector(request);
     let annotation = if request.config_digest.is_empty() {
         "tenkai.config-digest-".to_string()
     } else {
@@ -451,6 +467,13 @@ mod tests {
         };
         let err = executor.apply(&request).unwrap_err().to_string();
         assert!(err.contains("manifests"), "{err}");
+        let err = executor.observe(&request).unwrap_err().to_string();
+        assert!(err.contains("manifests"), "{err}");
+        std::fs::create_dir_all(root.join(KUBERNETES_MANIFESTS_DIR)).unwrap();
+        assert_eq!(
+            executor.observe(&request).unwrap(),
+            SoftwareObserveStatus::Unknown
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -480,6 +503,25 @@ mod tests {
             r#"{"items":[{"metadata":{"labels":{"tenkai.version":"1.0.0"},"annotations":{"tenkai.config-digest":"abc"}}}]}"#,
             &with_digest
         ));
+        let mut named = request.clone();
+        named.instance = "db-a".into();
+        assert!(
+            !kubernetes_items_mismatch(
+                r#"{"items":[{"metadata":{"labels":{"tenkai.version":"0.9.0"}}}]}"#,
+                &named
+            ),
+            "unlabeled objects belong to the default instance"
+        );
+        assert!(kubernetes_items_mismatch(
+            r#"{"items":[{"metadata":{"labels":{"tenkai.version":"0.9.0","tenkai.instance":"db-a"}}}]}"#,
+            &named
+        ));
+        let mut rewritten = request.clone();
+        rewritten.product = "api+edge".into();
+        assert!(kubernetes_items_mismatch(
+            r#"{"items":[{"metadata":{"labels":{"tenkai.version":"0.9.0","tenkai.instance":"api-edge"}}}]}"#,
+            &rewritten
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -505,6 +547,7 @@ data:
         .unwrap();
         let request = SoftwareApplyRequest {
             product: "smoke".into(),
+            instance: String::new(),
             version: "0.0.1".into(),
             environment: format!("tenkai-smoke-{}", &uuid::Uuid::new_v4().to_string()[..8]),
             workdir: root.clone(),

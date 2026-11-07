@@ -15,6 +15,8 @@ struct Args {
     environment: String,
     #[arg(long)]
     product: String,
+    #[arg(long, default_value = "")]
+    instance: String,
     #[arg(long)]
     generation: u64,
     #[arg(long)]
@@ -30,6 +32,7 @@ async fn main() -> std::process::ExitCode {
             workdir: &args.workdir,
             environment: &args.environment,
             product: &args.product,
+            instance: &args.instance,
             command: &args.command,
         },
         args.generation,

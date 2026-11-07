@@ -525,6 +525,7 @@ async fn software_request(
         ),
         overlays,
     );
+    request.instance = content.instance.clone();
     request.artifact_pulls = content.artifact_pulls.clone();
     request.cluster_config_path =
         crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;

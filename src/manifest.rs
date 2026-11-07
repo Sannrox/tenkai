@@ -188,6 +188,64 @@ pub struct ProductSection {
     pub kind: ProductKind,
 }
 
+/// How many instances of this release may run in one environment (ADR 0044 §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeployInstances {
+    /// At most one instance of this product in the environment. The default.
+    #[default]
+    One,
+    /// Several named instances of this product may run together.
+    Many,
+}
+
+impl DeployInstances {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::One => "one",
+            Self::Many => "many",
+        }
+    }
+
+    pub fn allows_several(self) -> bool {
+        matches!(self, Self::Many)
+    }
+}
+
+impl std::fmt::Display for DeployInstances {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for DeployInstances {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "one" => Ok(Self::One),
+            "many" => Ok(Self::Many),
+            other => bail!("unknown [deploy] instances {other:?}; expected \"one\" or \"many\""),
+        }
+    }
+}
+
+impl Serialize for DeployInstances {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DeployInstances {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+fn is_one_instance(value: &DeployInstances) -> bool {
+    *value == DeployInstances::One
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeploySection {
@@ -212,6 +270,10 @@ pub struct DeploySection {
     /// written (alias or canonical) is what the release signature covers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<crate::software_executor::SoftwareExecutorKind>,
+    /// Whether this release may run more than once in one environment
+    /// (ADR 0044 §2). Absent is `"one"`.
+    #[serde(default, skip_serializing_if = "is_one_instance")]
+    pub instances: DeployInstances,
 }
 
 impl Default for DeploySection {
@@ -223,6 +285,7 @@ impl Default for DeploySection {
             uninstall: None,
             health: None,
             executor: None,
+            instances: DeployInstances::One,
         }
     }
 }
@@ -712,6 +775,22 @@ fn validate_deploy_executor(manifest: &Manifest) -> Result<()> {
             "deploy.executor = \"{executor}\" is only supported for software products, not {:?}",
             manifest.product.kind
         );
+    }
+    if manifest.deploy.instances.allows_several() {
+        if manifest.product.kind.policy().target() != crate::product_kind::ProductTarget::Software {
+            bail!(
+                "[deploy] instances = \"many\" is only supported for software products, not {:?}",
+                manifest.product.kind
+            );
+        }
+        if manifest.deploy.executor == Some(crate::software_executor::SoftwareExecutorKind::Host) {
+            bail!(
+                "host releases must use [deploy] instances = \"one\"; the applier record is per product"
+            );
+        }
+        crate::ontology::validate_instance_name(&manifest.product.name).with_context(|| {
+            "[deploy] instances = \"many\" requires the product name to be a DNS label of at most 40 characters"
+        })?;
     }
     Ok(())
 }
@@ -1515,6 +1594,89 @@ max_startup_seconds = 30
         verify_release(&envelope, &roots, &digest(&shell), &artifact).unwrap();
         let err = verify_release(&envelope, &roots, &digest(&kubernetes), &artifact).unwrap_err();
         assert!(err.to_string().contains("manifest digest"), "{err}");
+    }
+
+    #[test]
+    fn deploy_instances_defaults_to_one_and_refuses_unknown_values() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-manifest-instances-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("tenkai.toml");
+        std::fs::write(&path, HELLO_LOCAL).unwrap();
+        let omitted = load(&path).unwrap();
+        assert_eq!(omitted.manifest.deploy.instances, DeployInstances::One);
+
+        let with_field = |value: &str| {
+            HELLO_LOCAL.replacen(
+                "[deploy]\n",
+                &format!("[deploy]\ninstances = \"{value}\"\n"),
+                1,
+            )
+        };
+        std::fs::write(&path, with_field("many")).unwrap();
+        assert_eq!(
+            load(&path).unwrap().manifest.deploy.instances,
+            DeployInstances::Many
+        );
+        std::fs::write(&path, with_field("one")).unwrap();
+        assert_eq!(
+            load(&path).unwrap().manifest.deploy.instances,
+            DeployInstances::One
+        );
+        std::fs::write(&path, with_field("sometimes")).unwrap();
+        let err = match load(&path) {
+            Ok(_) => panic!("unknown instances was admitted"),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            err.contains("unknown [deploy] instances \"sometimes\""),
+            "{err}"
+        );
+        std::fs::write(
+            &path,
+            HELLO_LOCAL.replacen(
+                "[deploy]\n",
+                "[deploy]\nexecutor = \"host\"\ninstances = \"many\"\n",
+                1,
+            ),
+        )
+        .unwrap();
+        let err = match load(&path) {
+            Ok(_) => panic!("host instances=many was admitted"),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            err.contains("host releases must use [deploy] instances = \"one\""),
+            "{err}"
+        );
+        let routing = include_str!("../examples/routing-local/tenkai.toml");
+        let err = match parse_raw(&format!("{routing}\n[deploy]\ninstances = \"many\"\n")) {
+            Ok(_) => panic!("routing instances=many was admitted"),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            err.contains("[deploy] instances = \"many\" is only supported for software products"),
+            "{err}"
+        );
+        std::fs::write(
+            &path,
+            HELLO_LOCAL
+                .replacen("hello-local", "hello_local", 1)
+                .replacen("[deploy]\n", "[deploy]\ninstances = \"many\"\n", 1),
+        )
+        .unwrap();
+        let err = match load(&path) {
+            Ok(_) => panic!("many with a non-DNS product name was admitted"),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            err.contains("DNS label") && err.contains("instances = \"many\""),
+            "{err}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

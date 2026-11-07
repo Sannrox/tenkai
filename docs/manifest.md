@@ -76,6 +76,32 @@ executor it declares; see
 that declares `kubernetes` or `kubernetes-inprocess` may omit `deploy.install`;
 every other software release still needs it.
 
+## Instances
+
+`[deploy] instances` says whether this release may run more than once in one
+environment ([ADR 0044](decisions/0044-product-instances-and-dependency-bindings.md) §2):
+
+```toml
+[deploy]
+instances = "many"   # default "one"
+```
+
+Omitted is `"one"`: planning a second instance of the product is refused and
+names both instances. `"many"` is for software releases whose executor isolates
+instances (shell, Helm, Docker, Kubernetes). The product name must be a DNS
+label of at most 40 characters, because the default instance uses that name.
+Host releases and non-software kinds stay `"one"` because their records are
+per product. Publication refuses
+any other value and names it. Older binaries refuse a manifest that declares
+the field (`[deploy]` denies unknown keys), so omit it until every server that
+reads the catalog understands it.
+
+Tenkai does not rewrite object names. A `"many"` release must use
+[`TENKAI_INSTANCE`](environment-variables.md#set-by-tenkai-for-deploy-commands)
+in its commands, or `${TENKAI_INSTANCE}` in native Kubernetes YAML, so two
+instances do not collide. The default instance is named after the product and
+keeps today's derived names.
+
 ## Delivery signals
 
 Optional `[delivery]` flags are part of the signed manifest. Both default to

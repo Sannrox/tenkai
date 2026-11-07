@@ -125,6 +125,7 @@ fn the_signed_command_runs_once_in_the_copy_with_a_fixed_environment() {
             "PATH",
             "TENKAI_ENVIRONMENT",
             "TENKAI_HOST_ACTION",
+            "TENKAI_INSTANCE",
             "TENKAI_PLAN_ID",
             "TENKAI_PRODUCT",
             "TENKAI_RELEASE_DIGEST",
