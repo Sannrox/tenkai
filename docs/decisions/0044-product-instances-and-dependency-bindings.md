@@ -1,6 +1,6 @@
 # ADR 0044: Product instances and dependency bindings
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-06
 - Issue: [#1003](https://github.com/Sannrox/tenkai/issues/1003)
 - Owner: Tenkai maintainers
