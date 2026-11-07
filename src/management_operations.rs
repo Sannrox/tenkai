@@ -22,6 +22,7 @@ use crate::auth_context::{
 };
 use crate::catalog::{ChannelPage, ReleasePage};
 use crate::client::Ctx;
+use crate::environment_dependencies::EnvironmentDependencies;
 use crate::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryResult};
 use crate::host_identity::AuthSession;
 use crate::management_lifecycle::{
@@ -1048,6 +1049,26 @@ impl ManagementOperations {
         }
         self.reconciler
             .environment_status(environment.to_string())
+            .await
+            .map_err(map_environment_error)
+    }
+
+    pub async fn environment_dependencies(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+    ) -> Result<EnvironmentDependencies, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        if self.tenant_mode {
+            return self
+                .tenant_operations()?
+                .dependencies(&context, environment)
+                .await
+                .map_err(map_tenant_error);
+        }
+        self.reconciler
+            .environment_dependencies(environment.to_string())
             .await
             .map_err(map_environment_error)
     }

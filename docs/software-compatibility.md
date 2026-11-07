@@ -230,6 +230,24 @@ exits unsuccessfully when any failure remains. Examples include
 `missing_capability`, `component_changed`, `incompatible_contract`,
 `unsupported_schema`, and `stale_evidence`.
 
+A required contract that is not yet in the environment records a durable hold
+instead of failing reconcile. `tenkaictl status` classifies that subscribed
+product as `waiting` and names the unmet contract and minimum. Other products
+keep `current`, `behind`, `missing`, `unhealthy`, and channel delivery holds.
+`GET /v1/environments/{environment}/status` includes the hold on the status
+row when present.
+
+`tenkaictl env dependencies <env>` lists subscribed and deployed products in
+contract plan order (providers before dependents). Each required or optional
+contract names a unique providing product and release, `absent` for an optional
+contract with no provider, or `ambiguous` when several deployed releases
+provide it. Holds are listed first. `--format json` is the same view as
+`GET /v1/environments/{environment}/dependencies`. `--format dot` prints the
+provider→dependent edges as Graphviz. Selecting a product in JSON includes
+impact: whether remove, upgrade, or rollback would be refused because a
+remaining installed dependent would be unsatisfied, naming that dependent and
+contract. The payload contains no endpoints, credentials, or instance names.
+
 Planning checks the target profile. A plan over several releases installs and
 upgrades providers before dependents, removes dependents before providers, and
 keeps name order among releases with no edge. Remove and downgrade order uses

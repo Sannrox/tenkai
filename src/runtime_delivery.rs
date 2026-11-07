@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::client::Ctx;
+use crate::environment_dependencies::EnvironmentDependencies;
 use crate::plan::PlanState;
 use crate::plan::{
     EnvironmentInspectReport, EnvironmentListEntry, FleetStatusReport, Plan, StatusRow,
@@ -31,6 +32,8 @@ pub type InspectEnvFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<EnvironmentInspectReport>> + Send + 'a>>;
 pub type StatusEnvFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<Vec<StatusRow>>> + Send + 'a>>;
+pub type DependenciesEnvFuture<'a> =
+    Pin<Box<dyn Future<Output = anyhow::Result<EnvironmentDependencies>> + Send + 'a>>;
 pub type FleetStatusFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<FleetStatusReport>> + Send + 'a>>;
 pub type InventoryFuture<'a> =
@@ -88,6 +91,9 @@ pub trait ReconcilePort: Send + Sync {
         })
     }
     fn environment_status(&self, environment: String) -> StatusEnvFuture<'_>;
+    fn environment_dependencies(&self, environment: String) -> DependenciesEnvFuture<'_> {
+        Box::pin(async move { Ok(EnvironmentDependencies::empty(environment)) })
+    }
     fn fleet_status(&self) -> FleetStatusFuture<'_>;
     fn fleet_status_without_outcome_export(&self) -> FleetStatusFuture<'_> {
         Box::pin(async {
@@ -174,6 +180,13 @@ impl ReconcilePort for Reconciler {
         Box::pin(async move {
             let mut ctx = self.ctx_clone();
             crate::plan::status(&mut ctx, &environment).await
+        })
+    }
+
+    fn environment_dependencies(&self, environment: String) -> DependenciesEnvFuture<'_> {
+        Box::pin(async move {
+            let mut ctx = self.ctx_clone();
+            crate::environment_dependencies::for_environment(&mut ctx, &environment).await
         })
     }
 

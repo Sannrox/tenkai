@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result, bail};
 use tenkai::{apply, client, connectivity, plan, preview};
 
 use crate::args::OutputFormat;
-use crate::env_args::EnvCommand;
+use crate::env_args::{DependencyFormat, EnvCommand};
 use crate::output::print_machine_result;
 
 pub(crate) async fn run(
@@ -94,6 +94,14 @@ pub(crate) async fn run(
             } else {
                 // JSON keeps multi-env inspect machine-readable without secrets.
                 println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+        }
+        EnvCommand::Dependencies { env, format } => {
+            let view = tenkai::environment_dependencies::for_environment(ctx, &env).await?;
+            match format {
+                DependencyFormat::Json => println!("{}", serde_json::to_string_pretty(&view)?),
+                DependencyFormat::Dot => println!("{}", view.to_dot()),
+                DependencyFormat::Text => println!("{}", view.to_text()),
             }
         }
         EnvCommand::Retire { env, reason } => {

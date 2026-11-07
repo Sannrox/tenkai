@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 
 /// Fence and reason for a configuration change. Both are required with
 /// `--target remote`; the embedded target does not use them.
@@ -51,6 +51,13 @@ pub(crate) enum EnvCommand {
     List,
     /// Inspect one environment: subscriptions, deployed versions, lease/fence, latest plan.
     Inspect { env: String },
+    /// Show dependency holds, providers, and remaining-dependent impact.
+    Dependencies {
+        env: String,
+        /// text (default), json, or Graphviz dot.
+        #[arg(long, value_enum, default_value_t = DependencyFormat::Text)]
+        format: DependencyFormat,
+    },
     /// Retire an environment after its active apply has been unlocked.
     Retire {
         env: String,
@@ -168,6 +175,13 @@ pub(crate) enum EnvCommand {
         #[arg(long)]
         generation: Option<u64>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum DependencyFormat {
+    Text,
+    Json,
+    Dot,
 }
 
 #[derive(Subcommand)]

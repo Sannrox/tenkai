@@ -1466,6 +1466,34 @@
       ],
       "type": "object"
     },
+    "DependencyHoldView": {
+      "description": "One durable unmet-required-contract hold.",
+      "properties": {
+        "contracts": {
+          "items": {
+            "$ref": "#/$defs/UnmetContract"
+          },
+          "type": "array"
+        },
+        "held_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "product": {
+          "type": "string"
+        },
+        "release_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "product",
+        "release_id",
+        "contracts",
+        "held_at"
+      ],
+      "type": "object"
+    },
     "DerivedCriticality": {
       "description": "Imported derived criticality. `stale` is computed at read time.",
       "properties": {
@@ -2111,6 +2139,32 @@
         "reason",
         "set_at",
         "source"
+      ],
+      "type": "object"
+    },
+    "EnvironmentDependencies": {
+      "description": "Environment dependency graph for status and `env dependencies`.",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "holds": {
+          "items": {
+            "$ref": "#/$defs/DependencyHoldView"
+          },
+          "type": "array"
+        },
+        "products": {
+          "items": {
+            "$ref": "#/$defs/ProductDependencyView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "environment",
+        "holds",
+        "products"
       ],
       "type": "object"
     },
@@ -3431,6 +3485,22 @@
       ],
       "type": "object"
     },
+    "ImpactRefusal": {
+      "description": "A remaining installed dependent that would be unsatisfied.",
+      "properties": {
+        "contract": {
+          "type": "string"
+        },
+        "dependent": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "dependent",
+        "contract"
+      ],
+      "type": "object"
+    },
     "ImportJob": {
       "additionalProperties": false,
       "description": "`GET /v1/imports/{id}` and the job file.",
@@ -4657,6 +4727,51 @@
       ],
       "type": "object"
     },
+    "ProductDependencyView": {
+      "description": "One subscribed or deployed product in contract plan order.",
+      "properties": {
+        "impact": {
+          "$ref": "#/$defs/ProductImpact"
+        },
+        "product": {
+          "type": "string"
+        },
+        "requirements": {
+          "items": {
+            "$ref": "#/$defs/RequirementView"
+          },
+          "type": "array"
+        },
+        "state": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "product",
+        "state",
+        "requirements",
+        "impact"
+      ],
+      "type": "object"
+    },
+    "ProductImpact": {
+      "description": "Remaining-dependent protection for remove, upgrade, and rollback of a product.",
+      "properties": {
+        "remove": {
+          "$ref": "#/$defs/ImpactRefusal"
+        },
+        "rollback": {
+          "$ref": "#/$defs/ImpactRefusal"
+        },
+        "upgrade": {
+          "$ref": "#/$defs/ImpactRefusal"
+        }
+      },
+      "type": "object"
+    },
     "PromoteRequest": {
       "additionalProperties": false,
       "properties": {
@@ -4710,6 +4825,66 @@
         "built_at_unix_ms"
       ],
       "type": "object"
+    },
+    "ProviderView": {
+      "description": "How a contract is satisfied in the deployed set.",
+      "oneOf": [
+        {
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "product": {
+              "type": "string"
+            },
+            "release": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unique",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "product",
+            "release",
+            "contract"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "absent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "products": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "ambiguous",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "products"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "PublishInputEntry": {
       "additionalProperties": false,
@@ -5106,6 +5281,30 @@
         "value",
         "reason",
         "generation"
+      ],
+      "type": "object"
+    },
+    "RequirementView": {
+      "description": "One required or optional contract on a product.",
+      "properties": {
+        "contract": {
+          "type": "string"
+        },
+        "minimum": {
+          "type": "string"
+        },
+        "optional": {
+          "type": "boolean"
+        },
+        "provider": {
+          "$ref": "#/$defs/ProviderView"
+        }
+      },
+      "required": [
+        "contract",
+        "minimum",
+        "optional",
+        "provider"
       ],
       "type": "object"
     },
@@ -5674,6 +5873,30 @@
       ],
       "type": "object"
     },
+    "StatusDependencyHold": {
+      "description": "Dependency hold carried on a status row (no product; the row already names it).",
+      "properties": {
+        "contracts": {
+          "items": {
+            "$ref": "#/$defs/UnmetContract"
+          },
+          "type": "array"
+        },
+        "held_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "release_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "release_id",
+        "contracts",
+        "held_at"
+      ],
+      "type": "object"
+    },
     "StatusRow": {
       "properties": {
         "channel": {
@@ -5682,6 +5905,10 @@
         "delivery_hold": {
           "$ref": "#/$defs/DeliveryHold",
           "description": "Present while the subscribed channel is held."
+        },
+        "dependency_hold": {
+          "$ref": "#/$defs/StatusDependencyHold",
+          "description": "Present while a required contract is unmet (ADR 0043)."
         },
         "deployed": {
           "type": [
@@ -5955,6 +6182,22 @@
         "key_id",
         "identity",
         "revoked"
+      ],
+      "type": "object"
+    },
+    "UnmetContract": {
+      "description": "Unmet contract named by a dependency hold.",
+      "properties": {
+        "contract": {
+          "type": "string"
+        },
+        "minimum": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "minimum"
       ],
       "type": "object"
     },
@@ -6455,6 +6698,15 @@
           "$ref": "#/$defs/StatusRow"
         },
         "type": "array"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}/dependencies",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/EnvironmentDependencies"
       }
     },
     {

@@ -174,6 +174,19 @@ pub(crate) async fn run(
             Ok(())
         }
         Command::Env {
+            command: EnvCommand::Dependencies { env, format },
+        } => {
+            let view = client.environment_dependencies(&env).await?;
+            match format {
+                crate::env_args::DependencyFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&view)?)
+                }
+                crate::env_args::DependencyFormat::Dot => println!("{}", view.to_dot()),
+                crate::env_args::DependencyFormat::Text => println!("{}", view.to_text()),
+            }
+            Ok(())
+        }
+        Command::Env {
             command:
                 EnvCommand::Hold {
                     env,
@@ -282,16 +295,20 @@ pub(crate) async fn run(
                 );
                 for r in rows {
                     let deployed = r.deployed.clone().unwrap_or_else(|| "-".into());
-                    let state = plan::subscription_state(
-                        r.deployed.as_deref(),
-                        &r.head,
-                        r.health.as_deref(),
-                        r.overlay_stale,
-                    );
+                    let state = plan::status_state(&r);
                     println!(
                         "{:<24} {:<10} {:<12} {:<12} {state}",
                         r.product, r.channel, deployed, r.head
                     );
+                    if let Some(hold) = &r.dependency_hold {
+                        let waiting = hold
+                            .contracts
+                            .iter()
+                            .map(|c| format!("{} >= {}", c.contract, c.minimum))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        println!("  waiting on {waiting}");
+                    }
                     if let Some(hold) = &r.delivery_hold {
                         println!(
                             "  channel hold at {} by {}: {}",
