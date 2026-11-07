@@ -203,6 +203,23 @@ pub(super) async fn environment_status(
     )
 }
 
+pub(super) async fn environment_dependencies(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .environment_dependencies(&credential, &environment)
+            .await,
+    )
+}
+
 pub(super) async fn observed_runtime(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,

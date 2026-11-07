@@ -131,23 +131,27 @@ pub(crate) async fn run(
             );
             for r in rows {
                 let deployed = r.deployed.clone().unwrap_or_else(|| "-".into());
-                let state = plan::subscription_state(
-                    r.deployed.as_deref(),
-                    &r.head,
-                    r.health.as_deref(),
-                    r.overlay_stale,
-                );
+                let state = plan::status_state(&r);
                 println!(
                     "{:<24} {:<10} {:<12} {:<12} {state}",
                     r.product, r.channel, deployed, r.head
                 );
+                if let Some(hold) = &r.dependency_hold {
+                    let waiting = hold
+                        .contracts
+                        .iter()
+                        .map(|c| format!("{} >= {}", c.contract, c.minimum))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("  waiting on {waiting}");
+                }
                 if let Some(hold) = &r.delivery_hold {
                     println!(
                         "  channel hold at {} by {}: {}",
                         hold.held_at, hold.actor, hold.reason
                     );
                 }
-                if matches!(state, "unknown" | "unhealthy")
+                if matches!(r.health.as_deref(), Some("unknown") | Some("unhealthy"))
                     && let Some(error) = r.error.as_deref()
                 {
                     println!("  recovery required: {error}");

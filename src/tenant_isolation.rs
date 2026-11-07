@@ -204,6 +204,11 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Environment,
         },
         TenantVisibleRpc {
+            id: "environment.dependencies",
+            path_template: "GET /v1/environments/{environment}/dependencies",
+            surface: TenantVisibleSurface::Environment,
+        },
+        TenantVisibleRpc {
             id: "environment.runtime",
             path_template: "GET /v1/environments/{environment}/runtime",
             surface: TenantVisibleSurface::Environment,
@@ -286,6 +291,7 @@ pub fn http_exposed_tenant_rpc_ids() -> &'static [&'static str] {
         "environment.list",
         "environment.get",
         "environment.status",
+        "environment.dependencies",
         "environment.runtime",
         "event.list",
     ]
@@ -1345,6 +1351,20 @@ mod tests {
         );
         assert_eq!(rpc.surface, TenantVisibleSurface::Environment);
         assert!(http_exposed_tenant_rpc_ids().contains(&"environment.runtime"));
+    }
+
+    #[test]
+    fn environment_dependencies_is_registered_and_http_exposed() {
+        let rpc = tenant_visible_rpcs()
+            .iter()
+            .find(|rpc| rpc.id == "environment.dependencies")
+            .expect("environment.dependencies must be in tenant_visible_rpcs");
+        assert_eq!(
+            rpc.path_template,
+            "GET /v1/environments/{environment}/dependencies"
+        );
+        assert_eq!(rpc.surface, TenantVisibleSurface::Environment);
+        assert!(http_exposed_tenant_rpc_ids().contains(&"environment.dependencies"));
     }
 
     #[test]

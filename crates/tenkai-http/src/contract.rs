@@ -25,6 +25,7 @@ use tenkai::criticality::{
 use tenkai::delivery_hold::DeliveryHoldView;
 use tenkai::environment::{EnvironmentInspectReport, EnvironmentListEntry, StatusRow};
 use tenkai::environment_config::{EnvironmentConfigRequest, RegisterEnvironmentRequest};
+use tenkai::environment_dependencies::EnvironmentDependencies;
 use tenkai::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryResult};
 use tenkai::fleet::FleetStatusReport;
 use tenkai::host_identity::AuthSession;
@@ -339,6 +340,13 @@ pub fn http_contract() -> Value {
             auth: Auth::Read,
             request: None,
             response: schema::<Vec<StatusRow>>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/environments/{environment}/dependencies",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<EnvironmentDependencies>(&mut g),
         },
         Route {
             method: "GET",
@@ -769,6 +777,11 @@ mod tests {
             ("EnvironmentInspectReport", "delivery_hold"),
             ("EnvironmentSubscriptionView", "delivery_hold"),
             ("StatusRow", "delivery_hold"),
+            ("StatusRow", "dependency_hold"),
+            ("ProductDependencyView", "version"),
+            ("ProductImpact", "remove"),
+            ("ProductImpact", "upgrade"),
+            ("ProductImpact", "rollback"),
             ("DeliveryHoldView", "hold"),
             ("ChannelListEntry", "hold"),
             ("EnvironmentMaintenanceInspect", "open_until_ms"),

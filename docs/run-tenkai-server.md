@@ -330,7 +330,7 @@ download the files the CLI otherwise writes there (#682):
 ### Remote CLI
 
 Remote v1 CLI support covers `reconcile --once`, `fleet status`, `fleet watch`,
-`env list`, `env inspect`, `env subscribe`, `env add`, the `set`, `clear` and
+`env list`, `env inspect`, `env dependencies`, `env subscribe`, `env add`, the `set`, `clear` and
 `remove` commands of `env facts`, `env constraints`, `env maintenance`,
 `env webhooks` and `env approval-policy`, `status`, `publish`, `promote`,
 `release recall`, `plan`, `approval submit`, `apply`, `rollback`, and the

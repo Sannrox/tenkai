@@ -116,6 +116,17 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn environment_dependencies(
+        &self,
+        environment: &str,
+    ) -> anyhow::Result<tenkai::environment_dependencies::EnvironmentDependencies> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/environments/{environment}/dependencies"),
+        )
+        .await
+    }
+
     pub async fn environment_approval_policy(
         &self,
         environment: &str,

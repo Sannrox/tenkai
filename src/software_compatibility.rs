@@ -840,10 +840,24 @@ pub(crate) fn holdable_unmet_requirements(
 /// Optional requirements may be absent. A required contract that had no matching
 /// deployed provider before the plan stays on observation rules. The refusal
 /// names the dependent product and the contract.
-pub(crate) fn refuse_unsatisfied_dependents(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemainingDependentRefusal {
+    pub dependent: String,
+    pub contract: String,
+    pub kind: RemainingDependentKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemainingDependentKind {
+    Ambiguous,
+    Unsatisfied { minimum: String },
+}
+
+/// First remaining dependent that would be unsatisfied or left ambiguous.
+pub(crate) fn remaining_dependent_refusal(
     remaining: &BTreeMap<String, CompatibilityProfile>,
     previous: &BTreeMap<String, CompatibilityProfile>,
-) -> Result<()> {
+) -> Result<Option<RemainingDependentRefusal>> {
     for (dependent, profile) in remaining {
         for component in profile.components.values() {
             for (contract, requirement) in &component.requires {
@@ -855,9 +869,11 @@ pub(crate) fn refuse_unsatisfied_dependents(
                     dependent,
                 )?;
                 if matching.len() > 1 {
-                    bail!(
-                        "plan would leave installed dependent {dependent} with ambiguous contract {contract}"
-                    );
+                    return Ok(Some(RemainingDependentRefusal {
+                        dependent: dependent.clone(),
+                        contract: contract.clone(),
+                        kind: RemainingDependentKind::Ambiguous,
+                    }));
                 }
                 if !matching.is_empty() {
                     continue;
@@ -875,17 +891,43 @@ pub(crate) fn refuse_unsatisfied_dependents(
                 if before.is_empty() {
                     continue;
                 }
-                bail!(
-                    "plan would leave installed dependent {dependent} without required contract {contract} (>={})",
-                    requirement.minimum()
-                );
+                return Ok(Some(RemainingDependentRefusal {
+                    dependent: dependent.clone(),
+                    contract: contract.clone(),
+                    kind: RemainingDependentKind::Unsatisfied {
+                        minimum: requirement.minimum().to_string(),
+                    },
+                }));
             }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
-fn matching_deployed_providers(
+pub(crate) fn refuse_unsatisfied_dependents(
+    remaining: &BTreeMap<String, CompatibilityProfile>,
+    previous: &BTreeMap<String, CompatibilityProfile>,
+) -> Result<()> {
+    match remaining_dependent_refusal(remaining, previous)? {
+        None => Ok(()),
+        Some(RemainingDependentRefusal {
+            dependent,
+            contract,
+            kind: RemainingDependentKind::Ambiguous,
+        }) => bail!(
+            "plan would leave installed dependent {dependent} with ambiguous contract {contract}"
+        ),
+        Some(RemainingDependentRefusal {
+            dependent,
+            contract,
+            kind: RemainingDependentKind::Unsatisfied { minimum },
+        }) => bail!(
+            "plan would leave installed dependent {dependent} without required contract {contract} (>={minimum})"
+        ),
+    }
+}
+
+pub(crate) fn matching_deployed_providers(
     profiles: &BTreeMap<String, CompatibilityProfile>,
     contract: &str,
     requirement: &ContractRequirement,

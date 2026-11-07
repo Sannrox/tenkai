@@ -26,7 +26,7 @@ pub use opening::{HotSwap, opening_router};
 pub use remote_client::{RemoteClient, RemoteFailure};
 pub use router::router;
 pub use tenkai::runtime_delivery::{
-    CompletionFuture, FleetStatusFuture, HealthFuture, InspectEnvFuture, InventoryFuture,
-    ListEnvFuture, ReconcileFuture, ReconcilePort, RuntimeHeartbeat, RuntimeInventoryReport,
-    RuntimeInventoryResponse, RuntimeWork, StatusEnvFuture, WorkFuture,
+    CompletionFuture, DependenciesEnvFuture, FleetStatusFuture, HealthFuture, InspectEnvFuture,
+    InventoryFuture, ListEnvFuture, ReconcileFuture, ReconcilePort, RuntimeHeartbeat,
+    RuntimeInventoryReport, RuntimeInventoryResponse, RuntimeWork, StatusEnvFuture, WorkFuture,
 };

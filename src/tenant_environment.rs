@@ -10,6 +10,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::auth_context::AuthenticatedRequestContext;
+use crate::environment_dependencies::EnvironmentDependencies;
 use crate::plan::{EnvironmentInspectReport, EnvironmentListEntry, FleetStatusReport, StatusRow};
 use crate::reconciler::TickReport;
 use crate::tenant_isolation::IsolationError;
@@ -163,6 +164,15 @@ impl TenantEnvironmentOperations {
             return Ok(projection.status_rows());
         }
         Ok(Vec::new())
+    }
+
+    pub async fn dependencies(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &str,
+    ) -> Result<EnvironmentDependencies, TenantEnvironmentError> {
+        self.visible_fixture(context, environment).await?;
+        Ok(EnvironmentDependencies::empty(environment))
     }
 
     pub async fn reconcile(
@@ -752,6 +762,7 @@ mod tests {
                     head: "9.9.9".into(),
                     overlay_stale: false,
                     delivery_hold: None,
+                    dependency_hold: None,
                 }])
             })
         }

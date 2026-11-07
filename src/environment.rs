@@ -1189,6 +1189,25 @@ pub struct StatusRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub delivery_hold: Option<crate::delivery_hold::DeliveryHold>,
+    /// Present while a required contract is unmet (ADR 0043).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub dependency_hold: Option<StatusDependencyHold>,
+}
+
+/// Unmet contract named by a dependency hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UnmetContract {
+    pub contract: String,
+    pub minimum: String,
+}
+
+/// Dependency hold carried on a status row (no product; the row already names it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct StatusDependencyHold {
+    pub release_id: String,
+    pub contracts: Vec<UnmetContract>,
+    pub held_at: i64,
 }
 
 /// Classify one subscription for inspect, status, and fleet posture.
@@ -1205,6 +1224,21 @@ pub fn subscription_state(
         (Some(version), _) if version == head => "current",
         (Some(_), _) => "behind",
         (None, _) => "missing",
+    }
+}
+
+/// Classify one status row. A dependency hold is `waiting`; health stays on
+/// the row so recovery output can still print from `unknown`/`unhealthy`.
+pub fn status_state(row: &StatusRow) -> &'static str {
+    if row.dependency_hold.is_some() {
+        "waiting"
+    } else {
+        subscription_state(
+            row.deployed.as_deref(),
+            &row.head,
+            row.health.as_deref(),
+            row.overlay_stale,
+        )
     }
 }
 
@@ -1493,6 +1527,8 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
         let held = selected_release.as_ref().is_ok_and(|(_, release)| {
             held_failed_target_release(&env_obj.properties, &product) == Some(release.as_str())
         });
+        let dependency_hold =
+            dependency_hold(&env_obj.properties, &product).map(|hold| hold.to_status_view());
         rows.push(StatusRow {
             deployed: env_obj
                 .properties
@@ -1522,6 +1558,7 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             overlay_stale: overlay_digest != applied,
             product,
             delivery_hold,
+            dependency_hold,
         });
     }
     rows.sort_by(|a, b| a.product.cmp(&b.product));
@@ -1550,13 +1587,17 @@ fn subscription_views_from_status(
                 error: row.error,
                 overlay_digest: (!overlay_digest.is_empty()).then_some(overlay_digest),
                 applied_overlay,
-                state: subscription_state(
-                    row.deployed.as_deref(),
-                    &row.head,
-                    row.health.as_deref(),
-                    config_stale,
-                )
-                .to_string(),
+                state: if row.dependency_hold.is_some() {
+                    "waiting".into()
+                } else {
+                    subscription_state(
+                        row.deployed.as_deref(),
+                        &row.head,
+                        row.health.as_deref(),
+                        config_stale,
+                    )
+                    .to_string()
+                },
                 delivery_hold: row.delivery_hold,
             }
         })
@@ -2445,6 +2486,24 @@ pub struct DependencyHold {
     pub held_at: i64,
 }
 
+impl DependencyHold {
+    /// Status-row view of this hold (product is already on the row).
+    pub fn to_status_view(&self) -> StatusDependencyHold {
+        StatusDependencyHold {
+            release_id: self.release_id.clone(),
+            contracts: self
+                .contracts
+                .iter()
+                .map(|(contract, minimum)| UnmetContract {
+                    contract: contract.clone(),
+                    minimum: minimum.clone(),
+                })
+                .collect(),
+            held_at: self.held_at,
+        }
+    }
+}
+
 /// One product's hold to persist after a reconcile snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DependencyHoldWrite {
@@ -3153,6 +3212,28 @@ mod tests {
             "behind"
         );
         assert_eq!(subscription_state(None, "1.0.0", None, false), "missing");
+        let waiting = StatusRow {
+            product: "app".into(),
+            channel: "stable".into(),
+            deployed: None,
+            health: None,
+            error: None,
+            head: "1.0.0".into(),
+            overlay_stale: false,
+            delivery_hold: None,
+            dependency_hold: Some(StatusDependencyHold {
+                release_id: "tenkai:release:app@1.0.0".into(),
+                contracts: vec![UnmetContract {
+                    contract: "database".into(),
+                    minimum: "1.0.0".into(),
+                }],
+                held_at: 1,
+            }),
+        };
+        assert_eq!(status_state(&waiting), "waiting");
+        let mut missing = waiting.clone();
+        missing.dependency_hold = None;
+        assert_eq!(status_state(&missing), "missing");
     }
 
     #[test]

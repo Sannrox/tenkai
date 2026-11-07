@@ -149,7 +149,7 @@ pub fn document_for(
 }
 
 /// True when this release already provides a satisfying version of `contract`.
-fn self_satisfies(
+pub(crate) fn self_satisfies(
     profile: &CompatibilityProfile,
     contract: &str,
     requirement: &ContractRequirement,
@@ -169,13 +169,13 @@ fn self_satisfies(
     Ok(false)
 }
 
-struct MatchingProvider {
-    product: String,
-    release: String,
-    contract_version: String,
+pub(crate) struct MatchingProvider {
+    pub product: String,
+    pub release: String,
+    pub contract_version: String,
 }
 
-fn matching_providers(
+pub(crate) fn matching_providers(
     dependent: &str,
     contract: &str,
     requirement: &ContractRequirement,
@@ -233,13 +233,19 @@ pub async fn deployed_set(
     Ok(deployed)
 }
 
-async fn stored_profile(
+pub(crate) async fn stored_profile(
     ctx: &mut Ctx,
     product: &str,
     version: &str,
 ) -> Result<Option<CompatibilityProfile>> {
-    let id = release_id(product, version);
-    let Some(object) = ctx.get(&id).await? else {
+    stored_profile_by_id(ctx, &release_id(product, version)).await
+}
+
+pub(crate) async fn stored_profile_by_id(
+    ctx: &mut Ctx,
+    id: &str,
+) -> Result<Option<CompatibilityProfile>> {
+    let Some(object) = ctx.get(id).await? else {
         return Ok(None);
     };
     let Some(raw) = object.properties.get("manifest") else {

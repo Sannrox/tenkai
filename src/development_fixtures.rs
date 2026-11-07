@@ -153,6 +153,7 @@ impl FixtureEnvironmentProjection {
                     head: projection.head.clone(),
                     overlay_stale: false,
                     delivery_hold: None,
+                    dependency_hold: None,
                 }
             })
             .collect()

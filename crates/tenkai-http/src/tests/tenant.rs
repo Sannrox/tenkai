@@ -178,6 +178,31 @@ async fn tenant_mode_management_apis_isolate_environments() {
     assert!(!status_body.contains("tenant-b"));
     assert!(!status_body.contains("env-b"));
 
+    let dependencies_cross = tenant_app
+        .clone()
+        .oneshot(
+            Request::get("/v1/environments/env-b/dependencies")
+                .header(
+                    "x-tenkai-assertion",
+                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dependencies_cross.status(), StatusCode::NOT_FOUND);
+    let dependencies_body = String::from_utf8(
+        axum::body::to_bytes(dependencies_cross.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(dependencies_body.contains(NON_DISCLOSING_DENY));
+    assert!(!dependencies_body.contains("tenant-b"));
+    assert!(!dependencies_body.contains("env-b"));
+
     let runtime_cross = tenant_app
         .clone()
         .oneshot(

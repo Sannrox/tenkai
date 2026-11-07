@@ -603,6 +603,24 @@ fn parses_env_list_and_inspect() {
             command: EnvCommand::Inspect { ref env }
         } if env == "prod"
     ));
+    let dependencies = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "dependencies",
+        "prod",
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        dependencies.command,
+        Command::Env {
+            command: EnvCommand::Dependencies {
+                ref env,
+                format: crate::env_args::DependencyFormat::Json,
+            }
+        } if env == "prod"
+    ));
     let retire = Cli::try_parse_from([
         "tenkaictl",
         "env",
