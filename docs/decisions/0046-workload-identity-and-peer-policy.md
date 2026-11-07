@@ -125,8 +125,10 @@ generation, with a fresh key. It is not a plan:
   the target, not from a timer in memory.
 - It starts at two thirds of the lifetime, 24 hours by default, and retries
   until it succeeds. The runtime reports each instance's certificate expiry.
-  A certificate inside its last sixth that has not been renewed reports the
-  instance as `warning` with the reason, through post-deploy health (#1057).
+  A certificate inside its last sixth that has not been renewed is shown as
+  near expiry in `status`, with the reason. Once post-deploy health (#1057)
+  exists, it also reports the instance as `warning` there. Renewal does not
+  depend on it.
 - For a release with `reload = "restart"`, renewal finishes with a rolling
   restart of the same version and configuration, performed by the runtime
   and honouring `min_available`. This narrowly amends ADR 0016, which
