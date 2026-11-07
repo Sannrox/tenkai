@@ -167,8 +167,12 @@ should have. Then the in-cluster release is applied as that identity.
 There is no step after this. Until the kubeconfig exists, every attempt to
 apply an in-cluster release in the environment fails closed, names the
 missing file, and leaves the deployment as it was; reconcile retries with
-its bounded backoff and converges once the cluster is up. Nothing orders
-releases beyond that: no dependency graph.
+its bounded backoff and converges once the cluster is up. After the host
+release, in-cluster releases that declare contract requirements apply
+providers before dependents and wait for Available between steps. Releases
+with no edge keep name order. An undeclared Kubernetes readiness edge is a
+missing contract; a cycle across releases is refused at planning. A plan that
+would invert a contract edge to run the host release first is refused.
 
 ## Tenkai's identity in the cluster
 

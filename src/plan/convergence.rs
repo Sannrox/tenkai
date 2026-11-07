@@ -3,6 +3,7 @@
 
 use super::*;
 use anyhow::{Result, bail};
+use std::collections::{BTreeMap, BTreeSet};
 
 fn classify_change(current: &str, desired: &str) -> Action {
     match (
@@ -730,18 +731,61 @@ async fn compute_snapshot_with_policy(
                 || !matches!(entry.1, Action::Downgrade | Action::Rollback)
         });
     }
+    let mut target_profiles = BTreeMap::new();
+    for (product, action, _, _, release, _, _) in &pending {
+        if matches!(action, Action::Remove) {
+            continue;
+        }
+        if target_profiles.contains_key(product) {
+            continue;
+        }
+        if let Some(manifest) = readable_manifest(ctx, &release.release_id).await?
+            && let Some(profile) = manifest.compatibility
+        {
+            target_profiles.insert(product.clone(), profile);
+        }
+    }
+    let mut installed_profiles = BTreeMap::new();
+    for (key, value) in &env_obj.properties {
+        let Some(product) = key.strip_prefix("deployed.") else {
+            continue;
+        };
+        if installed_profiles.contains_key(product) {
+            continue;
+        }
+        if let Some(manifest) = readable_manifest(ctx, &release_id(product, value)).await?
+            && let Some(profile) = manifest.compatibility
+        {
+            installed_profiles.insert(product.to_string(), profile);
+        }
+    }
+    let pending_actions = pending
+        .iter()
+        .map(|(product, action, _, _, _, _, _)| (product.as_str(), *action))
+        .collect::<Vec<_>>();
+    let contract_order =
+        contract_plan_order(&pending_actions, &target_profiles, &installed_profiles)?;
     // Enforce model_runtime ↔ routing_config rollout order (see docs). The
     // runtime agent's own release always runs last: switching restarts the
     // agent, so nothing may follow it in the plan (#685). Host releases run
     // first: a plan stops at its first failed step, and releases in a cluster
     // a host release installs fail closed until it exists (ADR 0041 section
-    // 4), so a host step sorted after them would never run.
+    // 4), so a host step sorted after them would never run. Contract edges
+    // (ADR 0043 §3) order providers before dependents, and reverse that for
+    // remove/downgrade/rollback; independent releases keep name order.
     pending.sort_by(|a, b| {
         let agent = |product: &str| product == crate::runtime_self_upgrade::SELF_PRODUCT;
         let not_host = |product: &String| !host_products.contains(product);
         // Removals run after everything else: what runs in a cluster a host
         // release provides has to go before the cluster does.
         let remove = |action: Action| action == Action::Remove;
+        let contract = |product: &str| {
+            contract_order
+                .ranks
+                .get(product)
+                .copied()
+                .unwrap_or(u32::MAX)
+        };
         agent(&a.0)
             .cmp(&agent(&b.0))
             .then_with(|| remove(a.1).cmp(&remove(b.1)))
@@ -749,6 +793,7 @@ async fn compute_snapshot_with_policy(
             .then_with(|| {
                 model_routing_rollout_rank(a.6, a.1).cmp(&model_routing_rollout_rank(b.6, b.1))
             })
+            .then_with(|| contract(&a.0).cmp(&contract(&b.0)))
             .then_with(|| a.0.cmp(&b.0))
     });
     validate_model_routing_rollout_order(
@@ -756,6 +801,14 @@ async fn compute_snapshot_with_policy(
             .iter()
             .map(|entry| (entry.6, entry.1))
             .collect::<Vec<_>>(),
+    )?;
+    refuse_inverted_contract_order(
+        &pending
+            .iter()
+            .map(|(product, action, _, _, _, _, _)| (product.as_str(), *action))
+            .collect::<Vec<_>>(),
+        &contract_order.target_edges,
+        &contract_order.installed_edges,
     )?;
     let steps = pending
         .into_iter()
@@ -851,6 +904,310 @@ pub(super) fn validate_model_routing_rollout_order(
         bail!(
             "unsafe rollback order: model_runtime step at {model_i} precedes routing_config step at {routing_i}; switch routes away before retiring the model"
         );
+    }
+    Ok(())
+}
+
+/// Provider product, dependent product, and the contract that links them.
+type ContractEdge = (String, String, String);
+
+fn profile_provides_requires(
+    profile: &crate::software_compatibility::CompatibilityProfile,
+) -> (BTreeMap<String, String>, BTreeSet<String>) {
+    let mut provides = BTreeMap::new();
+    let mut requires = BTreeSet::new();
+    for component in profile.components.values() {
+        for (contract, version) in &component.provides {
+            provides.insert(contract.clone(), version.clone());
+        }
+        for contract in component.requires.keys() {
+            requires.insert(contract.clone());
+        }
+    }
+    (provides, requires)
+}
+
+/// Unique provider in `profiles` for each required contract of another profile.
+fn cross_release_contract_edges(
+    profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
+) -> Vec<ContractEdge> {
+    let mut providers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut requires: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (product, profile) in profiles {
+        let (provided, required) = profile_provides_requires(profile);
+        for contract in provided.keys() {
+            providers
+                .entry(contract.clone())
+                .or_default()
+                .insert(product.clone());
+        }
+        requires.insert(product.clone(), required);
+    }
+    let mut edges = Vec::new();
+    for (dependent, contracts) in &requires {
+        for contract in contracts {
+            let Some(offered) = providers.get(contract) else {
+                continue;
+            };
+            if offered.len() != 1 {
+                continue;
+            }
+            let Some(provider) = offered.iter().next() else {
+                continue;
+            };
+            if provider == dependent {
+                continue;
+            }
+            edges.push((provider.clone(), dependent.clone(), contract.clone()));
+        }
+    }
+    edges
+}
+
+/// Target profile replaces installed for the same product; unchanged products stay.
+/// A pending product missing from `target`, or a Remove, drops its installed profile.
+fn overlay_profiles(
+    installed: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
+    target: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
+    pending: &[(&str, Action)],
+) -> BTreeMap<String, crate::software_compatibility::CompatibilityProfile> {
+    let removed: BTreeSet<&str> = pending
+        .iter()
+        .filter(|(_, action)| matches!(action, Action::Remove))
+        .map(|(product, _)| *product)
+        .collect();
+    let mut profiles = installed.clone();
+    for (product, _) in pending {
+        if removed.contains(product) || !target.contains_key(*product) {
+            profiles.remove(*product);
+        }
+    }
+    for (product, profile) in target {
+        if removed.contains(product.as_str()) {
+            continue;
+        }
+        profiles.insert(product.clone(), profile.clone());
+    }
+    profiles
+}
+
+fn refuse_cross_release_cycle(edges: &[ContractEdge]) -> Result<()> {
+    let mut outgoing: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+    let mut nodes = BTreeSet::new();
+    for (provider, dependent, contract) in edges {
+        nodes.insert(provider.as_str());
+        nodes.insert(dependent.as_str());
+        outgoing
+            .entry(provider.as_str())
+            .or_default()
+            .push((dependent.as_str(), contract.as_str()));
+    }
+    let mut visiting = Vec::new();
+    let mut visiting_set = BTreeMap::new();
+    let mut done = BTreeSet::new();
+    for node in nodes {
+        visit_plan_contract_edge(node, &outgoing, &mut visiting, &mut visiting_set, &mut done)?;
+    }
+    Ok(())
+}
+
+fn visit_plan_contract_edge<'a>(
+    node: &'a str,
+    outgoing: &BTreeMap<&'a str, Vec<(&'a str, &'a str)>>,
+    visiting: &mut Vec<(&'a str, &'a str)>,
+    visiting_set: &mut BTreeMap<&'a str, usize>,
+    done: &mut BTreeSet<&'a str>,
+) -> Result<()> {
+    if done.contains(node) {
+        return Ok(());
+    }
+    if let Some(&index) = visiting_set.get(node) {
+        let mut cycle: Vec<&str> = visiting[index..].iter().map(|(name, _)| *name).collect();
+        cycle.push(node);
+        let contracts: Vec<&str> = visiting[index..]
+            .iter()
+            .map(|(_, contract)| *contract)
+            .collect();
+        bail!(
+            "plan requirement cycle: {} (contracts: {})",
+            cycle.join(" -> "),
+            contracts.join(", ")
+        );
+    }
+    visiting_set.insert(node, visiting.len());
+    if let Some(next) = outgoing.get(node) {
+        for &(dependent, contract) in next {
+            visiting.push((node, contract));
+            visit_plan_contract_edge(dependent, outgoing, visiting, visiting_set, done)?;
+            visiting.pop();
+        }
+    }
+    visiting_set.remove(node);
+    done.insert(node);
+    Ok(())
+}
+
+fn reverse_contract_action(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Remove | Action::Downgrade | Action::Rollback
+    )
+}
+
+/// Name-ordered topological ranks among `members`. `precede` is (before, after).
+fn name_ordered_ranks(members: &BTreeSet<&str>, precede: &[(&str, &str)]) -> BTreeMap<String, u32> {
+    let mut incoming: BTreeMap<&str, u32> = members.iter().map(|product| (*product, 0)).collect();
+    let mut outgoing: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (from, to) in precede {
+        if !members.contains(from) || !members.contains(to) {
+            continue;
+        }
+        if outgoing.entry(*from).or_default().insert(*to) {
+            *incoming.entry(*to).or_default() += 1;
+        }
+    }
+    let mut ready: BTreeSet<&str> = incoming
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(product, _)| *product)
+        .collect();
+    let mut ranks = BTreeMap::new();
+    let mut order = 0u32;
+    while let Some(next) = ready.pop_first() {
+        ranks.insert(next.to_string(), order);
+        order += 1;
+        if let Some(successors) = outgoing.get(next) {
+            for to in successors {
+                if let Some(count) = incoming.get_mut(to) {
+                    *count -= 1;
+                    if *count == 0 {
+                        ready.insert(*to);
+                    }
+                }
+            }
+        }
+    }
+    ranks
+}
+
+fn refuse_mixed_direction_edges(pending: &[(&str, Action)], edges: &[ContractEdge]) -> Result<()> {
+    let actions: BTreeMap<&str, Action> = pending.iter().copied().collect();
+    for (provider, dependent, contract) in edges {
+        let Some(&provider_action) = actions.get(provider.as_str()) else {
+            continue;
+        };
+        let Some(&dependent_action) = actions.get(dependent.as_str()) else {
+            continue;
+        };
+        if reverse_contract_action(provider_action) != reverse_contract_action(dependent_action) {
+            bail!(
+                "plan requirement {contract} links {provider} ({provider_action}) and {dependent} ({dependent_action}) in opposite directions; split them into separate plans"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ContractPlanOrder {
+    ranks: BTreeMap<String, u32>,
+    target_edges: Vec<ContractEdge>,
+    installed_edges: Vec<ContractEdge>,
+}
+
+fn contract_plan_order(
+    pending: &[(&str, Action)],
+    target_profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
+    installed_profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
+) -> Result<ContractPlanOrder> {
+    let target_edges = cross_release_contract_edges(target_profiles);
+    let installed_edges = cross_release_contract_edges(installed_profiles);
+    let overlay_edges = cross_release_contract_edges(&overlay_profiles(
+        installed_profiles,
+        target_profiles,
+        pending,
+    ));
+    refuse_cross_release_cycle(&overlay_edges)?;
+    refuse_mixed_direction_edges(pending, &overlay_edges)?;
+    refuse_mixed_direction_edges(pending, &installed_edges)?;
+    let actions: BTreeMap<&str, Action> = pending.iter().copied().collect();
+    let members: BTreeSet<&str> = actions.keys().copied().collect();
+    let mut precede = Vec::new();
+    for (provider, dependent, _) in &target_edges {
+        let Some(&provider_action) = actions.get(provider.as_str()) else {
+            continue;
+        };
+        let Some(&dependent_action) = actions.get(dependent.as_str()) else {
+            continue;
+        };
+        if reverse_contract_action(provider_action) || reverse_contract_action(dependent_action) {
+            continue;
+        }
+        precede.push((provider.as_str(), dependent.as_str()));
+    }
+    for (provider, dependent, _) in &installed_edges {
+        let Some(&provider_action) = actions.get(provider.as_str()) else {
+            continue;
+        };
+        let Some(&dependent_action) = actions.get(dependent.as_str()) else {
+            continue;
+        };
+        if !reverse_contract_action(provider_action) || !reverse_contract_action(dependent_action) {
+            continue;
+        }
+        precede.push((dependent.as_str(), provider.as_str()));
+    }
+    Ok(ContractPlanOrder {
+        ranks: name_ordered_ranks(&members, &precede),
+        target_edges,
+        installed_edges,
+    })
+}
+
+/// Refuse when the sorted plan puts a dependent before its provider (or the
+/// reverse on remove/downgrade/rollback). Host, agent, and removal keys can
+/// otherwise override contract ranks.
+fn refuse_inverted_contract_order(
+    ordered: &[(&str, Action)],
+    target_edges: &[ContractEdge],
+    installed_edges: &[ContractEdge],
+) -> Result<()> {
+    let index: BTreeMap<&str, usize> = ordered
+        .iter()
+        .enumerate()
+        .map(|(i, (product, _))| (*product, i))
+        .collect();
+    let actions: BTreeMap<&str, Action> = ordered.iter().copied().collect();
+    for (edges, reverse) in [(target_edges, false), (installed_edges, true)] {
+        for (provider, dependent, contract) in edges {
+            let Some(&provider_index) = index.get(provider.as_str()) else {
+                continue;
+            };
+            let Some(&dependent_index) = index.get(dependent.as_str()) else {
+                continue;
+            };
+            let Some(&provider_action) = actions.get(provider.as_str()) else {
+                continue;
+            };
+            let Some(&dependent_action) = actions.get(dependent.as_str()) else {
+                continue;
+            };
+            if reverse_contract_action(provider_action) != reverse
+                || reverse_contract_action(dependent_action) != reverse
+            {
+                continue;
+            }
+            if reverse && dependent_index > provider_index {
+                bail!(
+                    "plan requirement {contract} is inverted: {dependent} must precede {provider} when removing or downgrading"
+                );
+            }
+            if !reverse && provider_index > dependent_index {
+                bail!(
+                    "plan requirement {contract} is inverted: {provider} must precede {dependent} in this plan"
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1231,6 +1588,416 @@ mod tests {
             model_routing_rollout_rank(ProductKind::RoutingConfig, Action::Rollback)
                 < model_routing_rollout_rank(ProductKind::ModelRuntime, Action::Rollback)
         );
+    }
+
+    fn test_profile(
+        requires: &[(&str, &str)],
+        provides: &[(&str, &str)],
+    ) -> crate::software_compatibility::CompatibilityProfile {
+        use crate::software_compatibility::{
+            CompatibilityProfile, ComponentPin, ComponentRequirement, ContractRequirement,
+        };
+        CompatibilityProfile {
+            version: 2,
+            components: BTreeMap::from([(
+                "main".into(),
+                ComponentRequirement {
+                    pin: ComponentPin::Revision("a".repeat(40)),
+                    requires: requires
+                        .iter()
+                        .map(|(contract, minimum)| {
+                            (
+                                (*contract).into(),
+                                ContractRequirement::Minimum((*minimum).into()),
+                            )
+                        })
+                        .collect(),
+                    provides: provides
+                        .iter()
+                        .map(|(contract, version)| ((*contract).into(), (*version).into()))
+                        .collect(),
+                },
+            )]),
+            capabilities: Vec::new(),
+            facts: BTreeMap::new(),
+            schema: None,
+            max_evidence_age_ms: 60_000,
+        }
+    }
+
+    #[test]
+    fn contract_order_puts_provider_before_dependent_instead_of_name_order() {
+        let profiles = BTreeMap::from([
+            ("app".into(), test_profile(&[("database", "1.0.0")], &[])),
+            ("db".into(), test_profile(&[], &[("database", "1.0.0")])),
+        ]);
+        let ranks = contract_plan_order(
+            &[("app", Action::Install), ("db", Action::Install)],
+            &profiles,
+            &profiles,
+        )
+        .unwrap()
+        .ranks;
+        assert!(ranks["db"] < ranks["app"], "{ranks:?}");
+    }
+
+    #[test]
+    fn contract_order_keeps_name_order_without_edges() {
+        let profiles = BTreeMap::from([
+            ("beta".into(), test_profile(&[], &[])),
+            ("alpha".into(), test_profile(&[], &[])),
+        ]);
+        let ranks = contract_plan_order(
+            &[("beta", Action::Install), ("alpha", Action::Install)],
+            &profiles,
+            &profiles,
+        )
+        .unwrap()
+        .ranks;
+        assert!(ranks["alpha"] < ranks["beta"], "{ranks:?}");
+    }
+
+    #[test]
+    fn contract_order_removes_dependent_before_provider() {
+        let profiles = BTreeMap::from([
+            ("app".into(), test_profile(&[("database", "1.0.0")], &[])),
+            ("db".into(), test_profile(&[], &[("database", "1.0.0")])),
+        ]);
+        let ranks = contract_plan_order(
+            &[("app", Action::Remove), ("db", Action::Remove)],
+            &profiles,
+            &profiles,
+        )
+        .unwrap()
+        .ranks;
+        assert!(ranks["app"] < ranks["db"], "{ranks:?}");
+    }
+
+    #[test]
+    fn contract_order_refuses_a_cross_release_cycle() {
+        let profiles = BTreeMap::from([
+            (
+                "app".into(),
+                test_profile(&[("database", "1.0.0")], &[("api", "1.0.0")]),
+            ),
+            (
+                "db".into(),
+                test_profile(&[("api", "1.0.0")], &[("database", "1.0.0")]),
+            ),
+        ]);
+        let err = contract_plan_order(
+            &[("app", Action::Install), ("db", Action::Install)],
+            &profiles,
+            &profiles,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("plan requirement cycle"), "{err}");
+        assert!(err.contains("app"), "{err}");
+        assert!(err.contains("db"), "{err}");
+        assert!(err.contains("database") || err.contains("api"), "{err}");
+    }
+
+    #[test]
+    fn contract_order_refuses_mixed_upgrade_and_remove() {
+        let profiles = BTreeMap::from([
+            ("app".into(), test_profile(&[("database", "1.0.0")], &[])),
+            ("db".into(), test_profile(&[], &[("database", "1.0.0")])),
+        ]);
+        let err = contract_plan_order(
+            &[("app", Action::Remove), ("db", Action::Upgrade)],
+            &profiles,
+            &profiles,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("opposite directions"), "{err}");
+        assert!(err.contains("database"), "{err}");
+    }
+
+    #[test]
+    fn contract_order_refuses_mixed_direction_from_installed_edge() {
+        let target = BTreeMap::from([
+            ("z-app".into(), test_profile(&[], &[])),
+            ("a-db".into(), test_profile(&[], &[("database", "1.0.0")])),
+        ]);
+        let installed = BTreeMap::from([
+            ("z-app".into(), test_profile(&[("database", "1.0.0")], &[])),
+            ("a-db".into(), test_profile(&[], &[("database", "1.0.0")])),
+        ]);
+        let err = contract_plan_order(
+            &[("z-app", Action::Downgrade), ("a-db", Action::Upgrade)],
+            &target,
+            &installed,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("opposite directions"), "{err}");
+        assert!(err.contains("database"), "{err}");
+    }
+
+    #[test]
+    fn contract_order_keeps_name_order_across_forward_and_reverse_without_edges() {
+        let profiles = BTreeMap::new();
+        let ranks = contract_plan_order(
+            &[
+                ("a", Action::Upgrade),
+                ("b", Action::Upgrade),
+                ("z", Action::Downgrade),
+            ],
+            &profiles,
+            &profiles,
+        )
+        .unwrap()
+        .ranks;
+        assert!(
+            ranks["a"] < ranks["b"] && ranks["b"] < ranks["z"],
+            "{ranks:?}"
+        );
+    }
+
+    #[test]
+    fn contract_order_detects_cycle_through_an_unchanged_release() {
+        let profiles = BTreeMap::from([
+            (
+                "app".into(),
+                test_profile(&[("database", "1.0.0")], &[("api", "1.0.0")]),
+            ),
+            (
+                "db".into(),
+                test_profile(&[("api", "1.0.0")], &[("database", "1.0.0")]),
+            ),
+        ]);
+        let err = contract_plan_order(&[("app", Action::Upgrade)], &profiles, &profiles)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("plan requirement cycle"), "{err}");
+        assert!(err.contains("app") && err.contains("db"), "{err}");
+    }
+
+    #[test]
+    fn contract_order_detects_cycle_across_target_and_installed_profiles() {
+        let target = BTreeMap::from([(
+            "app".into(),
+            test_profile(&[("database", "1.0.0")], &[("api", "1.0.0")]),
+        )]);
+        let installed = BTreeMap::from([(
+            "db".into(),
+            test_profile(&[("api", "1.0.0")], &[("database", "1.0.0")]),
+        )]);
+        let err = contract_plan_order(&[("app", Action::Upgrade)], &target, &installed)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("plan requirement cycle"), "{err}");
+        assert!(err.contains("app") && err.contains("db"), "{err}");
+    }
+
+    #[test]
+    fn contract_order_allows_upgrade_that_breaks_an_installed_cycle() {
+        let target = BTreeMap::from([
+            (
+                "a".into(),
+                test_profile(&[("database", "1.0.0")], &[("api", "1.0.0")]),
+            ),
+            ("b".into(), test_profile(&[], &[("database", "1.0.0")])),
+        ]);
+        let installed = BTreeMap::from([
+            ("a".into(), test_profile(&[], &[("api", "1.0.0")])),
+            (
+                "b".into(),
+                test_profile(&[("api", "1.0.0")], &[("database", "1.0.0")]),
+            ),
+        ]);
+        let ranks = contract_plan_order(
+            &[("a", Action::Upgrade), ("b", Action::Upgrade)],
+            &target,
+            &installed,
+        )
+        .unwrap()
+        .ranks;
+        assert!(ranks["b"] < ranks["a"], "{ranks:?}");
+    }
+
+    #[test]
+    fn contract_order_drops_installed_profile_when_target_has_none() {
+        let target = BTreeMap::new();
+        let installed = BTreeMap::from([
+            (
+                "a".into(),
+                test_profile(&[("database", "1.0.0")], &[("api", "1.0.0")]),
+            ),
+            (
+                "b".into(),
+                test_profile(&[("api", "1.0.0")], &[("database", "1.0.0")]),
+            ),
+        ]);
+        let ranks = contract_plan_order(&[("a", Action::Upgrade)], &target, &installed)
+            .unwrap()
+            .ranks;
+        assert!(ranks.contains_key("a"), "{ranks:?}");
+    }
+
+    #[test]
+    fn contract_order_remove_breaks_an_installed_cycle() {
+        let target = BTreeMap::from([(
+            "a".into(),
+            test_profile(&[("database", "1.0.0")], &[("api", "1.0.0")]),
+        )]);
+        let installed = BTreeMap::from([
+            (
+                "a".into(),
+                test_profile(&[("database", "1.0.0")], &[("api", "1.0.0")]),
+            ),
+            (
+                "b".into(),
+                test_profile(&[("api", "1.0.0")], &[("database", "1.0.0")]),
+            ),
+        ]);
+        let ranks = contract_plan_order(&[("a", Action::Remove)], &target, &installed)
+            .unwrap()
+            .ranks;
+        assert!(ranks.contains_key("a"), "{ranks:?}");
+    }
+
+    #[test]
+    fn contract_order_reverse_uses_installed_edges_when_target_drops_them() {
+        let target = BTreeMap::from([
+            ("z-app".into(), test_profile(&[], &[])),
+            ("a-db".into(), test_profile(&[], &[("database", "1.0.0")])),
+        ]);
+        let installed = BTreeMap::from([
+            ("z-app".into(), test_profile(&[("database", "1.0.0")], &[])),
+            ("a-db".into(), test_profile(&[], &[("database", "1.0.0")])),
+        ]);
+        let ranks = contract_plan_order(
+            &[("z-app", Action::Downgrade), ("a-db", Action::Downgrade)],
+            &target,
+            &installed,
+        )
+        .unwrap()
+        .ranks;
+        assert!(ranks["z-app"] < ranks["a-db"], "{ranks:?}");
+    }
+
+    #[test]
+    fn contract_order_refuses_when_agent_last_inverts_a_provider_edge() {
+        let agent = crate::runtime_self_upgrade::SELF_PRODUCT;
+        let edges = vec![(agent.to_string(), "app".to_string(), "runtime".to_string())];
+        let err = refuse_inverted_contract_order(
+            &[("app", Action::Upgrade), (agent, Action::Upgrade)],
+            &edges,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("inverted"), "{err}");
+        assert!(err.contains("runtime"), "{err}");
+        assert!(err.contains(agent), "{err}");
+        assert!(err.contains("app"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn plan_orders_provider_before_dependent_instead_of_name_order() {
+        use crate::software_compatibility::{
+            CompatibilityEvidence, ComponentObservation, ComponentPin, MigrationState,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-plan-order-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        let pin = "a".repeat(40);
+        let publish = |product: &str, extra: &str| {
+            format!(
+                "[product]\nname = \"{product}\"\nversion = \"1.0.0\"\n[deploy]\ninstall = \"true\"\n[compatibility]\nversion = 1\nmax_evidence_age_ms = 60000\n[compatibility.components.main.pin]\nkind = \"revision\"\nvalue = \"{pin}\"\n{extra}"
+            )
+        };
+        let db_raw = publish(
+            "db",
+            "[compatibility.components.main.provides]\ndatabase = \"1.0.0\"\n",
+        );
+        let app_raw = publish(
+            "app",
+            "[compatibility.components.main.requires]\ndatabase = \"1.0.0\"\n",
+        );
+        for (product, raw) in [("db", &db_raw), ("app", &app_raw)] {
+            let dir = root.join(product);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("tenkai.toml"), raw).unwrap();
+            crate::catalog::publish(
+                &mut ctx,
+                &dir.join("tenkai.toml"),
+                &crate::catalog::PublishOptions {
+                    allow_unsigned_development: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let actor = crate::auth_context::test_management_context("plan-order");
+        crate::catalog::promote(&mut ctx, &actor, "db@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::catalog::promote(&mut ctx, &actor, "app@1.0.0", "stable")
+            .await
+            .unwrap();
+        subscribe(&mut ctx, "local", "db", "stable").await.unwrap();
+        subscribe(&mut ctx, "local", "app", "stable").await.unwrap();
+        let evidence = |digest: String, requires, provides, contracts| CompatibilityEvidence {
+            version: 1,
+            release_digest: digest,
+            environment: "local".into(),
+            observed_at_ms: crate::now_millis() - 1_000,
+            components: BTreeMap::from([(
+                "main".into(),
+                ComponentObservation {
+                    pin: ComponentPin::Revision(pin.clone()),
+                    requires,
+                    provides,
+                },
+            )]),
+            contracts,
+            capabilities: Vec::new(),
+            schema_version: None,
+            migration: MigrationState::Stable,
+        };
+        crate::software_compatibility::record_evidence(
+            &mut ctx,
+            "local",
+            evidence(
+                crate::manifest::digest(&db_raw),
+                BTreeMap::new(),
+                BTreeMap::from([("database".into(), "1.0.0".into())]),
+                BTreeMap::from([("database".into(), "1.0.0".into())]),
+            ),
+        )
+        .await
+        .unwrap();
+        crate::software_compatibility::record_evidence(
+            &mut ctx,
+            "local",
+            evidence(
+                crate::manifest::digest(&app_raw),
+                BTreeMap::from([("database".into(), "1.0.0".into())]),
+                BTreeMap::new(),
+                BTreeMap::from([("database".into(), "1.0.0".into())]),
+            ),
+        )
+        .await
+        .unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        let products: Vec<_> = plan
+            .steps
+            .iter()
+            .map(|step| step.product.as_str())
+            .collect();
+        assert_eq!(products, vec!["db", "app"], "{products:?}");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn write_model_runtime_manifest(
