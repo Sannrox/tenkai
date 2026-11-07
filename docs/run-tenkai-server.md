@@ -46,6 +46,12 @@ database. Environment runtimes use separate tokens, each scoped server-side to
 exactly one environment. Continuous reconcile ticks emit structured diagnostics
 documented in [server diagnostics](server-diagnostics.md).
 
+On Linux the server also listens on `/run/tenkai/tenkai.sock` when that
+directory exists. Operators in `tenkai-operator` run `tenkaictl status --env
+<env>` without the management token, and open the console with
+`ssh -L 8080:/run/tenkai/tenkai.sock <host>`. See
+[host identity](configure-server-authentication.md#host-identity-linux).
+
 Plaintext HTTP is accepted only on loopback. For remote access, either put a
 TLS reverse proxy in front of it or serve TLS natively (see
 [native TLS](#native-tls)); never pass tokens or keys on a command line. By default

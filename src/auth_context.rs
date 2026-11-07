@@ -16,6 +16,20 @@ use crate::actor_chain::{Actor, ActorKind};
 /// Version of the authenticated-request-context contract.
 pub const AUTH_CONTEXT_CONTRACT_VERSION: u32 = 1;
 
+/// Kernel peer credentials from a Unix socket (`SO_PEERCRED` uid).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerCredentials {
+    pub uid: u32,
+}
+
+/// Audit facts recorded on a host-identity principal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostIdentityFacts {
+    pub uid: u32,
+    pub user_name: String,
+    pub groups: Vec<String>,
+}
+
 /// Transport credentials presented to an authenticator.
 ///
 /// Deliberately omits any caller-selected tenant field. Tenant membership is
@@ -27,6 +41,9 @@ pub struct CredentialMaterial {
     /// Opaque enterprise assertion bytes (for example an audience-bound JWT).
     /// Interpreting this material is extension-owned, not Tenkai-core-owned.
     pub assertion: Option<Vec<u8>>,
+    /// Kernel peer credentials from a Unix socket (ADR 0047). Absent on TCP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_credentials: Option<PeerCredentials>,
 }
 
 impl CredentialMaterial {
@@ -50,9 +67,13 @@ impl CredentialMaterial {
                 "assertion must not be empty when present".into(),
             ));
         }
-        if self.bearer_token.is_none() && self.assertion.is_none() {
+        if self.bearer_token.is_none()
+            && self.assertion.is_none()
+            && self.peer_credentials.is_none()
+        {
             return Err(AuthError::InvalidCredential(
-                "credential material must include a bearer token or assertion".into(),
+                "credential material must include a bearer token, assertion, or peer credentials"
+                    .into(),
             ));
         }
         Ok(())
@@ -171,6 +192,10 @@ pub struct AuthenticatedRequestContext {
     /// first. Empty when the principal called directly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     actor_chain: Vec<Actor>,
+    /// Host identity (uid, user, authorized groups) when the authenticator
+    /// was peer credentials. Absent for tokens and assertions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_identity: Option<HostIdentityFacts>,
 }
 
 impl AuthenticatedRequestContext {
@@ -206,6 +231,10 @@ impl AuthenticatedRequestContext {
         &self.actor_chain
     }
 
+    pub fn host_identity(&self) -> Option<&HostIdentityFacts> {
+        self.host_identity.as_ref()
+    }
+
     /// First actor in the chain that is not a person, if any.
     pub fn acting_agent(&self) -> Option<&Actor> {
         self.actor_chain
@@ -216,15 +245,24 @@ impl AuthenticatedRequestContext {
     /// Audit principal naming the subject and every delegating actor, for
     /// example `user-1 (act: assistant-7)`.
     pub fn audit_principal(&self) -> String {
-        if self.actor_chain.is_empty() {
-            return self.principal.id.clone();
+        let base = if self.actor_chain.is_empty() {
+            self.principal.id.clone()
+        } else {
+            let actors: Vec<&str> = self
+                .actor_chain
+                .iter()
+                .map(|actor| actor.id.as_str())
+                .collect();
+            format!("{} (act: {})", self.principal.id, actors.join(", "))
+        };
+        match &self.host_identity {
+            Some(host) => format!(
+                "{base} user={} groups={} source=host",
+                host.user_name,
+                host.groups.join(",")
+            ),
+            None => base,
         }
-        let actors: Vec<&str> = self
-            .actor_chain
-            .iter()
-            .map(|actor| actor.id.as_str())
-            .collect();
-        format!("{} (act: {})", self.principal.id, actors.join(", "))
     }
 
     pub fn has_delivery_capability(&self, required: DeliveryCapability) -> bool {
@@ -323,6 +361,7 @@ pub struct AuthenticatedRequestContextBuilder {
     channel_bindings: BTreeSet<String>,
     product_bindings: BTreeSet<String>,
     actor_chain: Vec<Actor>,
+    host_identity: Option<HostIdentityFacts>,
 }
 
 impl AuthenticatedRequestContextBuilder {
@@ -342,6 +381,7 @@ impl AuthenticatedRequestContextBuilder {
             channel_bindings: BTreeSet::new(),
             product_bindings: BTreeSet::new(),
             actor_chain: Vec::new(),
+            host_identity: None,
         }
     }
 
@@ -383,6 +423,16 @@ impl AuthenticatedRequestContextBuilder {
         self
     }
 
+    pub(crate) fn with_environment_binding_opt(mut self, environment: Option<String>) -> Self {
+        self.environment_binding = environment;
+        self
+    }
+
+    pub(crate) fn with_host_identity(mut self, host_identity: HostIdentityFacts) -> Self {
+        self.host_identity = Some(host_identity);
+        self
+    }
+
     /// Confine promote to these channels. Empty names are skipped.
     pub fn with_product_bindings(mut self, products: impl IntoIterator<Item = String>) -> Self {
         self.product_bindings = products.into_iter().collect();
@@ -419,6 +469,7 @@ impl AuthenticatedRequestContextBuilder {
             channel_bindings: self.channel_bindings,
             product_bindings: self.product_bindings,
             actor_chain: self.actor_chain,
+            host_identity: self.host_identity,
         };
         context.validate()?;
         Ok(context)
@@ -524,6 +575,19 @@ impl AuthStack {
         credential: &CredentialMaterial,
     ) -> Result<AuthenticatedRequestContext, AuthError> {
         self.authenticator.authenticate(credential)
+    }
+
+    /// Peer-credential identity on the Unix socket. Bearer and assertion still
+    /// go through the inner community or dual-stack authenticator.
+    pub fn with_host_identity(self, host: Arc<dyn CredentialAuthenticator>) -> Self {
+        Self {
+            authenticator: Arc::new(HostAwareAuthenticator {
+                inner: self.authenticator,
+                host,
+            }),
+            tenant_authority: self.tenant_authority,
+            mode: self.mode,
+        }
     }
 }
 
@@ -695,6 +759,29 @@ impl CredentialAuthenticator for DualStackAuthenticator {
         Err(AuthError::InvalidCredential(
             "enterprise dual-stack authenticator requires a community bearer or assertion".into(),
         ))
+    }
+}
+
+/// Prefer a bearer or assertion through `inner`; otherwise host identity.
+struct HostAwareAuthenticator {
+    inner: Arc<dyn CredentialAuthenticator>,
+    host: Arc<dyn CredentialAuthenticator>,
+}
+
+impl CredentialAuthenticator for HostAwareAuthenticator {
+    fn authenticator_id(&self) -> &str {
+        self.inner.authenticator_id()
+    }
+
+    fn authenticate(
+        &self,
+        credential: &CredentialMaterial,
+    ) -> Result<AuthenticatedRequestContext, AuthError> {
+        credential.validate()?;
+        if credential.bearer_token.is_some() || credential.assertion.is_some() {
+            return self.inner.authenticate(credential);
+        }
+        self.host.authenticate(credential)
     }
 }
 
@@ -920,6 +1007,7 @@ mod tests {
                 request_id: "req-1".into(),
                 bearer_token: Some("management-secret".into()),
                 assertion: None,
+                peer_credentials: None,
             })
             .unwrap();
         assert_eq!(context.principal_id(), "management");
@@ -948,6 +1036,7 @@ mod tests {
             request_id: "req".into(),
             bearer_token: Some("  ".into()),
             assertion: None,
+            peer_credentials: None,
         }
         .validate()
         .unwrap_err();
@@ -979,6 +1068,7 @@ mod tests {
             request_id: "req-3".into(),
             bearer_token: None,
             assertion: Some(b"forged".to_vec()),
+            peer_credentials: None,
         });
         assert!(matches!(denied, Err(AuthError::Unauthorized(_))));
 
@@ -987,6 +1077,7 @@ mod tests {
                 request_id: "req-4".into(),
                 bearer_token: None,
                 assertion: Some(b"good".to_vec()),
+                peer_credentials: None,
             })
             .unwrap();
         assert_eq!(context.principal_id(), "user:42");
@@ -1059,6 +1150,7 @@ mod tests {
                 request_id: "embedded-1".into(),
                 bearer_token: Some("management-secret".into()),
                 assertion: None,
+                peer_credentials: None,
             })
             .unwrap();
         assert!(!context.is_tenant_scoped());
@@ -1073,6 +1165,7 @@ mod tests {
                 request_id: "dyn-1".into(),
                 bearer_token: Some("management-secret".into()),
                 assertion: None,
+                peer_credentials: None,
             })
             .unwrap();
         assert_eq!(context.principal.kind, PrincipalKind::Management);
@@ -1088,6 +1181,7 @@ mod tests {
                 request_id: "forge-1".into(),
                 bearer_token: Some("management-secret".into()),
                 assertion: Some(b"tenant=evil".to_vec()),
+                peer_credentials: None,
             })
             .unwrap();
         assert!(context.tenant().is_none());
@@ -1116,6 +1210,7 @@ mod tests {
                 request_id: "cap-1".into(),
                 bearer_token: Some("management-secret".into()),
                 assertion: None,
+                peer_credentials: None,
             })
             .unwrap();
         assert!(context.has_delivery_capability(DeliveryCapability::Management));
@@ -1191,6 +1286,7 @@ mod tests {
                 request_id: "cap-2".into(),
                 bearer_token: None,
                 assertion: Some(b"good".to_vec()),
+                peer_credentials: None,
             })
             .unwrap();
         assert_eq!(context.principal.kind, PrincipalKind::Human);
@@ -1218,6 +1314,7 @@ mod tests {
                 request_id: "dual-1".into(),
                 bearer_token: Some("management-secret".into()),
                 assertion: None,
+                peer_credentials: None,
             })
             .unwrap();
         assert_eq!(context.principal_id(), "management");

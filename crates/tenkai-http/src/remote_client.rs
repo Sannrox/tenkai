@@ -62,6 +62,26 @@ impl RemoteClient {
         })
     }
 
+    /// Unix-socket client: Host is loopback, no bearer token (ADR 0047).
+    #[cfg(unix)]
+    pub fn unix_socket(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+        let path = path.as_ref();
+        anyhow::ensure!(
+            path.exists(),
+            "unix socket {} does not exist",
+            path.display()
+        );
+        Ok(Self {
+            base_url: "http://127.0.0.1".into(),
+            token: String::new(),
+            http: tenkai::outbound_tls::client()?.unix_socket(path).build()?,
+        })
+    }
+
+    pub async fn auth_session(&self) -> anyhow::Result<tenkai::host_identity::AuthSession> {
+        self.request_json(reqwest::Method::GET, "/v1/auth/me").await
+    }
+
     pub async fn reconcile(&self) -> anyhow::Result<TickReport> {
         self.request_json(reqwest::Method::POST, "/v1/reconcile")
             .await
@@ -252,8 +272,10 @@ impl RemoteClient {
     ) -> anyhow::Result<T> {
         let mut request = self
             .http
-            .request(method, format!("{}{path}", self.base_url))
-            .bearer_auth(&self.token);
+            .request(method, format!("{}{path}", self.base_url));
+        if !self.token.is_empty() {
+            request = request.bearer_auth(&self.token);
+        }
         if let Some(operation_id) = tenkai::telemetry::current_operation_id() {
             request = request.header("x-request-id", operation_id);
         }

@@ -269,6 +269,41 @@
       ],
       "type": "object"
     },
+    "AuthSession": {
+      "description": "Authenticated session as returned by `GET /v1/auth/me`.",
+      "properties": {
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "groups": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "principal",
+        "kind",
+        "capabilities"
+      ],
+      "type": "object"
+    },
     "BackupFailure": {
       "additionalProperties": false,
       "properties": {
@@ -6110,6 +6145,15 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/OidcClientDiscovery"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/auth/me",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/AuthSession"
       }
     },
     {

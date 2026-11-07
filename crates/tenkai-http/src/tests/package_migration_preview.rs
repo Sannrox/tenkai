@@ -99,6 +99,7 @@ async fn package_migration_preview_hides_cross_tenant_environment() {
                     br#"{"tenant":"tenant-b","principal":"user-b","capabilities":["read","management"]}"#
                         .to_vec(),
                 ),
+                peer_credentials: None,
             },
             &authority,
         )

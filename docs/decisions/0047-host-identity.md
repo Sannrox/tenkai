@@ -1,6 +1,6 @@
 # ADR 0047: Host identity as the default operator sign-in
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-06
 - Issue: [#997](https://github.com/Sannrox/tenkai/issues/997)
 - Owner: Tenkai maintainers
@@ -40,8 +40,9 @@ socket.
 
 ### 1. One Unix socket
 
-`tenkai-server` also listens on `/run/tenkai/tenkai.sock`, owned
-`root:tenkai-viewer` mode `0660`. `tenkai-viewer` is the socket-access group,
+`tenkai-server` also listens on `/run/tenkai/tenkai.sock`. The directory is
+`0750 tenkai:tenkai-viewer` so the unprivileged service can bind; the socket
+is mode `0660` with group `tenkai-viewer`. `tenkai-viewer` is the socket-access group,
 not a role ceiling: install puts every mapped user in it, including operators
 and admins. Role groups add capabilities; they do not replace viewer
 membership. A user in only `tenkai-operator` or `tenkai-admin` cannot connect

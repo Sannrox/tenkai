@@ -93,6 +93,8 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TENKAI_LISTEN` | `127.0.0.1:8080` | Server listen address; must remain loopback behind a TLS proxy |
+| `TENKAI_UNIX_SOCKET` | `/run/tenkai/tenkai.sock` on Linux | Unix socket for host identity. `tenkaictl` uses this path when it exists and no `--server-url` or token is set. `--no-unix-socket` disables the server listener |
+| `TENKAI_HOST_GRANTS` | `/etc/tenkai/host-grants.toml` | Root-owned OS-group grant mapping for host identity. Missing disables peer-credential authentication |
 | `TENKAI_RUNTIME_TOKENS` | `{}` | JSON object mapping bearer secrets to one environment each |
 | `TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS` | `{}` | JSON object mapping environment-scoped management bearers to one environment each; distinct from the fleet management token and runtime tokens |
 | `TENKAI_OIDC_CONFIG` | unset | Filesystem path to an OIDC trust TOML file; the server verifies OIDC access tokens sent as `Authorization: Bearer` and maps groups to grants ([configure server authentication](configure-server-authentication.md#oidc-access-tokens-468)). May be set together with `TENKAI_JWT_VERIFIER_CONFIG` when the issuers differ |

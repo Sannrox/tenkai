@@ -405,10 +405,80 @@ EOF
       die "cannot create ${client_file}"
     fi
   fi
+  grants_file="${conf_dir}/host-grants.toml"
+  if [ ! -e "$grants_file" ]; then
+    pending="$(umask 022; mktemp "${conf_dir}/.tenkai-install.XXXXXX")" \
+      || die "cannot create a temporary file in ${conf_dir}"
+    cat >"$pending" <<'EOF'
+# Host identity grants (ADR 0047). Root-owned; not writable by group or others.
+# OS group names map to the same capabilities as OIDC grant rules.
+
+[[grants.rules]]
+value = "tenkai-viewer"
+capabilities = ["read"]
+
+[[grants.rules]]
+value = "tenkai-operator"
+capabilities = ["management"]
+
+[[grants.rules]]
+value = "tenkai-admin"
+capabilities = ["management"]
+EOF
+    if [ "$(id -u)" = 0 ]; then
+      chown 0:0 "$pending"
+    fi
+    chmod 0644 "$pending"
+    if ln "$pending" "$grants_file" 2>/dev/null; then
+      rm -f "$pending"
+      pending=""
+      say "  ${grants_file}"
+    elif [ -e "$grants_file" ]; then
+      rm -f "$pending"
+      pending=""
+    else
+      rm -f "$pending"
+      pending=""
+      die "cannot create ${grants_file}"
+    fi
+  fi
+  if [ "$(id -u)" = 0 ] && [ "$sysconfdir" = /etc ]; then
+    for group in tenkai-viewer tenkai-operator tenkai-admin; do
+      if command -v groupadd >/dev/null 2>&1; then
+        groupadd -r "$group" 2>/dev/null || true
+      fi
+    done
+    if [ -n "${SUDO_USER:-}" ] && command -v usermod >/dev/null 2>&1; then
+      usermod -aG tenkai-viewer,tenkai-operator "$SUDO_USER" 2>/dev/null || true
+    fi
+    if getent passwd tenkai >/dev/null 2>&1; then
+      if command -v usermod >/dev/null 2>&1; then
+        usermod -aG tenkai-viewer tenkai 2>/dev/null || true
+      fi
+      if [ -d /run ]; then
+        mkdir -p /run/tenkai
+        chown tenkai:tenkai-viewer /run/tenkai
+        chmod 0750 /run/tenkai
+        say "  /run/tenkai"
+      fi
+    else
+      say "create the tenkai user, then: usermod -aG tenkai-viewer tenkai && systemd-tmpfiles --create /usr/lib/tmpfiles.d/tenkai.conf"
+    fi
+    if [ -d /usr/lib/tmpfiles.d ]; then
+      tmpfiles=/usr/lib/tmpfiles.d/tenkai.conf
+      if [ ! -e "$tmpfiles" ]; then
+        printf 'd /run/tenkai 0750 tenkai tenkai-viewer -\n' >"$tmpfiles"
+        chmod 0644 "$tmpfiles"
+        say "  ${tmpfiles}"
+      fi
+    fi
+  fi
   say ""
   say "As root, set TENKAI_MANAGEMENT_TOKEN in ${conf_dir}/server.env to the"
   say "contents of ${token_file}. systemd injects that value; the tenkai user"
-  say "cannot read a root-only token file. Then: sudo tenkaictl status --env <env>"
+  say "cannot read a root-only token file. Operators in tenkai-operator use"
+  say "the Unix socket /run/tenkai/tenkai.sock without the token:"
+  say "  tenkaictl status --env <env>"
 }
 
 if [ "$role" = server ]; then

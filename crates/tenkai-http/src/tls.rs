@@ -330,6 +330,35 @@ impl PeerCertificate for TlsStream<TcpStream> {
     }
 }
 
+/// Connection identity beyond TLS: Unix peer credentials when the listener is a
+/// Unix socket (ADR 0047).
+pub(crate) trait ConnectionIdentity: PeerCertificate {
+    fn unix_peer(&self) -> crate::auth::UnixPeerState {
+        crate::auth::UnixPeerState::Tcp
+    }
+}
+
+impl ConnectionIdentity for TcpStream {}
+
+impl ConnectionIdentity for TlsStream<TcpStream> {}
+
+#[cfg(unix)]
+impl PeerCertificate for tokio::net::UnixStream {
+    fn client_certificate(&self) -> Option<Arc<[u8]>> {
+        None
+    }
+}
+
+#[cfg(unix)]
+impl ConnectionIdentity for tokio::net::UnixStream {
+    fn unix_peer(&self) -> crate::auth::UnixPeerState {
+        match self.peer_cred() {
+            Ok(cred) => crate::auth::UnixPeerState::Uid(cred.uid()),
+            Err(_) => crate::auth::UnixPeerState::Unavailable,
+        }
+    }
+}
+
 /// Request extension: the verified client certificate of the connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientCertificate(pub Option<Arc<[u8]>>);

@@ -9,7 +9,8 @@ contract behind all modes is [authenticated request context](auth-request-contex
 
 | Mode | Use when | Configure with |
 | --- | --- | --- |
-| Community bearer tokens only | One team, shared secrets from a secret store | `TENKAI_MANAGEMENT_TOKEN`, optionally `TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS` |
+| Host identity (Linux Unix socket) | People on the server host, including the first install and the console over SSH | `/run/tenkai/tenkai.sock` plus `/etc/tenkai/host-grants.toml` ([ADR 0047](decisions/0047-host-identity.md)) |
+| Community bearer tokens only | Automation and break-glass | `TENKAI_MANAGEMENT_TOKEN`, optionally `TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS` |
 | Enterprise JWT assertions | A trusted gateway mints short-lived Ed25519-signed assertions, optionally with tenant claims | `TENKAI_JWT_VERIFIER_CONFIG` |
 | OIDC access tokens | People sign in through your identity provider, for example with the web console or `tenkaictl login` | `TENKAI_OIDC_CONFIG` |
 | JWT and OIDC together | Platform assertions and IdP access tokens in one process | both `TENKAI_JWT_VERIFIER_CONFIG` and `TENKAI_OIDC_CONFIG`, with distinct `iss` values |
@@ -39,6 +40,32 @@ environment-scoped token may call only operations bound to its environment;
 catalog-wide publish, promote, recall, and fleet-wide reconcile fail closed
 ([management lifecycle](management-lifecycle.md)). Never pass tokens on a
 command line.
+
+## Host identity (Linux)
+
+`tenkai-server` also listens on `/run/tenkai/tenkai.sock` (`TENKAI_UNIX_SOCKET`,
+`--unix-socket`; `--no-unix-socket` disables it). Each connection is identified
+by kernel peer credentials. OS groups in `/etc/tenkai/host-grants.toml`
+(`TENKAI_HOST_GRANTS`) map to the same grant-rule shape as OIDC:
+
+| OS group | Grant |
+| --- | --- |
+| `tenkai-viewer` | `read` |
+| `tenkai-operator` | `management` (implies `read` and `publish`) |
+| `tenkai-admin` | `management` |
+
+Install creates the groups, writes the mapping file, puts the installing
+user in `tenkai-viewer` and `tenkai-operator`, adds the `tenkai` service user
+to `tenkai-viewer`, and creates `/run/tenkai` so that user can bind
+`tenkai.sock` group `tenkai-viewer` mode `0660`. A user in no mapped group, a uid
+with no passwd entry, or an NSS failure is refused. TCP and the management
+token stay for automation and break-glass.
+
+On the host, `tenkaictl` uses the socket when it exists and sends no token.
+The console is reached with `ssh -L 8080:/run/tenkai/tenkai.sock <host>` and
+`GET /v1/auth/me` shows the user, groups, and `source=host`. Peer-credential
+requests require a loopback `Host`; an `Origin` or `Referer`, if present, must
+be a loopback console origin. Plans are still approved by offline keys.
 
 ## Enterprise JWT assertions
 

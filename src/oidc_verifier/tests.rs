@@ -80,6 +80,7 @@ fn authenticate(
             request_id: "req-1".into(),
             bearer_token: None,
             assertion: Some(token),
+            peer_credentials: None,
         },
         &TenantDerivationAuthority::new(OIDC_AUTH_EXTENSION_ID),
     )

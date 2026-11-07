@@ -146,13 +146,33 @@ async fn run(mut cli: Cli) -> Result<()> {
         cli.target = Some(Target::Embedded);
     }
     let token_file_from_flag = cli.token_file.is_some();
+    let server_url_from_flag_or_env = cli.server_url.is_some();
+    let token_from_env = tenkai::secret_source::is_configured("TENKAI_MANAGEMENT_TOKEN");
+    let host_socket = match &cli.command {
+        Command::Login { .. } | Command::Logout => None,
+        _ => client_config::host_unix_socket(
+            server_url_from_flag_or_env,
+            token_file_from_flag || token_from_env,
+            cli.target,
+            &config,
+        ),
+    };
     // Login and logout manage the OIDC session. A root-only token_file from
     // client.toml would refuse non-root login before the session is used.
     // Overriding the server URL leaves the config token behind so it is not
-    // sent to a different host.
-    client_config::apply_server_and_token(&mut cli, &config);
-    let target_configured = cli.target.is_some() || config.target.is_some();
-    let target = cli.target.or(config.target).unwrap_or(Target::Embedded);
+    // sent to a different host. The host Unix socket sends no token.
+    if host_socket.is_none() {
+        client_config::apply_server_and_token(&mut cli, &config);
+    } else if cli.server_url.is_none() {
+        cli.server_url = Some("http://127.0.0.1".into());
+    }
+    let target_configured =
+        cli.target.is_some() || config.target.is_some() || host_socket.is_some();
+    let target = if host_socket.is_some() {
+        Target::Remote
+    } else {
+        cli.target.or(config.target).unwrap_or(Target::Embedded)
+    };
     if cli.output == OutputFormat::JsonV1 && command_name(&cli.command, target).is_none() {
         let (code, message) = match target {
             Target::Embedded => (
@@ -413,7 +433,7 @@ async fn run(mut cli: Cli) -> Result<()> {
         return embedded_dev::run_dev(&cli).await;
     }
     if target == Target::Remote {
-        return remote::run(cli, &config, token_file_from_flag).await;
+        return remote::run(cli, &config, token_file_from_flag, host_socket).await;
     }
     if !target_configured {
         let default = std::path::PathBuf::from(client_config::DEFAULT_DATABASE);

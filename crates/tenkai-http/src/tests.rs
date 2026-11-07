@@ -9,6 +9,7 @@ mod exports;
 mod fixtures;
 mod grant_rules;
 mod health;
+mod host_identity;
 mod imports;
 mod lifecycle_support;
 mod observed_runtime;

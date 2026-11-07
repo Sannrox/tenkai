@@ -7,9 +7,12 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use tenkai::auth_context::{AuthenticatedRequestContext, CredentialMaterial, PrincipalKind};
+use tenkai::auth_context::{
+    AuthenticatedRequestContext, CredentialMaterial, PeerCredentials, PrincipalKind,
+};
 use tenkai::development_fixtures::DevelopmentFixture;
 use tenkai::federated_identity::reject_caller_selected_tenant;
+use tenkai::host_identity::{is_loopback_console_origin, is_loopback_host};
 use tenkai::management_operations::ManagementError;
 use tenkai::tenant_isolation::NON_DISCLOSING_DENY;
 
@@ -230,10 +233,22 @@ fn management_credential(headers: &HeaderMap) -> Result<CredentialMaterial, Mana
                 .filter(|token| is_compact_jws(token))
                 .map(|token| token.as_bytes().to_vec())
         });
-    if bearer_token.is_none() && assertion.is_none() {
+    let peer_credentials = match current_unix_peer() {
+        UnixPeerState::Uid(uid) => Some(PeerCredentials { uid }),
+        UnixPeerState::Unavailable => {
+            return Err(ManagementError::Unauthorized(
+                "peer credentials unavailable".into(),
+            ));
+        }
+        UnixPeerState::Tcp => None,
+    };
+    if bearer_token.is_none() && assertion.is_none() && peer_credentials.is_none() {
         return Err(ManagementError::Unauthorized(
             tenkai::management_operations::MISSING_CREDENTIAL.into(),
         ));
+    }
+    if peer_credentials.is_some() && bearer_token.is_none() && assertion.is_none() {
+        refuse_peer_csrf(headers)?;
     }
     let request_id = headers
         .get("x-request-id")
@@ -246,7 +261,61 @@ fn management_credential(headers: &HeaderMap) -> Result<CredentialMaterial, Mana
         request_id,
         bearer_token,
         assertion,
+        peer_credentials,
     })
+}
+
+/// Connection identity set by [`crate::opening::HotSwap`] for this request.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum UnixPeerState {
+    Tcp,
+    Uid(u32),
+    Unavailable,
+}
+
+tokio::task_local! {
+    static UNIX_PEER: UnixPeerState;
+}
+
+pub(crate) fn current_unix_peer() -> UnixPeerState {
+    UNIX_PEER
+        .try_with(|state| *state)
+        .unwrap_or(UnixPeerState::Tcp)
+}
+
+pub(crate) async fn with_unix_peer<F, T>(state: UnixPeerState, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    UNIX_PEER.scope(state, fut).await
+}
+
+fn refuse_peer_csrf(headers: &HeaderMap) -> Result<(), ManagementError> {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !is_loopback_host(host) {
+        return Err(ManagementError::Forbidden(
+            "host identity requires a loopback Host".into(),
+        ));
+    }
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            headers
+                .get(axum::http::header::REFERER)
+                .and_then(|value| value.to_str().ok())
+        });
+    if let Some(origin) = origin
+        && !is_loopback_console_origin(origin)
+    {
+        return Err(ManagementError::Forbidden(
+            "host identity Origin is not a loopback console origin".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn is_compact_jws(token: &str) -> bool {

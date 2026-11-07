@@ -813,6 +813,7 @@ mod tests {
             request_id: "req-1".into(),
             bearer_token: None,
             assertion: Some(serde_json::to_vec(&signed).unwrap()),
+            peer_credentials: None,
         };
         extension.authenticate(&credential, &authority).unwrap();
         let replay = extension.authenticate(&credential, &authority).unwrap_err();

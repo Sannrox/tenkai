@@ -310,6 +310,59 @@ pub(crate) fn apply_server_and_token(cli: &mut Cli, config: &ClientConfig) {
     }
 }
 
+/// When the host Unix socket exists, tenkaictl uses it and sends no token
+/// (ADR 0047). Flags, env, and a non-loopback client.toml `server_url` win.
+pub(crate) fn host_unix_socket(
+    server_url_from_flag_or_env: bool,
+    token_from_flag_or_env: bool,
+    explicit_target: Option<Target>,
+    config: &ClientConfig,
+) -> Option<std::path::PathBuf> {
+    host_unix_socket_at(
+        &tenkai::host_identity::default_unix_socket_path(),
+        server_url_from_flag_or_env,
+        token_from_flag_or_env,
+        explicit_target,
+        config,
+    )
+}
+
+fn host_unix_socket_at(
+    path: &Path,
+    server_url_from_flag_or_env: bool,
+    token_from_flag_or_env: bool,
+    explicit_target: Option<Target>,
+    config: &ClientConfig,
+) -> Option<PathBuf> {
+    if !cfg!(unix) {
+        return None;
+    }
+    if explicit_target.or(config.target) == Some(Target::Embedded) {
+        return None;
+    }
+    if server_url_from_flag_or_env || token_from_flag_or_env {
+        return None;
+    }
+    if let Some(url) = config.server_url.as_deref()
+        && !loopback_http_url(url)
+    {
+        return None;
+    }
+    path.exists().then(|| path.to_path_buf())
+}
+
+fn loopback_http_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    parsed.scheme() == "http"
+        && parsed.host().is_some_and(|host| match host {
+            url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+            url::Host::Ipv4(address) => address.is_loopback(),
+            url::Host::Ipv6(address) => address.is_loopback(),
+        })
+}
+
 pub(crate) fn missing_default_store_message(database: &Path) -> String {
     format!(
         "no Tenkai store at {}; use --target remote --server-url <url>, or run tenkaictl init for a local store",
@@ -606,5 +659,37 @@ default_environment = "lab"
             .to_string();
         assert!(err.contains("owner-only"), "{err}");
         assert!(!err.contains("s3cret"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_unix_socket_uses_existing_socket_for_loopback_config() {
+        let dir = temp_dir();
+        let socket = dir.join("tenkai.sock");
+        std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let config = sample_remote_config();
+        assert_eq!(
+            host_unix_socket_at(&socket, false, false, None, &config).as_deref(),
+            Some(socket.as_path())
+        );
+        assert!(
+            host_unix_socket_at(&socket, true, false, None, &config).is_none(),
+            "explicit server URL wins"
+        );
+        assert!(
+            host_unix_socket_at(&socket, false, true, None, &config).is_none(),
+            "explicit token wins"
+        );
+        assert!(
+            host_unix_socket_at(&socket, false, false, Some(Target::Embedded), &config).is_none()
+        );
+        let mut embedded = sample_remote_config();
+        embedded.target = Some(Target::Embedded);
+        assert!(
+            host_unix_socket_at(&socket, false, false, None, &embedded).is_none(),
+            "client.toml target=embedded wins"
+        );
+        let missing = dir.join("missing.sock");
+        assert!(host_unix_socket_at(&missing, false, false, None, &config).is_none());
     }
 }

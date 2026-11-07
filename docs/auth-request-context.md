@@ -64,9 +64,12 @@ credential verification.
 | `request_id` | Stable per-call identity for audit and idempotency correlation |
 | `bearer_token` | Community or host-local secret mapping (optional) |
 | `assertion` | Opaque enterprise assertion bytes (optional) |
+| `peer_credentials` | Kernel uid from a Unix socket (`SO_PEERCRED`; optional, Linux) |
 
-At least one of `bearer_token` or `assertion` must be present. Empty tokens or
-empty assertions fail closed.
+At least one of `bearer_token`, `assertion`, or `peer_credentials` must be
+present. Empty tokens or empty assertions fail closed. Peer credentials are
+accepted only on the Unix socket; TCP still requires a bearer or an assertion
+([ADR 0047](decisions/0047-host-identity.md)).
 
 ## Community authentication
 

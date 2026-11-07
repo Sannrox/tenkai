@@ -12,14 +12,30 @@ pub(crate) async fn run(
     mut cli: Cli,
     config: &ClientConfig,
     token_file_required: bool,
+    unix_socket: Option<std::path::PathBuf>,
 ) -> Result<()> {
-    let server_url = crate::login::require_server_url(cli.server_url.as_deref())?;
-    let runtime = crate::login::LoginRuntime::from_env_with_token_file(
-        cli.token_file.as_deref(),
-        token_file_required,
-    )?;
-    let token = crate::login::bearer_token(&runtime, &server_url).await?;
-    let client = tenkai_http::RemoteClient::new(&server_url, token)?;
+    let (client, watch_auth) = if let Some(socket) = unix_socket {
+        #[cfg(unix)]
+        {
+            (tenkai_http::RemoteClient::unix_socket(&socket)?, None)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = socket;
+            bail!("unix socket client requires a Unix host")
+        }
+    } else {
+        let server_url = crate::login::require_server_url(cli.server_url.as_deref())?;
+        let runtime = crate::login::LoginRuntime::from_env_with_token_file(
+            cli.token_file.as_deref(),
+            token_file_required,
+        )?;
+        let token = crate::login::bearer_token(&runtime, &server_url).await?;
+        (
+            tenkai_http::RemoteClient::new(&server_url, token)?,
+            Some((runtime, server_url)),
+        )
+    };
     let output = cli.output;
     let fill_env = client_config::needs_env_resolution(&mut cli.command);
     if fill_env {
@@ -80,17 +96,24 @@ pub(crate) async fn run(
         } => {
             run_fleet_watch(
                 {
-                    let runtime = runtime.clone();
-                    let server_url = server_url.clone();
+                    let unix_client = client.clone();
+                    let watch_auth = watch_auth.clone();
                     move || {
-                        let runtime = runtime.clone();
-                        let server_url = server_url.clone();
+                        let unix_client = unix_client.clone();
+                        let watch_auth = watch_auth.clone();
                         async move {
-                            // Refresh each sample so a saved OIDC access token
-                            // can expire during watch.
-                            let token = crate::login::bearer_token(&runtime, &server_url).await?;
-                            let client = tenkai_http::RemoteClient::new(&server_url, token)?;
-                            client.fleet_status().await
+                            match watch_auth {
+                                Some((runtime, server_url)) => {
+                                    // Refresh each sample so a saved OIDC access token
+                                    // can expire during watch.
+                                    let token =
+                                        crate::login::bearer_token(&runtime, &server_url).await?;
+                                    let client =
+                                        tenkai_http::RemoteClient::new(&server_url, token)?;
+                                    client.fleet_status().await
+                                }
+                                None => unix_client.fleet_status().await,
+                            }
                         }
                     }
                 },

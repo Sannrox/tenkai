@@ -52,6 +52,16 @@ const OIDC_CONFIG_ENV: &str = "TENKAI_OIDC_CONFIG";
 struct Cli {
     #[arg(long, env = "TENKAI_LISTEN", default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
+    /// Unix socket for host identity (ADR 0047). Linux default
+    /// `/run/tenkai/tenkai.sock`. Unset or missing parent directory skips it.
+    #[arg(long, env = "TENKAI_UNIX_SOCKET")]
+    unix_socket: Option<PathBuf>,
+    /// Do not listen on a Unix socket.
+    #[arg(long, default_value_t = false)]
+    no_unix_socket: bool,
+    /// Root-owned OS-group grant mapping. Missing disables host identity.
+    #[arg(long, env = "TENKAI_HOST_GRANTS")]
+    host_grants: Option<PathBuf>,
     /// Serve TLS with this PEM certificate chain (#671). The private key is
     /// the secret setting TENKAI_TLS_KEY (inline, _FILE or the secret
     /// directory), never an argument. Required for a non-loopback bind.
@@ -434,6 +444,55 @@ fn compose_issuer_auth(
     })
 }
 
+fn load_host_identity(
+    path: Option<&std::path::Path>,
+) -> Result<Option<Arc<tenkai::host_identity::HostIdentityAuthenticator>>> {
+    let explicit = path.is_some();
+    let path = path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(tenkai::host_identity::DEFAULT_HOST_GRANTS));
+    match tenkai::host_identity::HostGrantMapping::load(&path) {
+        Ok(Some(mapping)) => Ok(Some(Arc::new(
+            tenkai::host_identity::HostIdentityAuthenticator::nss(mapping),
+        ))),
+        Ok(None) if explicit => anyhow::bail!("host grants file {} is missing", path.display()),
+        Ok(None) => Ok(None),
+        Err(error) => Err(anyhow::anyhow!("{error}")),
+    }
+}
+
+fn unix_socket_listen_path(cli: &Cli) -> Option<PathBuf> {
+    if cli.no_unix_socket {
+        return None;
+    }
+    if let Some(path) = &cli.unix_socket {
+        return Some(path.clone());
+    }
+    if cfg!(target_os = "linux") {
+        Some(PathBuf::from(tenkai::host_identity::DEFAULT_UNIX_SOCKET))
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn bind_unix_socket(path: &std::path::Path) -> Result<tokio::net::UnixListener> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        && !parent.exists()
+    {
+        anyhow::bail!("unix socket directory {} does not exist", parent.display());
+    }
+    tenkai::host_identity::remove_stale_unix_socket(path)
+        .with_context(|| format!("preparing unix socket {}", path.display()))?;
+    let listener = tokio::net::UnixListener::bind(path)
+        .with_context(|| format!("binding unix socket {}", path.display()))?;
+    tenkai::host_identity::apply_host_socket_permissions(path)
+        .with_context(|| format!("setting unix socket permissions {}", path.display()))?;
+    Ok(listener)
+}
+
 fn parse_cli() -> Cli {
     let matches = Cli::command()
         .after_help(compiled_host_feature_report_with(
@@ -516,6 +575,7 @@ async fn main() -> Result<()> {
         .context("loading the TLS certificate and key")?;
     tenkai::key_revocation::load_configured()?;
     let management_token = tenkai::secret_source::require("TENKAI_MANAGEMENT_TOKEN")?;
+    let host_identity = load_host_identity(cli.host_grants.as_deref())?;
     let runtime_assignments = tenkai::secret_source::read("TENKAI_RUNTIME_TOKENS")?
         .map(|value| serde_json::from_str::<HashMap<String, String>>(&value))
         .transpose()
@@ -587,6 +647,39 @@ async fn main() -> Result<()> {
         "tenkai-server listening on {bound} profile={opening_profile} capabilities=opening tls={}",
         if tls.is_some() { "on" } else { "off" }
     );
+    let unix_socket_path = if host_identity.is_some() {
+        unix_socket_listen_path(&cli)
+    } else {
+        if cli.unix_socket.is_some() {
+            anyhow::bail!("--unix-socket requires a host grants file");
+        }
+        None
+    };
+    #[cfg(unix)]
+    let unix_listener = match unix_socket_path.as_ref() {
+        Some(path) => match bind_unix_socket(path) {
+            Ok(listener) => {
+                println!("tenkai-server listening on unix {}", path.display());
+                Some(listener)
+            }
+            Err(error) if cli.unix_socket.is_some() => {
+                return Err(error).context("binding the Unix socket");
+            }
+            Err(error) => {
+                eprintln!(
+                    "tenkai-server unix socket skipped path={} detail={error:#}",
+                    path.display()
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    #[cfg(not(unix))]
+    let unix_listener = {
+        let _ = unix_socket_path;
+        None::<()>
+    };
     let mut swap =
         tenkai_http::HotSwap::new(tenkai_http::opening_router(opening_profile, Vec::new()));
     if cli.tls_require_runtime_client_cert {
@@ -630,6 +723,28 @@ async fn main() -> Result<()> {
                 .await
         }),
     };
+    #[cfg(unix)]
+    let unix_task = unix_listener.map(|unix_listener| {
+        let serving = swap.clone();
+        let mut serve_shutdown = shutdown_tx.subscribe();
+        let stopped = async move {
+            loop {
+                if *serve_shutdown.borrow() {
+                    break;
+                }
+                if serve_shutdown.changed().await.is_err() {
+                    break;
+                }
+            }
+        };
+        tokio::spawn(async move {
+            axum::serve(unix_listener, serving)
+                .with_graceful_shutdown(stopped)
+                .await
+        })
+    });
+    #[cfg(not(unix))]
+    let unix_task = None::<tokio::task::JoinHandle<Result<(), std::io::Error>>>;
 
     // Multi-replica tenant-mode hubs fence their writes on the hub writer
     // lease (#748): the lease is tried once before the store opens, so a
@@ -954,6 +1069,7 @@ async fn main() -> Result<()> {
             runner_certificates_admitted: runner_ca.is_some() && cli.tls_client_ca.is_some(),
             trust_sources: (*trust_sources).clone(),
             trust_status: trust_status.clone(),
+            host_identity,
         },
         reconciler.clone(),
         store.clone(),
@@ -1597,6 +1713,11 @@ async fn main() -> Result<()> {
     let result = server_task
         .await
         .context("joining HTTP server task during shutdown")?;
+    if let Some(unix_task) = unix_task {
+        unix_task
+            .await
+            .context("joining Unix socket task during shutdown")??;
+    }
     reconcile_task
         .await
         .context("joining reconciliation task during shutdown")?;

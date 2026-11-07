@@ -46,4 +46,4 @@
 - [0044 — Product instances and dependency bindings](0044-product-instances-and-dependency-bindings.md) (proposed)
 - [0045 — Sealed secrets delivered by the environment runtime](0045-sealed-secrets.md) (proposed)
 - [0046 — Workload identity and peer policy from dependency bindings](0046-workload-identity-and-peer-policy.md) (proposed)
-- [0047 — Host identity as the default operator sign-in](0047-host-identity.md) (proposed)
+- [0047 — Host identity as the default operator sign-in](0047-host-identity.md)
