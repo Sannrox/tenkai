@@ -271,7 +271,22 @@ online check; the bundle signature is the offline one.
 
 `tenkaictl self-upgrade` replaces a community SQLite server's binaries from
 a signed bundle, with the bundle's host binaries verified as above (#678).
-Run it on the server host. The service runs `<home>/current/tenkai-server`:
+Run it on the server host. Build a hosts-only bundle from verified GitHub
+Release binaries; no product release is required:
+
+```bash
+tenkaictl bundle build \
+  --hosts-dir tenkai-hosts \
+  --host-tag v0.7.1 \
+  --host-git-sha 0123456789abcdef0123456789abcdef01234567 \
+  --host-workflow release \
+  --env site-c \
+  --out hosts.bundle.json \
+  --signing-key exporter.seed \
+  --trust-roots offline-trust.toml
+```
+
+The service runs `<home>/current/tenkai-server`:
 
 ```text
 <home>/versions/<digest>/tenkai-server, tenkai-executor-guard, tenkaictl
@@ -325,6 +340,12 @@ rollback is finished by running it again. The backup is restored at most
 once and only over a store the new version migrated, so a repeated rollback
 never overwrites what the older server wrote since. One self-upgrade
 command at a time holds a home.
+
+Converting an existing install whose unit runs a packaged `tenkai-server` to
+the `<home>/current` layout is a first install: run `self-upgrade apply`
+without a restart command, point the unit at `<home>/current/tenkai-server`,
+restart, then `self-upgrade confirm`. That first switch has nothing to roll
+back to through `self-upgrade`; reverting the unit is the rollback.
 
 Any other way of replacing the binary (a package, the install script, a
 manual copy) relies on the server's own pre-migration copy: its first start

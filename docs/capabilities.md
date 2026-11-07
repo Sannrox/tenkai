@@ -47,7 +47,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Classical ONNX scoring + registry promotion attestation | [Model runtime](model-runtime.md#classical-onnx-scoring); #651, #727, #728 |
 | Reference llama.cpp engine plugin (fake for CI) | [Model runtime](model-runtime.md); #64 |
 | Self-verifying offline bundles | [Offline bundles](offline-bundles.md); [ADR 0003](decisions/0003-canonical-offline-delivery-archives.md) |
-| Full-stack signed bundle build with SBOM and checksum | `tenkaictl bundle build`; [Build](offline-bundles.md#build); #626 |
+| Full-stack signed bundle build with SBOM and checksum | `tenkaictl bundle build`; [Build](offline-bundles.md#build); #626. Hosts-only with `--hosts-dir` and no `--release` (#1013) |
 | Signed advisory feed import and local image assessment | [Advisory feed](offline-bundles.md#advisory-feed); `tenkaictl exposure inspect`; #645 |
 | Declared and imported derived criticality | [Manage environments](manage-environments.md#criticality); [Plan approval](plan-approval.md#multi-party-approval); #694 |
 | Signed Tenkai hosts in offline bundles | [Host binaries](offline-bundles.md#host-binaries); [Release binaries](release-binaries.md#disconnected-sites); #640 |

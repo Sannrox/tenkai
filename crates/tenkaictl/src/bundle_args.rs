@@ -4,8 +4,9 @@ use clap::{Args, Subcommand};
 
 #[derive(Args)]
 pub(crate) struct BundleBuild {
-    /// Catalog identity `product@version`. Repeatable.
-    #[arg(long = "release", required = true)]
+    /// Catalog identity `product@version`. Repeatable. Required unless
+    /// `--hosts-dir` is set for a hosts-only bundle.
+    #[arg(long = "release", required_unless_present = "hosts_dir")]
     pub(crate) releases: Vec<String>,
     /// Environment identity bound into the signed statement.
     #[arg(long)]
@@ -20,7 +21,8 @@ pub(crate) struct BundleBuild {
     #[arg(long)]
     pub(crate) trust_roots: PathBuf,
     /// Directory of packaged hosts: `<platform>/{tenkaictl,tenkai-server,tenkai-executor-guard}`.
-    #[arg(long)]
+    /// Required when no `--release` is given.
+    #[arg(long, required_unless_present = "releases")]
     pub(crate) hosts_dir: Option<PathBuf>,
     /// Host release tag recorded next to bundled binaries.
     #[arg(long, requires = "hosts_dir")]
@@ -51,7 +53,7 @@ pub(crate) struct BundleBuild {
 
 #[derive(Subcommand)]
 pub(crate) enum BundleCommand {
-    /// Sign one full-stack offline bundle from published releases.
+    /// Sign one offline bundle from published releases, or a hosts-only bundle.
     Build(Box<BundleBuild>),
     /// Verify a bundle and write its docs to `<out>/<version>/`.
     Docs {

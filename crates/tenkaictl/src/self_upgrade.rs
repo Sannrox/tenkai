@@ -336,6 +336,99 @@ mod tests {
         (home, ids.pop().unwrap(), b)
     }
 
+    /// A hosts-only bundle verifies and stages through plan on a temp home.
+    #[tokio::test]
+    async fn hosts_only_bundle_stages_through_self_upgrade_plan() {
+        use base64::Engine as _;
+        use ed25519_dalek::SigningKey;
+        use tenkai::oci_artifact::MemoryArtifactRegistry;
+        use tenkai::offline_bundle_build::{self, BundleBuildRequest};
+        use tenkai::offline_host_binaries::{
+            HostBinaryInput, HostBinaryProvenance, HostBinaryRole,
+        };
+        use tenkai::release_signing::{TRUST_ROOT_VERSION, key_id};
+
+        let root = std::env::temp_dir().join(format!(
+            "tenkaictl-hosts-only-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let schema = tenkai::storage::SCHEMA_VERSION;
+        let platform = tenkai::offline_host_binaries::detect_platform().unwrap();
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = --check-store ]; then echo '{{\"stored\":{schema},\"supported\":{schema}}}'; exit 0; fi\necho ok\n"
+        );
+        let provenance = HostBinaryProvenance {
+            tag: "v0.0.0".into(),
+            git_sha: "0123456789abcdef0123456789abcdef01234567".into(),
+            workflow: "release".into(),
+        };
+        let hosts = HostBinaryRole::all()
+            .into_iter()
+            .map(|role| HostBinaryInput {
+                role,
+                platform: platform.to_string(),
+                bytes: script.as_bytes().to_vec(),
+                provenance: provenance.clone(),
+            })
+            .collect();
+        let signing = SigningKey::from_bytes(&[7; 32]);
+        let public =
+            base64::engine::general_purpose::STANDARD.encode(signing.verifying_key().to_bytes());
+        let trust_toml = format!(
+            "version = {TRUST_ROOT_VERSION}\n\n[[signers]]\nkey_id = \"{}\"\nidentity = \"exporter\"\npublic_key = \"{public}\"\n",
+            key_id(&signing.verifying_key().to_bytes())
+        );
+        let trust_path = root.join("offline-trust.toml");
+        std::fs::write(&trust_path, &trust_toml).unwrap();
+        let archive = root.join("hosts.bundle.json");
+        let registry = MemoryArtifactRegistry::new();
+        let mut ctx = tenkai::client::Ctx::embedded(root.join("catalog.db")).unwrap();
+        let issued_at = tenkai::now_millis();
+        offline_bundle_build::build(
+            &mut ctx,
+            &BundleBuildRequest {
+                releases: Vec::new(),
+                tenant_id: tenkai::ontology::NS.into(),
+                environment_id: "site-c".into(),
+                archive: &archive,
+                signing_key: &signing,
+                exporter_identity: "exporter".into(),
+                trust_roots: trust_toml.as_bytes(),
+                hosts,
+                issued_at_unix_ms: issued_at,
+                expires_at_unix_ms: offline_bundle_build::default_expires_at(issued_at),
+                registry: &registry,
+                weight_cache: None,
+                base: None,
+                advisory_feed: None,
+                derived_criticality: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap();
+        let home = Home::new(root.join("home"));
+        let (_id, check) = candidate(
+            &home,
+            &Source {
+                home: root.join("home"),
+                bundle: archive,
+                trust_roots: trust_path,
+                env: "site-c".into(),
+                database: root.join("tenkai.db"),
+                platform: Some(platform.to_string()),
+                check_timeout_secs: 30,
+            },
+        )
+        .unwrap();
+        assert_eq!(check.stored, schema);
+        assert_eq!(check.supported, schema);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Readiness that never comes rolls the switch back, and the restart
     /// command runs again; readiness that comes confirms it.
     #[tokio::test]
