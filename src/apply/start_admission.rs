@@ -434,6 +434,7 @@ mod tests {
             id: String::new(),
             order: 0,
             product: "api".into(),
+            instance: String::new(),
             action: crate::plan::Action::Rollback,
             from: Some("1.1.0".into()),
             to: "1.0.0".into(),

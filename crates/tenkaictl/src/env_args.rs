@@ -68,6 +68,9 @@ pub(crate) enum EnvCommand {
     Subscribe {
         env: String,
         spec: String,
+        /// Named instance of the product. Defaults to the product name.
+        #[arg(long)]
+        instance: Option<String>,
         /// Current fencing generation; required with --target remote.
         #[arg(long)]
         generation: Option<u64>,
@@ -78,6 +81,9 @@ pub(crate) enum EnvCommand {
     Unsubscribe {
         env: String,
         product: String,
+        /// Named instance of the product. Defaults to the product name.
+        #[arg(long)]
+        instance: Option<String>,
         /// Current fencing generation; required with --target remote.
         #[arg(long)]
         generation: Option<u64>,

@@ -434,6 +434,7 @@ mod tests {
             id: String::new(),
             order: 0,
             product: policy.product.clone(),
+            instance: String::new(),
             action: Action::Install,
             from: None,
             to: policy.version.clone(),

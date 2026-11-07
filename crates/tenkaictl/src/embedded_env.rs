@@ -114,24 +114,36 @@ pub(crate) async fn run(
                 retirement.retired_at, retirement.actor, retirement.reason
             );
         }
-        EnvCommand::Subscribe { env, spec, .. } => {
+        EnvCommand::Subscribe {
+            env,
+            spec,
+            instance,
+            ..
+        } => {
             let Some((product, channel)) = spec.split_once('=') else {
                 bail!("expected <product>=<channel>, got {spec:?}");
             };
-            let message = plan::subscribe(ctx, &env, product, channel).await?;
+            let message =
+                plan::subscribe_instance(ctx, &env, product, channel, instance.as_deref()).await?;
             if output == OutputFormat::JsonV1 {
                 print_machine_result(&crate::output::subscribe_result(&env, &spec))?;
             } else {
                 println!("{message}");
             }
         }
-        EnvCommand::Unsubscribe { env, product, .. } => {
+        EnvCommand::Unsubscribe {
+            env,
+            product,
+            instance,
+            ..
+        } => {
             println!(
                 "{}",
-                tenkai::environment::unsubscribe(
+                tenkai::environment::unsubscribe_instance(
                     ctx,
                     &env,
                     &product,
+                    instance.as_deref(),
                     &tenkai::software_executor::SoftwareExecutors::try_from_process()?,
                     |_| Ok(()),
                 )

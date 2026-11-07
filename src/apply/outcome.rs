@@ -94,6 +94,7 @@ mod tests {
             id: "step-1".into(),
             order: 0,
             product: "api".into(),
+            instance: String::new(),
             action: crate::plan::Action::Install,
             from: None,
             to: "1.0.0".into(),

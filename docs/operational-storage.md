@@ -10,7 +10,11 @@ complete spoke and embedded adapter; the PostgreSQL adapter must pass the same
 immutability, lifecycle, idempotency, and generation-fencing contract.
 `Ctx::embedded` and community `tenkai-server` open only `SqliteStore`.
 Pre-0029 graph files migrate into typed schema 13 rows and drop `embedded_*`
-tables so leftover objects cannot authorize apply. `TENKAI_POSTGRES_URL` is
+tables so leftover objects cannot authorize apply. Schema 14 keys an
+environment's deployments, subscriptions, holds, and retries by instance
+(ADR 0044 §1). Existing records keep the product name as the instance, so
+`deployed.{product}` stays the default key. An older binary refuses a
+schema-14 store. `TENKAI_POSTGRES_URL` is
 invalid on embedded and spoke hosts.
 
 The store also owns the provider-event retry queue used for audit, outcome,
@@ -43,7 +47,8 @@ Server management requests and their terminal outcomes are appended to the
 restart. The table contains principals, operation/resource identifiers, and
 outcomes only; bearer credentials and request secrets are never persisted.
 
-Typed operator-facing change events live in `change_events` (schema 13): a
+Typed operator-facing change events live in `change_events` (schema 13, still
+present at schema 14): a
 monotonic sequence cursor, kind, resource, and optional environment. `GET
 /v1/events` pages that log. The table is not the provider outbox. Readers
 skip kinds their version does not know, so a newer replica, or the release

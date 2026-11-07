@@ -707,6 +707,8 @@ mod tests {
             description: "foreign delivery".into(),
             subscriptions: vec![crate::plan::EnvironmentSubscriptionView {
                 product: "secret-app".into(),
+
+                instance: "secret-app".into(),
                 channel: "stable".into(),
                 head: "9.9.9".into(),
                 deployed: Some("9.9.9".into()),
@@ -755,6 +757,8 @@ mod tests {
             Box::pin(async {
                 Ok(vec![StatusRow {
                     product: "secret-app".into(),
+
+                    instance: "secret-app".into(),
                     channel: "stable".into(),
                     deployed: Some("9.9.9".into()),
                     health: Some("ok".into()),

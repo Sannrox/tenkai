@@ -37,6 +37,7 @@ async fn compatible_migration_approves_executes_resumes_and_rolls_back() {
             id: String::new(),
             order: 0,
             product: "pkg".into(),
+            instance: String::new(),
             action: crate::plan::Action::Upgrade,
             from: Some("1.0.0".into()),
             to: "1.1.0".into(),

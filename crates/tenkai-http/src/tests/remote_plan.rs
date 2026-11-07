@@ -26,7 +26,7 @@ async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
     client.promote_release("api@1.0.0", "stable").await.unwrap();
     let read = current_generation(&client, "stage").await;
     client
-        .subscribe_environment("stage", "api=stable", read)
+        .subscribe_environment("stage", "api=stable", read, None)
         .await
         .unwrap();
 

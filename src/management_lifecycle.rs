@@ -408,6 +408,10 @@ pub struct SubscribeRequest {
     pub environment: String,
     pub expected_generation: u64,
     pub spec: String,
+    /// Named instance; omitted or empty defaults to the product.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub instance: Option<String>,
 }
 
 /// `DELETE /v1/environments/{environment}/subscriptions/{product}`: remove
@@ -421,6 +425,10 @@ pub struct UnsubscribeRequest {
     pub environment: String,
     pub expected_generation: u64,
     pub product: String,
+    /// Named instance; omitted or empty defaults to the product.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1501,6 +1509,7 @@ mod tests {
             environment: "stage".into(),
             expected_generation: 2,
             spec: "api=stable".into(),
+            instance: None,
         };
         let err = admit_subscribe(&request, "prod", PrincipalKind::Management, None)
             .unwrap_err()

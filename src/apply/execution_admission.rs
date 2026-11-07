@@ -5,7 +5,7 @@ use std::fmt;
 use anyhow::Result;
 
 use crate::client::Ctx;
-use crate::ontology::{REL_SUBSCRIBES, env_id};
+use crate::ontology::env_id;
 use crate::plan::{Action, Plan};
 
 /// Reconciliation only needs to know whether an approved computed Plan still
@@ -105,28 +105,26 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
         }));
     }
     // A removal is planned because the environment stopped subscribing to
-    // the product, and everything else because it subscribes: either is
+    // the instance, and everything else because it subscribes: either is
     // stale once that changed.
-    let subscriptions = ctx.linked(&environment.id, REL_SUBSCRIBES, "out").await?;
+    let subscriptions = crate::environment::list_subscriptions(ctx, &environment).await?;
     if let Some(input) = plan.inputs.iter().find(|input| {
         !subscriptions
             .iter()
-            .any(|channel| channel.id == input.channel_id)
+            .any(|sub| sub.channel.id == input.channel_id && sub.instance == input.instance_name())
     }) {
         return Ok(Err(Rejection::Unsubscribed {
             product: input.product.clone(),
         }));
     }
     if plan.steps.iter().any(|step| step.action == Action::Remove) {
-        let subscribed: Vec<String> = subscriptions
+        let subscribed: Vec<&str> = subscriptions
             .iter()
-            .filter_map(|channel| channel.properties.get("product").cloned())
+            .map(|sub| sub.instance.as_str())
             .collect();
-        if let Some(step) = plan
-            .steps
-            .iter()
-            .find(|step| step.action == Action::Remove && subscribed.contains(&step.product))
-        {
+        if let Some(step) = plan.steps.iter().find(|step| {
+            step.action == Action::Remove && subscribed.contains(&step.instance_name())
+        }) {
             return Ok(Err(Rejection::Resubscribed {
                 product: step.product.clone(),
             }));
@@ -139,19 +137,18 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
         if step.host.is_some() {
             continue;
         }
+        let instance = step.instance_name();
         if step.action != Action::Rollback
             && environment
                 .properties
-                .get(&format!("deployment_health.{}", step.product))
+                .get(&format!("deployment_health.{instance}"))
                 .is_some_and(|health| health == "unknown")
         {
             return Ok(Err(Rejection::DeploymentUnknown {
                 product: step.product.clone(),
             }));
         }
-        let actual = environment
-            .properties
-            .get(&format!("deployed.{}", step.product));
+        let actual = environment.properties.get(&format!("deployed.{instance}"));
         if actual != step.from.as_ref() {
             return Ok(Err(Rejection::DeploymentChanged {
                 product: step.product.clone(),
@@ -208,7 +205,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::ontology::{KIND_CHANNEL, KIND_ENVIRONMENT, NS, channel_id};
+    use crate::ontology::{KIND_CHANNEL, KIND_ENVIRONMENT, NS, REL_SUBSCRIBES, channel_id};
     use crate::pb::sekai::Object;
     use crate::plan::{DesiredStateInput, PLAN_FORMAT_VERSION, PlanState, Step};
 
@@ -235,6 +232,8 @@ mod tests {
             created_at: 1,
             inputs: vec![DesiredStateInput {
                 product: "api".into(),
+
+                instance: String::new(),
                 channel: "stable".into(),
                 channel_id,
                 desired_version: "2.0.0".into(),
@@ -247,6 +246,7 @@ mod tests {
                 id: "tenkai:plan:prod:test:step:0".into(),
                 order: 0,
                 product: "api".into(),
+                instance: String::new(),
                 action: Action::Upgrade,
                 from: Some("1.0.0".into()),
                 to: "2.0.0".into(),
@@ -441,6 +441,7 @@ mod tests {
                 id: "tenkai:plan:review:leftover:step:0".into(),
                 order: 0,
                 product: "api".into(),
+                instance: String::new(),
                 action: Action::Rollback,
                 from: Some("2.0.0".into()),
                 to: "1.0.0".into(),

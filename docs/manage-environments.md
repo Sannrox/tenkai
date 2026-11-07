@@ -21,6 +21,11 @@ evidence. `env inspect <name>` also prints subscriptions, deployed versions,
 lease/fencing state, and the latest plan. Latest-plan inspection includes
 sanitized lifecycle detail and at most 256 ordered step summaries; executable
 digests, work directories, payloads, and bearer tokens are not returned.
+Subscriptions, plan steps, and status name an instance. An instance that is
+not named is the product. `env subscribe <env> <product>=<channel>
+--instance <name>` creates a second copy of that product in the environment;
+`--instance` defaults to the product. Instance names are DNS labels of at
+most 40 characters and unique in the environment.
 
 `env add --connectivity <class>` also sets the connectivity class.
 

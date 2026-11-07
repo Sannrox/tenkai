@@ -179,6 +179,7 @@ impl RemoteClient {
         environment: &str,
         spec: &str,
         expected_generation: u64,
+        instance: Option<&str>,
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
@@ -191,6 +192,7 @@ impl RemoteClient {
                 environment: environment.to_string(),
                 expected_generation,
                 spec: spec.to_string(),
+                instance: instance.map(str::to_string),
             }),
         )
         .await
@@ -201,6 +203,7 @@ impl RemoteClient {
         environment: &str,
         product: &str,
         expected_generation: u64,
+        instance: Option<&str>,
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::DELETE,
@@ -213,6 +216,7 @@ impl RemoteClient {
                 environment: environment.to_string(),
                 expected_generation,
                 product: product.to_string(),
+                instance: instance.map(str::to_string),
             }),
         )
         .await

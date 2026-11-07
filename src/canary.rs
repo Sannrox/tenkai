@@ -486,6 +486,7 @@ mod tests {
                 id: format!("{}:step:0", outcome.plan_id),
                 order: 0,
                 product: outcome.release_product().into(),
+                instance: String::new(),
                 action: Action::Install,
                 from: None,
                 to: "1.2.3".into(),

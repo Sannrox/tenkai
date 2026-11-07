@@ -5,6 +5,17 @@ use super::*;
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 
+struct PendingChange {
+    product: String,
+    instance: String,
+    action: Action,
+    from: Option<String>,
+    to: String,
+    release: ReleasePin,
+    restore: Option<ReleasePin>,
+    kind: crate::manifest::ProductKind,
+}
+
 fn classify_change(current: &str, desired: &str) -> Action {
     match (
         semver::Version::parse(current),
@@ -65,12 +76,39 @@ async fn release_is_recalled(ctx: &mut Ctx, release_id: &str) -> Result<bool> {
 
 fn failed_target_is_held(
     properties: &std::collections::HashMap<String, String>,
-    product: &str,
+    instance: &str,
     release: &str,
 ) -> bool {
     properties
-        .get(&format!("failed_target.{product}"))
+        .get(&format!("failed_target.{instance}"))
         .is_some_and(|failed_target| failed_target == release)
+}
+
+fn product_of_release_id(id: &str) -> Option<&str> {
+    id.strip_prefix("tenkai:release:")
+        .and_then(|spec| spec.split_once('@'))
+        .map(|(product, _)| product)
+}
+
+fn deployed_release_id(
+    properties: &std::collections::HashMap<String, String>,
+    instance: &str,
+    version: &str,
+) -> String {
+    properties
+        .get(&format!("deployed_release.{instance}"))
+        .cloned()
+        .unwrap_or_else(|| release_id(instance, version))
+}
+
+fn product_for_instance(
+    properties: &std::collections::HashMap<String, String>,
+    instance: &str,
+) -> String {
+    properties
+        .get(&format!("deployed_release.{instance}"))
+        .and_then(|id| product_of_release_id(id).map(str::to_string))
+        .unwrap_or_else(|| instance.to_string())
 }
 
 /// The stored manifest of a catalog release.
@@ -369,18 +407,14 @@ async fn compute_snapshot_with_policy(
 ) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
     let env_obj = crate::environment::active_environment(ctx, env).await?;
     crate::preview::admit_plan(&env_obj, crate::now_millis())?;
-    let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
+    let subscriptions = crate::environment::list_subscriptions(ctx, &env_obj).await?;
 
-    let mut products = std::collections::HashSet::new();
-    for channel in &channels {
-        let product = channel
-            .properties
-            .get("product")
-            .cloned()
-            .unwrap_or_default();
-        if !products.insert(product.clone()) {
+    let mut instances = std::collections::HashSet::new();
+    for sub in &subscriptions {
+        if !instances.insert(sub.instance.clone()) {
             bail!(
-                "environment {env} has multiple channel subscriptions for {product}; subscribe again after concurrent updates settle"
+                "environment {env} has duplicate instance {}; subscribe again after concurrent updates settle",
+                sub.instance
             );
         }
     }
@@ -396,8 +430,10 @@ async fn compute_snapshot_with_policy(
     let mut held_routing = false;
     let mut hold_sets = BTreeMap::new();
     let mut hold_clears = BTreeSet::new();
-    for ch in channels {
-        let product = ch.properties.get("product").cloned().unwrap_or_default();
+    for sub in subscriptions {
+        let product = sub.product;
+        let instance = sub.instance;
+        let ch = sub.channel;
         let channel = ch.properties.get("channel").cloned().unwrap_or_default();
         let channel_version = ch
             .properties
@@ -476,26 +512,26 @@ async fn compute_snapshot_with_policy(
         if host_record.is_none()
             && env_obj
                 .properties
-                .get(&format!("deployment_health.{product}"))
+                .get(&format!("deployment_health.{instance}"))
                 .is_some_and(|health| health == "unknown")
         {
             let detail = env_obj
                 .properties
-                .get(&format!("deployment_error.{product}"))
+                .get(&format!("deployment_error.{instance}"))
                 .map(String::as_str)
                 .unwrap_or("deployment state requires manual reconciliation");
             bail!(
-                "deployment state for {product} in {env} is unknown: {detail}; reconcile it or use rollback before creating a new plan"
+                "deployment state for {instance} in {env} is unknown: {detail}; reconcile it or use rollback before creating a new plan"
             );
         }
-        if policy.observe_live && failed_target_is_held(&env_obj.properties, &product, &release) {
+        if policy.observe_live && failed_target_is_held(&env_obj.properties, &instance, &release) {
             held_model |= selected.kind == crate::manifest::ProductKind::ModelRuntime;
             held_routing |= selected.kind == crate::manifest::ProductKind::RoutingConfig;
             continue;
         }
         let deployed = env_obj
             .properties
-            .get(&format!("deployed.{product}"))
+            .get(&format!("deployed.{instance}"))
             .cloned();
         let kind = selected.kind;
         if kind == crate::manifest::ProductKind::WorkshopModule {
@@ -503,6 +539,11 @@ async fn compute_snapshot_with_policy(
         }
         inputs.push(DesiredStateInput {
             product: product.clone(),
+            instance: if instance == product {
+                String::new()
+            } else {
+                instance.clone()
+            },
             channel,
             channel_id: ch.id,
             desired_version: desired.clone(),
@@ -520,7 +561,7 @@ async fn compute_snapshot_with_policy(
                     // Nothing observes host releases, so say how to settle it.
                     let unknown = env_obj
                         .properties
-                        .get(&format!("deployment_health.{product}"))
+                        .get(&format!("deployment_health.{instance}"))
                         .is_some_and(|health| health == "unknown");
                     if unknown || deployed.as_deref() != Some(desired.as_str()) {
                         bail!(
@@ -536,32 +577,34 @@ async fn compute_snapshot_with_policy(
                 }
                 HostProgress::NeedsHealth => {
                     host_health_only.insert(product.clone());
-                    pending.push((
+                    pending.push(PendingChange {
                         product,
-                        Action::Restart,
-                        Some(desired.clone()),
-                        desired,
-                        target,
-                        None,
+                        instance,
+                        action: Action::Restart,
+                        from: Some(desired.clone()),
+                        to: desired,
+                        release: target,
+                        restore: None,
                         kind,
-                    ));
+                    });
                 }
-                HostProgress::NeedsInstall => pending.push((
+                HostProgress::NeedsInstall => pending.push(PendingChange {
                     product,
-                    Action::Install,
-                    deployed,
-                    desired,
-                    target,
-                    None,
+                    instance,
+                    action: Action::Install,
+                    from: deployed,
+                    to: desired,
+                    release: target,
+                    restore: None,
                     kind,
-                )),
+                }),
             }
             continue;
         }
         match deployed {
             Some(v) if v == desired => {
                 let mut restart = !policy.observe_live
-                    && failed_target_is_held(&env_obj.properties, &product, &release);
+                    && failed_target_is_held(&env_obj.properties, &instance, &release);
                 // Reconcile observes each release with its own executor, and
                 // never restarts a host release on its own (ADR 0041).
                 let live = if policy.observe_live {
@@ -616,21 +659,22 @@ async fn compute_snapshot_with_policy(
                 }
                 if env_obj
                     .properties
-                    .get(&format!("deployment_health.{product}"))
+                    .get(&format!("deployment_health.{instance}"))
                     .is_some_and(|health| health == "unhealthy")
                 {
                     restart = true;
                 }
                 if restart && !host {
-                    pending.push((
+                    pending.push(PendingChange {
                         product,
-                        Action::Restart,
-                        Some(v),
-                        desired,
-                        target,
-                        None,
+                        instance,
+                        action: Action::Restart,
+                        from: Some(v),
+                        to: desired,
+                        release: target,
+                        restore: None,
                         kind,
-                    ));
+                    });
                 }
             }
             Some(v) => {
@@ -641,9 +685,27 @@ async fn compute_snapshot_with_policy(
                 } else {
                     Some(pin_release(ctx, &current_id, env).await?)
                 };
-                pending.push((product, action, Some(v), desired, target, restore, kind));
+                pending.push(PendingChange {
+                    product,
+                    instance,
+                    action,
+                    from: Some(v),
+                    to: desired,
+                    release: target,
+                    restore,
+                    kind,
+                });
             }
-            None => pending.push((product, Action::Install, None, desired, target, None, kind)),
+            None => pending.push(PendingChange {
+                product,
+                instance,
+                action: Action::Install,
+                from: None,
+                to: desired,
+                release: target,
+                restore: None,
+                kind,
+            }),
         }
     }
     // A host product the environment no longer subscribes to is removed
@@ -654,25 +716,28 @@ async fn compute_snapshot_with_policy(
     // release, so a missing or unreadable record refuses the plan instead
     // of passing for "nothing to remove".
     let mut removable = std::collections::BTreeSet::new();
-    let unknown = |product: &str| {
+    let unknown = |instance: &str| {
         env_obj
             .properties
-            .get(&format!("deployment_health.{product}"))
+            .get(&format!("deployment_health.{instance}"))
             .is_some_and(|health| health == "unknown")
     };
     for (key, value) in &env_obj.properties {
         // The deployed release, or the target of a failed step that left
-        // the deployment unknown.
-        let (product, release) = if let Some(product) = key.strip_prefix("deployed.") {
-            (product, release_id(product, value))
-        } else if let Some(product) = key.strip_prefix("failed_target.")
-            && unknown(product)
+        // the deployment unknown. Property suffixes are instance names.
+        let (instance, release) = if let Some(instance) = key.strip_prefix("deployed.") {
+            (
+                instance,
+                deployed_release_id(&env_obj.properties, instance, value),
+            )
+        } else if let Some(instance) = key.strip_prefix("failed_target.")
+            && unknown(instance)
         {
-            (product, value.clone())
+            (instance, value.clone())
         } else {
             continue;
         };
-        if !products.contains(product)
+        if !instances.contains(instance)
             && readable_manifest(ctx, &release)
                 .await?
                 .is_some_and(|manifest| {
@@ -680,7 +745,7 @@ async fn compute_snapshot_with_policy(
                         == Some(crate::software_executor::SoftwareExecutorKind::Host)
                 })
         {
-            removable.insert(product.to_string());
+            removable.insert(instance.to_string());
         }
     }
     match executors.host() {
@@ -702,25 +767,26 @@ async fn compute_snapshot_with_policy(
                     Some(started) => ctx.get(&started.plan_id).await?.is_some(),
                     None => false,
                 };
-                if (recorded || planned) && !products.contains(&record.product) {
+                if (recorded || planned) && !instances.contains(&record.product) {
                     removable.insert(record.product);
                 }
             }
-            for product in removable {
+            for instance in removable {
+                let product = product_for_instance(&env_obj.properties, &instance);
                 let record = host.applied_state(env, &product)?;
                 let deployed = env_obj
                     .properties
-                    .get(&format!("deployed.{product}"))
+                    .get(&format!("deployed.{instance}"))
                     .cloned();
                 let Some(version) = host_source(&record, deployed.as_deref()) else {
                     let server = match deployed {
                         Some(deployed) => Some(deployed),
-                        None if unknown(&product) => Some("it as unknown".to_string()),
+                        None if unknown(&instance) => Some("it as unknown".to_string()),
                         None => None,
                     };
                     if let Some(server) = server {
                         bail!(
-                            "the host applier records nothing applied for {product} in {env} at generation {}, but this server records {server}; once no apply runs, record it with `tenkaictl env reconcile {env} {product}`",
+                            "the host applier records nothing applied for {instance} in {env} at generation {}, but this server records {server}; once no apply runs, record it with `tenkaictl env reconcile {env} {product}`",
                             record.generation
                         );
                     }
@@ -730,15 +796,16 @@ async fn compute_snapshot_with_policy(
                 // nothing, and its signature and integrity are still checked.
                 let target =
                     pin_release_for_recovery(ctx, &release_id(&product, &version), env).await?;
-                pending.push((
+                pending.push(PendingChange {
                     product,
-                    Action::Remove,
-                    Some(version.clone()),
-                    version,
-                    target,
-                    None,
-                    crate::manifest::ProductKind::Software,
-                ));
+                    instance,
+                    action: Action::Remove,
+                    from: Some(version.clone()),
+                    to: version,
+                    release: target,
+                    restore: None,
+                    kind: crate::manifest::ProductKind::Software,
+                });
             }
         }
         // Without the applier's records nothing here can remove a host
@@ -751,40 +818,45 @@ async fn compute_snapshot_with_policy(
     }
     inputs.sort_by(|a, b| a.product.cmp(&b.product));
     if held_model {
-        pending.retain(|entry| entry.6 != crate::manifest::ProductKind::RoutingConfig);
+        pending.retain(|entry| entry.kind != crate::manifest::ProductKind::RoutingConfig);
     }
     if held_routing {
         pending.retain(|entry| {
-            entry.6 != crate::manifest::ProductKind::ModelRuntime
-                || !matches!(entry.1, Action::Downgrade | Action::Rollback)
+            entry.kind != crate::manifest::ProductKind::ModelRuntime
+                || !matches!(entry.action, Action::Downgrade | Action::Rollback)
         });
     }
     let mut target_profiles = BTreeMap::new();
-    for (product, action, _, _, release, _, _) in &pending {
-        if matches!(action, Action::Remove) {
+    for entry in &pending {
+        if matches!(entry.action, Action::Remove) {
             continue;
         }
-        if target_profiles.contains_key(product) {
+        if target_profiles.contains_key(&entry.product) {
             continue;
         }
-        if let Some(manifest) = readable_manifest(ctx, &release.release_id).await?
+        if let Some(manifest) = readable_manifest(ctx, &entry.release.release_id).await?
             && let Some(profile) = manifest.compatibility
         {
-            target_profiles.insert(product.clone(), profile);
+            target_profiles.insert(entry.product.clone(), profile);
         }
     }
     let mut installed_profiles = BTreeMap::new();
     for (key, value) in &env_obj.properties {
-        let Some(product) = key.strip_prefix("deployed.") else {
+        let Some(instance) = key.strip_prefix("deployed.") else {
             continue;
         };
-        if installed_profiles.contains_key(product) {
+        let product = product_for_instance(&env_obj.properties, instance);
+        if installed_profiles.contains_key(&product) {
             continue;
         }
-        if let Some(manifest) = readable_manifest(ctx, &release_id(product, value)).await?
+        if let Some(manifest) = readable_manifest(
+            ctx,
+            &deployed_release_id(&env_obj.properties, instance, value),
+        )
+        .await?
             && let Some(profile) = manifest.compatibility
         {
-            installed_profiles.insert(product.to_string(), profile);
+            installed_profiles.insert(product, profile);
         }
     }
     schedule_dependency_rerenders(
@@ -799,7 +871,7 @@ async fn compute_snapshot_with_policy(
     .await?;
     let pending_actions = pending
         .iter()
-        .map(|(product, action, _, _, _, _, _)| (product.as_str(), *action))
+        .map(|entry| (entry.product.as_str(), entry.action))
         .collect::<Vec<_>>();
     let contract_order =
         contract_plan_order(&pending_actions, &target_profiles, &installed_profiles)?;
@@ -813,17 +885,17 @@ async fn compute_snapshot_with_policy(
     // remove/downgrade/rollback; independent releases keep name order.
     let reverse_providers: BTreeSet<&str> = pending
         .iter()
-        .filter(|(_, action, _, _, _, _, _)| reverse_contract_action(*action))
-        .map(|(product, _, _, _, _, _, _)| product.as_str())
+        .filter(|entry| reverse_contract_action(entry.action))
+        .map(|entry| entry.product.as_str())
         .collect();
     let rerender_after_reverse: BTreeSet<&str> = contract_order
         .installed_edges
         .iter()
         .filter(|(provider, dependent, _)| {
             reverse_providers.contains(provider.as_str())
-                && pending.iter().any(|(product, action, _, _, _, _, _)| {
-                    product == dependent && *action == Action::Restart
-                })
+                && pending
+                    .iter()
+                    .any(|entry| entry.product == *dependent && entry.action == Action::Restart)
         })
         .map(|(_, dependent, _)| dependent.as_str())
         .collect();
@@ -849,26 +921,28 @@ async fn compute_snapshot_with_policy(
                 .copied()
                 .unwrap_or(u32::MAX)
         };
-        agent(&a.0)
-            .cmp(&agent(&b.0))
-            .then_with(|| band(&a.0, a.1).cmp(&band(&b.0, b.1)))
-            .then_with(|| not_host(&a.0).cmp(&not_host(&b.0)))
+        agent(&a.product)
+            .cmp(&agent(&b.product))
+            .then_with(|| band(&a.product, a.action).cmp(&band(&b.product, b.action)))
+            .then_with(|| not_host(&a.product).cmp(&not_host(&b.product)))
             .then_with(|| {
-                model_routing_rollout_rank(a.6, a.1).cmp(&model_routing_rollout_rank(b.6, b.1))
+                model_routing_rollout_rank(a.kind, a.action)
+                    .cmp(&model_routing_rollout_rank(b.kind, b.action))
             })
-            .then_with(|| contract(&a.0).cmp(&contract(&b.0)))
-            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| contract(&a.product).cmp(&contract(&b.product)))
+            .then_with(|| a.product.cmp(&b.product))
+            .then_with(|| a.instance.cmp(&b.instance))
     });
     validate_model_routing_rollout_order(
         &pending
             .iter()
-            .map(|entry| (entry.6, entry.1))
+            .map(|entry| (entry.kind, entry.action))
             .collect::<Vec<_>>(),
     )?;
     refuse_inverted_contract_order(
         &pending
             .iter()
-            .map(|(product, action, _, _, _, _, _)| (product.as_str(), *action))
+            .map(|entry| (entry.product.as_str(), entry.action))
             .collect::<Vec<_>>(),
         &contract_order.target_edges,
         &contract_order.installed_edges,
@@ -877,26 +951,34 @@ async fn compute_snapshot_with_policy(
     let steps = pending
         .into_iter()
         .enumerate()
-        .map(
-            |(index, (product, action, from, to, release, restore, _kind))| Step {
+        .map(|index_entry| {
+            let (index, entry) = index_entry;
+            Step {
                 id: format!("{}:step:{index}", env_id(env)),
                 // Binding sets the generation from the applier's record.
-                host: host_health_only.contains(&product).then_some(HostStep {
-                    action: HostAction::Health,
-                    expected_generation: 0,
-                }),
+                host: host_health_only
+                    .contains(&entry.product)
+                    .then_some(HostStep {
+                        action: HostAction::Health,
+                        expected_generation: 0,
+                    }),
                 order: index as u32,
-                product,
-                action,
-                from,
-                to,
-                release_id: release.release_id,
-                release_digest: release.digest,
-                artifact_digest: release.artifact_digest,
-                workdir: release.workdir,
-                restore,
-            },
-        )
+                instance: if entry.instance == entry.product {
+                    String::new()
+                } else {
+                    entry.instance
+                },
+                product: entry.product,
+                action: entry.action,
+                from: entry.from,
+                to: entry.to,
+                release_id: entry.release.release_id,
+                release_digest: entry.release.digest,
+                artifact_digest: entry.release.artifact_digest,
+                workdir: entry.release.workdir,
+                restore: entry.restore,
+            }
+        })
         .collect();
     crate::environment::persist_dependency_holds(ctx, env, &hold_sets, &hold_clears).await?;
     Ok((inputs, steps))
@@ -1231,15 +1313,7 @@ struct ContractPlanOrder {
     overlay_edges: Vec<ContractEdge>,
 }
 
-type PendingEntry = (
-    String,
-    Action,
-    Option<String>,
-    String,
-    ReleasePin,
-    Option<ReleasePin>,
-    crate::manifest::ProductKind,
-);
+type PendingEntry = PendingChange;
 
 /// Same-version Restart of remaining dependents whose providers change (ADR 0043 §6).
 async fn schedule_dependency_rerenders(
@@ -1253,7 +1327,7 @@ async fn schedule_dependency_rerenders(
 ) -> Result<()> {
     let pending_actions: Vec<(&str, Action)> = pending
         .iter()
-        .map(|(product, action, _, _, _, _, _)| (product.as_str(), *action))
+        .map(|entry| (entry.product.as_str(), entry.action))
         .collect();
     let remaining = overlay_profiles(installed_profiles, target_profiles, &pending_actions);
     let mut remaining_versions = BTreeMap::new();
@@ -1262,11 +1336,11 @@ async fn schedule_dependency_rerenders(
             remaining_versions.insert(product.to_string(), version.clone());
         }
     }
-    for (product, action, _, to, _, _, _) in pending.iter() {
-        if matches!(action, Action::Remove) {
-            remaining_versions.remove(product);
+    for entry in pending.iter() {
+        if matches!(entry.action, Action::Remove) {
+            remaining_versions.remove(&entry.product);
         } else {
-            remaining_versions.insert(product.clone(), to.clone());
+            remaining_versions.insert(entry.product.clone(), entry.to.clone());
         }
     }
     let mut current_deployed = BTreeMap::new();
@@ -1281,10 +1355,8 @@ async fn schedule_dependency_rerenders(
             remaining_deployed.insert(product.clone(), (version.clone(), profile.clone()));
         }
     }
-    let pending_products: BTreeSet<String> = pending
-        .iter()
-        .map(|(product, _, _, _, _, _, _)| product.clone())
-        .collect();
+    let pending_products: BTreeSet<String> =
+        pending.iter().map(|entry| entry.product.clone()).collect();
     let mut extra = Vec::new();
     for (product, profile) in installed_profiles {
         if pending_products.contains(product) || host_products.contains(product) {
@@ -1319,15 +1391,16 @@ async fn schedule_dependency_rerenders(
             continue;
         }
         let target = pin_release(ctx, &release_id(product, version), env).await?;
-        extra.push((
-            product.clone(),
-            Action::Restart,
-            Some(version.clone()),
-            version.clone(),
-            target,
-            None,
-            manifest.product.kind,
-        ));
+        extra.push(PendingChange {
+            instance: product.clone(),
+            product: product.clone(),
+            action: Action::Restart,
+            from: Some(version.clone()),
+            to: version.clone(),
+            release: target,
+            restore: None,
+            kind: manifest.product.kind,
+        });
     }
     pending.extend(extra);
     Ok(())
@@ -1648,19 +1721,21 @@ pub(super) async fn rollback_step_with_recovery(
         }
     }
     let env_obj = crate::environment::environment(ctx, env).await?;
+    let instance = product;
+    let product = product_for_instance(&env_obj.properties, instance);
     let current = env_obj
         .properties
-        .get(&format!("deployed.{product}"))
+        .get(&format!("deployed.{instance}"))
         .cloned();
     let Some(prev) = env_obj
         .properties
-        .get(&format!("deployed_prev.{product}"))
+        .get(&format!("deployed_prev.{instance}"))
         .cloned()
         .filter(|v| !v.is_empty())
     else {
-        bail!("no previous version of {product} recorded in {env} — nothing to roll back to");
+        bail!("no previous version of {instance} recorded in {env} — nothing to roll back to");
     };
-    let prev_id = release_id(product, &prev);
+    let prev_id = release_id(&product, &prev);
     let prev_recalled = release_is_recalled(ctx, &prev_id).await?;
     if prev_recalled && recovery.is_none() {
         bail!(
@@ -1677,32 +1752,34 @@ pub(super) async fn rollback_step_with_recovery(
         let Some(name) = key.strip_prefix("deployed.") else {
             continue;
         };
-        if name == product {
+        if name == instance {
             continue;
         }
-        if let Some(manifest) = readable_manifest(ctx, &release_id(name, value)).await?
+        let other = product_for_instance(&env_obj.properties, name);
+        if let Some(manifest) =
+            readable_manifest(ctx, &deployed_release_id(&env_obj.properties, name, value)).await?
             && let Some(profile) = manifest.compatibility
         {
-            remaining.insert(name.to_string(), profile);
+            remaining.insert(other, profile);
         }
     }
     let mut previous = remaining.clone();
     if let Some(version) = current.as_deref()
-        && let Some(manifest) = readable_manifest(ctx, &release_id(product, version)).await?
+        && let Some(manifest) = readable_manifest(ctx, &release_id(&product, version)).await?
         && let Some(profile) = manifest.compatibility
     {
-        previous.insert(product.to_string(), profile);
+        previous.insert(product.clone(), profile);
     }
     if let Some(manifest) = readable_manifest(ctx, &prev_id).await?
         && let Some(profile) = manifest.compatibility
     {
-        remaining.insert(product.to_string(), profile);
+        remaining.insert(product.clone(), profile);
     }
     crate::software_compatibility::refuse_unsatisfied_dependents(&remaining, &previous)?;
     crate::software_compatibility::require_release(ctx, env, &prev_id).await?;
     let restore = match current.as_deref() {
         Some(version) => {
-            let current_id = release_id(product, version);
+            let current_id = release_id(&product, version);
             if release_is_recalled(ctx, &current_id).await? {
                 if recovery.is_some() {
                     Some(pin_release_for_recovery(ctx, &current_id, env).await?)
@@ -1715,8 +1792,13 @@ pub(super) async fn rollback_step_with_recovery(
         }
         None => None,
     };
+    let step_instance = if instance == product.as_str() {
+        String::new()
+    } else {
+        instance.to_string()
+    };
     Ok(Step {
-        id: format!("{}:rollback:{product}", env_id(env)),
+        id: format!("{}:rollback:{instance}", env_id(env)),
         order: 0,
         release_id: target.release_id,
         release_digest: target.digest,
@@ -1724,7 +1806,8 @@ pub(super) async fn rollback_step_with_recovery(
         workdir: target.workdir,
         host: None,
         restore,
-        product: product.into(),
+        product,
+        instance: step_instance,
         action: Action::Rollback,
         from: current,
         to: prev,
@@ -1735,22 +1818,29 @@ pub(super) async fn rollback_step_with_recovery(
 pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
     validate_identifier("product", product)?;
     let env_obj = crate::environment::environment(ctx, env).await?;
+    let instance = product;
+    let product = product_for_instance(&env_obj.properties, instance);
     let Some(current) = env_obj
         .properties
-        .get(&format!("deployed.{product}"))
+        .get(&format!("deployed.{instance}"))
         .cloned()
         .filter(|value| !value.is_empty())
     else {
-        bail!("no deployed version of {product} recorded in {env} — nothing to restart");
+        bail!("no deployed version of {instance} recorded in {env} — nothing to restart");
     };
-    let current_id = release_id(product, &current);
+    let current_id = release_id(&product, &current);
     if release_is_recalled(ctx, &current_id).await? {
         bail!("cannot restart recalled release {current_id}");
     }
     let target = pin_release(ctx, &current_id, env).await?;
     crate::software_compatibility::require_release(ctx, env, &current_id).await?;
+    let step_instance = if instance == product.as_str() {
+        String::new()
+    } else {
+        instance.to_string()
+    };
     Ok(Step {
-        id: format!("{}:restart:{product}", env_id(env)),
+        id: format!("{}:restart:{instance}", env_id(env)),
         order: 0,
         release_id: target.release_id,
         release_digest: target.digest,
@@ -1758,7 +1848,8 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
         workdir: target.workdir,
         host: None,
         restore: None,
-        product: product.into(),
+        product,
+        instance: step_instance,
         action: Action::Restart,
         from: Some(current.clone()),
         to: current,

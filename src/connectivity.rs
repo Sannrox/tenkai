@@ -3678,6 +3678,8 @@ install = "true"
             created_at: 1,
             inputs: vec![crate::plan::DesiredStateInput {
                 product: "edge-app".into(),
+
+                instance: String::new(),
                 channel: "stable".into(),
                 channel_id: channel_id("edge-app", "stable"),
                 desired_version: "1.0.0".into(),
@@ -3690,6 +3692,7 @@ install = "true"
                 id: String::new(),
                 order: 0,
                 product: "edge-app".into(),
+                instance: String::new(),
                 action: crate::plan::Action::Install,
                 from: None,
                 to: "1.0.0".into(),

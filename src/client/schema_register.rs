@@ -11,7 +11,7 @@ use crate::ontology::{
     ACTION_REPLACE_SUBSCRIPTION, ACTION_SUBSCRIBE, KIND_CANARY_ATTEMPT, KIND_CANARY_DESIGNATION,
     KIND_CANARY_OUTCOME, KIND_CANARY_POLICY, KIND_CANARY_POLICY_POINTER, KIND_CHANNEL,
     KIND_CONNECTIVITY_UPGRADE, KIND_DEPLOYMENT, KIND_ENVIRONMENT, KIND_ENVIRONMENT_EXECUTION,
-    KIND_HEALTH_GATE_EVIDENCE, KIND_MAINTENANCE_CONFIG, KIND_PACKAGE_MIGRATION,
+    KIND_HEALTH_GATE_EVIDENCE, KIND_INSTANCE, KIND_MAINTENANCE_CONFIG, KIND_PACKAGE_MIGRATION,
     KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN, KIND_PLAN_APPROVAL_ENVELOPE,
     KIND_PLAN_APPROVAL_VERIFICATION, KIND_PRODUCT, KIND_PRODUCT_MAINTENANCE_CONFIG,
     KIND_PROMOTION_AUDIT, KIND_PROMOTION_LOCK, KIND_RELEASE, KIND_RELEASE_RECALL,
@@ -628,11 +628,21 @@ pub fn known_object_types() -> Vec<ObjectType> {
             ],
         ),
         object_type(
+            KIND_INSTANCE,
+            "A named instance of a product in one environment",
+            vec![
+                prop("environment", true, "Environment name"),
+                prop("name", true, "Instance name unique in the environment"),
+                prop("product", true, "Product this instance runs"),
+            ],
+        ),
+        object_type(
             KIND_DEPLOYMENT,
             "One executed step: a release applied to an environment",
             vec![
                 prop("environment", true, "Environment name"),
                 prop("product", true, "Product name"),
+                prop("instance", false, "Instance name; defaults to product"),
                 prop("from_version", false, "Previously deployed version"),
                 prop("to_version", true, "Applied version"),
                 prop("status", true, "succeeded|failed|rolled_back"),

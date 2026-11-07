@@ -734,9 +734,15 @@ async fn compensate_activation(
     }
     let failure = format!("deployment bookkeeping failed after activation: {failure}");
     if !restores_automatically(content) {
-        let _ =
-            crate::environment::record_unknown(ctx, lease, environment, &step.product, &failure)
-                .await;
+        let _ = crate::environment::record_unknown(
+            ctx,
+            lease,
+            environment,
+            &step.product,
+            step.instance_name(),
+            &failure,
+        )
+        .await;
         return Ok(());
     }
     let cleaned = match product_execution::deactivate(ctx, lease, content, adapters.clone()).await {
@@ -756,6 +762,7 @@ async fn compensate_activation(
                     lease,
                     environment,
                     &step.product,
+                    step.instance_name(),
                     previous,
                     Some(&step.to),
                 )
@@ -767,9 +774,15 @@ async fn compensate_activation(
         }
     }
     if !cleaned || !restored || step.from.is_none() {
-        let _ =
-            crate::environment::record_unknown(ctx, lease, environment, &step.product, &failure)
-                .await;
+        let _ = crate::environment::record_unknown(
+            ctx,
+            lease,
+            environment,
+            &step.product,
+            step.instance_name(),
+            &failure,
+        )
+        .await;
     }
     Ok(())
 }
