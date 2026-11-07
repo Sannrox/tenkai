@@ -543,6 +543,18 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         }
         times.plan_ms = planned.elapsed().as_millis() as u64;
         let applied = Instant::now();
+        if let Some(json) = tenkai::dependency_document::configmap_json(request) {
+            let mut object: Value =
+                serde_json::from_str(&json).context("parsing dependency ConfigMap")?;
+            stamp_ownership(&mut object, request);
+            stop_if_lease_lost(stop, request, &[], &[])?;
+            let _ = self.api.apply_server_side(
+                cluster_config,
+                &request.environment,
+                FIELD_MANAGER,
+                &object,
+            )?;
+        }
         let mut observations = Vec::new();
         for mut object in objects {
             stop_if_lease_lost(stop, request, &[], &[])?;
@@ -761,6 +773,10 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
                     .remove(cluster_config, &request.environment, &name, &kind)?;
             }
         }
+        let name = tenkai::dependency_document::configmap_name(&request.product);
+        let _ = self
+            .api
+            .remove(cluster_config, &request.environment, &name, "ConfigMap");
         Ok(())
     }
 
@@ -1695,6 +1711,7 @@ mod tests {
             cluster_config_path: Some(kubeconfig.to_path_buf()),
             secret_dir_path: None,
             apply_attempt: String::new(),
+            dependency_document: String::new(),
         }
     }
 

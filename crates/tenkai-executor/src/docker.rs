@@ -1411,6 +1411,52 @@ fn populate_config_files(
     Ok(())
 }
 
+fn populate_dependency_document(
+    executor: &DockerHostExecutor,
+    name: &str,
+    request: &SoftwareApplyRequest,
+) -> Result<()> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    if request.dependency_document.is_empty() {
+        return Ok(());
+    }
+    let contents = request.dependency_document.as_bytes();
+    let mut archive = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(contents.len() as u64);
+    header.set_mode(0o444);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_cksum();
+    archive.append_data(&mut header, Path::new("dependencies.json"), contents)?;
+    let bytes = archive.into_inner()?;
+    let target = format!("{name}:/etc/tenkai");
+    let mut child = executor
+        .docker_command()
+        .args(["cp", "-", &target])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("starting Docker dependency-document copy")?;
+    let write = child
+        .stdin
+        .take()
+        .context("Docker dependency-document copy has no input")?
+        .write_all(&bytes);
+    let status = child.wait()?;
+    write.context("streaming Docker dependency document")?;
+    if !status.success() {
+        bail!(
+            "Docker dependency-document copy failed for container {name} destination {}",
+            tenkai::dependency_document::DOCKER_PATH
+        );
+    }
+    Ok(())
+}
+
 /// Create the container for `container` unless a matching, running, not
 /// unhealthy one already exists. A container being replaced is stopped and
 /// kept under [`previous_runtime_name`]; every change is pushed onto `journal` before
@@ -1579,7 +1625,8 @@ fn replace_container(
     args.extend(entrypoint_args.iter().cloned());
     args.extend(container.command.iter().flatten().cloned());
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    if !container.files.is_empty() {
+    let has_document = !request.dependency_document.is_empty();
+    if !container.files.is_empty() || has_document {
         docker_ok(
             executor,
             request,
@@ -1588,6 +1635,7 @@ fn replace_container(
             &arg_refs,
         )?;
         populate_config_files(executor, container, &name, &files)?;
+        populate_dependency_document(executor, &name, request)?;
         if container_spec_digest(request, container)? != spec_digest {
             bail!("release configuration changed during container creation");
         }

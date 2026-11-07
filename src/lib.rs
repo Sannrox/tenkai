@@ -180,6 +180,7 @@ pub mod dark_site;
 pub mod delivery_bridge;
 pub mod delivery_hold;
 pub mod delivery_manifest;
+pub mod dependency_document;
 pub mod deploy_webhook;
 pub mod dev_sign;
 pub mod development_fixtures;

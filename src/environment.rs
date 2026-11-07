@@ -395,6 +395,7 @@ async fn update_reconciled_deployment_object(
         .properties
         .remove(&format!("deployment_error.{product}"));
     stamp_applied_overlays(object, product);
+    crate::dependency_document::stamp(ctx, object, product).await?;
     object
         .properties
         .remove(&format!("deployed_prev.{product}"));
@@ -472,6 +473,7 @@ pub(crate) async fn record_deployed(
         .properties
         .remove(&format!("deployment_error.{product}"));
     stamp_applied_overlays(&mut object, product);
+    crate::dependency_document::stamp(ctx, &mut object, product).await?;
     object.updated = crate::now_millis();
     guarded_update(ctx, lease, object).await
 }
@@ -636,6 +638,22 @@ pub(crate) async fn record_deployment_observation(
                 format!("deployment_unknown_attempt.{}", observation.step.product),
                 attempt_id.clone(),
             );
+        }
+        if observation.status == "succeeded" {
+            match observation.transition {
+                DeploymentTransition::Deployed { .. } | DeploymentTransition::Refreshed => {
+                    crate::dependency_document::stamp(ctx, environment, &observation.step.product)
+                        .await?;
+                }
+                DeploymentTransition::Removed { .. } => {
+                    environment.properties.remove(&format!(
+                        "{}{}",
+                        crate::dependency_document::APPLIED_PROPERTY_PREFIX,
+                        observation.step.product
+                    ));
+                }
+                _ => {}
+            }
         }
     }
     let webhook_endpoints = environment
@@ -853,6 +871,7 @@ fn transition_deployment(
                 "deployed_release",
                 "deployment_health",
                 "deployment_error",
+                "applied_dependencies",
             ] {
                 environment.properties.remove(&format!("{key}.{product}"));
             }

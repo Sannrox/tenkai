@@ -41,6 +41,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
             );
         }
         ensure_namespace(self, &request.environment)?;
+        apply_dependency_configmap(self, request, SoftwareDeployPhase::Apply)?;
         for path in &files {
             let path_s = path.to_string_lossy();
             run_kubectl(
@@ -116,6 +117,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
                 &request.environment,
             )?;
         }
+        delete_dependency_configmap(self, request)?;
         Ok(())
     }
 
@@ -344,6 +346,58 @@ fn kubernetes_items_mismatch(items_json: &str, request: &SoftwareApplyRequest) -
     })
 }
 
+fn apply_dependency_configmap(
+    executor: &KubernetesSoftwareExecutor,
+    request: &SoftwareApplyRequest,
+    phase: SoftwareDeployPhase,
+) -> Result<()> {
+    let Some(json) = tenkai::dependency_document::configmap_json(request) else {
+        return Ok(());
+    };
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-dependencies-cm-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
+    let path_s = path.to_string_lossy().into_owned();
+    let result = run_kubectl(
+        &executor.kubectl_binary,
+        &["apply", "-f", &path_s, "--namespace", &request.environment],
+        phase,
+        "apply dependency ConfigMap",
+        &request.product,
+        &request.environment,
+    );
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
+fn delete_dependency_configmap(
+    executor: &KubernetesSoftwareExecutor,
+    request: &SoftwareApplyRequest,
+) -> Result<()> {
+    let name = tenkai::dependency_document::configmap_name(&request.product);
+    run_kubectl(
+        &executor.kubectl_binary,
+        &[
+            "delete",
+            "configmap",
+            &name,
+            "--namespace",
+            &request.environment,
+            "--ignore-not-found=true",
+        ],
+        SoftwareDeployPhase::Remove,
+        "delete dependency ConfigMap",
+        &request.product,
+        &request.environment,
+    )
+}
+
 fn annotate_config_digest(
     executor: &KubernetesSoftwareExecutor,
     request: &SoftwareApplyRequest,
@@ -461,6 +515,7 @@ data:
             cluster_config_path: None,
             secret_dir_path: None,
             apply_attempt: String::new(),
+            dependency_document: String::new(),
         };
         let executor = KubernetesSoftwareExecutor {
             kubectl_binary: PathBuf::from(binary),

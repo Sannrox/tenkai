@@ -125,8 +125,18 @@ tenkaictl reconcile --once
 helm upgrade --install <product> <workdir> \
   --namespace <environment> --create-namespace --wait --timeout 5m \
   --set tenkai.version=<version> --set tenkai.releaseId=<release_id> \
-  [--set tenkai.configDigest=<digest> --set tenkai.config.<key>=<value> ...]
+  [--set tenkai.configDigest=<digest> --set tenkai.config.<key>=<value> ...] \
+  [--set-file tenkai.dependencies=<path-to-canonical-json>]
 ```
+
+A release that declares requirements also gets a dependency document
+([software compatibility](software-compatibility.md)). Helm charts read it as
+`tenkai.dependencies`. Native and in-process Kubernetes apply ConfigMap
+`tenkai-dependencies-<product>` in the environment namespace, data key
+`tenkai-dependencies.json`. Docker copies the file to
+`/etc/tenkai/dependencies.json` in each container. Host apply writes
+`tenkai-dependencies.json` next to `request.json` in the spool instance
+directory. Executors never write the document into signed release content.
 
 ## Native Kubernetes enablement
 
@@ -153,6 +163,8 @@ Rules:
 - When a non-secret overlay digest is present, apply and restart also annotate
   `tenkai.config-digest` on Deployments and StatefulSets labeled
   `tenkai.product`.
+- When the apply request carries a dependency document, apply also creates
+  ConfigMap `tenkai-dependencies-<product>` with key `tenkai-dependencies.json`.
 - Product, version, and environment names must not contain path separators.
 
 Kustomize is **not** supported in this surface.

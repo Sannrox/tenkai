@@ -66,6 +66,7 @@ fn request(root: &Path, kubeconfig: &Path, env: &str, version: &str) -> Software
         cluster_config_path: Some(kubeconfig.to_path_buf()),
         secret_dir_path: None,
         apply_attempt: String::new(),
+        dependency_document: String::new(),
     }
 }
 

@@ -532,6 +532,12 @@ async fn software_request(
         crate::software_executor::secret_dir_from_properties(&env_obj.properties)?;
     // Apply and its failed-apply cleanup run under the same lease.
     request.apply_attempt = format!("lease-{}", lease.generation);
+    if let Some(profile) = &content.manifest.compatibility {
+        request.dependency_document =
+            crate::dependency_document::json_for_product(ctx, &env_obj, &content.product, profile)
+                .await?
+                .unwrap_or_default();
+    }
     Ok(request)
 }
 
