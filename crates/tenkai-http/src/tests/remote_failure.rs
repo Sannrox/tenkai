@@ -70,7 +70,7 @@ async fn failed_apply_steps_are_rejected_not_reported_as_applied() {
     client.promote_release("api@1.0.0", "stable").await.unwrap();
     let generation = current_generation(&client, "stage").await;
     client
-        .subscribe_environment("stage", "api=stable", generation)
+        .subscribe_environment("stage", "api=stable", generation, None)
         .await
         .unwrap();
     let plan = client.plan_environment("stage", generation).await.unwrap();

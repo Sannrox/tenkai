@@ -516,7 +516,7 @@ async fn restart_retries_failed_health_gate(
     let env = crate::environment::environment(ctx, environment).await?;
     Ok(env
         .properties
-        .get(&format!("failed_target.{}", step.product))
+        .get(&format!("failed_target.{}", step.instance_name()))
         == Some(&step.release_id))
 }
 
@@ -721,6 +721,7 @@ mod tests {
             id: "step-1".into(),
             order: 0,
             product: "api".into(),
+            instance: String::new(),
             action,
             from: Some("1.0.0".into()),
             to: "1.1.0".into(),

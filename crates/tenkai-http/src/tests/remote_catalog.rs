@@ -118,6 +118,7 @@ async fn remote_catalog_lifecycle_publish_promote_subscribe_and_recall() {
                         environment: "stage".into(),
                         expected_generation: generation,
                         spec: "api=stable".into(),
+                        instance: None,
                     })
                     .unwrap(),
                 ))
@@ -179,6 +180,7 @@ async fn remote_catalog_lifecycle_publish_promote_subscribe_and_recall() {
                         environment: "prod".into(),
                         expected_generation: 0,
                         spec: "api=stable".into(),
+                        instance: None,
                     })
                     .unwrap(),
                 ))

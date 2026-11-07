@@ -146,6 +146,8 @@ impl FixtureEnvironmentProjection {
                 };
                 crate::plan::StatusRow {
                     product: projection.product.clone(),
+
+                    instance: projection.product.clone(),
                     channel: projection.channel.clone(),
                     deployed,
                     health,
@@ -173,6 +175,7 @@ impl FixtureEnvironmentProjection {
                 }
                 .into(),
                 product: row.product,
+                instance: row.instance,
                 channel: row.channel,
                 head: row.head,
                 deployed: row.deployed,

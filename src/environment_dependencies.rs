@@ -681,6 +681,8 @@ mod tests {
             BTreeMap::from([("app".into(), product("1.0.0", "current", deployed_app))]);
         let row = StatusRow {
             product: "app".into(),
+
+            instance: "app".into(),
             channel: "stable".into(),
             deployed: Some("1.0.0".into()),
             health: None,

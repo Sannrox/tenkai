@@ -222,6 +222,7 @@ pub(super) async fn create_pin_plan(
         id: String::new(),
         order: 0,
         product: pin.product.clone(),
+        instance: String::new(),
         action,
         from: deployed,
         to: pin.version.clone(),

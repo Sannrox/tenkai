@@ -354,6 +354,7 @@ mod tests {
             id: "s0".into(),
             order: 0,
             product: product.into(),
+            instance: String::new(),
             action: Action::Upgrade,
             from: Some("1.0.0".into()),
             to: "1.1.0".into(),

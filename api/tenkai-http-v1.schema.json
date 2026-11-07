@@ -2524,6 +2524,11 @@
         "id": {
           "type": "string"
         },
+        "instance": {
+          "default": "",
+          "description": "Instance this step applies to. Equals `product` when unnamed.",
+          "type": "string"
+        },
         "order": {
           "format": "uint32",
           "minimum": 0,
@@ -2849,6 +2854,11 @@
             "string",
             "null"
           ]
+        },
+        "instance": {
+          "default": "",
+          "description": "Instance this subscription names. Equals `product` when unnamed.",
+          "type": "string"
         },
         "overlay_digest": {
           "default": null,
@@ -5931,6 +5941,11 @@
             "null"
           ]
         },
+        "instance": {
+          "default": "",
+          "description": "Instance this row describes. Equals `product` when unnamed (ADR 0044 §1).",
+          "type": "string"
+        },
         "overlay_stale": {
           "default": false,
           "type": "boolean"
@@ -5956,6 +5971,10 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "instance": {
+          "description": "Named instance; omitted or empty defaults to the product.",
+          "type": "string"
         },
         "operation": {
           "type": "string"
@@ -6230,6 +6249,10 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "instance": {
+          "description": "Named instance; omitted or empty defaults to the product.",
+          "type": "string"
         },
         "operation": {
           "type": "string"

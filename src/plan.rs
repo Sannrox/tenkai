@@ -35,7 +35,7 @@ pub use crate::environment::{
     reconcile_deployment, require_environment_fact, set_artifact_mirror, set_cluster_config_path,
     set_docker_secret_dir, set_environment_constraint, set_environment_fact,
     set_environment_overlay, set_plan_approval_policy, status, status_state, subscribe,
-    subscription_state,
+    subscribe_instance, subscription_state,
 };
 pub(crate) use crate::environment::{
     inspect_environment_for_policy, update_runtime_deployments_object,
@@ -91,6 +91,10 @@ pub struct Step {
     pub id: String,
     pub order: u32,
     pub product: String,
+    /// Instance this step applies to. Empty means the product name, omitted
+    /// from the encoding so default-named plan digests stay unchanged.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instance: String,
     pub action: Action,
     pub from: Option<String>,
     pub to: String,
@@ -105,6 +109,28 @@ pub struct Step {
     /// drops it, computes a different digest, and fails approval closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<HostStep>,
+}
+
+impl Step {
+    /// Instance this step applies to. Empty `instance` means the product.
+    pub fn instance_name(&self) -> &str {
+        if self.instance.is_empty() {
+            &self.product
+        } else {
+            &self.instance
+        }
+    }
+}
+
+impl DesiredStateInput {
+    /// Instance this input applies to. Empty `instance` means the product.
+    pub fn instance_name(&self) -> &str {
+        if self.instance.is_empty() {
+            &self.product
+        } else {
+            &self.instance
+        }
+    }
 }
 
 /// What a host step authorizes the root-side applier to do (ADR 0041).
@@ -160,6 +186,9 @@ pub struct ReleasePin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesiredStateInput {
     pub product: String,
+    /// Instance this input applies to. Empty means the product name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instance: String,
     pub channel: String,
     pub channel_id: String,
     pub desired_version: String,
@@ -661,6 +690,8 @@ mod tests {
             created_at: 123,
             inputs: vec![DesiredStateInput {
                 product: "api".into(),
+
+                instance: String::new(),
                 channel: "stable".into(),
                 channel_id: "tenkai:channel:api/stable".into(),
                 desired_version: "2.0.0".into(),
@@ -673,6 +704,7 @@ mod tests {
                 id: String::new(),
                 order: 0,
                 product: "api".into(),
+                instance: String::new(),
                 action: Action::Upgrade,
                 from: Some("1.0.0".into()),
                 to: "2.0.0".into(),
@@ -707,6 +739,39 @@ mod tests {
         plan.id = plan_id(&plan.environment, plan.created_at, &plan.content_id);
         plan.steps[0].id = format!("{}:step:0", plan.id);
         plan
+    }
+
+    #[test]
+    fn empty_instance_is_omitted_from_plan_encoding() {
+        let default = example_plan();
+        let mut named = example_plan();
+        named.steps[0].instance = "api-a".into();
+        named.inputs[0].instance = "api-a".into();
+        let default_json = serde_json::to_value(&default.steps[0]).unwrap();
+        let named_json = serde_json::to_value(&named.steps[0]).unwrap();
+        assert!(default_json.get("instance").is_none(), "{default_json}");
+        assert_eq!(
+            named_json.get("instance").and_then(|v| v.as_str()),
+            Some("api-a")
+        );
+        assert_ne!(
+            content_address(
+                &default.environment,
+                default.created_at,
+                &default.inputs,
+                &default.steps,
+                None,
+            )
+            .unwrap(),
+            content_address(
+                &named.environment,
+                named.created_at,
+                &named.inputs,
+                &named.steps,
+                None,
+            )
+            .unwrap()
+        );
     }
 
     #[test]

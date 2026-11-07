@@ -299,6 +299,8 @@ mod tests {
             } else {
                 vec![EnvironmentSubscriptionView {
                     product: "api".into(),
+
+                    instance: "api".into(),
                     channel: "stable".into(),
                     head: head.into(),
                     deployed: deployed.map(str::to_string),

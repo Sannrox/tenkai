@@ -503,6 +503,8 @@ mod tests {
 
         let inputs = vec![DesiredStateInput {
             product: "api".into(),
+
+            instance: String::new(),
             channel: "stable".into(),
             channel_id: "tenkai:channel:api/stable".into(),
             desired_version: to.into(),
@@ -515,6 +517,7 @@ mod tests {
             id: String::new(),
             order: 0,
             product: "api".into(),
+            instance: String::new(),
             action: Action::Upgrade,
             from: Some(from.into()),
             to: to.into(),

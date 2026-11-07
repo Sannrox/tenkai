@@ -712,6 +712,7 @@ inputs = ["manifests"]
                 id: "s0".into(),
                 order: 0,
                 product: "demo".into(),
+                instance: String::new(),
                 action: Action::Install,
                 from: None,
                 to: "0.1.0".into(),

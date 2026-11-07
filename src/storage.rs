@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: u32 = 13;
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// Retention cutoff for environment-execution claim change rows (#874).
 pub const CATALOG_HISTORY_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;

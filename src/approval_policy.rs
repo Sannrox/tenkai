@@ -1170,6 +1170,8 @@ mod tests {
             created_at,
             inputs: vec![DesiredStateInput {
                 product: product.into(),
+
+                instance: String::new(),
                 channel: "stable".into(),
                 channel_id: "tenkai:channel:api/stable".into(),
                 desired_version: "1.0.0".into(),
@@ -1182,6 +1184,7 @@ mod tests {
                 id: "step-0".into(),
                 order: 0,
                 product: product.into(),
+                instance: String::new(),
                 action,
                 from: None,
                 to: "1.0.0".into(),

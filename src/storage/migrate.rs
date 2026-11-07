@@ -283,7 +283,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     let current: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if current < SCHEMA_VERSION {
         let tx = connection.transaction()?;
-        tx.execute_batch("PRAGMA user_version = 13;")?;
+        tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
         tx.commit()?;
     }
     Ok(())

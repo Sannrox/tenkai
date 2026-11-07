@@ -439,6 +439,8 @@ mod tests {
             description: "ok".into(),
             subscriptions: vec![EnvironmentSubscriptionView {
                 product: "api".into(),
+
+                instance: "api".into(),
                 channel: "stable".into(),
                 head: "1.0.0".into(),
                 deployed: Some("1.0.0".into()),
@@ -489,6 +491,8 @@ mod tests {
             description: "drift".into(),
             subscriptions: vec![EnvironmentSubscriptionView {
                 product: "api".into(),
+
+                instance: "api".into(),
                 channel: "stable".into(),
                 head: "2.0.0".into(),
                 deployed: Some("1.0.0".into()),
@@ -529,6 +533,8 @@ mod tests {
             description: "bad".into(),
             subscriptions: vec![EnvironmentSubscriptionView {
                 product: "api".into(),
+
+                instance: "api".into(),
                 channel: "stable".into(),
                 head: "1.0.0".into(),
                 deployed: Some("1.0.0".into()),
@@ -624,6 +630,8 @@ mod tests {
             description: "overlay".into(),
             subscriptions: vec![EnvironmentSubscriptionView {
                 product: "api".into(),
+
+                instance: "api".into(),
                 channel: "stable".into(),
                 head: "1.0.0".into(),
                 deployed: Some("1.0.0".into()),

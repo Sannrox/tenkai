@@ -20,6 +20,7 @@ fn plan_with_steps(id: &str, environment: &str, steps: u32) -> Plan {
                 id: uuid::Uuid::new_v4().to_string(),
                 order,
                 product: format!("product-{order}"),
+                instance: String::new(),
                 action: Action::Install,
                 from: None,
                 to: "1.0.0".into(),

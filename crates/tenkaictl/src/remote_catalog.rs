@@ -105,13 +105,14 @@ pub(crate) async fn run(
                 EnvCommand::Unsubscribe {
                     env,
                     product,
+                    instance,
                     generation,
                 },
         } => {
             let generation = generation
                 .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;
             let result = client
-                .unsubscribe_environment(&env, &product, generation)
+                .unsubscribe_environment(&env, &product, generation, instance.as_deref())
                 .await?;
             println!("{}", result.message);
             Ok(())
@@ -121,13 +122,14 @@ pub(crate) async fn run(
                 EnvCommand::Subscribe {
                     env,
                     spec,
+                    instance,
                     generation,
                 },
         } => {
             let generation = generation
                 .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;
             let result = client
-                .subscribe_environment(&env, &spec, generation)
+                .subscribe_environment(&env, &spec, generation, instance.as_deref())
                 .await
                 .map_err(|error| {
                     with_remote_resources(

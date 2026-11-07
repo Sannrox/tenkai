@@ -21,6 +21,7 @@ pub const KIND_PLAN_APPROVAL_VERIFICATION: &str = "tenkai.plan_approval_verifica
 pub const KIND_PLAN_APPROVAL_ENVELOPE: &str = "tenkai.plan_approval_envelope";
 pub const KIND_ENVIRONMENT_EXECUTION: &str = "tenkai.environment_execution";
 pub const KIND_DEPLOYMENT: &str = "tenkai.deployment";
+pub const KIND_INSTANCE: &str = "tenkai.instance";
 pub const KIND_HEALTH_GATE_EVIDENCE: &str = "tenkai.health_gate_evidence";
 pub const KIND_CANARY_DESIGNATION: &str = "tenkai.canary_designation";
 pub const KIND_CANARY_POLICY: &str = "tenkai.canary_policy";
@@ -39,6 +40,7 @@ pub const REL_RELEASE_OF: &str = "release_of";
 pub const REL_HAS_RELEASE_VERIFICATION: &str = "has_release_verification";
 pub const REL_PROMOTES: &str = "promotes";
 pub const REL_SUBSCRIBES: &str = "subscribes";
+pub const REL_HAS_INSTANCE: &str = "has_instance";
 pub const REL_DEPLOYED_RELEASE: &str = "deployed_release";
 pub const REL_IN_ENVIRONMENT: &str = "in_environment";
 pub const REL_PART_OF_PLAN: &str = "part_of_plan";
@@ -133,6 +135,40 @@ pub fn plan_id(env: &str, ts: i64, content_id: &str) -> String {
 pub fn deployment_id(env: &str, product: &str, ts: i64) -> String {
     format!("tenkai:deployment:{env}:{product}:{ts}")
 }
+
+/// One named instance of a product in an environment (ADR 0044 §1).
+pub fn instance_id(env: &str, name: &str) -> String {
+    format!("tenkai:instance:{env}:{name}")
+}
+
+/// Explicit instance names are DNS labels of at most 40 characters.
+/// Default instance names equal the product and are not re-validated.
+pub fn validate_instance_name(name: &str) -> Result<()> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        bail!("instance name must be a DNS label of at most 40 characters");
+    };
+    if name.len() > 40
+        || !first.is_ascii_alphanumeric()
+        || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        || name.ends_with('-')
+    {
+        bail!("instance name must be a DNS label of at most 40 characters");
+    }
+    Ok(())
+}
+
+/// `instance` when set, otherwise the product name (ADR 0044 §1 default).
+pub fn instance_or_product(instance: Option<&str>, product: &str) -> Result<String> {
+    match instance.map(str::trim).filter(|name| !name.is_empty()) {
+        None => Ok(product.to_string()),
+        Some(name) if name == product => Ok(product.to_string()),
+        Some(name) => {
+            validate_instance_name(name)?;
+            Ok(name.to_string())
+        }
+    }
+}
 pub fn health_gate_evidence_id(plan_id: &str, step_id: &str) -> String {
     format!("{plan_id}:health-gate:{step_id}")
 }
@@ -147,6 +183,32 @@ mod tests {
         assert!(validate_identifier("product", "api@1").is_err());
         assert!(validate_identifier("environment", "prod:eu").is_err());
         assert!(validate_identifier("channel", "stable/eu").is_err());
+    }
+
+    #[test]
+    fn instance_names_are_dns_labels() {
+        assert!(validate_instance_name("db-a").is_ok());
+        assert!(validate_instance_name("a").is_ok());
+        assert!(validate_instance_name(&"a".repeat(40)).is_ok());
+        assert!(validate_instance_name("").is_err());
+        assert!(validate_instance_name("-db").is_err());
+        assert!(validate_instance_name("db-").is_err());
+        assert!(validate_instance_name("db_a").is_err());
+        assert!(validate_instance_name(&"a".repeat(41)).is_err());
+    }
+
+    #[test]
+    fn instance_or_product_defaults_and_validates() {
+        assert_eq!(instance_or_product(None, "database").unwrap(), "database");
+        assert_eq!(
+            instance_or_product(Some("database"), "database").unwrap(),
+            "database"
+        );
+        assert_eq!(
+            instance_or_product(Some("db-a"), "database").unwrap(),
+            "db-a"
+        );
+        assert!(instance_or_product(Some("db_a"), "database").is_err());
     }
 
     #[test]

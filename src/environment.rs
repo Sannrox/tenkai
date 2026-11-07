@@ -351,7 +351,8 @@ pub async fn reconcile_deployment(
         }
         _ => Vec::new(),
     };
-    update_reconciled_deployment_object(ctx, &mut object, product, deployed, observed_at).await?;
+    update_reconciled_deployment_object(ctx, &mut object, product, product, deployed, observed_at)
+        .await?;
     ctx.put_with_provider_events(object, &provider_events, &feedback)
         .await?;
     Ok(match deployed {
@@ -364,9 +365,15 @@ async fn update_reconciled_deployment_object(
     ctx: &mut Ctx,
     object: &mut Object,
     product: &str,
+    instance: &str,
     deployed: Option<&str>,
     observed_at: i64,
 ) -> Result<()> {
+    let key = if instance.is_empty() {
+        product
+    } else {
+        instance
+    };
     match deployed {
         Some(version) => {
             validate_identifier("version", version)?;
@@ -376,35 +383,29 @@ async fn update_reconciled_deployment_object(
             }
             object
                 .properties
-                .insert(format!("deployed.{product}"), version.into());
+                .insert(format!("deployed.{key}"), version.into());
             object
                 .properties
-                .insert(format!("deployed_release.{product}"), release);
+                .insert(format!("deployed_release.{key}"), release);
         }
         None => {
-            object.properties.remove(&format!("deployed.{product}"));
-            object
-                .properties
-                .remove(&format!("deployed_release.{product}"));
+            object.properties.remove(&format!("deployed.{key}"));
+            object.properties.remove(&format!("deployed_release.{key}"));
         }
     }
     object
         .properties
-        .insert(format!("deployment_health.{product}"), "healthy".into());
-    object
-        .properties
-        .remove(&format!("deployment_error.{product}"));
+        .insert(format!("deployment_health.{key}"), "healthy".into());
+    object.properties.remove(&format!("deployment_error.{key}"));
     stamp_applied_overlays(object, product);
     crate::dependency_document::stamp(ctx, object, product).await?;
-    object
-        .properties
-        .remove(&format!("deployed_prev.{product}"));
+    object.properties.remove(&format!("deployed_prev.{key}"));
     for prefix in [
         "deployment_unknown_plan.",
         "deployment_unknown_step.",
         "deployment_unknown_attempt.",
     ] {
-        object.properties.remove(&format!("{prefix}{product}"));
+        object.properties.remove(&format!("{prefix}{key}"));
     }
     object.updated = observed_at;
     Ok(())
@@ -418,12 +419,13 @@ pub(crate) async fn update_runtime_deployments_object(
 ) -> Result<()> {
     for step in steps {
         validate_identifier("product", &step.product)?;
-        let previous_key = format!("deployed_prev.{}", step.product);
+        let previous_key = format!("deployed_prev.{}", step.instance_name());
         let kept_previous = object.properties.get(&previous_key).cloned();
         update_reconciled_deployment_object(
             ctx,
             object,
             &step.product,
+            step.instance_name(),
             Some(&step.to),
             observed_at,
         )
@@ -450,28 +452,32 @@ pub(crate) async fn record_deployed(
     lease: &crate::apply::EnvironmentLease,
     environment_name: &str,
     product: &str,
+    instance: &str,
     version: &str,
     previous: Option<&str>,
 ) -> Result<()> {
+    let key = if instance.is_empty() {
+        product
+    } else {
+        instance
+    };
     let mut object = environment(ctx, environment_name).await?;
     object
         .properties
-        .insert(format!("deployed.{product}"), version.to_string());
+        .insert(format!("deployed.{key}"), version.to_string());
     object.properties.insert(
-        format!("deployed_release.{product}"),
+        format!("deployed_release.{key}"),
         release_id(product, version),
     );
     if let Some(previous) = previous {
         object
             .properties
-            .insert(format!("deployed_prev.{product}"), previous.to_string());
+            .insert(format!("deployed_prev.{key}"), previous.to_string());
     }
     object
         .properties
-        .insert(format!("deployment_health.{product}"), "healthy".into());
-    object
-        .properties
-        .remove(&format!("deployment_error.{product}"));
+        .insert(format!("deployment_health.{key}"), "healthy".into());
+    object.properties.remove(&format!("deployment_error.{key}"));
     stamp_applied_overlays(&mut object, product);
     crate::dependency_document::stamp(ctx, &mut object, product).await?;
     object.updated = crate::now_millis();
@@ -483,17 +489,19 @@ pub(crate) async fn record_unknown(
     lease: &crate::apply::EnvironmentLease,
     environment_name: &str,
     product: &str,
+    instance: &str,
     detail: &str,
 ) -> Result<()> {
     let mut object = environment(ctx, environment_name).await?;
     transition_deployment(
         &mut object,
         product,
+        instance,
         &DeploymentTransition::Unknown,
         detail,
         crate::now_millis(),
     );
-    clear_unknown_origin(&mut object, product);
+    clear_unknown_origin(&mut object, instance);
     guarded_update(ctx, lease, object).await
 }
 
@@ -503,11 +511,8 @@ pub(crate) async fn record_deployment_observation(
     observation: DeploymentObservation<'_>,
 ) -> Result<()> {
     let observed_at = crate::now_millis();
-    let attempt_id = deployment_id(
-        observation.environment,
-        &observation.step.product,
-        observed_at,
-    );
+    let instance = observation.step.instance_name();
+    let attempt_id = deployment_id(observation.environment, instance, observed_at);
     let mut deployment = Object {
         id: attempt_id.clone(),
         kind: KIND_DEPLOYMENT.into(),
@@ -523,6 +528,7 @@ pub(crate) async fn record_deployment_observation(
         properties: HashMap::from([
             ("environment".into(), observation.environment.to_string()),
             ("product".into(), observation.step.product.clone()),
+            ("instance".into(), instance.to_string()),
             (
                 "from_version".into(),
                 observation.step.from.clone().unwrap_or_default(),
@@ -578,18 +584,19 @@ pub(crate) async fn record_deployment_observation(
     let failed_target_before = environment.as_ref().and_then(|environment| {
         environment
             .properties
-            .get(&failed_target_key(&observation.step.product))
+            .get(&failed_target_key(instance))
             .cloned()
     });
     if let Some(environment) = environment.as_mut() {
         transition_deployment(
             environment,
             &observation.step.product,
+            instance,
             &observation.transition,
             observation.detail,
             deployment.updated,
         );
-        let failed_target_key = self::failed_target_key(&observation.step.product);
+        let failed_target_key = self::failed_target_key(instance);
         if matches!(observation.status, "failed" | "rolled_back")
             && observation.step.action != crate::plan::Action::Rollback
         {
@@ -598,16 +605,16 @@ pub(crate) async fn record_deployment_observation(
                 observation.step.release_id.clone(),
             );
             environment.properties.insert(
-                format!("failed_target_plan.{}", observation.step.product),
+                format!("failed_target_plan.{instance}"),
                 observation.plan_id.into(),
             );
             environment.properties.insert(
-                format!("failed_target_at.{}", observation.step.product),
+                format!("failed_target_at.{instance}"),
                 deployment.updated.to_string(),
             );
             record_failed_target_error(
                 &mut environment.properties,
-                &observation.step.product,
+                instance,
                 &observation.step.release_id,
                 observation.detail,
             );
@@ -623,19 +630,19 @@ pub(crate) async fn record_deployment_observation(
             environment.properties.remove(&failed_target_key);
             environment
                 .properties
-                .remove(&format!("failed_target_plan.{}", observation.step.product));
+                .remove(&format!("failed_target_plan.{instance}"));
         }
         if observation.transition == DeploymentTransition::Unknown {
             environment.properties.insert(
-                format!("deployment_unknown_plan.{}", observation.step.product),
+                format!("deployment_unknown_plan.{instance}"),
                 observation.plan_id.into(),
             );
             environment.properties.insert(
-                format!("deployment_unknown_step.{}", observation.step.product),
+                format!("deployment_unknown_step.{instance}"),
                 observation.step.id.clone(),
             );
             environment.properties.insert(
-                format!("deployment_unknown_attempt.{}", observation.step.product),
+                format!("deployment_unknown_attempt.{instance}"),
                 attempt_id.clone(),
             );
         }
@@ -827,88 +834,111 @@ fn clear_unknown_origin(environment: &mut Object, product: &str) {
 fn transition_deployment(
     environment: &mut Object,
     product: &str,
+    instance: &str,
     transition: &DeploymentTransition,
     detail: &str,
     observed_at: i64,
 ) {
+    let key = if instance.is_empty() {
+        product
+    } else {
+        instance
+    };
     match transition {
         DeploymentTransition::Unchanged => return,
         DeploymentTransition::Refreshed => {
             environment
                 .properties
-                .insert(format!("deployment_health.{product}"), "healthy".into());
+                .insert(format!("deployment_health.{key}"), "healthy".into());
             environment
                 .properties
-                .remove(&format!("deployment_error.{product}"));
+                .remove(&format!("deployment_error.{key}"));
             stamp_applied_overlays(environment, product);
-            clear_unknown_origin(environment, product);
+            clear_unknown_origin(environment, key);
         }
         DeploymentTransition::Deployed { version, previous } => {
             environment
                 .properties
-                .insert(format!("deployed.{product}"), version.clone());
+                .insert(format!("deployed.{key}"), version.clone());
             environment.properties.insert(
-                format!("deployed_release.{product}"),
+                format!("deployed_release.{key}"),
                 release_id(product, version),
             );
             if let Some(previous) = previous {
                 environment
                     .properties
-                    .insert(format!("deployed_prev.{product}"), previous.clone());
+                    .insert(format!("deployed_prev.{key}"), previous.clone());
             }
             environment
                 .properties
-                .insert(format!("deployment_health.{product}"), "healthy".into());
+                .insert(format!("deployment_health.{key}"), "healthy".into());
             environment
                 .properties
-                .remove(&format!("deployment_error.{product}"));
+                .remove(&format!("deployment_error.{key}"));
             stamp_applied_overlays(environment, product);
-            clear_unknown_origin(environment, product);
+            clear_unknown_origin(environment, key);
         }
         DeploymentTransition::Removed { version } => {
-            for key in [
+            for prefix in [
                 "deployed",
                 "deployed_release",
                 "deployment_health",
                 "deployment_error",
                 "applied_dependencies",
             ] {
-                environment.properties.remove(&format!("{key}.{product}"));
+                environment.properties.remove(&format!("{prefix}.{key}"));
             }
             environment
                 .properties
-                .insert(format!("deployed_prev.{product}"), version.clone());
-            clear_unknown_origin(environment, product);
+                .insert(format!("deployed_prev.{key}"), version.clone());
+            clear_unknown_origin(environment, key);
         }
         DeploymentTransition::Unknown => {
+            environment.properties.remove(&format!("deployed.{key}"));
             environment
                 .properties
-                .remove(&format!("deployed.{product}"));
+                .remove(&format!("deployed_release.{key}"));
             environment
                 .properties
-                .remove(&format!("deployed_release.{product}"));
+                .insert(format!("deployment_health.{key}"), "unknown".into());
             environment
                 .properties
-                .insert(format!("deployment_health.{product}"), "unknown".into());
-            environment
-                .properties
-                .insert(format!("deployment_error.{product}"), detail.into());
+                .insert(format!("deployment_error.{key}"), detail.into());
         }
     }
     environment.updated = observed_at;
 }
 
 /// Subscribe an environment to a product channel. The channel must exist.
+/// `instance` defaults to the product name (ADR 0044 §1).
 pub async fn subscribe(ctx: &mut Ctx, env: &str, product: &str, channel: &str) -> Result<String> {
+    subscribe_instance(ctx, env, product, channel, None).await
+}
+
+/// Subscribe a named instance of `product` in `env` to `channel`.
+pub async fn subscribe_instance(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    channel: &str,
+    instance: Option<&str>,
+) -> Result<String> {
     validate_identifier("environment", env)?;
     validate_identifier("product", product)?;
     validate_identifier("channel", channel)?;
+    let instance = instance_or_product(instance, product)?;
     let eid = env_id(env);
     let existing = active_environment(ctx, env).await?;
     crate::preview::refuse_channel_promotion(&existing)?;
     let cid = channel_id(product, channel);
     if ctx.get(&cid).await?.is_none() {
         bail!("channel {product}/{channel} does not exist — promote a release into it first");
+    }
+    if instance != product {
+        return subscribe_named_instance(ctx, env, product, channel, &instance, &eid, &cid).await;
+    }
+    if named_instance_exists(ctx, &eid, &instance).await? {
+        bail!("environment {env} already has instance {instance}");
     }
     let links = ctx.links(&eid, REL_SUBSCRIBES).await?;
     let mut existing = Vec::new();
@@ -938,6 +968,84 @@ pub async fn subscribe(ctx: &mut Ctx, env: &str, product: &str, channel: &str) -
     Ok(format!("{env} subscribed to {product}/{channel}"))
 }
 
+async fn subscribe_named_instance(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    channel: &str,
+    instance: &str,
+    eid: &str,
+    cid: &str,
+) -> Result<String> {
+    let iid = instance_id(env, instance);
+    if let Some(existing) = ctx.get(&iid).await? {
+        if existing.properties.get("product").map(String::as_str) != Some(product) {
+            bail!("environment {env} already has instance {instance}");
+        }
+        let links = ctx.links(&iid, REL_SUBSCRIBES).await?;
+        if links.iter().any(|link| link.to_id == cid) {
+            return Ok(format!(
+                "{env} instance {instance} already subscribed to {product}/{channel}"
+            ));
+        }
+        for link in links {
+            ctx.unlink(&iid, &link.to_id, REL_SUBSCRIBES).await?;
+        }
+        ctx.link(eid, &iid, REL_HAS_INSTANCE).await?;
+        ctx.link(&iid, cid, REL_SUBSCRIBES).await?;
+        return Ok(format!(
+            "{env} instance {instance} subscribed to {product}/{channel}"
+        ));
+    }
+    for linked in ctx.linked(eid, REL_HAS_INSTANCE, "out").await? {
+        if linked.properties.get("name").map(String::as_str) == Some(instance) {
+            bail!("environment {env} already has instance {instance}");
+        }
+    }
+    if default_instance_exists(ctx, eid, instance).await? {
+        bail!("environment {env} already has instance {instance}");
+    }
+    let now = crate::now_millis();
+    ctx.put(Object {
+        id: iid.clone(),
+        kind: KIND_INSTANCE.into(),
+        name: instance.to_string(),
+        namespace: NS.into(),
+        external_id: String::new(),
+        properties: HashMap::from([
+            ("environment".into(), env.to_string()),
+            ("name".into(), instance.to_string()),
+            ("product".into(), product.to_string()),
+        ]),
+        created: now,
+        updated: now,
+    })
+    .await?;
+    ctx.link(eid, &iid, REL_HAS_INSTANCE).await?;
+    ctx.link(&iid, cid, REL_SUBSCRIBES).await?;
+    Ok(format!(
+        "{env} instance {instance} subscribed to {product}/{channel}"
+    ))
+}
+
+async fn named_instance_exists(ctx: &mut Ctx, eid: &str, instance: &str) -> Result<bool> {
+    for linked in ctx.linked(eid, REL_HAS_INSTANCE, "out").await? {
+        if linked.properties.get("name").map(String::as_str) == Some(instance) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn default_instance_exists(ctx: &mut Ctx, eid: &str, instance: &str) -> Result<bool> {
+    for channel in ctx.linked(eid, REL_SUBSCRIBES, "out").await? {
+        if channel.properties.get("product").map(String::as_str) == Some(instance) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Remove `product` from `env`'s desired state. When a release of it is
 /// deployed, it must be a `host` release: the next approved plan uninstalls
 /// it through the root-side applier (ADR 0041 section 2). Removing a
@@ -957,11 +1065,24 @@ pub async fn unsubscribe(
     executors: &crate::software_executor::SoftwareExecutors,
     fence: impl FnOnce(u64) -> Result<()>,
 ) -> Result<String> {
+    unsubscribe_instance(ctx, env, product, None, executors, fence).await
+}
+
+/// Remove a named instance, or the default instance when `instance` is omitted.
+pub async fn unsubscribe_instance(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    instance: Option<&str>,
+    executors: &crate::software_executor::SoftwareExecutors,
+    fence: impl FnOnce(u64) -> Result<()>,
+) -> Result<String> {
     validate_identifier("environment", env)?;
+    let instance = instance_or_product(instance, product)?;
     let lease =
-        crate::apply::claim_environment(ctx, env, &format!("unsubscribe:{product}")).await?;
+        crate::apply::claim_environment(ctx, env, &format!("unsubscribe:{instance}")).await?;
     let unsubscribed = match fence(lease.generation.saturating_sub(1)) {
-        Ok(()) => unsubscribe_held(ctx, env, product, executors).await,
+        Ok(()) => unsubscribe_held(ctx, env, product, &instance, executors).await,
         Err(error) => Err(error),
     };
     let released = crate::apply::release_environment(ctx, &lease).await;
@@ -986,6 +1107,7 @@ async fn unsubscribe_held(
     ctx: &mut Ctx,
     env: &str,
     product: &str,
+    instance: &str,
     executors: &crate::software_executor::SoftwareExecutors,
 ) -> Result<String> {
     validate_identifier("environment", env)?;
@@ -995,7 +1117,7 @@ async fn unsubscribe_held(
     let property = |key: &str| {
         existing
             .properties
-            .get(&format!("{key}.{product}"))
+            .get(&format!("{key}.{instance}"))
             .cloned()
     };
     // What may be on the host: the deployed release, and a release whose
@@ -1009,14 +1131,14 @@ async fn unsubscribe_held(
     .collect();
     if candidates.is_empty() && property("deployment_health").as_deref() == Some("unknown") {
         bail!(
-            "deployment state of {product} in {env} is unknown; record it with `tenkaictl env reconcile` before unsubscribing"
+            "deployment state of {instance} in {env} is unknown; record it with `tenkaictl env reconcile` before unsubscribing"
         );
     }
     for release in &candidates {
         let executor = crate::plan::stored_release_executor(ctx, release).await?;
         if executor != Some(crate::software_executor::SoftwareExecutorKind::Host) {
             bail!(
-                "{product} is deployed in {env} from {release}, which is not a host release; only host releases are removed by a plan"
+                "{instance} is deployed in {env} from {release}, which is not a host release; only host releases are removed by a plan"
             );
         }
     }
@@ -1024,24 +1146,42 @@ async fn unsubscribe_held(
         // Only the host executor can plan the uninstall this promises.
         executors.host()?;
     }
-    let mut removed = 0;
-    for link in ctx.links(&eid, REL_SUBSCRIBES).await? {
-        let channel = ctx
-            .get(&link.to_id)
-            .await?
-            .with_context(|| format!("subscription link {} has no channel", link.id))?;
-        if channel.properties.get("product").map(String::as_str) == Some(product) {
-            ctx.unlink(&eid, &link.to_id, REL_SUBSCRIBES).await?;
-            removed += 1;
+    let removed = if instance == product {
+        let mut removed = 0;
+        for link in ctx.links(&eid, REL_SUBSCRIBES).await? {
+            let channel = ctx
+                .get(&link.to_id)
+                .await?
+                .with_context(|| format!("subscription link {} has no channel", link.id))?;
+            if channel.properties.get("product").map(String::as_str) == Some(product) {
+                ctx.unlink(&eid, &link.to_id, REL_SUBSCRIBES).await?;
+                removed += 1;
+            }
         }
-    }
+        removed
+    } else {
+        let iid = instance_id(env, instance);
+        match ctx.get(&iid).await? {
+            Some(object)
+                if object.properties.get("product").map(String::as_str) == Some(product) =>
+            {
+                ctx.unlink(&eid, &iid, REL_HAS_INSTANCE).await?;
+                for link in ctx.links(&iid, REL_SUBSCRIBES).await? {
+                    ctx.unlink(&iid, &link.to_id, REL_SUBSCRIBES).await?;
+                }
+                ctx.delete(&iid).await?;
+                1
+            }
+            Some(_) | None => 0,
+        }
+    };
     if removed == 0 {
-        return Ok(format!("{env} is not subscribed to {product}"));
+        return Ok(format!("{env} is not subscribed to {instance}"));
     }
     Ok(if candidates.is_empty() {
-        format!("{env} unsubscribed from {product}")
+        format!("{env} unsubscribed from {instance}")
     } else {
-        format!("{env} unsubscribed from {product}; the next approved plan uninstalls it")
+        format!("{env} unsubscribed from {instance}; the next approved plan uninstalls it")
     })
 }
 
@@ -1178,6 +1318,9 @@ pub async fn list_environment_constraints(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StatusRow {
     pub product: String,
+    /// Instance this row describes. Equals `product` when unnamed (ADR 0044 §1).
+    #[serde(default)]
+    pub instance: String,
     pub channel: String,
     pub deployed: Option<String>,
     pub health: Option<String>,
@@ -1433,6 +1576,9 @@ pub struct EnvironmentConstraint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnvironmentSubscriptionView {
     pub product: String,
+    /// Instance this subscription names. Equals `product` when unnamed.
+    #[serde(default)]
+    pub instance: String,
     pub channel: String,
     pub head: String,
     pub deployed: Option<String>,
@@ -1481,10 +1627,87 @@ pub struct EnvironmentPlanStepSummary {
     pub id: String,
     pub order: u32,
     pub product: String,
+    /// Instance this step applies to. Equals `product` when unnamed.
+    #[serde(default)]
+    pub instance: String,
     pub action: String,
     pub from: Option<String>,
     pub to: String,
     pub release_id: String,
+}
+
+/// One channel subscription, keyed by instance (ADR 0044 §1).
+pub(crate) struct Subscription {
+    pub instance: String,
+    pub product: String,
+    pub channel: Object,
+}
+
+fn product_of_channel(channel: &Object) -> String {
+    channel
+        .properties
+        .get("product")
+        .cloned()
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            channel
+                .id
+                .strip_prefix("tenkai:channel:")
+                .and_then(|rest| rest.split_once('/'))
+                .map(|(product, _)| product.to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// Default (env→channel) subscriptions plus named instance subscriptions.
+pub(crate) async fn list_subscriptions(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+) -> Result<Vec<Subscription>> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for instance in ctx.linked(&env_obj.id, REL_HAS_INSTANCE, "out").await? {
+        let name = instance
+            .properties
+            .get("name")
+            .cloned()
+            .unwrap_or_else(|| instance.name.clone());
+        let product = instance
+            .properties
+            .get("product")
+            .cloned()
+            .unwrap_or_default();
+        let channels = ctx.linked(&instance.id, REL_SUBSCRIBES, "out").await?;
+        let Some(channel) = channels.into_iter().next() else {
+            continue;
+        };
+        let product = if product.is_empty() {
+            product_of_channel(&channel)
+        } else {
+            product
+        };
+        if !seen.insert(name.clone()) {
+            bail!("environment {} has duplicate instance {name}", env_obj.name);
+        }
+        out.push(Subscription {
+            instance: name,
+            product,
+            channel,
+        });
+    }
+    for channel in ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await? {
+        let product = product_of_channel(&channel);
+        if product.is_empty() || !seen.insert(product.clone()) {
+            continue;
+        }
+        out.push(Subscription {
+            instance: product.clone(),
+            product,
+            channel,
+        });
+    }
+    out.sort_by(|left, right| left.instance.cmp(&right.instance));
+    Ok(out)
 }
 
 pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
@@ -1493,10 +1716,12 @@ pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
 }
 
 async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<StatusRow>> {
-    let channels = ctx.linked(&env_obj.id, REL_SUBSCRIBES, "out").await?;
+    let subscriptions = list_subscriptions(ctx, env_obj).await?;
     let mut rows = Vec::new();
-    for ch in channels {
-        let product = ch.properties.get("product").cloned().unwrap_or_default();
+    for sub in subscriptions {
+        let product = sub.product;
+        let instance = sub.instance;
+        let ch = sub.channel;
         let channel = ch.properties.get("channel").cloned().unwrap_or_default();
         let delivery_hold = crate::delivery_hold::get(
             ctx,
@@ -1525,29 +1750,35 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
         )
         .await;
         let held = selected_release.as_ref().is_ok_and(|(_, release)| {
-            held_failed_target_release(&env_obj.properties, &product) == Some(release.as_str())
+            held_failed_target_release(&env_obj.properties, &instance) == Some(release.as_str())
         });
         let dependency_hold =
             dependency_hold(&env_obj.properties, &product).map(|hold| hold.to_status_view());
         rows.push(StatusRow {
+            instance: instance.clone(),
             deployed: env_obj
                 .properties
-                .get(&format!("deployed.{product}"))
+                .get(&format!("deployed.{instance}"))
                 .cloned(),
             health: env_obj
                 .properties
-                .get(&format!("deployment_health.{product}"))
+                .get(&format!("deployment_health.{instance}"))
                 .cloned(),
             error: if held
-                && env_obj.properties.get(&format!("deployment_health.{product}"))
+                && env_obj
+                    .properties
+                    .get(&format!("deployment_health.{instance}"))
                     .is_none_or(|health| health != "unknown")
             {
-                let cause = held_failed_target_error(&env_obj.properties, &product)
+                let cause = held_failed_target_error(&env_obj.properties, &instance)
                     .map(|detail| format!(": {detail}"))
                     .unwrap_or_default();
                 Some(format!("target failed{cause}; automatic retry held; create and approve an explicit plan to retry"))
             } else {
-                env_obj.properties.get(&format!("deployment_error.{product}")).cloned()
+                env_obj
+                    .properties
+                    .get(&format!("deployment_error.{instance}"))
+                    .cloned()
             },
             channel,
             head: ch
@@ -1561,7 +1792,11 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             dependency_hold,
         });
     }
-    rows.sort_by(|a, b| a.product.cmp(&b.product));
+    rows.sort_by(|a, b| {
+        a.instance
+            .cmp(&b.instance)
+            .then_with(|| a.product.cmp(&b.product))
+    });
     Ok(rows)
 }
 
@@ -1580,6 +1815,11 @@ fn subscription_views_from_status(
             let config_stale = overlay_digest != applied_overlay.clone().unwrap_or_default();
             EnvironmentSubscriptionView {
                 product: row.product.clone(),
+                instance: if row.instance.is_empty() {
+                    row.product.clone()
+                } else {
+                    row.instance.clone()
+                },
                 channel: row.channel,
                 head: row.head.clone(),
                 deployed: row.deployed.clone(),
@@ -2931,14 +3171,18 @@ pub(crate) fn environment_plan_summary(plan: Plan) -> Result<EnvironmentPlanSumm
         .steps
         .into_iter()
         .take(MAX_PLAN_STEP_SUMMARIES)
-        .map(|step| EnvironmentPlanStepSummary {
-            id: step.id,
-            order: step.order,
-            product: step.product,
-            action: step.action.to_string(),
-            from: step.from,
-            to: step.to,
-            release_id: step.release_id,
+        .map(|step| {
+            let instance = step.instance_name().to_string();
+            EnvironmentPlanStepSummary {
+                id: step.id,
+                order: step.order,
+                instance,
+                product: step.product,
+                action: step.action.to_string(),
+                from: step.from,
+                to: step.to,
+                release_id: step.release_id,
+            }
         })
         .collect::<Vec<_>>();
     Ok(EnvironmentPlanSummary {
@@ -3070,6 +3314,7 @@ mod tests {
         transition_deployment(
             &mut environment,
             "api",
+            "api",
             &DeploymentTransition::Deployed {
                 version: "2.0.0".into(),
                 previous: Some("1.0.0".into()),
@@ -3111,6 +3356,7 @@ mod tests {
 
         transition_deployment(
             &mut environment,
+            "api",
             "api",
             &DeploymentTransition::Unknown,
             "cleanup failed",
@@ -3214,6 +3460,8 @@ mod tests {
         assert_eq!(subscription_state(None, "1.0.0", None, false), "missing");
         let waiting = StatusRow {
             product: "app".into(),
+
+            instance: "app".into(),
             channel: "stable".into(),
             deployed: None,
             health: None,
@@ -3600,6 +3848,8 @@ mod tests {
             created_at: 100,
             inputs: vec![crate::plan::DesiredStateInput {
                 product: "api".into(),
+
+                instance: String::new(),
                 channel: "stable".into(),
                 channel_id: "tenkai:channel:api/stable".into(),
                 desired_version: "1.0.0".into(),
@@ -3612,6 +3862,7 @@ mod tests {
                 id: String::new(),
                 order: 0,
                 product: "api".into(),
+                instance: String::new(),
                 action: crate::plan::Action::Install,
                 from: None,
                 to: "1.0.0".into(),
@@ -3834,6 +4085,8 @@ mod tests {
             created_at: 100,
             inputs: vec![crate::plan::DesiredStateInput {
                 product: "api".into(),
+
+                instance: String::new(),
                 channel: "stable".into(),
                 channel_id: "tenkai:channel:api/stable".into(),
                 desired_version: "1.0.0".into(),
@@ -3846,6 +4099,7 @@ mod tests {
                 id: String::new(),
                 order: 0,
                 product: "api".into(),
+                instance: String::new(),
                 action: crate::plan::Action::Install,
                 from: None,
                 to: "1.0.0".into(),
@@ -3955,6 +4209,8 @@ mod tests {
             created_at: 100,
             inputs: vec![crate::plan::DesiredStateInput {
                 product: "api".into(),
+
+                instance: String::new(),
                 channel: "stable".into(),
                 channel_id: "tenkai:channel:api/stable".into(),
                 desired_version: "1.0.0".into(),
@@ -3967,6 +4223,7 @@ mod tests {
                 id: String::new(),
                 order: 0,
                 product: "api".into(),
+                instance: String::new(),
                 action: crate::plan::Action::Install,
                 from: None,
                 to: "1.0.0".into(),
@@ -4093,5 +4350,150 @@ mod tests {
         assert!(listed.contains("registered: edge, lab"), "{listed}");
         assert!(!listed.contains("tenkaictl env add"), "{listed}");
         let _ = std::fs::remove_file(&database);
+    }
+
+    async fn published_channel(ctx: &mut Ctx, root: &std::path::Path, product: &str) {
+        std::fs::write(
+            root.join("tenkai.toml"),
+            format!(
+                "[product]\nname = \"{product}\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\n"
+            ),
+        )
+        .unwrap();
+        crate::catalog::publish(
+            ctx,
+            &root.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("instances");
+        crate::catalog::promote(ctx, &actor, &format!("{product}@1.0.0"), "stable")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn named_instance_subscribe_is_distinct_and_inspects() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-instance-subscribe-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "local", "Local").await.unwrap();
+        published_channel(&mut ctx, &root, "database").await;
+        published_channel(&mut ctx, &root, "cache").await;
+
+        subscribe(&mut ctx, "local", "database", "stable")
+            .await
+            .unwrap();
+        let default = inspect_environment(&mut ctx, "local").await.unwrap();
+        assert_eq!(default.subscriptions.len(), 1);
+        assert_eq!(default.subscriptions[0].product, "database");
+        assert_eq!(default.subscriptions[0].instance, "database");
+
+        let named = subscribe_instance(&mut ctx, "local", "database", "stable", Some("db-a"))
+            .await
+            .unwrap();
+        assert!(named.contains("db-a"), "{named}");
+        let duplicate = subscribe_instance(&mut ctx, "local", "database", "stable", Some("db-a"))
+            .await
+            .unwrap();
+        assert!(duplicate.contains("already"), "{duplicate}");
+        let taken = subscribe_instance(&mut ctx, "local", "cache", "stable", Some("db-a"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            taken.contains("environment local already has instance db-a"),
+            "{taken}"
+        );
+        let named_default =
+            subscribe_instance(&mut ctx, "local", "cache", "stable", Some("database"))
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(
+            named_default.contains("environment local already has instance database"),
+            "{named_default}"
+        );
+        let invalid = subscribe_instance(&mut ctx, "local", "database", "stable", Some("db_a"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(invalid.contains("DNS label"), "{invalid}");
+
+        let inspected = inspect_environment(&mut ctx, "local").await.unwrap();
+        let names: Vec<_> = inspected
+            .subscriptions
+            .iter()
+            .map(|row| (row.instance.as_str(), row.product.as_str()))
+            .collect();
+        assert!(names.contains(&("database", "database")), "{names:?}");
+        assert!(names.contains(&("db-a", "database")), "{names:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn two_instances_plan_distinct_steps_and_resume() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-instance-plan-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "local", "Local").await.unwrap();
+        published_channel(&mut ctx, &root, "database").await;
+        subscribe_instance(&mut ctx, "local", "database", "stable", Some("db-a"))
+            .await
+            .unwrap();
+        subscribe_instance(&mut ctx, "local", "database", "stable", Some("db-b"))
+            .await
+            .unwrap();
+
+        let first = crate::plan::create(&mut ctx, "local").await.unwrap();
+        let instances: Vec<_> = first
+            .steps
+            .iter()
+            .map(|step| step.instance_name().to_string())
+            .collect();
+        assert_eq!(first.steps.len(), 2, "{first:?}");
+        assert!(instances.contains(&"db-a".into()), "{instances:?}");
+        assert!(instances.contains(&"db-b".into()), "{instances:?}");
+        assert!(
+            first.steps.iter().all(|step| step.product == "database"),
+            "{first:?}"
+        );
+        assert_eq!(
+            crate::apply::classify_candidate(&mut ctx, &first)
+                .await
+                .unwrap(),
+            crate::apply::CandidateAdmission::Admissible
+        );
+
+        let mut env = environment(&mut ctx, "local").await.unwrap();
+        env.properties
+            .insert("deployed.db-a".into(), "1.0.0".into());
+        env.properties
+            .insert("deployment_health.db-a".into(), "healthy".into());
+        ctx.put(env).await.unwrap();
+
+        let resumed = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert_eq!(resumed.steps.len(), 1, "{resumed:?}");
+        assert_eq!(resumed.steps[0].instance_name(), "db-b");
+        assert_eq!(resumed.steps[0].product, "database");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

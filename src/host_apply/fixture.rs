@@ -207,6 +207,7 @@ impl HostFixture {
                     id: format!("{id}:step:{order}"),
                     order: order as u32,
                     product: spec.release.product.clone(),
+                    instance: String::new(),
                     action: spec.step_action,
                     from: spec.from.clone(),
                     to: spec.release.version.clone(),

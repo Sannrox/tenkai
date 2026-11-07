@@ -1640,9 +1640,15 @@ impl ManagementOperations {
         let actor = &context.audit_principal();
         self.audit(actor, "catalog.subscribe.requested")?;
         let mut ctx = self.catalog_ctx(&context)?;
-        let message = crate::environment::subscribe(&mut ctx, environment, product, channel)
-            .await
-            .map_err(map_catalog_error)?;
+        let message = crate::environment::subscribe_instance(
+            &mut ctx,
+            environment,
+            product,
+            channel,
+            request.instance.as_deref(),
+        )
+        .await
+        .map_err(map_catalog_error)?;
         self.audit(actor, "catalog.subscribe.completed")?;
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Subscribe,
@@ -1682,10 +1688,11 @@ impl ManagementOperations {
         let executors = crate::software_executor::SoftwareExecutors::try_from_process()
             .map_err(map_catalog_error)?;
         let expected = request.expected_generation;
-        let message = crate::environment::unsubscribe(
+        let message = crate::environment::unsubscribe_instance(
             &mut ctx,
             environment,
             product,
+            request.instance.as_deref(),
             &executors,
             |superseded| management_lifecycle::require_expected_generation(expected, superseded),
         )
@@ -2931,6 +2938,7 @@ mod tests {
             id: format!("step-{product}"),
             order: 0,
             product: product.into(),
+            instance: String::new(),
             action: crate::plan::Action::Install,
             from: None,
             to: "1.0.0".into(),
@@ -3524,6 +3532,7 @@ mod tests {
                     environment: "stage".into(),
                     expected_generation: 0,
                     spec: "api=stable".into(),
+                    instance: None,
                 },
             )
             .await
@@ -3675,6 +3684,7 @@ mod tests {
                 environment: "stage".into(),
                 expected_generation: current_generation(&ops, &credential, "stage").await,
                 spec: "api=stable".into(),
+                instance: None,
             },
         )
         .await
@@ -3749,6 +3759,7 @@ mod tests {
                 environment: "stage".into(),
                 expected_generation: current_generation(&ops, &human, "stage").await,
                 spec: "api=stable".into(),
+                instance: None,
             },
         )
         .await

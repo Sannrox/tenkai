@@ -153,7 +153,7 @@ async fn remote_hold_set_release_retry_and_stale_generation() {
     let current = current_generation(&client, "stage").await;
     let not_current = current + 1;
     client
-        .subscribe_environment("stage", "api=stable", current)
+        .subscribe_environment("stage", "api=stable", current, None)
         .await
         .unwrap();
 

@@ -817,6 +817,7 @@ mod tests {
                 id: "s1".into(),
                 order: 0,
                 product: "edge-app".into(),
+                instance: String::new(),
                 action: crate::plan::Action::Install,
                 from: None,
                 to: "1.0.0".into(),

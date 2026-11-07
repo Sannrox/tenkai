@@ -455,6 +455,7 @@ mod tests {
             id: String::new(),
             order: 0,
             product: "api".into(),
+            instance: String::new(),
             action: Action::Rollback,
             from: Some("2.0.0".into()),
             to: "1.0.0".into(),

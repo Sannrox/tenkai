@@ -315,6 +315,8 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
         created_at,
         inputs: vec![DesiredStateInput {
             product: "api".into(),
+
+            instance: String::new(),
             channel: "stable".into(),
             channel_id: "tenkai:channel:api/stable".into(),
             desired_version: "1.0.0".into(),
@@ -327,6 +329,7 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
             id: format!("{}:step:0", plan_id(env, created_at, "digest-a")),
             order: 0,
             product: "api".into(),
+            instance: String::new(),
             action: Action::Install,
             from: None,
             to: "1.0.0".into(),

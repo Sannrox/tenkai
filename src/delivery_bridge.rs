@@ -303,7 +303,7 @@ async fn rollback_after_health_failure(
     let mut rollback_triggered = false;
     for step in &plan.steps {
         let Some(previous) = step.from.as_deref() else {
-            record_recovery_required(ctx, &plan.environment, &step.product).await?;
+            record_recovery_required(ctx, &plan.environment, step.instance_name()).await?;
             return Ok((
                 false,
                 true,
@@ -311,18 +311,20 @@ async fn rollback_after_health_failure(
             ));
         };
         let mut object = environment::environment(ctx, &plan.environment).await?;
-        object
-            .properties
-            .insert(format!("deployed.{}", step.product), step.to.clone());
-        object
-            .properties
-            .insert(format!("deployed_prev.{}", step.product), previous.into());
+        object.properties.insert(
+            format!("deployed.{}", step.instance_name()),
+            step.to.clone(),
+        );
+        object.properties.insert(
+            format!("deployed_prev.{}", step.instance_name()),
+            previous.into(),
+        );
         object.updated = crate::now_millis();
         ctx.put(object).await?;
-        let rollback = plan::rollback_step(ctx, &plan.environment, &step.product).await?;
+        let rollback = plan::rollback_step(ctx, &plan.environment, step.instance_name()).await?;
         rollback_triggered = true;
         if adapter.rollback_fails() {
-            record_recovery_required(ctx, &plan.environment, &step.product).await?;
+            record_recovery_required(ctx, &plan.environment, step.instance_name()).await?;
             return Ok((
                 true,
                 true,
@@ -374,11 +376,12 @@ async fn complete_under_optional_lease(
         if completion.succeeded {
             for step in &stored.steps {
                 let mut object = environment::environment(ctx, environment).await?;
-                object
-                    .properties
-                    .insert(format!("deployed.{}", step.product), step.to.clone());
                 object.properties.insert(
-                    format!("deployment_health.{}", step.product),
+                    format!("deployed.{}", step.instance_name()),
+                    step.to.clone(),
+                );
+                object.properties.insert(
+                    format!("deployment_health.{}", step.instance_name()),
                     "healthy".into(),
                 );
                 object.updated = crate::now_millis();

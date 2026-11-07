@@ -803,6 +803,63 @@ fn parses_env_list_and_inspect() {
 }
 
 #[test]
+fn parses_env_subscribe_and_unsubscribe_instance() {
+    let subscribe = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "subscribe",
+        "prod",
+        "database=stable",
+        "--instance",
+        "db-a",
+    ])
+    .unwrap();
+    assert!(matches!(
+        subscribe.command,
+        Command::Env {
+            command: EnvCommand::Subscribe {
+                ref env,
+                ref spec,
+                ref instance,
+                ..
+            }
+        } if env == "prod" && spec == "database=stable" && instance.as_deref() == Some("db-a")
+    ));
+    let default =
+        Cli::try_parse_from(["tenkaictl", "env", "subscribe", "prod", "database=stable"]).unwrap();
+    assert!(matches!(
+        default.command,
+        Command::Env {
+            command: EnvCommand::Subscribe {
+                ref instance,
+                ..
+            }
+        } if instance.is_none()
+    ));
+    let unsubscribe = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "unsubscribe",
+        "prod",
+        "database",
+        "--instance",
+        "db-a",
+    ])
+    .unwrap();
+    assert!(matches!(
+        unsubscribe.command,
+        Command::Env {
+            command: EnvCommand::Unsubscribe {
+                ref env,
+                ref product,
+                ref instance,
+                ..
+            }
+        } if env == "prod" && product == "database" && instance.as_deref() == Some("db-a")
+    ));
+}
+
+#[test]
 fn parses_one_shot_reconciler_settings() {
     let cli = Cli::try_parse_from([
         "tenkaictl",
