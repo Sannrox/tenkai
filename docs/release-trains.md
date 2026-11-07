@@ -31,7 +31,12 @@ Admission requires:
 - each release published with a [family release manifest](family-release-manifests.md)
   whose digest equals the listed `digest`, so every member is named by digest;
 - each release manifest carrying a `[compatibility]` profile, its matrix. A
-  component without one is refused.
+  component without one is refused;
+- members' required contracts satisfied by a matching `provides` on some
+  member of the train, using the requiring profile's matching rule (v2 0.y
+  minor match; v1 same-major). The refusal names the member and the contract.
+  Optional requirements never block admission. Environment observations for
+  providers Tenkai does not install are not consulted here.
 
 Promotion to `stable` is a separate, explicit step:
 
