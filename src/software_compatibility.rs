@@ -163,6 +163,10 @@ pub struct CompatibilityOutcome {
     /// Required contracts satisfied by a last-successful deployment (`product@version`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub satisfied_by: BTreeMap<String, String>,
+    /// Candidate-profile required contracts this evaluation left unmet.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub(crate) candidate_unmet: BTreeMap<String, String>,
 }
 
 impl From<CompatibilityOutcome> for CompatibilityReport {
@@ -198,6 +202,7 @@ impl CompatibilityOutcome {
             release_digest: release_digest.into(),
             failures,
             satisfied_by: BTreeMap::new(),
+            candidate_unmet: BTreeMap::new(),
         }
     }
 }
@@ -504,13 +509,22 @@ fn evaluate_owned(
                 }
             }
         }
-        check_contracts(
+        let unmet = check_contracts(
             profile.version,
             &required.requires,
             &contracts,
             &mut report.failures,
             &mut report.satisfied_by,
         )?;
+        for (contract, minimum) in unmet {
+            report
+                .candidate_unmet
+                .entry(contract)
+                .and_modify(|existing| {
+                    *existing = stricter_contract_minimum(existing, &minimum);
+                })
+                .or_insert(minimum);
+        }
     }
     // Retained observations constrain the proposed final component set too.
     // Keep every component's provides. Skip requires owned by another profile;
@@ -532,7 +546,7 @@ fn evaluate_owned(
                 )
             })
             .collect();
-        check_contracts(
+        let _ = check_contracts(
             1,
             &retained,
             &contracts,
@@ -671,7 +685,8 @@ fn check_contracts(
     contracts: &BTreeMap<&str, Vec<ContractOffer<'_>>>,
     failures: &mut Vec<CompatibilityFailure>,
     satisfied_by: &mut BTreeMap<String, String>,
-) -> Result<()> {
+) -> Result<BTreeMap<String, String>> {
+    let mut unmet: BTreeMap<String, String> = BTreeMap::new();
     for (contract, requirement) in requirements {
         let offers = contracts.get(contract.as_str()).map(Vec::as_slice);
         let failure = match offers {
@@ -698,10 +713,25 @@ fn check_contracts(
             }),
         };
         if let Some(failure) = failure {
+            if !requirement.optional()
+                && matches!(
+                    failure,
+                    CompatibilityFailure::MissingContract { .. }
+                        | CompatibilityFailure::IncompatibleContract { .. }
+                )
+            {
+                let minimum = requirement.minimum().to_string();
+                unmet
+                    .entry(contract.clone())
+                    .and_modify(|existing| {
+                        *existing = stricter_contract_minimum(existing, &minimum);
+                    })
+                    .or_insert(minimum);
+            }
             failures.push(failure);
         }
     }
-    Ok(())
+    Ok(unmet)
 }
 
 fn contract_satisfies(
@@ -723,6 +753,55 @@ fn contract_satisfies(
 #[error("software compatibility blocked: {report:?}")]
 pub struct CompatibilityBlocked {
     pub report: CompatibilityReport,
+}
+
+/// Candidate-required contracts that are unmet and the only failures on `outcome`.
+///
+/// Reconcile records a hold for `candidate_unmet` (ADR 0043 §4). That set
+/// comes from the candidate profile's own `check_contracts`, so an installed
+/// dependent's stricter minimum cannot be mistaken for the candidate's.
+/// Any other failure, or a contract failure the candidate does not require,
+/// still refuses. Optional requirements never hold.
+pub(crate) fn holdable_unmet_requirements(
+    outcome: &CompatibilityOutcome,
+    profile: &CompatibilityProfile,
+) -> Option<Vec<(String, String)>> {
+    if outcome.failures.is_empty() || outcome.candidate_unmet.is_empty() {
+        return None;
+    }
+    let mut required = BTreeSet::new();
+    for component in profile.components.values() {
+        for (contract, requirement) in &component.requires {
+            if !requirement.optional() {
+                required.insert(contract.as_str());
+            }
+        }
+    }
+    for failure in &outcome.failures {
+        match failure {
+            CompatibilityFailure::MissingContract { contract }
+            | CompatibilityFailure::IncompatibleContract { contract } => {
+                if !required.contains(contract.as_str()) {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(
+        outcome
+            .candidate_unmet
+            .iter()
+            .map(|(c, m)| (c.clone(), m.clone()))
+            .collect(),
+    )
+}
+
+fn stricter_contract_minimum(left: &str, right: &str) -> String {
+    match (semver::Version::parse(left), semver::Version::parse(right)) {
+        (Ok(left_ver), Ok(right_ver)) if right_ver > left_ver => right.to_string(),
+        _ => left.to_string(),
+    }
 }
 
 pub(crate) const EVIDENCE_KIND: &str = "tenkai.software_compatibility_evidence";
@@ -966,7 +1045,7 @@ pub(crate) async fn report_manifest(
             }
         }
         for component in installed_profile.components.values() {
-            check_contracts(
+            let _ = check_contracts(
                 installed_profile.version,
                 &component.requires,
                 &offers,
@@ -1463,6 +1542,86 @@ mod tests {
             deployed,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn holdable_unmet_is_only_the_candidate_required_contracts() {
+        let (profile, evidence) = fixture();
+        let digest = evidence.release_digest.clone();
+        let missing = CompatibilityOutcome {
+            version: 1,
+            release_digest: digest.clone(),
+            failures: vec![CompatibilityFailure::MissingContract {
+                contract: "database".into(),
+            }],
+            satisfied_by: BTreeMap::new(),
+            candidate_unmet: BTreeMap::from([("database".into(), "1.2.0".into())]),
+        };
+        assert_eq!(
+            holdable_unmet_requirements(&missing, &profile),
+            Some(vec![("database".into(), "1.2.0".into())])
+        );
+        let mixed = CompatibilityOutcome {
+            version: 1,
+            release_digest: digest.clone(),
+            failures: vec![
+                CompatibilityFailure::MissingContract {
+                    contract: "database".into(),
+                },
+                CompatibilityFailure::StaleEvidence,
+            ],
+            satisfied_by: BTreeMap::new(),
+            candidate_unmet: BTreeMap::from([("database".into(), "1.2.0".into())]),
+        };
+        assert_eq!(holdable_unmet_requirements(&mixed, &profile), None);
+        let other = CompatibilityOutcome {
+            version: 1,
+            release_digest: digest,
+            failures: vec![CompatibilityFailure::MissingContract {
+                contract: "queue".into(),
+            }],
+            satisfied_by: BTreeMap::new(),
+            candidate_unmet: BTreeMap::from([("queue".into(), "1.0.0".into())]),
+        };
+        assert_eq!(holdable_unmet_requirements(&other, &profile), None);
+        let satisfied_elsewhere = CompatibilityOutcome {
+            version: 1,
+            release_digest: evidence.release_digest.clone(),
+            failures: vec![CompatibilityFailure::IncompatibleContract {
+                contract: "database".into(),
+            }],
+            satisfied_by: BTreeMap::from([("database".into(), "compat-db@1.0.0".into())]),
+            candidate_unmet: BTreeMap::new(),
+        };
+        assert_eq!(
+            holdable_unmet_requirements(&satisfied_elsewhere, &profile),
+            None
+        );
+        let mut two = profile.clone();
+        two.components.insert(
+            "api".into(),
+            ComponentRequirement {
+                pin: ComponentPin::Revision("b".repeat(40)),
+                requires: BTreeMap::from([(
+                    "database".into(),
+                    ContractRequirement::Minimum("1.5.0".into()),
+                )]),
+                provides: BTreeMap::new(),
+            },
+        );
+        let incompatible = CompatibilityOutcome {
+            version: 1,
+            release_digest: evidence.release_digest.clone(),
+            failures: vec![CompatibilityFailure::IncompatibleContract {
+                contract: "database".into(),
+            }],
+            satisfied_by: BTreeMap::new(),
+            candidate_unmet: BTreeMap::from([("database".into(), "1.5.0".into())]),
+        };
+        assert_eq!(
+            holdable_unmet_requirements(&incompatible, &two),
+            Some(vec![("database".into(), "1.5.0".into())])
+        );
     }
 
     #[test]

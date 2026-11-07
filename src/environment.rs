@@ -4,7 +4,7 @@
 //! in-process interface. Planning consumes Environment state but does not own its
 //! mutation or operator readback rules.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
@@ -2418,6 +2418,148 @@ pub async fn held_failed_target(
     Ok(held_failed_target_release(&env.properties, product).map(str::to_string))
 }
 
+/// Durable wait for a required contract that is not yet in the environment (ADR 0043 §4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyHold {
+    pub release_id: String,
+    pub contracts: Vec<(String, String)>,
+    pub held_at: i64,
+}
+
+/// One product's hold to persist after a reconcile snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DependencyHoldWrite {
+    pub release_id: String,
+    pub contracts: Vec<(String, String)>,
+}
+
+/// Environment property key for a dependency hold of `product`.
+pub fn dependency_hold_key(product: &str) -> String {
+    format!("dependency_hold.{product}")
+}
+
+fn dependency_hold_contracts_key(product: &str) -> String {
+    format!("dependency_hold_contracts.{product}")
+}
+
+fn dependency_hold_at_key(product: &str) -> String {
+    format!("dependency_hold_at.{product}")
+}
+
+/// Active dependency hold for `product`, if the stored properties are complete.
+pub fn dependency_hold(
+    properties: &HashMap<String, String>,
+    product: &str,
+) -> Option<DependencyHold> {
+    let release_id = properties.get(&dependency_hold_key(product))?.clone();
+    if release_id.is_empty() {
+        return None;
+    }
+    let contracts_raw = properties.get(&dependency_hold_contracts_key(product))?;
+    let mut contracts = Vec::new();
+    for part in contracts_raw.split(',') {
+        let (contract, minimum) = part.split_once('=')?;
+        if contract.is_empty() || minimum.is_empty() {
+            return None;
+        }
+        contracts.push((contract.to_string(), minimum.to_string()));
+    }
+    if contracts.is_empty() {
+        return None;
+    }
+    let held_at = properties
+        .get(&dependency_hold_at_key(product))?
+        .parse()
+        .ok()?;
+    Some(DependencyHold {
+        release_id,
+        contracts,
+        held_at,
+    })
+}
+
+/// Record a hold for `release_id`. The same release and contracts keep `held_at`.
+pub(crate) fn record_dependency_hold(
+    properties: &mut HashMap<String, String>,
+    product: &str,
+    release_id: &str,
+    contracts: &[(String, String)],
+    now_ms: i64,
+) -> bool {
+    if let Some(existing) = dependency_hold(properties, product)
+        && existing.release_id == release_id
+        && existing.contracts == contracts
+    {
+        return false;
+    }
+    properties.insert(dependency_hold_key(product), release_id.to_string());
+    properties.insert(
+        dependency_hold_contracts_key(product),
+        contracts
+            .iter()
+            .map(|(contract, minimum)| format!("{contract}={minimum}"))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    properties.insert(dependency_hold_at_key(product), now_ms.to_string());
+    true
+}
+
+/// Remove a dependency hold for `product`. Returns whether anything was stored.
+pub(crate) fn clear_dependency_hold(
+    properties: &mut HashMap<String, String>,
+    product: &str,
+) -> bool {
+    let release = properties.remove(&dependency_hold_key(product)).is_some();
+    let contracts = properties
+        .remove(&dependency_hold_contracts_key(product))
+        .is_some();
+    let held_at = properties
+        .remove(&dependency_hold_at_key(product))
+        .is_some();
+    release || contracts || held_at
+}
+
+/// Reload the environment and write only dependency-hold properties.
+///
+/// Planning loads a snapshot before live observation. Putting that snapshot
+/// back would overwrite a concurrent apply or configuration update. This
+/// reloads immediately before the write and changes only `dependency_hold.*`.
+/// Environment objects have no compare-and-swap; other property writes use the
+/// same read-modify-put (`set_environment_constraint`, overlays, failed_target).
+pub(crate) async fn persist_dependency_holds(
+    ctx: &mut Ctx,
+    env: &str,
+    sets: &BTreeMap<String, DependencyHoldWrite>,
+    clears: &BTreeSet<String>,
+) -> Result<()> {
+    if sets.is_empty() && clears.is_empty() {
+        return Ok(());
+    }
+    let mut env_obj = environment(ctx, env).await?;
+    let now = crate::now_millis();
+    let mut changed = false;
+    for product in clears {
+        if !sets.contains_key(product) {
+            changed |= clear_dependency_hold(&mut env_obj.properties, product);
+        }
+    }
+    for (product, hold) in sets {
+        changed |= record_dependency_hold(
+            &mut env_obj.properties,
+            product,
+            &hold.release_id,
+            &hold.contracts,
+            now,
+        );
+    }
+    if changed {
+        env_obj.updated = now;
+        ctx.put(env_obj).await?;
+    }
+    Ok(())
+}
+
 /// Digest of one product's non-secret overlays. Empty overlays yield an empty digest.
 pub fn overlay_digest(values: &BTreeMap<String, String>) -> String {
     if values.is_empty() {
@@ -2908,6 +3050,41 @@ mod tests {
             "cleanup failed"
         );
         assert_eq!(environment.updated, 84);
+    }
+
+    #[test]
+    fn dependency_hold_is_idempotent_for_the_same_contracts() {
+        let mut properties = HashMap::new();
+        let contracts = vec![("database".into(), "1.2.0".into())];
+        assert!(record_dependency_hold(
+            &mut properties,
+            "app",
+            "tenkai:release:app@1.0.0",
+            &contracts,
+            10,
+        ));
+        assert!(!record_dependency_hold(
+            &mut properties,
+            "app",
+            "tenkai:release:app@1.0.0",
+            &contracts,
+            20,
+        ));
+        let hold = dependency_hold(&properties, "app").unwrap();
+        assert_eq!(hold.release_id, "tenkai:release:app@1.0.0");
+        assert_eq!(hold.contracts, contracts);
+        assert_eq!(hold.held_at, 10);
+        assert!(record_dependency_hold(
+            &mut properties,
+            "app",
+            "tenkai:release:app@1.1.0",
+            &contracts,
+            30,
+        ));
+        assert_eq!(dependency_hold(&properties, "app").unwrap().held_at, 30);
+        assert!(clear_dependency_hold(&mut properties, "app"));
+        assert_eq!(dependency_hold(&properties, "app"), None);
+        assert!(!clear_dependency_hold(&mut properties, "app"));
     }
 
     #[test]

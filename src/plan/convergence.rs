@@ -394,6 +394,8 @@ async fn compute_snapshot_with_policy(
     let mut host_products = std::collections::HashSet::new();
     let mut held_model = false;
     let mut held_routing = false;
+    let mut hold_sets = BTreeMap::new();
+    let mut hold_clears = BTreeSet::new();
     for ch in channels {
         let product = ch.properties.get("product").cloned().unwrap_or_default();
         let channel = ch.properties.get("channel").cloned().unwrap_or_default();
@@ -429,7 +431,33 @@ async fn compute_snapshot_with_policy(
             );
         }
         let target = pin_release(ctx, &release, env).await?;
-        crate::software_compatibility::require_release(ctx, env, &release).await?;
+        if policy.observe_live {
+            match admit_reconcile_dependency(ctx, env, &release).await? {
+                DependencyAdmission::Hold {
+                    release_id,
+                    contracts,
+                } => {
+                    hold_sets.insert(
+                        product.clone(),
+                        crate::environment::DependencyHoldWrite {
+                            release_id,
+                            contracts,
+                        },
+                    );
+                    held_model |= selected.kind == crate::manifest::ProductKind::ModelRuntime;
+                    held_routing |= selected.kind == crate::manifest::ProductKind::RoutingConfig;
+                    continue;
+                }
+                DependencyAdmission::Proceed => {
+                    if crate::environment::dependency_hold(&env_obj.properties, &product).is_some()
+                    {
+                        hold_clears.insert(product.clone());
+                    }
+                }
+            }
+        } else {
+            crate::software_compatibility::require_release(ctx, env, &release).await?;
+        }
         crate::topology::require_placement(ctx, env, &release).await?;
         // The root-side applier's record, not the server's view, says what a
         // host release has applied (ADR 0041 section 2).
@@ -834,7 +862,50 @@ async fn compute_snapshot_with_policy(
             },
         )
         .collect();
+    crate::environment::persist_dependency_holds(ctx, env, &hold_sets, &hold_clears).await?;
     Ok((inputs, steps))
+}
+
+enum DependencyAdmission {
+    Hold {
+        release_id: String,
+        contracts: Vec<(String, String)>,
+    },
+    Proceed,
+}
+
+/// Reconcile waits for an unmet required contract instead of failing the tick.
+async fn admit_reconcile_dependency(
+    ctx: &mut Ctx,
+    env: &str,
+    release: &str,
+) -> Result<DependencyAdmission> {
+    let Some(outcome) = crate::software_compatibility::report_outcome(ctx, env, release).await?
+    else {
+        return Ok(DependencyAdmission::Proceed);
+    };
+    if outcome.failures.is_empty() {
+        return Ok(DependencyAdmission::Proceed);
+    }
+    let profile = stored_release_manifest(ctx, release).await?.compatibility;
+    let Some(profile) = profile else {
+        return Err(crate::software_compatibility::CompatibilityBlocked {
+            report: outcome.into(),
+        }
+        .into());
+    };
+    let Some(unmet) =
+        crate::software_compatibility::holdable_unmet_requirements(&outcome, &profile)
+    else {
+        return Err(crate::software_compatibility::CompatibilityBlocked {
+            report: outcome.into(),
+        }
+        .into());
+    };
+    Ok(DependencyAdmission::Hold {
+        release_id: release.to_string(),
+        contracts: unmet,
+    })
 }
 
 /// Deterministic step ranking for coordinated model_runtime + routing_config
@@ -1997,6 +2068,284 @@ mod tests {
             .map(|step| step.product.as_str())
             .collect();
         assert_eq!(products, vec!["db", "app"], "{products:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn publish_compat_release(
+        ctx: &mut Ctx,
+        root: &std::path::Path,
+        product: &str,
+        extra: &str,
+    ) -> String {
+        let pin = "a".repeat(40);
+        let raw = format!(
+            "[product]\nname = \"{product}\"\nversion = \"1.0.0\"\n[deploy]\ninstall = \"true\"\n[compatibility]\nversion = 1\nmax_evidence_age_ms = 60000\n[compatibility.components.{product}.pin]\nkind = \"revision\"\nvalue = \"{pin}\"\n{extra}"
+        );
+        let dir = root.join(product);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tenkai.toml"), &raw).unwrap();
+        crate::catalog::publish(
+            ctx,
+            &dir.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        raw
+    }
+
+    fn compat_evidence(
+        digest: String,
+        component: &str,
+        pin: &str,
+        requires: BTreeMap<String, String>,
+        provides: BTreeMap<String, String>,
+        contracts: BTreeMap<String, String>,
+    ) -> crate::software_compatibility::CompatibilityEvidence {
+        use crate::software_compatibility::{
+            CompatibilityEvidence, ComponentObservation, ComponentPin, MigrationState,
+        };
+        CompatibilityEvidence {
+            version: 1,
+            release_digest: digest,
+            environment: "local".into(),
+            observed_at_ms: crate::now_millis() - 1_000,
+            components: BTreeMap::from([(
+                component.into(),
+                ComponentObservation {
+                    pin: ComponentPin::Revision(pin.into()),
+                    requires,
+                    provides,
+                },
+            )]),
+            contracts,
+            capabilities: Vec::new(),
+            schema_version: None,
+            migration: MigrationState::Stable,
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_holds_unmet_required_contract_and_resumes_when_provider_deploys() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-dep-hold-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("state.db");
+        let mut ctx = Ctx::embedded(&db_path).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        let pin = "a".repeat(40);
+        let db_raw = publish_compat_release(
+            &mut ctx,
+            &root,
+            "db",
+            "[compatibility.components.db.provides]\ndatabase = \"1.0.0\"\n",
+        )
+        .await;
+        let app_raw = publish_compat_release(
+            &mut ctx,
+            &root,
+            "app",
+            "[compatibility.components.app.requires]\ndatabase = \"1.0.0\"\n",
+        )
+        .await;
+        let side_raw = publish_compat_release(&mut ctx, &root, "side", "").await;
+        let actor = crate::auth_context::test_management_context("dep-hold");
+        for product in ["db", "app", "side"] {
+            crate::catalog::promote(&mut ctx, &actor, &format!("{product}@1.0.0"), "stable")
+                .await
+                .unwrap();
+        }
+        subscribe(&mut ctx, "local", "app", "stable").await.unwrap();
+        subscribe(&mut ctx, "local", "side", "stable")
+            .await
+            .unwrap();
+        crate::software_compatibility::record_evidence(
+            &mut ctx,
+            "local",
+            compat_evidence(
+                crate::manifest::digest(&app_raw),
+                "app",
+                &pin,
+                BTreeMap::from([("database".into(), "1.0.0".into())]),
+                BTreeMap::new(),
+                BTreeMap::new(),
+            ),
+        )
+        .await
+        .unwrap();
+        crate::software_compatibility::record_evidence(
+            &mut ctx,
+            "local",
+            compat_evidence(
+                crate::manifest::digest(&side_raw),
+                "side",
+                &pin,
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+            ),
+        )
+        .await
+        .unwrap();
+        crate::software_compatibility::record_evidence(
+            &mut ctx,
+            "local",
+            compat_evidence(
+                crate::manifest::digest(&db_raw),
+                "db",
+                &pin,
+                BTreeMap::new(),
+                BTreeMap::from([("database".into(), "1.0.0".into())]),
+                BTreeMap::new(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let err = crate::plan::create(&mut ctx, "local").await.unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::software_compatibility::CompatibilityBlocked>()
+                .is_some(),
+            "{err}"
+        );
+
+        let held = crate::plan::create_for_reconcile(&mut ctx, "local")
+            .await
+            .unwrap();
+        let products: Vec<_> = held
+            .steps
+            .iter()
+            .map(|step| step.product.as_str())
+            .collect();
+        assert_eq!(products, vec!["side"], "{products:?}");
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        let hold = crate::environment::dependency_hold(&env.properties, "app").unwrap();
+        assert_eq!(hold.release_id, "tenkai:release:app@1.0.0");
+        assert_eq!(hold.contracts, vec![("database".into(), "1.0.0".into())]);
+        let held_at = hold.held_at;
+
+        let again = crate::plan::create_for_reconcile(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert_eq!(
+            again
+                .steps
+                .iter()
+                .map(|step| step.product.as_str())
+                .collect::<Vec<_>>(),
+            vec!["side"]
+        );
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::environment::dependency_hold(&env.properties, "app")
+                .unwrap()
+                .held_at,
+            held_at
+        );
+
+        drop(ctx);
+        let mut ctx = Ctx::embedded(&db_path).unwrap();
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::environment::dependency_hold(&env.properties, "app")
+                .unwrap()
+                .held_at,
+            held_at
+        );
+
+        crate::environment::reconcile_deployment(&mut ctx, "local", "db", Some("1.0.0"))
+            .await
+            .unwrap();
+        let resumed = crate::plan::create_for_reconcile(&mut ctx, "local")
+            .await
+            .unwrap();
+        let products: Vec<_> = resumed
+            .steps
+            .iter()
+            .map(|step| step.product.as_str())
+            .collect();
+        assert!(products.contains(&"app"), "{products:?}");
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::environment::dependency_hold(&env.properties, "app"),
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn optional_requirement_does_not_hold_on_reconcile() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-dep-hold-opt-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        let pin = "a".repeat(40);
+        let raw = format!(
+            "[product]\nname = \"app\"\nversion = \"1.0.0\"\n[deploy]\ninstall = \"true\"\n[compatibility]\nversion = 2\nmax_evidence_age_ms = 60000\n[compatibility.components.app.pin]\nkind = \"revision\"\nvalue = \"{pin}\"\n[compatibility.components.app.requires]\ndatabase = {{ minimum = \"1.0.0\", optional = true }}\n"
+        );
+        let dir = root.join("app");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tenkai.toml"), &raw).unwrap();
+        crate::catalog::publish(
+            &mut ctx,
+            &dir.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("dep-hold-opt");
+        crate::catalog::promote(&mut ctx, &actor, "app@1.0.0", "stable")
+            .await
+            .unwrap();
+        subscribe(&mut ctx, "local", "app", "stable").await.unwrap();
+        crate::software_compatibility::record_evidence(
+            &mut ctx,
+            "local",
+            compat_evidence(
+                crate::manifest::digest(&raw),
+                "app",
+                &pin,
+                BTreeMap::from([("database".into(), "1.0.0".into())]),
+                BTreeMap::new(),
+                BTreeMap::new(),
+            ),
+        )
+        .await
+        .unwrap();
+        let plan = crate::plan::create_for_reconcile(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert_eq!(plan.steps[0].product, "app");
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::environment::dependency_hold(&env.properties, "app"),
+            None
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

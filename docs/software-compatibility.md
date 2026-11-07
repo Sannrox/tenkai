@@ -99,6 +99,18 @@ all use it. A contract offered both by a deployed release and by an observation,
 or by several deployed releases, is ambiguous and refused. Hand-recorded
 evidence remains for providers Tenkai does not install.
 
+When reconcile (including the environment tick after a channel promotion) would
+deploy a release whose required contract is not satisfied in that environment,
+Tenkai records a durable hold on that environment and product, names the unmet
+contract and minimum, and makes no change to that product. Other products still
+plan. The hold is re-evaluated when the deployed set changes and on every
+reconcile; once the contract is satisfied, the release continues through the
+normal plan, approval, and gate path. The hold grants no execution authority.
+An explicit `plan` still refuses an unmet required contract
+(`missing_contract` or `incompatible_contract`). Optional requirements never
+hold. Ambiguous contracts, stale or missing evidence, and other compatibility
+failures still fail the tick.
+
 The schema range is inclusive. Migration state is `stable` or `pending` and must
 match exactly. Tenkai checks this declaration; it does not run migrations or
 reverse them during rollback. Facts use the existing admitted environment fact
