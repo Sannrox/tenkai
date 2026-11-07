@@ -180,7 +180,13 @@ exits unsuccessfully when any failure remains. Examples include
 `missing_capability`, `component_changed`, `incompatible_contract`,
 `unsupported_schema`, and `stale_evidence`.
 
-Planning checks the target profile. Apply checks current evidence again before
+Planning checks the target profile. A plan over several releases installs and
+upgrades providers before dependents, removes dependents before providers, and
+keeps name order among releases with no edge. Remove and downgrade order uses
+the currently deployed contracts, including requirements the target drops. A
+cycle across releases is refused at planning, naming the releases and
+contracts. A plan that would invert a contract edge to satisfy host, agent, or
+removal order is refused, naming the contract and the two releases. Apply checks current evidence again before
 any executor mutation; a prior passing report grants no execution authority.
 Pull-only runtime work dispatch and heartbeat renewal also recheck current
 evidence. `--skip-gates` does not bypass compatibility. Plan signatures, approvals, fencing,

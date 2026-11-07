@@ -85,9 +85,11 @@ unless the dependent binds one of them
 
 Within one environment, a plan installs and upgrades providers before their
 dependents, and removes dependents before their providers. Releases with no
-edge between them keep name order, so plans stay deterministic. A cycle is
-refused at publication when it is within one release, and at planning when it
-spans releases; the refusal names the cycle.
+edge between them keep name order, so plans stay deterministic. Remove and
+downgrade order uses currently deployed contracts, including requirements the
+target drops. A cycle is refused at publication when it is within one release,
+and at planning when it spans releases; the refusal names the cycle. A plan is
+refused when host, agent, or removal order would invert a contract edge.
 
 This replaces the undocumented name-only order (#985) for releases that
 declare dependencies.
