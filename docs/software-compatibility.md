@@ -92,6 +92,13 @@ requires the minor to match below 1.0, because a 0.y minor may break the surface
 Version 1 keeps the same-major rule for 0.y contracts. Multiple providers of the
 same required contract are ambiguous and refused even when their versions agree.
 
+A required contract is also satisfied by the `provides` of a release whose last
+deployment in the same environment succeeded. That record is durable in the
+operational store and does not expire. Planning, apply, restart, and rollback
+all use it. A contract offered both by a deployed release and by an observation,
+or by several deployed releases, is ambiguous and refused. Hand-recorded
+evidence remains for providers Tenkai does not install.
+
 The schema range is inclusive. Migration state is `stable` or `pending` and must
 match exactly. Tenkai checks this declaration; it does not run migrations or
 reverse them during rollback. Facts use the existing admitted environment fact
@@ -106,11 +113,13 @@ profile declaration.
 ## Record observations
 
 The environment owner supplies a JSON observation bound to the exact target
-release's manifest digest and environment. Components include both the candidate
-constituents and retained installed dependencies. Required and provided contracts
-from installed release profiles are checked too, so a candidate cannot silently
-break a declared dependent. Reused component identities across retained products
-are refused as ambiguous.
+release's manifest digest and environment. Components include the candidate
+constituents. Do not re-state contracts Tenkai already deployed: those come
+from the provider release's signed `provides`. `contracts` describes other
+observed external providers. Required contracts from installed release profiles
+are checked against deployed `provides` and the observation, so a candidate
+cannot silently break a declared dependent. Reused component identities across
+retained products are refused as ambiguous.
 
 ```json
 {
@@ -123,14 +132,9 @@ are refused as ambiguous.
       "pin": { "kind": "digest", "value": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
       "requires": { "database": "1.2.0" },
       "provides": {}
-    },
-    "database": {
-      "pin": { "kind": "revision", "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
-      "requires": {},
-      "provides": { "database": "1.3.0" }
     }
   },
-  "contracts": {},
+  "contracts": { "database": "1.3.0" },
   "capabilities": ["containers"],
   "schema_version": 3,
   "migration": "stable"
@@ -138,8 +142,8 @@ are refused as ambiguous.
 ```
 
 Replace the digest and timestamp with the actual release digest and observation
-time. `contracts` describes other observed external providers. Do not repeat a
-component-provided contract there, since that would declare two providers.
+time. Do not repeat a deployed or component-provided contract in `contracts`,
+since that would declare two providers.
 
 ```sh
 tenkaictl env compatibility record local observation.json
@@ -168,11 +172,13 @@ observations with the same newest timestamp fail closed. Missing, malformed,
 stale, future-dated, mismatched, or ambiguous evidence cannot authorize execution.
 A healthy process is still refused when its contract or pin is incompatible.
 
-Reports contain a version, the target manifest digest, and typed failure reasons
-with requirement identifiers. They omit observed fact values, payloads, and
-private paths. CLI `check` prints the report and exits unsuccessfully when any
-failure remains. Examples include `missing_capability`, `component_changed`,
-`incompatible_contract`, `unsupported_schema`, and `stale_evidence`.
+Reports contain a version, the target manifest digest, typed failure reasons
+with requirement identifiers, and `satisfied_by` naming the deployed
+`product@version` that satisfied each required contract. They omit observed
+fact values, payloads, and private paths. CLI `check` prints the report and
+exits unsuccessfully when any failure remains. Examples include
+`missing_capability`, `component_changed`, `incompatible_contract`,
+`unsupported_schema`, and `stale_evidence`.
 
 Planning checks the target profile. Apply checks current evidence again before
 any executor mutation; a prior passing report grants no execution authority.

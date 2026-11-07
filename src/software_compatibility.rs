@@ -150,6 +150,38 @@ pub struct CompatibilityReport {
     pub version: u32,
     pub release_digest: String,
     pub failures: Vec<CompatibilityFailure>,
+    /// Required contracts satisfied by a last-successful deployment (`product@version`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub satisfied_by: BTreeMap<String, String>,
+}
+
+impl CompatibilityReport {
+    fn with_failures(
+        release_digest: impl Into<String>,
+        failures: Vec<CompatibilityFailure>,
+    ) -> Self {
+        Self {
+            version: 1,
+            release_digest: release_digest.into(),
+            failures,
+            satisfied_by: BTreeMap::new(),
+        }
+    }
+}
+
+/// Last-successful deployments that offer a contract: name -> `(product@version, contract version)`.
+type DeployedOffers = BTreeMap<String, Vec<(String, String)>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContractOfferSource<'a> {
+    Observed,
+    Deployed(&'a str),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ContractOffer<'a> {
+    version: &'a str,
+    source: ContractOfferSource<'a>,
 }
 
 impl CompatibilityProfile {
@@ -364,9 +396,11 @@ pub fn evaluate(
         facts,
         now_ms,
         None,
+        &BTreeMap::new(),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_owned(
     profile: &CompatibilityProfile,
     release_digest: &str,
@@ -375,13 +409,10 @@ fn evaluate_owned(
     facts: &BTreeMap<String, String>,
     now_ms: i64,
     owned: Option<&BTreeSet<String>>,
+    deployed: &DeployedOffers,
 ) -> Result<CompatibilityReport> {
     profile.validate()?;
-    let mut report = CompatibilityReport {
-        version: 1,
-        release_digest: release_digest.into(),
-        failures: Vec::new(),
-    };
+    let mut report = CompatibilityReport::with_failures(release_digest, Vec::new());
     let Some(evidence) = evidence else {
         report.failures.push(CompatibilityFailure::MissingEvidence);
         return Ok(report);
@@ -418,15 +449,7 @@ fn evaluate_owned(
     {
         report.failures.push(CompatibilityFailure::StaleEvidence);
     }
-    let mut contracts: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for (name, version) in &evidence.contracts {
-        contracts.entry(name).or_default().push(version);
-    }
-    for component in evidence.components.values() {
-        for (name, version) in &component.provides {
-            contracts.entry(name).or_default().push(version);
-        }
-    }
+    let contracts = contract_offers(Some(evidence), deployed);
     for (name, required) in &profile.components {
         match evidence.components.get(name) {
             None => report
@@ -452,6 +475,7 @@ fn evaluate_owned(
             &required.requires,
             &contracts,
             &mut report.failures,
+            &mut report.satisfied_by,
         )?;
     }
     // Retained observations constrain the proposed final component set too.
@@ -474,7 +498,13 @@ fn evaluate_owned(
                 )
             })
             .collect();
-        check_contracts(1, &retained, &contracts, &mut report.failures)?;
+        check_contracts(
+            1,
+            &retained,
+            &contracts,
+            &mut report.failures,
+            &mut BTreeMap::new(),
+        )?;
     }
     let mut capabilities = profile.capabilities.clone();
     capabilities.sort();
@@ -509,26 +539,125 @@ fn evaluate_owned(
     Ok(report)
 }
 
+fn contract_offers<'a>(
+    evidence: Option<&'a CompatibilityEvidence>,
+    deployed: &'a DeployedOffers,
+) -> BTreeMap<&'a str, Vec<ContractOffer<'a>>> {
+    let mut contracts: BTreeMap<&str, Vec<ContractOffer<'_>>> = BTreeMap::new();
+    if let Some(evidence) = evidence {
+        for (name, version) in &evidence.contracts {
+            contracts
+                .entry(name.as_str())
+                .or_default()
+                .push(ContractOffer {
+                    version,
+                    source: ContractOfferSource::Observed,
+                });
+        }
+        for component in evidence.components.values() {
+            for (name, version) in &component.provides {
+                contracts
+                    .entry(name.as_str())
+                    .or_default()
+                    .push(ContractOffer {
+                        version,
+                        source: ContractOfferSource::Observed,
+                    });
+            }
+        }
+    }
+    for (name, offers) in deployed {
+        for (release, version) in offers {
+            contracts
+                .entry(name.as_str())
+                .or_default()
+                .push(ContractOffer {
+                    version,
+                    source: ContractOfferSource::Deployed(release),
+                });
+        }
+    }
+    contracts
+}
+
+fn add_deployed_provides(
+    deployed: &mut DeployedOffers,
+    product: &str,
+    version: &str,
+    profile: &CompatibilityProfile,
+) {
+    let release = format!("{product}@{version}");
+    for component in profile.components.values() {
+        for (contract, contract_version) in &component.provides {
+            deployed
+                .entry(contract.clone())
+                .or_default()
+                .push((release.clone(), contract_version.clone()));
+        }
+    }
+}
+
+/// Environment-level constraints from an installed profile. Candidate observations
+/// no longer restate that product's component pins.
+fn check_environment_constraints(
+    profile: &CompatibilityProfile,
+    evidence: &CompatibilityEvidence,
+    facts: &BTreeMap<String, String>,
+    failures: &mut Vec<CompatibilityFailure>,
+) {
+    let mut capabilities = profile.capabilities.clone();
+    capabilities.sort();
+    capabilities.dedup();
+    for capability in capabilities {
+        if !evidence.capabilities.contains(&capability) {
+            failures.push(CompatibilityFailure::MissingCapability { capability });
+        }
+    }
+    for (fact, expected) in &profile.facts {
+        if facts.get(fact) != Some(expected) {
+            failures.push(CompatibilityFailure::UnsatisfiedFact { fact: fact.clone() });
+        }
+    }
+    if let Some(schema) = &profile.schema {
+        if !evidence
+            .schema_version
+            .is_some_and(|version| version >= schema.minimum && version <= schema.maximum)
+        {
+            failures.push(CompatibilityFailure::UnsupportedSchema);
+        }
+        if evidence.migration != schema.migration {
+            failures.push(CompatibilityFailure::MigrationState);
+        }
+    }
+}
+
 fn check_contracts(
     profile_version: u32,
     requirements: &BTreeMap<String, ContractRequirement>,
-    contracts: &BTreeMap<&str, Vec<&str>>,
+    contracts: &BTreeMap<&str, Vec<ContractOffer<'_>>>,
     failures: &mut Vec<CompatibilityFailure>,
+    satisfied_by: &mut BTreeMap<String, String>,
 ) -> Result<()> {
     for (contract, requirement) in requirements {
-        let failure = match contracts.get(contract.as_str()).map(Vec::as_slice) {
+        let offers = contracts.get(contract.as_str()).map(Vec::as_slice);
+        let failure = match offers {
             None | Some([]) if requirement.optional() => None,
             None | Some([]) => Some(CompatibilityFailure::MissingContract {
                 contract: contract.clone(),
             }),
             Some([provided]) => {
-                let actual = semver::Version::parse(provided)?;
+                let actual = semver::Version::parse(provided.version)?;
                 let minimum = semver::Version::parse(requirement.minimum())?;
-                (!contract_satisfies(profile_version, &actual, &minimum)).then(|| {
-                    CompatibilityFailure::IncompatibleContract {
+                if !contract_satisfies(profile_version, &actual, &minimum) {
+                    Some(CompatibilityFailure::IncompatibleContract {
                         contract: contract.clone(),
+                    })
+                } else {
+                    if let ContractOfferSource::Deployed(release) = provided.source {
+                        satisfied_by.insert(contract.clone(), release.to_string());
                     }
-                })
+                    None
+                }
             }
             Some(_) => Some(CompatibilityFailure::AmbiguousContract {
                 contract: contract.clone(),
@@ -682,28 +811,25 @@ pub(crate) async fn report_manifest(
     let mut observations = Vec::new();
     for record in records {
         let Some(raw) = record.properties.get("evidence") else {
-            return Ok(Some(CompatibilityReport {
-                version: 1,
-                release_digest: digest.into(),
-                failures: vec![CompatibilityFailure::InvalidEvidence],
-            }));
+            return Ok(Some(CompatibilityReport::with_failures(
+                digest,
+                vec![CompatibilityFailure::InvalidEvidence],
+            )));
         };
         let identity = format!("{:x}", Sha256::digest(raw.as_bytes()));
         if record.id != format!("tenkai:software-compatibility:{environment}:{identity}") {
-            return Ok(Some(CompatibilityReport {
-                version: 1,
-                release_digest: digest.into(),
-                failures: vec![CompatibilityFailure::InvalidEvidence],
-            }));
+            return Ok(Some(CompatibilityReport::with_failures(
+                digest,
+                vec![CompatibilityFailure::InvalidEvidence],
+            )));
         }
         match serde_json::from_str::<CompatibilityEvidence>(raw) {
             Ok(evidence) => observations.push(evidence),
             Err(_) => {
-                return Ok(Some(CompatibilityReport {
-                    version: 1,
-                    release_digest: digest.into(),
-                    failures: vec![CompatibilityFailure::InvalidEvidence],
-                }));
+                return Ok(Some(CompatibilityReport::with_failures(
+                    digest,
+                    vec![CompatibilityFailure::InvalidEvidence],
+                )));
             }
         }
     }
@@ -712,11 +838,10 @@ pub(crate) async fn report_manifest(
         && observations[observations.len() - 1].observed_at_ms
             == observations[observations.len() - 2].observed_at_ms
     {
-        return Ok(Some(CompatibilityReport {
-            version: 1,
-            release_digest: digest.into(),
-            failures: vec![CompatibilityFailure::AmbiguousEvidence],
-        }));
+        return Ok(Some(CompatibilityReport::with_failures(
+            digest,
+            vec![CompatibilityFailure::AmbiguousEvidence],
+        )));
     }
     let now = crate::now_millis();
     let env = crate::environment::environment(ctx, environment).await?;
@@ -731,6 +856,7 @@ pub(crate) async fn report_manifest(
     installed.sort();
     let mut owned: BTreeSet<String> = profile.components.keys().cloned().collect();
     let mut installed_profiles = Vec::new();
+    let mut deployed = DeployedOffers::new();
     let mut ambiguous = Vec::new();
     for (product, version) in installed {
         if product == manifest.product.name {
@@ -755,6 +881,7 @@ pub(crate) async fn report_manifest(
                 });
             }
         }
+        add_deployed_provides(&mut deployed, &product, &version, &installed_profile);
         installed_profiles.push(installed_profile);
     }
     let mut result = evaluate_owned(
@@ -765,19 +892,43 @@ pub(crate) async fn report_manifest(
         &facts,
         now,
         Some(&owned),
+        &deployed,
     )?;
     result.failures.extend(ambiguous);
+    // Deployed releases satisfy contracts from their signed provides. Do not
+    // require the candidate observation to re-state those components. Still
+    // check each installed profile's requires, schema, capabilities, and facts
+    // so a candidate cannot silently unsatisfy a declared dependent.
+    // Freshness stays the candidate profile's max_evidence_age_ms: deployed
+    // provides do not expire (ADR 0043 §2), so an installed profile's evidence
+    // age bound is not applied to another release's observation.
+    let offers = contract_offers(observations.last(), &deployed);
     for installed_profile in &installed_profiles {
-        let retained = evaluate_owned(
-            installed_profile,
-            digest,
-            environment,
-            observations.last(),
-            &facts,
-            now,
-            Some(&owned),
-        )?;
-        result.failures.extend(retained.failures);
+        if let Some(evidence) = observations.last() {
+            check_environment_constraints(
+                installed_profile,
+                evidence,
+                &facts,
+                &mut result.failures,
+            );
+        } else {
+            for (fact, expected) in &installed_profile.facts {
+                if facts.get(fact) != Some(expected) {
+                    result
+                        .failures
+                        .push(CompatibilityFailure::UnsatisfiedFact { fact: fact.clone() });
+                }
+            }
+        }
+        for component in installed_profile.components.values() {
+            check_contracts(
+                installed_profile.version,
+                &component.requires,
+                &offers,
+                &mut result.failures,
+                &mut BTreeMap::new(),
+            )?;
+        }
     }
     result.failures.sort();
     result.failures.dedup();
@@ -806,11 +957,10 @@ pub(crate) async fn require_manifest(
     let report = report_manifest(ctx, environment, manifest, digest)
         .await
         .map_err(|_| CompatibilityBlocked {
-            report: CompatibilityReport {
-                version: 1,
-                release_digest: digest.into(),
-                failures: vec![CompatibilityFailure::PreflightUnavailable],
-            },
+            report: CompatibilityReport::with_failures(
+                digest,
+                vec![CompatibilityFailure::PreflightUnavailable],
+            ),
         })?;
     if let Some(report) = report
         && !report.failures.is_empty()
@@ -1077,6 +1227,7 @@ mod tests {
             &BTreeMap::new(),
             1_050,
             Some(&owned),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(
@@ -1248,6 +1399,204 @@ mod tests {
         );
     }
 
+    fn evaluate_with_deployed(
+        profile: &CompatibilityProfile,
+        evidence: &CompatibilityEvidence,
+        deployed: &DeployedOffers,
+    ) -> CompatibilityReport {
+        evaluate_owned(
+            profile,
+            &evidence.release_digest,
+            "test",
+            Some(evidence),
+            &BTreeMap::new(),
+            1_050,
+            None,
+            deployed,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn deployed_release_satisfies_requirement_without_observed_contract() {
+        let (profile, mut evidence) = fixture();
+        evidence.contracts.clear();
+        let deployed = BTreeMap::from([(
+            "database".into(),
+            vec![("compat-db@1.0.0".into(), "1.3.0".into())],
+        )]);
+        let report = evaluate_with_deployed(&profile, &evidence, &deployed);
+        assert!(report.failures.is_empty(), "{report:?}");
+        assert_eq!(
+            report.satisfied_by.get("database").map(String::as_str),
+            Some("compat-db@1.0.0")
+        );
+    }
+
+    #[test]
+    fn deployed_and_observed_contract_is_ambiguous() {
+        let (profile, evidence) = fixture();
+        let deployed = BTreeMap::from([(
+            "database".into(),
+            vec![("compat-db@1.0.0".into(), "1.3.0".into())],
+        )]);
+        let report = evaluate_with_deployed(&profile, &evidence, &deployed);
+        assert_eq!(
+            report.failures,
+            vec![CompatibilityFailure::AmbiguousContract {
+                contract: "database".into()
+            }]
+        );
+        assert!(report.satisfied_by.is_empty());
+    }
+
+    #[test]
+    fn two_deployed_providers_of_one_contract_are_ambiguous() {
+        let (profile, mut evidence) = fixture();
+        evidence.contracts.clear();
+        let deployed = BTreeMap::from([(
+            "database".into(),
+            vec![
+                ("compat-db@1.0.0".into(), "1.3.0".into()),
+                ("compat-db-b@1.0.0".into(), "1.4.0".into()),
+            ],
+        )]);
+        let report = evaluate_with_deployed(&profile, &evidence, &deployed);
+        assert_eq!(
+            report.failures,
+            vec![CompatibilityFailure::AmbiguousContract {
+                contract: "database".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn unmet_required_contract_is_still_missing() {
+        let (profile, mut evidence) = fixture();
+        evidence.contracts.clear();
+        let report = evaluate_with_deployed(&profile, &evidence, &BTreeMap::new());
+        assert_eq!(
+            report.failures,
+            vec![CompatibilityFailure::MissingContract {
+                contract: "database".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn incompatible_deployed_contract_is_refused() {
+        let (profile, mut evidence) = fixture();
+        evidence.contracts.clear();
+        let deployed = BTreeMap::from([(
+            "database".into(),
+            vec![("compat-db@1.0.0".into(), "2.0.0".into())],
+        )]);
+        let report = evaluate_with_deployed(&profile, &evidence, &deployed);
+        assert_eq!(
+            report.failures,
+            vec![CompatibilityFailure::IncompatibleContract {
+                contract: "database".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn two_components_in_one_release_providing_the_same_contract_stay_ambiguous() {
+        let (profile, mut evidence) = fixture();
+        evidence.contracts.clear();
+        let mut deployed = DeployedOffers::new();
+        let provider = CompatibilityProfile {
+            version: 1,
+            components: BTreeMap::from([
+                (
+                    "primary".into(),
+                    ComponentRequirement {
+                        pin: ComponentPin::Revision("b".repeat(40)),
+                        requires: BTreeMap::new(),
+                        provides: BTreeMap::from([("database".into(), "1.3.0".into())]),
+                    },
+                ),
+                (
+                    "replica".into(),
+                    ComponentRequirement {
+                        pin: ComponentPin::Revision("c".repeat(40)),
+                        requires: BTreeMap::new(),
+                        provides: BTreeMap::from([("database".into(), "1.3.0".into())]),
+                    },
+                ),
+            ]),
+            capabilities: Vec::new(),
+            facts: BTreeMap::new(),
+            schema: None,
+            max_evidence_age_ms: 100,
+        };
+        add_deployed_provides(&mut deployed, "compat-db", "1.0.0", &provider);
+        let report = evaluate_with_deployed(&profile, &evidence, &deployed);
+        assert_eq!(
+            report.failures,
+            vec![CompatibilityFailure::AmbiguousContract {
+                contract: "database".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn installed_schema_bounds_still_constrain_the_observation() {
+        let (_, mut evidence) = fixture();
+        evidence.schema_version = Some(4);
+        let mut failures = Vec::new();
+        let installed = CompatibilityProfile {
+            version: 1,
+            components: BTreeMap::from([(
+                "store".into(),
+                ComponentRequirement {
+                    pin: ComponentPin::Revision("b".repeat(40)),
+                    requires: BTreeMap::new(),
+                    provides: BTreeMap::from([("database".into(), "1.3.0".into())]),
+                },
+            )]),
+            capabilities: Vec::new(),
+            facts: BTreeMap::new(),
+            schema: Some(SchemaRequirement {
+                minimum: 2,
+                maximum: 3,
+                migration: MigrationState::Stable,
+            }),
+            max_evidence_age_ms: 100,
+        };
+        check_environment_constraints(&installed, &evidence, &BTreeMap::new(), &mut failures);
+        assert_eq!(failures, vec![CompatibilityFailure::UnsupportedSchema]);
+    }
+
+    #[test]
+    fn installed_capability_requirements_still_constrain_the_observation() {
+        let (_, mut evidence) = fixture();
+        evidence.capabilities.clear();
+        let mut failures = Vec::new();
+        let installed = CompatibilityProfile {
+            version: 1,
+            components: BTreeMap::from([(
+                "store".into(),
+                ComponentRequirement {
+                    pin: ComponentPin::Revision("b".repeat(40)),
+                    requires: BTreeMap::new(),
+                    provides: BTreeMap::from([("database".into(), "1.3.0".into())]),
+                },
+            )]),
+            capabilities: vec!["containers".into()],
+            facts: BTreeMap::new(),
+            schema: None,
+            max_evidence_age_ms: 100,
+        };
+        check_environment_constraints(&installed, &evidence, &BTreeMap::new(), &mut failures);
+        assert_eq!(
+            failures,
+            vec![CompatibilityFailure::MissingCapability {
+                capability: "containers".into()
+            }]
+        );
+    }
+
     async fn publish_fixture(
         ctx: &mut crate::client::Ctx,
         root: &std::path::Path,
@@ -1297,6 +1646,40 @@ mod tests {
         evidence.observed_at_ms =
             crate::now_millis() - if max_age_ms < 50_000 { 0 } else { 50_000 };
         (evidence, path)
+    }
+
+    async fn publish_signed_release(
+        ctx: &mut crate::client::Ctx,
+        root: &std::path::Path,
+        product: &str,
+        version: &str,
+        profile: CompatibilityProfile,
+    ) -> String {
+        let dir = root.join(format!("{product}-{version}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut manifest = crate::manifest::parse_raw(&format!(
+            "[product]\nname = \"{product}\"\nversion = \"{version}\"\n[deploy]\ninstall = \"true\"\nuninstall = \"true\"\n"
+        ))
+        .unwrap();
+        manifest.compatibility = Some(profile);
+        let raw = toml::to_string(&manifest).unwrap();
+        let path = dir.join("tenkai.toml");
+        std::fs::write(&path, &raw).unwrap();
+        let signature = dir.join("signature.json");
+        let roots = dir.join("trust.toml");
+        crate::dev_sign::sign_release(&root.join("keys"), &path, &signature, &roots).unwrap();
+        crate::catalog::publish(
+            ctx,
+            &path,
+            &crate::catalog::PublishOptions {
+                signature: Some(signature),
+                trust_roots: Some(roots),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        crate::manifest::digest(&raw)
     }
 
     fn execution_options(
@@ -1578,6 +1961,154 @@ mod tests {
             Some("1.1.0")
         );
         drop(ctx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn deployed_provider_satisfies_requirement_across_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-compat-deployed-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("state.db");
+        let mut ctx = crate::client::Ctx::embedded(&db).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::environment::env_add(&mut ctx, "local", "fixture")
+            .await
+            .unwrap();
+        let actor = crate::auth_context::test_management_context("compatibility-test");
+        let executor = std::sync::Arc::new(crate::software_executor::FakeSoftwareExecutor::new());
+
+        let db_pin = ComponentPin::Revision("b".repeat(40));
+        let db_profile = CompatibilityProfile {
+            version: 1,
+            components: BTreeMap::from([(
+                "store".into(),
+                ComponentRequirement {
+                    pin: db_pin.clone(),
+                    requires: BTreeMap::new(),
+                    provides: BTreeMap::from([("database".into(), "1.3.0".into())]),
+                },
+            )]),
+            capabilities: Vec::new(),
+            facts: BTreeMap::new(),
+            schema: None,
+            max_evidence_age_ms: 100_000,
+        };
+        let db_digest =
+            publish_signed_release(&mut ctx, &root, "compat-db", "1.0.0", db_profile).await;
+        let db_evidence = CompatibilityEvidence {
+            version: 1,
+            release_digest: db_digest,
+            environment: "local".into(),
+            observed_at_ms: crate::now_millis(),
+            components: BTreeMap::from([(
+                "store".into(),
+                ComponentObservation {
+                    pin: db_pin,
+                    requires: BTreeMap::new(),
+                    provides: BTreeMap::from([("database".into(), "1.3.0".into())]),
+                },
+            )]),
+            contracts: BTreeMap::new(),
+            capabilities: Vec::new(),
+            schema_version: None,
+            migration: MigrationState::Stable,
+        };
+        record_evidence(&mut ctx, "local", db_evidence)
+            .await
+            .unwrap();
+        crate::catalog::promote(&mut ctx, &actor, "compat-db@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::environment::subscribe(&mut ctx, "local", "compat-db", "stable")
+            .await
+            .unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        crate::apply::execute_with_options(&mut ctx, &plan.id, execution_options(executor.clone()))
+            .await
+            .unwrap();
+
+        let (mut app_profile, mut app_evidence) = fixture();
+        app_profile.max_evidence_age_ms = 100_000;
+        let app_digest =
+            publish_signed_release(&mut ctx, &root, "compat-app", "1.0.0", app_profile).await;
+        app_evidence.release_digest = app_digest;
+        app_evidence.environment = "local".into();
+        app_evidence.observed_at_ms = crate::now_millis() - 2_000;
+        app_evidence.contracts.clear();
+        record_evidence(&mut ctx, "local", app_evidence.clone())
+            .await
+            .unwrap();
+
+        let first = report(&mut ctx, "local", "compat-app@1.0.0")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first.failures.is_empty(), "{first:?}");
+        assert_eq!(
+            first.satisfied_by.get("database").map(String::as_str),
+            Some("compat-db@1.0.0")
+        );
+
+        crate::catalog::promote(&mut ctx, &actor, "compat-app@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::environment::subscribe(&mut ctx, "local", "compat-app", "stable")
+            .await
+            .unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        crate::apply::execute_with_options(&mut ctx, &plan.id, execution_options(executor.clone()))
+            .await
+            .unwrap();
+
+        drop(ctx);
+        let mut restarted = crate::client::Ctx::embedded(&db).unwrap();
+        let second = report(&mut restarted, "local", "compat-app@1.0.0")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(second.failures.is_empty(), "{second:?}");
+        assert_eq!(
+            second.satisfied_by.get("database").map(String::as_str),
+            Some("compat-db@1.0.0")
+        );
+        drop(restarted);
+
+        let mut other = crate::client::Ctx::embedded(&db).unwrap();
+        let third = report(&mut other, "local", "compat-app@1.0.0")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(third.failures.is_empty(), "{third:?}");
+        assert_eq!(
+            third.satisfied_by.get("database").map(String::as_str),
+            Some("compat-db@1.0.0")
+        );
+
+        app_evidence.observed_at_ms = crate::now_millis();
+        app_evidence
+            .contracts
+            .insert("database".into(), "1.3.0".into());
+        record_evidence(&mut other, "local", app_evidence)
+            .await
+            .unwrap();
+        let ambiguous = report(&mut other, "local", "compat-app@1.0.0")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            ambiguous
+                .failures
+                .contains(&CompatibilityFailure::AmbiguousContract {
+                    contract: "database".into()
+                }),
+            "{ambiguous:?}"
+        );
+
+        drop(other);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
