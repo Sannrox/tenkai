@@ -18,7 +18,11 @@ see [release signing](release-signing.md#production-signer).
 ## Build
 
 `tenkaictl bundle build` takes one or more published releases and writes one
-signed v1 archive plus its companion chunk store. The same inputs produce
+signed v1 archive plus its companion chunk store. With `--hosts-dir` and no
+`--release` it writes a hosts-only archive for
+[`self-upgrade`](release-binaries.md#upgrade-a-server-host): hosts, checksum,
+SBOMs, and trust roots, with no product catalog lookup. `--base` still needs a
+release set. The same inputs produce
 byte-identical checksum and SBOM manifests. The archive carries images by
 digest, host binaries when `--hosts-dir` is set, release configs, public trust
 roots, model weights, `checksums/manifest.json`
@@ -72,6 +76,20 @@ command is embedded-only. The v1 envelope binds `plans/content.json` and
 `approvals/content.json` as the signed release-set identity; those entries are
 not an executable Plan. First install through `upgrade install-bundle` remains
 #623.
+
+A hosts-only build omits `--release`. Host provenance flags stay required:
+
+```bash
+tenkaictl bundle build \
+  --hosts-dir tenkai-hosts \
+  --host-tag v0.7.1 \
+  --host-git-sha 0123456789abcdef0123456789abcdef01234567 \
+  --host-workflow release \
+  --env site-c \
+  --out hosts.bundle.json \
+  --signing-key exporter.seed \
+  --trust-roots offline-trust.toml
+```
 
 Rehearsal: `cargo test --locked two_builds_of_the_same_inputs_produce_byte_identical_manifests`
 builds the same release set twice and compares checksum and SBOM bytes.

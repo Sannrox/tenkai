@@ -225,8 +225,9 @@ impl BundleStatement {
         if self.issued_at_unix_ms <= 0 || self.expires_at_unix_ms <= self.issued_at_unix_ms {
             bail!("bundle validity interval is invalid");
         }
-        if self.release_ids.is_empty() || self.entries.is_empty() {
-            bail!("bundle must contain releases and entries");
+        // Hosts-only archives (#1013) carry entries with an empty release set.
+        if self.entries.is_empty() {
+            bail!("bundle must contain entries");
         }
         if self.entries.len() > MAX_ENTRIES {
             bail!("bundle exceeds the {MAX_ENTRIES} entry limit");

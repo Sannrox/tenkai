@@ -363,6 +363,64 @@ fn remote_configuration_commands_map_to_their_changes() {
 }
 
 #[test]
+fn bundle_build_parses_hosts_only_without_release() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "bundle",
+        "build",
+        "--env",
+        "dark-1",
+        "--out",
+        "hosts.bundle.json",
+        "--signing-key",
+        "exporter.seed",
+        "--trust-roots",
+        "offline-trust.toml",
+        "--hosts-dir",
+        "hosts",
+        "--host-tag",
+        "v0.5.0",
+        "--host-git-sha",
+        "0123456789abcdef0123456789abcdef01234567",
+        "--host-workflow",
+        "release",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Bundle {
+            command: crate::bundle_args::BundleCommand::Build(ref args)
+        } if args.releases.is_empty()
+            && args.hosts_dir.as_deref() == Some(std::path::Path::new("hosts"))
+            && args.env == "dark-1"
+    ));
+}
+
+#[test]
+fn bundle_build_without_release_or_hosts_dir_is_refused() {
+    let err = Cli::try_parse_from([
+        "tenkaictl",
+        "bundle",
+        "build",
+        "--env",
+        "dark-1",
+        "--out",
+        "site.bundle.json",
+        "--signing-key",
+        "exporter.seed",
+        "--trust-roots",
+        "offline-trust.toml",
+    ])
+    .err()
+    .expect("bundle build without --release or --hosts-dir is refused");
+    let text = err.to_string();
+    assert!(
+        text.contains("required") || text.contains("hosts-dir") || text.contains("release"),
+        "{text}"
+    );
+}
+
+#[test]
 fn bundle_build_parses_release_set_and_public_trust_roots() {
     let cli = Cli::try_parse_from([
         "tenkaictl",

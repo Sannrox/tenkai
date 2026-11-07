@@ -1,9 +1,11 @@
-//! One command that assembles a signed full-stack offline bundle (#626).
+//! One command that assembles a signed full-stack offline bundle (#626), or a
+//! hosts-only archive for server self-upgrade (#1013).
 //!
 //! `tenkaictl bundle build` takes published releases and emits `tenkai.offline-bundle.v1`
 //! plus the companion chunk store: images by digest, host binaries, configs,
 //! public trust roots, model weights, a checksum manifest, and an SBOM per
-//! component. Each image artifact's SBOM is the one its release declares
+//! component. With `--hosts-dir` and no `--release` it packs only the hosts,
+//! checksum, SBOMs, trust roots, envelope identity, and this build's docs. Each image artifact's SBOM is the one its release declares
 //! (#804): the build fetches it by digest, checks it, and carries it under
 //! `sbom/artifacts/`; the component SBOM lists the files it packed and names
 //! those declared documents. Host binaries and model weights have no declared
@@ -860,7 +862,12 @@ async fn load_release(ctx: &mut Ctx, spec: &str) -> Result<Object> {
 
 fn validate_request(request: &BundleBuildRequest<'_>) -> Result<()> {
     if request.releases.is_empty() {
-        bail!("bundle build requires at least one --release");
+        if request.hosts.is_empty() {
+            bail!("bundle build requires at least one --release or --hosts-dir");
+        }
+        if request.base.is_some() {
+            bail!("bundle build --base requires at least one --release");
+        }
     }
     if request.tenant_id.trim().is_empty() || request.environment_id.trim().is_empty() {
         bail!("bundle build requires tenant and environment identities");
@@ -1115,6 +1122,61 @@ mod tests {
     use crate::release_signing::{TRUST_ROOT_VERSION, key_id};
     use base64::Engine as _;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn hosts_only_bundle_carries_hosts_checksum_sbom_and_trust_roots() {
+        let fixture = Fixture::new("hosts-only").await;
+        let archive = fixture.root.join("hosts.bundle.json");
+        let mut request = fixture.request(&archive);
+        request.releases = Vec::new();
+        let mut ctx = Ctx::embedded(fixture.root.join("tenkai.db")).unwrap();
+        let envelope = build(&mut ctx, &request).await.unwrap();
+        let paths: Vec<&str> = envelope
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect();
+        assert!(paths.iter().any(|path| path.starts_with("hosts/")));
+        assert!(paths.contains(&CHECKSUM_MANIFEST_PATH));
+        assert!(paths.contains(&"sbom/hosts.json"));
+        assert!(paths.contains(&TRUST_ROOTS_PATH));
+        assert!(!paths.contains(&crate::offline_bundle::STACK_MANIFEST_PATH));
+        assert!(!paths.iter().any(|path| path.contains("edge-app")));
+        envelope
+            .verify(
+                &parse_trust_roots(&fixture.trust_toml).unwrap(),
+                ontology::NS,
+                "dark-1",
+                fixture.issued_at + 1,
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn hosts_only_build_refuses_a_delta_base() {
+        let fixture = Fixture::new("hosts-only-base").await;
+        let archive = fixture.root.join("hosts.bundle.json");
+        let mut request = fixture.request(&archive);
+        request.releases = Vec::new();
+        request.base = Some("edge-app@1.0.0".into());
+        let mut ctx = Ctx::embedded(fixture.root.join("tenkai.db")).unwrap();
+        let err = build(&mut ctx, &request).await.unwrap_err().to_string();
+        assert!(err.contains("--base"), "{err}");
+        assert!(err.contains("--release"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn empty_releases_without_hosts_are_refused() {
+        let fixture = Fixture::new("empty-set").await;
+        let archive = fixture.root.join("empty.bundle.json");
+        let mut request = fixture.request(&archive);
+        request.releases = Vec::new();
+        request.hosts.clear();
+        let mut ctx = Ctx::embedded(fixture.root.join("tenkai.db")).unwrap();
+        let err = build(&mut ctx, &request).await.unwrap_err().to_string();
+        assert!(err.contains("--release"), "{err}");
+        assert!(err.contains("--hosts-dir"), "{err}");
+    }
 
     #[tokio::test]
     async fn two_builds_of_the_same_inputs_produce_byte_identical_manifests() {
