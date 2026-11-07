@@ -150,12 +150,45 @@ pub struct CompatibilityReport {
     pub version: u32,
     pub release_digest: String,
     pub failures: Vec<CompatibilityFailure>,
+}
+
+/// Public reports contain requirement identifiers, never observed facts or payloads.
+// HTTP/CLI JSON keep the CompatibilityReport schema name; satisfied_by is additive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(rename = "CompatibilityReport")]
+pub struct CompatibilityOutcome {
+    pub version: u32,
+    pub release_digest: String,
+    pub failures: Vec<CompatibilityFailure>,
     /// Required contracts satisfied by a last-successful deployment (`product@version`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub satisfied_by: BTreeMap<String, String>,
 }
 
+impl From<CompatibilityOutcome> for CompatibilityReport {
+    fn from(outcome: CompatibilityOutcome) -> Self {
+        Self {
+            version: outcome.version,
+            release_digest: outcome.release_digest,
+            failures: outcome.failures,
+        }
+    }
+}
+
 impl CompatibilityReport {
+    fn with_failures(
+        release_digest: impl Into<String>,
+        failures: Vec<CompatibilityFailure>,
+    ) -> Self {
+        Self {
+            version: 1,
+            release_digest: release_digest.into(),
+            failures,
+        }
+    }
+}
+
+impl CompatibilityOutcome {
     fn with_failures(
         release_digest: impl Into<String>,
         failures: Vec<CompatibilityFailure>,
@@ -398,6 +431,7 @@ pub fn evaluate(
         None,
         &BTreeMap::new(),
     )
+    .map(Into::into)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -410,9 +444,9 @@ fn evaluate_owned(
     now_ms: i64,
     owned: Option<&BTreeSet<String>>,
     deployed: &DeployedOffers,
-) -> Result<CompatibilityReport> {
+) -> Result<CompatibilityOutcome> {
     profile.validate()?;
-    let mut report = CompatibilityReport::with_failures(release_digest, Vec::new());
+    let mut report = CompatibilityOutcome::with_failures(release_digest, Vec::new());
     let Some(evidence) = evidence else {
         report.failures.push(CompatibilityFailure::MissingEvidence);
         return Ok(report);
@@ -765,6 +799,17 @@ pub async fn report(
     environment: &str,
     release: &str,
 ) -> Result<Option<CompatibilityReport>> {
+    Ok(report_outcome(ctx, environment, release)
+        .await?
+        .map(Into::into))
+}
+
+/// Same as [`report`], including which deployed release satisfied each required contract.
+pub async fn report_outcome(
+    ctx: &mut crate::client::Ctx,
+    environment: &str,
+    release: &str,
+) -> Result<Option<CompatibilityOutcome>> {
     let release = if release.starts_with("tenkai:release:") {
         release.to_string()
     } else {
@@ -796,7 +841,7 @@ pub(crate) async fn report_manifest(
     environment: &str,
     manifest: &crate::manifest::Manifest,
     digest: &str,
-) -> Result<Option<CompatibilityReport>> {
+) -> Result<Option<CompatibilityOutcome>> {
     let Some(profile) = &manifest.compatibility else {
         return Ok(None);
     };
@@ -811,14 +856,14 @@ pub(crate) async fn report_manifest(
     let mut observations = Vec::new();
     for record in records {
         let Some(raw) = record.properties.get("evidence") else {
-            return Ok(Some(CompatibilityReport::with_failures(
+            return Ok(Some(CompatibilityOutcome::with_failures(
                 digest,
                 vec![CompatibilityFailure::InvalidEvidence],
             )));
         };
         let identity = format!("{:x}", Sha256::digest(raw.as_bytes()));
         if record.id != format!("tenkai:software-compatibility:{environment}:{identity}") {
-            return Ok(Some(CompatibilityReport::with_failures(
+            return Ok(Some(CompatibilityOutcome::with_failures(
                 digest,
                 vec![CompatibilityFailure::InvalidEvidence],
             )));
@@ -826,7 +871,7 @@ pub(crate) async fn report_manifest(
         match serde_json::from_str::<CompatibilityEvidence>(raw) {
             Ok(evidence) => observations.push(evidence),
             Err(_) => {
-                return Ok(Some(CompatibilityReport::with_failures(
+                return Ok(Some(CompatibilityOutcome::with_failures(
                     digest,
                     vec![CompatibilityFailure::InvalidEvidence],
                 )));
@@ -838,7 +883,7 @@ pub(crate) async fn report_manifest(
         && observations[observations.len() - 1].observed_at_ms
             == observations[observations.len() - 2].observed_at_ms
     {
-        return Ok(Some(CompatibilityReport::with_failures(
+        return Ok(Some(CompatibilityOutcome::with_failures(
             digest,
             vec![CompatibilityFailure::AmbiguousEvidence],
         )));
@@ -965,7 +1010,10 @@ pub(crate) async fn require_manifest(
     if let Some(report) = report
         && !report.failures.is_empty()
     {
-        return Err(CompatibilityBlocked { report }.into());
+        return Err(CompatibilityBlocked {
+            report: report.into(),
+        }
+        .into());
     }
     Ok(())
 }
@@ -1403,7 +1451,7 @@ mod tests {
         profile: &CompatibilityProfile,
         evidence: &CompatibilityEvidence,
         deployed: &DeployedOffers,
-    ) -> CompatibilityReport {
+    ) -> CompatibilityOutcome {
         evaluate_owned(
             profile,
             &evidence.release_digest,
@@ -2043,7 +2091,7 @@ mod tests {
             .await
             .unwrap();
 
-        let first = report(&mut ctx, "local", "compat-app@1.0.0")
+        let first = report_outcome(&mut ctx, "local", "compat-app@1.0.0")
             .await
             .unwrap()
             .unwrap();
@@ -2066,7 +2114,7 @@ mod tests {
 
         drop(ctx);
         let mut restarted = crate::client::Ctx::embedded(&db).unwrap();
-        let second = report(&mut restarted, "local", "compat-app@1.0.0")
+        let second = report_outcome(&mut restarted, "local", "compat-app@1.0.0")
             .await
             .unwrap()
             .unwrap();
@@ -2078,7 +2126,7 @@ mod tests {
         drop(restarted);
 
         let mut other = crate::client::Ctx::embedded(&db).unwrap();
-        let third = report(&mut other, "local", "compat-app@1.0.0")
+        let third = report_outcome(&mut other, "local", "compat-app@1.0.0")
             .await
             .unwrap()
             .unwrap();
@@ -2095,7 +2143,7 @@ mod tests {
         record_evidence(&mut other, "local", app_evidence)
             .await
             .unwrap();
-        let ambiguous = report(&mut other, "local", "compat-app@1.0.0")
+        let ambiguous = report_outcome(&mut other, "local", "compat-app@1.0.0")
             .await
             .unwrap()
             .unwrap();

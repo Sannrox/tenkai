@@ -251,7 +251,9 @@ pub(crate) async fn run(
                 }
                 crate::env_args::CompatibilityCommand::Check { env, release } => {
                     crate::embedded_env_config::print_compatibility_report(
-                        client.software_compatibility_report(&env, &release).await?,
+                        client
+                            .software_compatibility_outcome(&env, &release)
+                            .await?,
                     )?;
                 }
             }

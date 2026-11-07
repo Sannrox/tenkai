@@ -86,7 +86,9 @@ pub fn http_contract() -> Value {
             path: "/v1/environments/{environment}/compatibility/{release}",
             auth: Auth::Read,
             request: None,
-            response: schema::<Option<tenkai::software_compatibility::CompatibilityReport>>(&mut g),
+            response: schema::<Option<tenkai::software_compatibility::CompatibilityOutcome>>(
+                &mut g,
+            ),
         },
         Route {
             method: "POST",

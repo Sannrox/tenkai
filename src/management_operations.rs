@@ -853,6 +853,18 @@ impl ManagementOperations {
         environment: &str,
         release: &str,
     ) -> Result<Option<crate::software_compatibility::CompatibilityReport>, ManagementError> {
+        Ok(self
+            .software_compatibility_outcome(credential, environment, release)
+            .await?
+            .map(Into::into))
+    }
+
+    pub async fn software_compatibility_outcome(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        release: &str,
+    ) -> Result<Option<crate::software_compatibility::CompatibilityOutcome>, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
         self.require_community_catalog_host()?;
@@ -863,7 +875,7 @@ impl ManagementOperations {
             "software compatibility",
         )?;
         let mut ctx = self.application_ctx()?;
-        crate::software_compatibility::report(&mut ctx, environment, release)
+        crate::software_compatibility::report_outcome(&mut ctx, environment, release)
             .await
             .map_err(|_| {
                 ManagementError::Unavailable("software compatibility preflight unavailable".into())
