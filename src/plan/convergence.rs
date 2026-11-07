@@ -880,25 +880,26 @@ async fn admit_reconcile_dependency(
     env: &str,
     release: &str,
 ) -> Result<DependencyAdmission> {
-    let Some(outcome) = crate::software_compatibility::report_outcome(ctx, env, release).await?
-    else {
+    let Some(eval) = crate::software_compatibility::report_eval(ctx, env, release).await? else {
         return Ok(DependencyAdmission::Proceed);
     };
-    if outcome.failures.is_empty() {
+    if eval.outcome.failures.is_empty() {
         return Ok(DependencyAdmission::Proceed);
     }
     let profile = stored_release_manifest(ctx, release).await?.compatibility;
     let Some(profile) = profile else {
         return Err(crate::software_compatibility::CompatibilityBlocked {
-            report: outcome.into(),
+            report: eval.into(),
         }
         .into());
     };
-    let Some(unmet) =
-        crate::software_compatibility::holdable_unmet_requirements(&outcome, &profile)
-    else {
+    let Some(unmet) = crate::software_compatibility::holdable_unmet_requirements(
+        &eval.outcome,
+        &eval.candidate_unmet,
+        &profile,
+    ) else {
         return Err(crate::software_compatibility::CompatibilityBlocked {
-            report: outcome.into(),
+            report: eval.into(),
         }
         .into());
     };
