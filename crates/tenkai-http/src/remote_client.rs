@@ -132,6 +132,17 @@ impl RemoteClient {
         environment: &str,
         release: &str,
     ) -> anyhow::Result<Option<tenkai::software_compatibility::CompatibilityReport>> {
+        Ok(self
+            .software_compatibility_outcome(environment, release)
+            .await?
+            .map(Into::into))
+    }
+
+    pub async fn software_compatibility_outcome(
+        &self,
+        environment: &str,
+        release: &str,
+    ) -> anyhow::Result<Option<tenkai::software_compatibility::CompatibilityOutcome>> {
         self.request_json(
             reqwest::Method::GET,
             &format!(

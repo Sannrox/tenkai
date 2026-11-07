@@ -428,7 +428,8 @@ pub(crate) async fn compatibility(
             println!("recorded software compatibility evidence for {env}");
         }
         crate::env_args::CompatibilityCommand::Check { env, release } => {
-            let report = tenkai::software_compatibility::report(ctx, &env, &release).await?;
+            let report =
+                tenkai::software_compatibility::report_outcome(ctx, &env, &release).await?;
             print_compatibility_report(report)?;
         }
     }
@@ -436,7 +437,7 @@ pub(crate) async fn compatibility(
 }
 
 pub(crate) fn print_compatibility_report(
-    report: Option<tenkai::software_compatibility::CompatibilityReport>,
+    report: Option<tenkai::software_compatibility::CompatibilityOutcome>,
 ) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&report)?);
     if report.is_some_and(|report| !report.failures.is_empty()) {

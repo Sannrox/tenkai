@@ -1089,6 +1089,13 @@
         "release_digest": {
           "type": "string"
         },
+        "satisfied_by": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Required contracts satisfied by a last-successful deployment (`product@version`).",
+          "type": "object"
+        },
         "version": {
           "format": "uint32",
           "minimum": 0,

@@ -497,7 +497,7 @@ pub(super) async fn software_compatibility_report(
     manage_result(
         state
             .management
-            .software_compatibility_report(&credential, &environment, &release)
+            .software_compatibility_outcome(&credential, &environment, &release)
             .await,
     )
 }
