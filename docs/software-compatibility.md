@@ -130,7 +130,11 @@ constituents. Do not re-state contracts Tenkai already deployed: those come
 from the provider release's signed `provides`. `contracts` describes other
 observed external providers. Required contracts from installed release profiles
 are checked against deployed `provides` and the observation, so a candidate
-cannot silently break a declared dependent. Reused component identities across
+cannot silently break a declared dependent. A plan that would remove, roll
+back, or upgrade a provider so an installed remaining dependent's required
+contract is no longer satisfied is refused, naming the dependent and the
+contract. Losing an optional provider is allowed. A required contract that had
+no matching deployed provider before the plan stays on observation rules. Reused component identities across
 retained products are refused as ambiguous.
 
 ```json

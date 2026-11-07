@@ -1194,11 +1194,9 @@ fn contract_plan_order(
 ) -> Result<ContractPlanOrder> {
     let target_edges = cross_release_contract_edges(target_profiles);
     let installed_edges = cross_release_contract_edges(installed_profiles);
-    let overlay_edges = cross_release_contract_edges(&overlay_profiles(
-        installed_profiles,
-        target_profiles,
-        pending,
-    ));
+    let remaining = overlay_profiles(installed_profiles, target_profiles, pending);
+    crate::software_compatibility::refuse_unsatisfied_dependents(&remaining, installed_profiles)?;
+    let overlay_edges = cross_release_contract_edges(&remaining);
     refuse_cross_release_cycle(&overlay_edges)?;
     refuse_mixed_direction_edges(pending, &overlay_edges)?;
     refuse_mixed_direction_edges(pending, &installed_edges)?;
@@ -1481,6 +1479,33 @@ pub(super) async fn rollback_step_with_recovery(
     } else {
         pin_release(ctx, &prev_id, env).await?
     };
+    let mut remaining = BTreeMap::new();
+    for (key, value) in &env_obj.properties {
+        let Some(name) = key.strip_prefix("deployed.") else {
+            continue;
+        };
+        if name == product {
+            continue;
+        }
+        if let Some(manifest) = readable_manifest(ctx, &release_id(name, value)).await?
+            && let Some(profile) = manifest.compatibility
+        {
+            remaining.insert(name.to_string(), profile);
+        }
+    }
+    let mut previous = remaining.clone();
+    if let Some(version) = current.as_deref()
+        && let Some(manifest) = readable_manifest(ctx, &release_id(product, version)).await?
+        && let Some(profile) = manifest.compatibility
+    {
+        previous.insert(product.to_string(), profile);
+    }
+    if let Some(manifest) = readable_manifest(ctx, &prev_id).await?
+        && let Some(profile) = manifest.compatibility
+    {
+        remaining.insert(product.to_string(), profile);
+    }
+    crate::software_compatibility::refuse_unsatisfied_dependents(&remaining, &previous)?;
     crate::software_compatibility::require_release(ctx, env, &prev_id).await?;
     let restore = match current.as_deref() {
         Some(version) => {
@@ -1660,6 +1685,40 @@ mod tests {
             model_routing_rollout_rank(ProductKind::RoutingConfig, Action::Rollback)
                 < model_routing_rollout_rank(ProductKind::ModelRuntime, Action::Rollback)
         );
+    }
+
+    fn test_profile_optional(
+        requires: &[(&str, &str)],
+    ) -> crate::software_compatibility::CompatibilityProfile {
+        use crate::software_compatibility::{
+            CompatibilityProfile, ComponentPin, ComponentRequirement, ContractRequirement,
+        };
+        CompatibilityProfile {
+            version: 2,
+            components: BTreeMap::from([(
+                "main".into(),
+                ComponentRequirement {
+                    pin: ComponentPin::Revision("a".repeat(40)),
+                    requires: requires
+                        .iter()
+                        .map(|(contract, minimum)| {
+                            (
+                                (*contract).into(),
+                                ContractRequirement::Detailed {
+                                    minimum: (*minimum).into(),
+                                    optional: true,
+                                },
+                            )
+                        })
+                        .collect(),
+                    provides: BTreeMap::new(),
+                },
+            )]),
+            capabilities: Vec::new(),
+            facts: BTreeMap::new(),
+            schema: None,
+            max_evidence_age_ms: 60_000,
+        }
     }
 
     fn test_profile(
@@ -1898,10 +1957,7 @@ mod tests {
                 "a".into(),
                 test_profile(&[("database", "1.0.0")], &[("api", "1.0.0")]),
             ),
-            (
-                "b".into(),
-                test_profile(&[("api", "1.0.0")], &[("database", "1.0.0")]),
-            ),
+            ("b".into(), test_profile(&[], &[])),
         ]);
         let ranks = contract_plan_order(&[("a", Action::Upgrade)], &target, &installed)
             .unwrap()
@@ -1910,7 +1966,7 @@ mod tests {
     }
 
     #[test]
-    fn contract_order_remove_breaks_an_installed_cycle() {
+    fn contract_order_refuses_remove_that_unsatisfies_a_remaining_dependent() {
         let target = BTreeMap::from([(
             "a".into(),
             test_profile(&[("database", "1.0.0")], &[("api", "1.0.0")]),
@@ -1925,10 +1981,67 @@ mod tests {
                 test_profile(&[("api", "1.0.0")], &[("database", "1.0.0")]),
             ),
         ]);
-        let ranks = contract_plan_order(&[("a", Action::Remove)], &target, &installed)
+        let err = contract_plan_order(&[("a", Action::Remove)], &target, &installed)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("installed dependent b"), "{err}");
+        assert!(err.contains("api"), "{err}");
+    }
+
+    #[test]
+    fn contract_order_refuses_upgrade_that_drops_a_required_contract() {
+        let target = BTreeMap::from([("db".into(), test_profile(&[], &[]))]);
+        let installed = BTreeMap::from([
+            ("app".into(), test_profile(&[("database", "1.0.0")], &[])),
+            ("db".into(), test_profile(&[], &[("database", "1.0.0")])),
+        ]);
+        let err = contract_plan_order(&[("db", Action::Upgrade)], &target, &installed)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("installed dependent app"), "{err}");
+        assert!(err.contains("database"), "{err}");
+    }
+
+    #[test]
+    fn contract_order_refuses_rollback_that_drops_a_required_contract() {
+        let target = BTreeMap::from([("db".into(), test_profile(&[], &[]))]);
+        let installed = BTreeMap::from([
+            ("app".into(), test_profile(&[("database", "1.0.0")], &[])),
+            ("db".into(), test_profile(&[], &[("database", "1.0.0")])),
+        ]);
+        let err = contract_plan_order(&[("db", Action::Rollback)], &target, &installed)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("installed dependent app"), "{err}");
+        assert!(err.contains("database"), "{err}");
+    }
+
+    #[test]
+    fn contract_order_allows_remove_of_an_optional_provider() {
+        let installed = BTreeMap::from([
+            (
+                "app".into(),
+                test_profile_optional(&[("database", "1.0.0")]),
+            ),
+            ("db".into(), test_profile(&[], &[("database", "1.0.0")])),
+        ]);
+        let ranks = contract_plan_order(&[("db", Action::Remove)], &BTreeMap::new(), &installed)
             .unwrap()
             .ranks;
-        assert!(ranks.contains_key("a"), "{ranks:?}");
+        assert!(ranks.contains_key("db"), "{ranks:?}");
+    }
+
+    #[test]
+    fn contract_order_allows_remove_when_another_provider_still_satisfies() {
+        let installed = BTreeMap::from([
+            ("app".into(), test_profile(&[("database", "1.0.0")], &[])),
+            ("db".into(), test_profile(&[], &[("database", "1.0.0")])),
+            ("db2".into(), test_profile(&[], &[("database", "1.1.0")])),
+        ]);
+        let ranks = contract_plan_order(&[("db", Action::Remove)], &BTreeMap::new(), &installed)
+            .unwrap()
+            .ranks;
+        assert!(ranks.contains_key("db"), "{ranks:?}");
     }
 
     #[test]
