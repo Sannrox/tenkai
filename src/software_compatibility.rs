@@ -771,7 +771,7 @@ fn check_contracts(
     Ok(unmet)
 }
 
-fn contract_satisfies(
+pub(crate) fn contract_satisfies(
     profile_version: u32,
     actual: &semver::Version,
     minimum: &semver::Version,

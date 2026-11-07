@@ -382,6 +382,33 @@ impl HostExecutor {
         Ok(instance)
     }
 
+    /// Write a basename file into an instance spool (the dependency document).
+    pub fn write_spool_file(&self, instance: &str, name: &str, contents: &[u8]) -> Result<()> {
+        validate_instance_name(instance)?;
+        if name != crate::dependency_document::HOST_FILE
+            || name.contains('/')
+            || name.contains('\\')
+            || name.contains('\0')
+        {
+            bail!(
+                "host spool extra file must be {}",
+                crate::dependency_document::HOST_FILE
+            );
+        }
+        let path = self.spool_dir.join(instance).join(name);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("creating {}", path.display()))?;
+        use std::io::Write as _;
+        file.write_all(contents)
+            .with_context(|| format!("writing {}", path.display()))?;
+        file.sync_all()?;
+        Ok(())
+    }
+
     /// Ask systemd to stop every running host unit that acts on
     /// `environment`, and return their instances. Only the environment
     /// lease's holder may have one running, so a unit still running when

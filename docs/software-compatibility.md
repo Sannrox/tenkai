@@ -181,6 +181,40 @@ or workdir paths. Each stored observation is content-addressed and immutable;
 repeating identical evidence is idempotent and does not refresh its age. Recording
 an observation does not change environment configuration or deployed versions.
 
+## Dependency document
+
+At apply and same-version restart, a software release that declares
+cross-release requirements receives a version 1 JSON document derived only from
+stored successful deployments (ADR 0043 §6). For each required or optional
+contract the document names the providing product, its release version, and the
+provided contract version, or `state: absent` for an optional contract with no
+provider. Required contracts are never absent. A contract this release already
+provides is omitted. The bytes are identical on every replica and on retry.
+The document carries no endpoints, credentials, or instance names (instance
+names are a later format).
+
+```json
+{
+  "version": 1,
+  "contracts": {
+    "database": {
+      "state": "present",
+      "product": "postgres",
+      "release": "1.3.0",
+      "contract": "1.3.0"
+    },
+    "connector.capture": { "state": "absent" }
+  }
+}
+```
+
+When a plan changes the providers of an already-installed dependent, the same
+plan re-renders that dependent after the provider step as `restart`. A
+same-version restart is not a mixed-direction version change. Host releases are
+never restarted (ADR 0041); they receive the file on install or upgrade. A
+release with no cross-release requirements receives no document. Executors
+deliver the document as described in [software executor](software-executor.md).
+
 ## Interpret refusal and refresh evidence
 
 The newest observation for the exact environment and release is used. Conflicting

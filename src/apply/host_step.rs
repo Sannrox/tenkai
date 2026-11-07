@@ -67,6 +67,24 @@ pub(super) async fn run(
     ) {
         return Ok(HostStepEnd::NotRun(format!("{error:#}")));
     }
+    if let Some(profile) = &content.manifest.compatibility {
+        let env = crate::environment::environment(ctx, &content.environment).await?;
+        match crate::dependency_document::json_for_product(ctx, &env, &content.product, profile)
+            .await
+        {
+            Ok(Some(json)) => {
+                if let Err(error) = host.write_spool_file(
+                    &instance,
+                    crate::dependency_document::HOST_FILE,
+                    json.as_bytes(),
+                ) {
+                    return Ok(HostStepEnd::NotRun(format!("{error:#}")));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => return Ok(HostStepEnd::NotRun(format!("{error:#}"))),
+        }
+    }
     let ended = start_and_wait(ctx, lease, host, &instance).await;
     host.discard_spool(&instance);
     let started = ended?;

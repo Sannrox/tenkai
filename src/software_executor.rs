@@ -125,6 +125,11 @@ pub struct SoftwareApplyRequest {
     /// nothing by release label alone.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub apply_attempt: String,
+    /// Canonical JSON dependency document (ADR 0043 §6). Empty when the
+    /// release declares no requirements. Old executors ignore an unknown
+    /// field; new ones treat empty as no document.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dependency_document: String,
 }
 
 /// An executor cannot reach its target, found before anything was applied:
@@ -217,6 +222,7 @@ pub enum SoftwareObserveStatus {
 #[derive(Debug, Default)]
 pub struct FakeSoftwareExecutor {
     applied: Mutex<Vec<String>>,
+    documents: Mutex<Vec<String>>,
     fail_apply: bool,
     apply_delay: std::time::Duration,
 }
@@ -239,6 +245,11 @@ impl FakeSoftwareExecutor {
     pub fn applied_keys(&self) -> Vec<String> {
         self.applied.lock().expect("fake software mutex").clone()
     }
+
+    /// Canonical dependency documents delivered with each apply, empty when none.
+    pub fn applied_documents(&self) -> Vec<String> {
+        self.documents.lock().expect("fake software mutex").clone()
+    }
 }
 
 impl SoftwareExecutor for FakeSoftwareExecutor {
@@ -257,6 +268,10 @@ impl SoftwareExecutor for FakeSoftwareExecutor {
         }
         let key = request_key(request);
         self.applied.lock().expect("fake software mutex").push(key);
+        self.documents
+            .lock()
+            .expect("fake software mutex")
+            .push(request.dependency_document.clone());
         Ok(())
     }
 
@@ -789,7 +804,7 @@ fn process_default_from_value(value: Option<&str>) -> Result<ProcessDefault> {
 }
 
 fn request_key(request: &SoftwareApplyRequest) -> String {
-    if request.config_digest.is_empty() {
+    let mut key = if request.config_digest.is_empty() {
         format!(
             "{}|{}|{}",
             request.environment, request.product, request.version
@@ -799,7 +814,14 @@ fn request_key(request: &SoftwareApplyRequest) -> String {
             "{}|{}|{}|{}",
             request.environment, request.product, request.version, request.config_digest
         )
+    };
+    if !request.dependency_document.is_empty() {
+        key.push('|');
+        key.push_str(&crate::dependency_document::digest_json(
+            &request.dependency_document,
+        ));
     }
+    key
 }
 
 pub fn validate_request(request: &SoftwareApplyRequest) -> Result<()> {
@@ -838,6 +860,7 @@ pub fn request_from_parts(
         cluster_config_path: None,
         secret_dir_path: None,
         apply_attempt: uuid::Uuid::new_v4().simple().to_string(),
+        dependency_document: String::new(),
     }
 }
 
@@ -869,6 +892,7 @@ mod tests {
             cluster_config_path: None,
             secret_dir_path: None,
             apply_attempt: String::new(),
+            dependency_document: String::new(),
         }
     }
 

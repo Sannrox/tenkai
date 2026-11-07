@@ -57,6 +57,7 @@ impl HelmSoftwareExecutor {
             .arg("--timeout")
             .arg("5m");
         apply_helm_set_flags(&mut command, request);
+        let _dependency_file = helm_dependency_file(request, &mut command)?;
         for set in extra_sets {
             command.arg("--set").arg(set);
         }
@@ -162,6 +163,46 @@ fn apply_helm_set_flags(command: &mut Command, request: &SoftwareApplyRequest) {
             .arg("--set")
             .arg(format!("tenkai.config.{key}={value}"));
     }
+}
+
+struct TempDoc(PathBuf);
+
+impl Drop for TempDoc {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn helm_dependency_file(
+    request: &SoftwareApplyRequest,
+    command: &mut Command,
+) -> Result<Option<TempDoc>> {
+    if request.dependency_document.is_empty() {
+        return Ok(None);
+    }
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-dependencies-{}-{}.json",
+        std::process::id(),
+        uuid_like()
+    ));
+    std::fs::write(&path, request.dependency_document.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    command.arg("--set-file").arg(format!(
+        "{}={}",
+        tenkai::dependency_document::HELM_VALUES_KEY,
+        path.display()
+    ));
+    Ok(Some(TempDoc(path)))
+}
+
+fn uuid_like() -> String {
+    format!(
+        "{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    )
 }
 
 fn helm_values_mismatch(values_json: &str, request: &SoftwareApplyRequest) -> bool {
