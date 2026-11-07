@@ -16,6 +16,26 @@ struct PendingChange {
     kind: crate::manifest::ProductKind,
 }
 
+fn refuse_second_one_instance(
+    env: &str,
+    product_instances: &BTreeMap<String, Vec<(String, crate::manifest::DeployInstances)>>,
+) -> Result<()> {
+    for (product, rows) in product_instances {
+        if rows.len() < 2 {
+            continue;
+        }
+        if rows.iter().all(|(_, mode)| mode.allows_several()) {
+            continue;
+        }
+        bail!(
+            "environment {env} already has instance {} of product {product}; a second instance {} needs [deploy] instances = \"many\" on the release",
+            rows[0].0,
+            rows[1].0
+        );
+    }
+    Ok(())
+}
+
 fn classify_change(current: &str, desired: &str) -> Action {
     match (
         semver::Version::parse(current),
@@ -430,6 +450,8 @@ async fn compute_snapshot_with_policy(
     let mut held_routing = false;
     let mut hold_sets = BTreeMap::new();
     let mut hold_clears = BTreeSet::new();
+    let mut product_instances: BTreeMap<String, Vec<(String, crate::manifest::DeployInstances)>> =
+        BTreeMap::new();
     for sub in subscriptions {
         let product = sub.product;
         let instance = sub.instance;
@@ -461,6 +483,14 @@ async fn compute_snapshot_with_policy(
         .await?;
         let desired = selected.version;
         let release = selected.release_id;
+        let instances_mode = readable_manifest(ctx, &release)
+            .await?
+            .map(|manifest| manifest.deploy.instances)
+            .unwrap_or_default();
+        product_instances
+            .entry(product.clone())
+            .or_default()
+            .push((instance.clone(), instances_mode));
         if release_is_recalled(ctx, &release).await? {
             bail!(
                 "channel head {release} is recalled; promote another release before converging {product} in {env}"
@@ -631,6 +661,11 @@ async fn compute_snapshot_with_policy(
                         crate::environment::product_overlays(&env_obj, &product)
                             .unwrap_or_default(),
                     );
+                    request.instance = if instance == product {
+                        String::new()
+                    } else {
+                        instance.clone()
+                    };
                     request.cluster_config_path =
                         crate::software_executor::cluster_config_path_from_properties(
                             &env_obj.properties,
@@ -649,9 +684,14 @@ async fn compute_snapshot_with_policy(
                 let overlay_digest = crate::environment::overlay_digest(
                     &crate::environment::product_overlays(&env_obj, &product).unwrap_or_default(),
                 );
+                let applied_key = if instance.is_empty() {
+                    &product
+                } else {
+                    &instance
+                };
                 let applied = env_obj
                     .properties
-                    .get(&format!("applied_config.{product}"))
+                    .get(&format!("applied_config.{applied_key}"))
                     .cloned()
                     .unwrap_or_default();
                 if overlay_digest != applied {
@@ -816,6 +856,7 @@ async fn compute_snapshot_with_policy(
             }
         }
     }
+    refuse_second_one_instance(env, &product_instances)?;
     inputs.sort_by(|a, b| a.product.cmp(&b.product));
     if held_model {
         pending.retain(|entry| entry.kind != crate::manifest::ProductKind::RoutingConfig);

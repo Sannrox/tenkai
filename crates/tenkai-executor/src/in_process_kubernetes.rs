@@ -24,7 +24,7 @@ use crate::workload_stall::{Stall, StallClassifier, WorkloadEvidence};
 use tenkai::software_executor::{
     RolloutPhaseTimes, SoftwareApplyRequest, SoftwareExecutor, SoftwareObserveStatus,
     TargetUnavailable, k8s_label_value, kubernetes_manifests_dir, list_manifest_files,
-    validate_cluster_config_path, validate_request,
+    substitute_instance_placeholder, validate_cluster_config_path, validate_request,
 };
 
 pub const FIELD_MANAGER: &str = "tenkai";
@@ -537,7 +537,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         }
         let mut objects = Vec::new();
         for path in &files {
-            for object in parse_manifest_objects(path)? {
+            for object in parse_manifest_objects(path, request.instance_name())? {
                 objects.push(object);
             }
         }
@@ -767,13 +767,13 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
         let manifests = kubernetes_manifests_dir(&request.workdir)?;
         let files = list_manifest_files(&manifests)?;
         for path in files.iter().rev() {
-            for object in parse_manifest_objects(path)? {
+            for object in parse_manifest_objects(path, request.instance_name())? {
                 let (kind, name) = object_identity(&object)?;
                 self.api
                     .remove(cluster_config, &request.environment, &name, &kind)?;
             }
         }
-        let name = tenkai::dependency_document::configmap_name(&request.product);
+        let name = tenkai::dependency_document::configmap_name(request.instance_name());
         let _ = self
             .api
             .remove(cluster_config, &request.environment, &name, "ConfigMap");
@@ -792,7 +792,7 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
         }
         let mut saw_workload = false;
         for path in &files {
-            for object in parse_manifest_objects(path)? {
+            for object in parse_manifest_objects(path, request.instance_name())? {
                 let (kind, name) = object_identity(&object)?;
                 if !is_workload(&kind) {
                     continue;
@@ -826,9 +826,10 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
     }
 }
 
-fn parse_manifest_objects(path: &Path) -> Result<Vec<Value>> {
+fn parse_manifest_objects(path: &Path, instance: &str) -> Result<Vec<Value>> {
     let raw = std::fs::read_to_string(path)
         .map_err(|error| anyhow::anyhow!("reading manifest {}: {error}", path.display()))?;
+    let raw = substitute_instance_placeholder(&raw, instance);
     let mut objects = Vec::new();
     for document in serde_yaml::Deserializer::from_str(&raw) {
         let yaml_value = serde_yaml::Value::deserialize(document)
@@ -896,6 +897,10 @@ fn stamp_ownership(object: &mut Value, request: &SoftwareApplyRequest) {
     labels.insert(
         "tenkai.product".into(),
         Value::String(k8s_label_value(&request.product)),
+    );
+    labels.insert(
+        "tenkai.instance".into(),
+        Value::String(k8s_label_value(request.instance_name())),
     );
     labels.insert(
         "tenkai.version".into(),
@@ -1701,6 +1706,7 @@ mod tests {
     fn request(root: &Path, kubeconfig: &Path, version: &str) -> SoftwareApplyRequest {
         SoftwareApplyRequest {
             product: "edge-app".into(),
+            instance: String::new(),
             version: version.into(),
             environment: "lab".into(),
             workdir: root.to_path_buf(),

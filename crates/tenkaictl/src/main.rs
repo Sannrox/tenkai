@@ -196,6 +196,7 @@ async fn run(mut cli: Cli) -> Result<()> {
         workdir,
         environment,
         product,
+        instance,
         generation,
         command,
     } = &cli.command
@@ -206,6 +207,7 @@ async fn run(mut cli: Cli) -> Result<()> {
                 workdir,
                 environment,
                 product,
+                instance,
                 command,
             },
             *generation,

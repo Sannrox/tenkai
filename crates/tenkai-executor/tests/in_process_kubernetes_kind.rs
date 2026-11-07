@@ -56,6 +56,7 @@ spec:
 fn request(root: &Path, kubeconfig: &Path, env: &str, version: &str) -> SoftwareApplyRequest {
     SoftwareApplyRequest {
         product: "edge-app".into(),
+        instance: String::new(),
         version: version.into(),
         environment: env.into(),
         workdir: root.to_path_buf(),

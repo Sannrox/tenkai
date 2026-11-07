@@ -63,9 +63,10 @@ pub fn digest_json(json: &str) -> String {
     format!("{:x}", Sha256::digest(json.as_bytes()))
 }
 
-/// ConfigMap name for an in-cluster document (`tenkai-dependencies-<product>`).
-pub fn configmap_name(product: &str) -> String {
-    let label = crate::software_executor::k8s_label_value(product)
+/// ConfigMap name for an in-cluster document (`tenkai-dependencies-<instance>`).
+/// The default instance is the product, so existing names stay.
+pub fn configmap_name(instance: &str) -> String {
+    let label = crate::software_executor::k8s_label_value(instance)
         .to_ascii_lowercase()
         .replace(['_', '.'], "-");
     format!("tenkai-dependencies-{label}")
@@ -76,7 +77,7 @@ pub fn configmap_json(request: &crate::software_executor::SoftwareApplyRequest) 
     if request.dependency_document.is_empty() {
         return None;
     }
-    let name = configmap_name(&request.product);
+    let name = configmap_name(request.instance_name());
     let value = serde_json::json!({
         "apiVersion": "v1",
         "kind": "ConfigMap",
@@ -85,6 +86,7 @@ pub fn configmap_json(request: &crate::software_executor::SoftwareApplyRequest) 
             "namespace": request.environment,
             "labels": {
                 "tenkai.product": crate::software_executor::k8s_label_value(&request.product),
+                "tenkai.instance": crate::software_executor::k8s_label_value(request.instance_name()),
             }
         },
         "data": {

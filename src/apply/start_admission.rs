@@ -115,8 +115,15 @@ pub(super) async fn admit(
                 artifact_digest: step.artifact_digest.clone(),
                 workdir: step.workdir.clone(),
             };
-            let content =
-                admit_release(ctx, &target, &plan.environment, &step.product, false).await?;
+            let content = admit_release(
+                ctx,
+                &target,
+                &plan.environment,
+                &step.product,
+                step.instance_name(),
+                false,
+            )
+            .await?;
             let Some(suite) = content
                 .manifest
                 .gate

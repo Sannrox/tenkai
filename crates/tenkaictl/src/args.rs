@@ -88,6 +88,8 @@ pub(crate) enum Command {
         environment: String,
         #[arg(long)]
         product: String,
+        #[arg(long, default_value = "")]
+        instance: String,
         #[arg(long)]
         generation: u64,
         #[arg(long)]

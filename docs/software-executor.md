@@ -122,9 +122,10 @@ tenkaictl reconcile --once
 ```
 
 ```text
-helm upgrade --install <product> <workdir> \
+helm upgrade --install <instance> <workdir> \
   --namespace <environment> --create-namespace --wait --timeout 5m \
   --set tenkai.version=<version> --set tenkai.releaseId=<release_id> \
+  --set tenkai.instance=<instance> \
   [--set tenkai.configDigest=<digest> --set tenkai.config.<key>=<value> ...] \
   [--set-file tenkai.dependencies=<path-to-canonical-json>]
 ```
@@ -132,8 +133,9 @@ helm upgrade --install <product> <workdir> \
 A release that declares requirements also gets a dependency document
 ([software compatibility](software-compatibility.md)). Helm charts read it as
 `tenkai.dependencies`. Native and in-process Kubernetes apply ConfigMap
-`tenkai-dependencies-<product>` in the environment namespace, data key
-`tenkai-dependencies.json`. Docker copies the file to
+`tenkai-dependencies-<instance>` in the environment namespace, data key
+`tenkai-dependencies.json`. The default instance is the product, so existing
+names stay. Docker copies the file to
 `/etc/tenkai/dependencies.json` in each container. Host apply writes
 `tenkai-dependencies.json` next to `request.json` in the spool instance
 directory. Executors never write the document into signed release content.
@@ -158,14 +160,21 @@ Rules:
 - Tenkai ensures the namespace exists (`kubectl create namespace` if missing).
 - After apply, resources are labeled (overwrite):
   - `tenkai.product`
+  - `tenkai.instance` (the product when the instance is not named)
   - `tenkai.version`
   - `tenkai.release-id` (sanitized for Kubernetes label charset)
+- Observe, restart, and remove select on `tenkai.product` and `tenkai.instance`
+  so two instances of one product do not share a selector.
+- Native and in-process apply substitute `${TENKAI_INSTANCE}` as a literal
+  string in `{workdir}/manifests/**/*.yaml` and nowhere else. The signed
+  workdir is not rewritten. A default-named instance of a manifest without
+  the placeholder keeps today's object names.
 - When a non-secret overlay digest is present, apply and restart also annotate
   `tenkai.config-digest` on Deployments and StatefulSets labeled
-  `tenkai.product`.
+  `tenkai.product` and `tenkai.instance`.
 - When the apply request carries a dependency document, apply also creates
-  ConfigMap `tenkai-dependencies-<product>` with key `tenkai-dependencies.json`.
-- Product, version, and environment names must not contain path separators.
+  ConfigMap `tenkai-dependencies-<instance>` with key `tenkai-dependencies.json`.
+- Product, version, instance, and environment names must not contain path separators.
 
 Kustomize is **not** supported in this surface.
 

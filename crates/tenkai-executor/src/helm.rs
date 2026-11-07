@@ -48,7 +48,7 @@ impl HelmSoftwareExecutor {
         command
             .arg("upgrade")
             .arg("--install")
-            .arg(&request.product)
+            .arg(request.instance_name())
             .arg(&request.workdir)
             .arg("--namespace")
             .arg(&request.environment)
@@ -88,7 +88,7 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
         let mut command = Command::new(&self.helm_binary);
         command
             .arg("uninstall")
-            .arg(&request.product)
+            .arg(request.instance_name())
             .arg("--namespace")
             .arg(&request.environment)
             .arg("--wait");
@@ -107,7 +107,7 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
         validate_request(request)?;
         let output = Command::new(&self.helm_binary)
             .arg("status")
-            .arg(&request.product)
+            .arg(request.instance_name())
             .arg("--namespace")
             .arg(&request.environment)
             .output()
@@ -118,7 +118,7 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
         let values = Command::new(&self.helm_binary)
             .arg("get")
             .arg("values")
-            .arg(&request.product)
+            .arg(request.instance_name())
             .arg("--namespace")
             .arg(&request.environment)
             .arg("--all")
@@ -154,7 +154,9 @@ fn apply_helm_set_flags(command: &mut Command, request: &SoftwareApplyRequest) {
         .arg("--set")
         .arg(format!("tenkai.version={}", request.version))
         .arg("--set")
-        .arg(format!("tenkai.releaseId={}", request.release_id));
+        .arg(format!("tenkai.releaseId={}", request.release_id))
+        .arg("--set")
+        .arg(format!("tenkai.instance={}", request.instance_name()));
     command
         .arg("--set")
         .arg(format!("tenkai.configDigest={}", request.config_digest));

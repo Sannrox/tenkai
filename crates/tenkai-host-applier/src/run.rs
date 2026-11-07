@@ -47,6 +47,14 @@ pub fn command_environment(step: &VerifiedHostStep) -> Vec<(&'static str, String
         ("HOME", "/root".into()),
         ("TENKAI_ENVIRONMENT", step.environment.clone()),
         ("TENKAI_PRODUCT", step.product.clone()),
+        (
+            "TENKAI_INSTANCE",
+            if step.product_instance.is_empty() {
+                step.product.clone()
+            } else {
+                step.product_instance.clone()
+            },
+        ),
         ("TENKAI_VERSION", step.release.version.clone()),
         (
             "TENKAI_RELEASE_DIGEST",

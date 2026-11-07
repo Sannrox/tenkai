@@ -685,6 +685,7 @@ pub(super) async fn run_mutation_command(
             workdir: &content.workdir,
             environment: &content.environment,
             product: &content.product,
+            instance: &content.instance,
             command: cmd,
         },
     )

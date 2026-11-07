@@ -16,6 +16,8 @@ pub(super) struct ReleaseContent {
     pub(super) workdir: PathBuf,
     pub(super) environment: String,
     pub(super) product: String,
+    /// Instance this apply is for. Empty means the product.
+    pub(super) instance: String,
     pub(super) mutation_lock: PathBuf,
     pub(super) routing_state: PathBuf,
     pub(super) model_runtime_state: PathBuf,
@@ -61,6 +63,7 @@ pub(super) async fn admit(
     pin: &ReleasePin,
     environment: &str,
     product: &str,
+    instance: &str,
     recalled_recovery: bool,
 ) -> Result<ReleaseContent> {
     let snapshot = if recalled_recovery {
@@ -135,6 +138,11 @@ pub(super) async fn admit(
         workdir,
         environment: environment.to_string(),
         product: product.to_string(),
+        instance: if instance.is_empty() || instance == product {
+            String::new()
+        } else {
+            instance.to_string()
+        },
         mutation_lock: runtime_dir.join(".mutation.lock"),
         routing_state: runtime_dir.join("routing").join(format!("{product}.json")),
         model_runtime_state: runtime_dir

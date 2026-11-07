@@ -79,7 +79,8 @@ async fn run_command(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // Match production deploy children: clear parent env and allowlist only.
-    for (key, value) in crate::fenced_mutation::deploy_child_environment(environment, product, None)
+    for (key, value) in
+        crate::fenced_mutation::deploy_child_environment(environment, product, product, None)
     {
         command.env(key, value);
     }
@@ -515,6 +516,7 @@ mod tests {
                     uninstall: uninstall.map(str::to_string),
                     health: health.map(str::to_string),
                     executor: None,
+                    instances: crate::manifest::DeployInstances::One,
                 },
                 routing: None,
                 model: None,
@@ -538,6 +540,7 @@ mod tests {
             workdir,
             environment: "test".into(),
             product: "api".into(),
+            instance: String::new(),
             mutation_lock: std::env::temp_dir().join("tenkai-test-mutation.lock"),
             routing_state: std::env::temp_dir().join("tenkai-test-routing-state.json"),
             model_runtime_state: std::env::temp_dir().join("tenkai-test-model-runtime-state.json"),

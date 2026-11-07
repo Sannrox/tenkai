@@ -397,7 +397,7 @@ async fn update_reconciled_deployment_object(
         .properties
         .insert(format!("deployment_health.{key}"), "healthy".into());
     object.properties.remove(&format!("deployment_error.{key}"));
-    stamp_applied_overlays(object, product);
+    stamp_applied_overlays(object, product, instance);
     crate::dependency_document::stamp(ctx, object, product).await?;
     object.properties.remove(&format!("deployed_prev.{key}"));
     for prefix in [
@@ -478,7 +478,7 @@ pub(crate) async fn record_deployed(
         .properties
         .insert(format!("deployment_health.{key}"), "healthy".into());
     object.properties.remove(&format!("deployment_error.{key}"));
-    stamp_applied_overlays(&mut object, product);
+    stamp_applied_overlays(&mut object, product, instance);
     crate::dependency_document::stamp(ctx, &mut object, product).await?;
     object.updated = crate::now_millis();
     guarded_update(ctx, lease, object).await
@@ -853,7 +853,7 @@ fn transition_deployment(
             environment
                 .properties
                 .remove(&format!("deployment_error.{key}"));
-            stamp_applied_overlays(environment, product);
+            stamp_applied_overlays(environment, product, instance);
             clear_unknown_origin(environment, key);
         }
         DeploymentTransition::Deployed { version, previous } => {
@@ -875,7 +875,7 @@ fn transition_deployment(
             environment
                 .properties
                 .remove(&format!("deployment_error.{key}"));
-            stamp_applied_overlays(environment, product);
+            stamp_applied_overlays(environment, product, instance);
             clear_unknown_origin(environment, key);
         }
         DeploymentTransition::Removed { version } => {
@@ -885,6 +885,7 @@ fn transition_deployment(
                 "deployment_health",
                 "deployment_error",
                 "applied_dependencies",
+                "applied_config",
             ] {
                 environment.properties.remove(&format!("{prefix}.{key}"));
             }
@@ -1729,9 +1730,14 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
         )
         .await?;
         let overlay_digest = overlay_digest_for(env_obj, &product);
+        let applied_key = if instance.is_empty() {
+            &product
+        } else {
+            &instance
+        };
         let applied = env_obj
             .properties
-            .get(&format!("applied_config.{product}"))
+            .get(&format!("applied_config.{applied_key}"))
             .cloned()
             .unwrap_or_default();
         let selected_release = crate::plan::resolve_subscription_selection(
@@ -1807,9 +1813,14 @@ fn subscription_views_from_status(
     rows.into_iter()
         .map(|row| {
             let overlay_digest = overlay_digest_for(env_obj, &row.product);
+            let applied_key = if row.instance.is_empty() {
+                &row.product
+            } else {
+                &row.instance
+            };
             let applied_overlay = env_obj
                 .properties
-                .get(&format!("applied_config.{}", row.product))
+                .get(&format!("applied_config.{applied_key}"))
                 .cloned()
                 .filter(|value| !value.is_empty());
             let config_stale = overlay_digest != applied_overlay.clone().unwrap_or_default();
@@ -2914,19 +2925,24 @@ fn overlay_digest_for(env_obj: &Object, product: &str) -> String {
         .unwrap_or_default()
 }
 
-fn stamp_applied_overlays(environment: &mut Object, product: &str) {
+fn stamp_applied_overlays(environment: &mut Object, product: &str, instance: &str) {
+    let key = if instance.is_empty() {
+        product
+    } else {
+        instance
+    };
     let digest = overlay_digest_for(environment, product);
     if digest.is_empty() {
         environment
             .properties
-            .remove(&format!("applied_config.{product}"));
+            .remove(&format!("applied_config.{key}"));
         environment
             .properties
             .remove(&format!("config_digest.{product}"));
     } else {
         environment
             .properties
-            .insert(format!("applied_config.{product}"), digest.clone());
+            .insert(format!("applied_config.{key}"), digest.clone());
         environment
             .properties
             .insert(format!("config_digest.{product}"), digest);
@@ -4356,7 +4372,7 @@ mod tests {
         std::fs::write(
             root.join("tenkai.toml"),
             format!(
-                "[product]\nname = \"{product}\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\n"
+                "[product]\nname = \"{product}\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\ninstances = \"many\"\n"
             ),
         )
         .unwrap();
@@ -4494,6 +4510,55 @@ mod tests {
         assert_eq!(resumed.steps[0].instance_name(), "db-b");
         assert_eq!(resumed.steps[0].product, "database");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn one_release_refuses_a_second_instance_at_plan() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-instance-one-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "local", "Local").await.unwrap();
+        std::fs::write(
+            root.join("tenkai.toml"),
+            "[product]\nname = \"database\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\n",
+        )
+        .unwrap();
+        crate::catalog::publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("instances");
+        crate::catalog::promote(&mut ctx, &actor, "database@1.0.0", "stable")
+            .await
+            .unwrap();
+        subscribe_instance(&mut ctx, "local", "database", "stable", Some("db-a"))
+            .await
+            .unwrap();
+        subscribe_instance(&mut ctx, "local", "database", "stable", Some("db-b"))
+            .await
+            .unwrap();
+        let err = crate::plan::create(&mut ctx, "local")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("already has instance") && err.contains("instances = \"many\""),
+            "{err}"
+        );
+        assert!(err.contains("db-a") && err.contains("db-b"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
