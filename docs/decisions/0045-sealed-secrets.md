@@ -1,6 +1,6 @@
 # ADR 0045: Sealed secrets delivered by the environment runtime
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-06 (revised 2026-11-07)
 - Issue: [#1020](https://github.com/Sannrox/tenkai/issues/1020)
 - Owner: Tenkai maintainers
