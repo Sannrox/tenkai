@@ -5,11 +5,12 @@
 //! family conformance matrix together. [`admit`] verifies the profile against
 //! the release trust roots and binds each entry to a published Catalog Release
 //! that carries that family release manifest (`catalog publish
-//! --family-release`) and a `[compatibility]` profile, its matrix. A train
-//! enters the `candidate` channel; [`promote_stable`] is the explicit step to
-//! `stable`. When any member carries gate flags, that step also needs an
-//! explicit approval, as a flagged release holds a single channel. Trains are
-//! immutable once admitted.
+//! --family-release`) and a `[compatibility]` profile, its matrix. Admission
+//! also refuses a train whose members do not satisfy each other's required
+//! contracts (ADR 0043 §8). A train enters the `candidate` channel;
+//! [`promote_stable`] is the explicit step to `stable`. When any member
+//! carries gate flags, that step also needs an explicit approval, as a flagged
+//! release holds a single channel. Trains are immutable once admitted.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -24,6 +25,9 @@ use crate::ontology::{NS, release_id, validate_identifier};
 use crate::pb::sekai::Object;
 use crate::release_signing::{SignatureEnvelope, TrustRoots, verify_release};
 use crate::signature_verification::validate_prefixed_digest;
+use crate::software_compatibility::{
+    CompatibilityProfile, ContractRequirement, contract_satisfies,
+};
 
 pub const SCHEMA: &str = "tenkai.release-train.v1";
 pub const TRAIN_KIND: &str = "tenkai.release_train";
@@ -113,9 +117,13 @@ pub async fn admit(
     )
     .context("verifying the release train signature")?;
     let mut gate_flags = BTreeSet::new();
+    let mut members = BTreeMap::new();
     for member in &profile.components {
-        gate_flags.extend(require_member(ctx, member).await?);
+        let (flags, compatibility) = require_member(ctx, member).await?;
+        gate_flags.extend(flags);
+        members.insert(member.component.clone(), compatibility);
     }
+    refuse_unsatisfied_members(&members)?;
 
     let id = train_id(&profile.name);
     if let Some(existing) = ctx.get(&id).await? {
@@ -279,11 +287,15 @@ fn validate(profile: &Profile) -> Result<()> {
 
 /// A member must be a published release admitted with this exact family
 /// release manifest and carrying its compatibility matrix. Returns the gate
-/// flags the release carries.
+/// flags the release carries and the stored profile used for the member
+/// contract check.
 async fn require_member(
     ctx: &mut Ctx,
     member: &Member,
-) -> Result<BTreeSet<crate::family_release::GateFlag>> {
+) -> Result<(
+    BTreeSet<crate::family_release::GateFlag>,
+    CompatibilityProfile,
+)> {
     let spec = format!("{}@{}", member.component, member.version);
     let Some(release) = ctx
         .get(&release_id(&member.component, &member.version))
@@ -309,11 +321,58 @@ async fn require_member(
         .with_context(|| format!("release {spec} has no stored manifest"))?;
     let manifest = crate::manifest::parse_raw(manifest)
         .with_context(|| format!("parsing the stored manifest of {spec}"))?;
-    ensure!(
-        manifest.compatibility.is_some(),
-        "release train member {spec} has no [compatibility] matrix"
-    );
-    crate::family_release::stored_gate_flags(&release)
+    let compatibility = manifest
+        .compatibility
+        .with_context(|| format!("release train member {spec} has no [compatibility] matrix"))?;
+    Ok((
+        crate::family_release::stored_gate_flags(&release)?,
+        compatibility,
+    ))
+}
+
+/// Members must cover every required contract. Optional requirements never
+/// block. Matching uses the requiring profile's rule, including v2 0.y.
+fn refuse_unsatisfied_members(members: &BTreeMap<String, CompatibilityProfile>) -> Result<()> {
+    for (dependent, profile) in members {
+        for component in profile.components.values() {
+            for (contract, requirement) in &component.requires {
+                if requirement.optional() {
+                    continue;
+                }
+                if member_provides(members, contract, requirement, profile.version)? {
+                    continue;
+                }
+                bail!(
+                    "release train member {dependent} has no provider for required contract {contract} (>={})",
+                    requirement.minimum()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn member_provides(
+    members: &BTreeMap<String, CompatibilityProfile>,
+    contract: &str,
+    requirement: &ContractRequirement,
+    profile_version: u32,
+) -> Result<bool> {
+    let minimum = semver::Version::parse(requirement.minimum())
+        .with_context(|| format!("required {contract} minimum {}", requirement.minimum()))?;
+    for (provider, profile) in members {
+        for component in profile.components.values() {
+            let Some(version) = component.provides.get(contract) else {
+                continue;
+            };
+            let actual = semver::Version::parse(version)
+                .with_context(|| format!("provided {contract} version {version} on {provider}"))?;
+            if contract_satisfies(profile_version, &actual, &minimum) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// SHA-256 over the sorted `component version digest` lines, so the signature
@@ -336,7 +395,9 @@ fn members_digest(members: &[Member]) -> String {
 mod tests {
     use super::*;
     use crate::catalog::{FamilyReleaseInput, PublishOptions};
-    use crate::software_compatibility::{CompatibilityProfile, ComponentPin, ComponentRequirement};
+    use crate::software_compatibility::{
+        CompatibilityProfile, ComponentPin, ComponentRequirement, ContractRequirement,
+    };
     use std::path::PathBuf;
 
     /// Unique per process and call, so parallel tests and agents never share files.
@@ -353,14 +414,41 @@ mod tests {
     }
 
     fn matrix(component: &str) -> CompatibilityProfile {
+        profile(component, 1, &[], &[])
+    }
+
+    fn profile(
+        component: &str,
+        version: u32,
+        requires: &[(&str, &str, bool)],
+        provides: &[(&str, &str)],
+    ) -> CompatibilityProfile {
         CompatibilityProfile {
-            version: 1,
+            version,
             components: BTreeMap::from([(
                 component.to_string(),
                 ComponentRequirement {
                     pin: ComponentPin::Digest(format!("sha256:{}", "c".repeat(64))),
-                    requires: BTreeMap::new(),
-                    provides: BTreeMap::new(),
+                    requires: requires
+                        .iter()
+                        .map(|(contract, minimum, optional)| {
+                            (
+                                (*contract).into(),
+                                if *optional {
+                                    ContractRequirement::Detailed {
+                                        minimum: (*minimum).into(),
+                                        optional: true,
+                                    }
+                                } else {
+                                    ContractRequirement::Minimum((*minimum).into())
+                                },
+                            )
+                        })
+                        .collect(),
+                    provides: provides
+                        .iter()
+                        .map(|(contract, provided)| ((*contract).into(), (*provided).into()))
+                        .collect(),
                 },
             )]),
             capabilities: Vec::new(),
@@ -390,6 +478,35 @@ mod tests {
         if with_matrix {
             manifest.compatibility = Some(matrix(component));
         }
+        publish_manifest(ctx, dir, component, version, manifest, gate_flags).await
+    }
+
+    async fn publish_profile(
+        ctx: &mut Ctx,
+        dir: &Path,
+        component: &str,
+        version: &str,
+        compatibility: CompatibilityProfile,
+        gate_flags: &[&str],
+    ) -> String {
+        let mut manifest = crate::manifest::parse_raw(&format!(
+            "[product]\nname = \"{component}\"\nversion = \"{version}\"\n\n[deploy]\ninstall = \"true\"\n"
+        ))
+        .unwrap();
+        manifest.compatibility = Some(compatibility);
+        publish_manifest(ctx, dir, component, version, manifest, gate_flags).await
+    }
+
+    async fn publish_manifest(
+        ctx: &mut Ctx,
+        dir: &Path,
+        component: &str,
+        version: &str,
+        manifest: crate::manifest::Manifest,
+        gate_flags: &[&str],
+    ) -> String {
+        let product = dir.join(format!("{component}-{version}"));
+        std::fs::create_dir_all(&product).unwrap();
         let toml_path = product.join("tenkai.toml");
         std::fs::write(&toml_path, toml::to_string(&manifest).unwrap()).unwrap();
         let signature = product.join("release.sig.json");
@@ -607,6 +724,142 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("not published"), "{error}");
         assert!(show(&mut ctx, "train-2026.12").await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn consistent_train_with_required_provider_is_admitted() {
+        let dir = scratch("deps-ok");
+        let mut ctx = ctx_in(&dir).await;
+        let db = publish_profile(
+            &mut ctx,
+            &dir,
+            "db",
+            "1.0.0",
+            profile("db", 1, &[], &[("database", "1.0.0")]),
+            &[],
+        )
+        .await;
+        let app = publish_profile(
+            &mut ctx,
+            &dir,
+            "app",
+            "1.0.0",
+            profile("app", 1, &[("database", "1.0.0", false)], &[]),
+            &[],
+        )
+        .await;
+        let admitted = admit_paths(
+            &mut ctx,
+            &train(
+                &dir,
+                "train-deps-ok",
+                &[("db", "1.0.0", &db), ("app", "1.0.0", &app)],
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(admitted.channel, TrainChannel::Candidate);
+        assert_eq!(
+            admit_paths(
+                &mut ctx,
+                &train(
+                    &dir,
+                    "train-deps-ok",
+                    &[("db", "1.0.0", &db), ("app", "1.0.0", &app)],
+                ),
+            )
+            .await
+            .unwrap(),
+            admitted
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn train_missing_required_provider_is_refused() {
+        let dir = scratch("deps-missing");
+        let mut ctx = ctx_in(&dir).await;
+        let app = publish_profile(
+            &mut ctx,
+            &dir,
+            "app",
+            "1.0.0",
+            profile("app", 1, &[("database", "1.0.0", false)], &[]),
+            &[],
+        )
+        .await;
+        let error = admit_paths(
+            &mut ctx,
+            &train(&dir, "train-deps-missing", &[("app", "1.0.0", &app)]),
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("app"), "{error}");
+        assert!(message.contains("database"), "{error}");
+        assert!(show(&mut ctx, "train-deps-missing").await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn optional_unmet_does_not_block_admission() {
+        let dir = scratch("deps-optional");
+        let mut ctx = ctx_in(&dir).await;
+        let app = publish_profile(
+            &mut ctx,
+            &dir,
+            "app",
+            "1.0.0",
+            profile("app", 2, &[("database", "1.0.0", true)], &[]),
+            &[],
+        )
+        .await;
+        let admitted = admit_paths(
+            &mut ctx,
+            &train(&dir, "train-deps-optional", &[("app", "1.0.0", &app)]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(admitted.channel, TrainChannel::Candidate);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn v2_zero_y_mismatch_is_refused() {
+        let dir = scratch("deps-zeroy");
+        let mut ctx = ctx_in(&dir).await;
+        let peer = publish_profile(
+            &mut ctx,
+            &dir,
+            "peer",
+            "0.2.0",
+            profile("peer", 2, &[], &[("connector", "0.2.0")]),
+            &[],
+        )
+        .await;
+        let app = publish_profile(
+            &mut ctx,
+            &dir,
+            "app",
+            "1.0.0",
+            profile("app", 2, &[("connector", "0.1.0", false)], &[]),
+            &[],
+        )
+        .await;
+        let error = admit_paths(
+            &mut ctx,
+            &train(
+                &dir,
+                "train-deps-zeroy",
+                &[("peer", "0.2.0", &peer), ("app", "1.0.0", &app)],
+            ),
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("app"), "{error}");
+        assert!(message.contains("connector"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
