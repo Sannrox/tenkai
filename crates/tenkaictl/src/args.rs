@@ -21,7 +21,7 @@ use crate::wave_args::WaveCommand;
     name = "tenkaictl",
     version,
     about = "Constraint-based local delivery",
-    after_help = "Client config: /etc/tenkai/client.toml, then $XDG_CONFIG_HOME/tenkai/client.toml (target, server_url, default_environment, token_file). Flags and environment variables override both. The token is never in the file or on argv."
+    after_help = "Client config: /etc/tenkai/client.toml, then $XDG_CONFIG_HOME/tenkai/client.toml (target, server_url, default_environment, token_file). Flags and environment variables override both. The token is never in the file or on argv. On Linux, when /run/tenkai/tenkai.sock exists, tenkaictl uses it and sends no token unless --server-url or a token is set."
 )]
 pub(crate) struct Cli {
     /// Select the embedded application core or an authenticated remote server.

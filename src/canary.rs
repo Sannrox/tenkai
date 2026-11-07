@@ -1383,6 +1383,7 @@ max_startup_seconds = 30
                 request_id: "req-human".into(),
                 bearer_token: None,
                 assertion: Some(token.into_bytes()),
+                peer_credentials: None,
             })
             .unwrap();
         assert_eq!(human.principal.kind, PrincipalKind::Human);
@@ -1436,6 +1437,7 @@ max_startup_seconds = 30
                     )
                     .into_bytes(),
                 ),
+                peer_credentials: None,
             })
             .unwrap();
         let community = auth
@@ -1443,6 +1445,7 @@ max_startup_seconds = 30
                 request_id: "req-community".into(),
                 bearer_token: Some("management-secret".into()),
                 assertion: None,
+                peer_credentials: None,
             })
             .unwrap();
         crate::catalog::promote(&mut ctx, &capable, "qwen-canary@1.0.0", "stable")
@@ -1567,6 +1570,7 @@ max_startup_seconds = 30
                 request_id: "req-human-repair".into(),
                 bearer_token: None,
                 assertion: Some(sign(&claims).into_bytes()),
+                peer_credentials: None,
             })
             .unwrap();
         assert_eq!(human.principal.kind, PrincipalKind::Human);
@@ -1598,6 +1602,7 @@ max_startup_seconds = 30
                 request_id: "req-mgmt-jwt-repair".into(),
                 bearer_token: None,
                 assertion: Some(sign(&claims).into_bytes()),
+                peer_credentials: None,
             })
             .unwrap();
         let repaired = repair_pending(&mut ctx, &capable, &plan_id).await.unwrap();
@@ -1610,6 +1615,7 @@ max_startup_seconds = 30
                 request_id: "req-community-repair".into(),
                 bearer_token: Some("management-secret".into()),
                 assertion: None,
+                peer_credentials: None,
             })
             .unwrap();
         let repaired = repair_pending(&mut ctx, &community, &plan_id)

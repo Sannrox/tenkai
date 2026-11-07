@@ -39,6 +39,7 @@ async fn tenant_mode_management_apis_isolate_environments() {
                 request_id: "seed-a".into(),
                 bearer_token: None,
                 assertion: Some(br#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#.to_vec()),
+                peer_credentials: None,
             },
             &authority,
         )
@@ -49,6 +50,7 @@ async fn tenant_mode_management_apis_isolate_environments() {
                 request_id: "seed-b".into(),
                 bearer_token: None,
                 assertion: Some(br#"{"tenant":"tenant-b","principal":"user-b","capabilities":["read","management"]}"#.to_vec()),
+                peer_credentials: None,
             },
             &authority,
         )

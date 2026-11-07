@@ -65,6 +65,7 @@ pub struct HotSwap {
     current: Arc<RwLock<Router>>,
     runtime_client_certificate_required: bool,
     client_certificate: Option<Arc<[u8]>>,
+    unix_peer: super::auth::UnixPeerState,
 }
 
 impl HotSwap {
@@ -73,6 +74,7 @@ impl HotSwap {
             current: Arc::new(RwLock::new(router)),
             runtime_client_certificate_required: false,
             client_certificate: None,
+            unix_peer: super::auth::UnixPeerState::Tcp,
         }
     }
 
@@ -93,7 +95,7 @@ impl HotSwap {
 impl<L> Service<IncomingStream<'_, L>> for HotSwap
 where
     L: axum::serve::Listener,
-    L::Io: crate::tls::PeerCertificate,
+    L::Io: crate::tls::ConnectionIdentity,
 {
     type Response = Self;
     type Error = Infallible;
@@ -104,9 +106,10 @@ where
     }
 
     fn call(&mut self, stream: IncomingStream<'_, L>) -> Self::Future {
-        use crate::tls::PeerCertificate as _;
+        use crate::tls::{ConnectionIdentity as _, PeerCertificate as _};
         let mut connection = self.clone();
         connection.client_certificate = stream.io().client_certificate();
+        connection.unix_peer = stream.io().unix_peer();
         std::future::ready(Ok(connection))
     }
 }
@@ -143,10 +146,20 @@ impl Service<Request> for HotSwap {
             .read()
             .expect("opening router slot is not poisoned")
             .clone();
+        let unix_peer = self.unix_peer;
+        if matches!(unix_peer, super::auth::UnixPeerState::Unavailable) {
+            return Box::pin(std::future::ready(Ok(crate::runtime::error_response(
+                StatusCode::UNAUTHORIZED,
+                "peer credentials unavailable",
+            ))));
+        }
         Box::pin(async move {
-            Ok(Service::call(&mut router, req)
-                .await
-                .unwrap_or_else(|err| match err {}))
+            Ok(super::auth::with_unix_peer(unix_peer, async move {
+                Service::call(&mut router, req)
+                    .await
+                    .unwrap_or_else(|err| match err {})
+            })
+            .await)
         })
     }
 }

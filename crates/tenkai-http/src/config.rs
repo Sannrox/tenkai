@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tenkai::auth_context::{
-    AuthHostConfig, AuthStack, CommunityTokenAuthenticator, EnterpriseAuthExtension,
-    PrincipalIdentity, PrincipalKind, build_auth_stack,
+    AuthHostConfig, AuthStack, CommunityTokenAuthenticator, CredentialAuthenticator,
+    EnterpriseAuthExtension, PrincipalIdentity, PrincipalKind, build_auth_stack,
 };
 use tenkai::federated_identity::{FederatingAuthExtension, FederationConfig, IdentityDirectory};
 use tenkai::runtime_capabilities::{
@@ -79,6 +79,8 @@ pub struct ServerConfig {
     /// The worst certificate status and since when, refreshed in the
     /// background so health probes never read trust files themselves.
     pub trust_status: Arc<std::sync::RwLock<Option<tenkai::trust_posture::TrustSnapshot>>>,
+    /// Host identity (Unix peer credentials). Absent disables that path.
+    pub host_identity: Option<Arc<tenkai::host_identity::HostIdentityAuthenticator>>,
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +121,7 @@ impl ServerConfig {
             writer_fence: None,
             trust_sources: Default::default(),
             trust_status: Default::default(),
+            host_identity: None,
         }
     }
 
@@ -245,7 +248,13 @@ impl ServerConfig {
                 extension
             }
         });
-        build_auth_stack(&self.resolved_auth_host(), enterprise, Arc::new(community))
-            .map_err(|error| anyhow::anyhow!("auth stack composition failed: {error}"))
+        let stack = build_auth_stack(&self.resolved_auth_host(), enterprise, Arc::new(community))
+            .map_err(|error| anyhow::anyhow!("auth stack composition failed: {error}"))?;
+        Ok(match &self.host_identity {
+            Some(host) => {
+                stack.with_host_identity(host.clone() as Arc<dyn CredentialAuthenticator>)
+            }
+            None => stack,
+        })
     }
 }

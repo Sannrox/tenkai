@@ -1088,6 +1088,7 @@ impl TenantIsolationHarness {
             request_id: request_id.into(),
             bearer_token: None,
             assertion: Some(assertion),
+            peer_credentials: None,
         })
     }
 
@@ -1161,6 +1162,7 @@ impl TenantIsolationHarness {
                     request_id: "req-wrong-aud".into(),
                     bearer_token: None,
                     assertion: Some(wrong_audience),
+                    peer_credentials: None,
                 })
                 .is_err()
         );
@@ -1431,6 +1433,7 @@ mod tests {
                 request_id: "c1".into(),
                 bearer_token: Some("management-secret".into()),
                 assertion: None,
+                peer_credentials: None,
             })
             .unwrap();
         assert!(!context.is_tenant_scoped());

@@ -247,6 +247,7 @@ capabilities = ["read", "management"]
             request_id: request_id.into(),
             bearer_token: bearer,
             assertion: Some(token),
+            peer_credentials: None,
         }
     }
 
@@ -299,6 +300,7 @@ capabilities = ["read", "management"]
                 request_id: "req-mgmt".into(),
                 bearer_token: Some("mgmt".into()),
                 assertion: None,
+                peer_credentials: None,
             })
             .unwrap();
         assert_eq!(community.principal_id(), "community-admin");

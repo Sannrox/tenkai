@@ -105,14 +105,12 @@ fn directory_outage_refuses_login_and_unauthenticated_calls() {
                 request_id: "req-1".into(),
                 bearer_token: None,
                 assertion: None,
+                peer_credentials: None,
             },
             &TenantDerivationAuthority::new(OIDC_AUTH_EXTENSION_ID),
         )
         .unwrap_err();
-    assert!(
-        error.to_string().contains("bearer token or assertion"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("bearer token"), "{error}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

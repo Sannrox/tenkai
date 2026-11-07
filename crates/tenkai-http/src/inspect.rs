@@ -313,6 +313,18 @@ pub(super) async fn oidc_client(State(state): State<Arc<AppState>>) -> Response 
     }
 }
 
+/// Authenticated principal, including host identity (ADR 0047).
+pub(super) async fn auth_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(state.management.session(&credential))
+}
+
 pub(super) async fn ready(State(state): State<Arc<AppState>>) -> Response {
     // A standby is alive (/healthz) but must not take writes (#748).
     if state

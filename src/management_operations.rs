@@ -23,6 +23,7 @@ use crate::auth_context::{
 use crate::catalog::{ChannelPage, ReleasePage};
 use crate::client::Ctx;
 use crate::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryResult};
+use crate::host_identity::AuthSession;
 use crate::management_lifecycle::{
     self, ApplyRequest, ApproveRequest, ChannelHoldRequest, DeliveryHoldRequest,
     ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest, PromoteRequest,
@@ -219,6 +220,13 @@ impl ManagementOperations {
                 ))
             }
         }
+    }
+
+    /// `GET /v1/auth/me`: the authenticated principal, including host identity.
+    pub fn session(&self, credential: &CredentialMaterial) -> Result<AuthSession, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        Ok(AuthSession::from_context(&context))
     }
 
     pub fn with_agent_actor_policy(mut self, policy: AgentActorPolicy) -> Self {
@@ -3173,6 +3181,7 @@ mod tests {
             request_id: "req-human".into(),
             bearer_token: None,
             assertion: Some(token.into_bytes()),
+            peer_credentials: None,
         };
 
         let reconcile = ops.reconcile(&credential).await.unwrap_err();
@@ -3197,6 +3206,7 @@ mod tests {
             request_id: "req-read".into(),
             bearer_token: None,
             assertion: Some(token.into_bytes()),
+            peer_credentials: None,
         };
 
         ops.fleet_status(&credential).await.unwrap();
@@ -3220,6 +3230,7 @@ mod tests {
             request_id: "req-mgmt".into(),
             bearer_token: None,
             assertion: Some(token.into_bytes()),
+            peer_credentials: None,
         };
         let report = ops.reconcile(&credential).await.unwrap();
         assert_eq!(report.environments.len(), 1);
@@ -3233,6 +3244,7 @@ mod tests {
             request_id: "req-community".into(),
             bearer_token: Some("management-secret".into()),
             assertion: None,
+            peer_credentials: None,
         };
         let report = ops.reconcile(&credential).await.unwrap();
         assert_eq!(report.environments[0].environment, "prod");
@@ -3285,6 +3297,7 @@ mod tests {
             request_id: "req-grant".into(),
             bearer_token: Some("unused".into()),
             assertion: None,
+            peer_credentials: None,
         }
     }
 
@@ -3678,6 +3691,7 @@ mod tests {
             request_id: "req-agent".into(),
             bearer_token: Some("agent".into()),
             assertion: None,
+            peer_credentials: None,
         };
         ops.publish_release(&human, signed_publish_request(&root, "1.0.0"))
             .await
@@ -3796,6 +3810,7 @@ mod tests {
             request_id: "req-agent-jwt".into(),
             bearer_token: None,
             assertion: Some(mint_jwt(&signing, &claims).into_bytes()),
+            peer_credentials: None,
         };
         let context = ops.authenticate(&credential).unwrap();
         assert_eq!(context.principal_id(), "user-42");

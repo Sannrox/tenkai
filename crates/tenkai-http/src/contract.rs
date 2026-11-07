@@ -27,6 +27,7 @@ use tenkai::environment::{EnvironmentInspectReport, EnvironmentListEntry, Status
 use tenkai::environment_config::{EnvironmentConfigRequest, RegisterEnvironmentRequest};
 use tenkai::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryResult};
 use tenkai::fleet::FleetStatusReport;
+use tenkai::host_identity::AuthSession;
 use tenkai::management_lifecycle::{
     ApplyRequest, ApproveRequest, ChannelHoldRequest, DeliveryHoldRequest,
     ManagementLifecycleResult, PlanRequest, PromoteRequest, PublishRequest, RecallRequest,
@@ -116,6 +117,13 @@ pub fn http_contract() -> Value {
             auth: Auth::None,
             request: None,
             response: schema::<OidcClientDiscovery>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/auth/me",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<AuthSession>(&mut g),
         },
         Route {
             method: "POST",

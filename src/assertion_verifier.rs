@@ -629,6 +629,7 @@ pub fn authenticate_process_management(
         request_id,
         bearer_token: management_token,
         assertion: jwt_assertion,
+        peer_credentials: None,
     })?;
     // Every caller is a mutation, so an agent actor is refused (ADR 0034).
     if context.acting_agent().is_some() {
@@ -843,6 +844,7 @@ mod tests {
                     request_id: "cap-1".into(),
                     bearer_token: None,
                     assertion: Some(token.into_bytes()),
+                    peer_credentials: None,
                 },
                 &TenantDerivationAuthority::new("jwt-ref"),
             )
@@ -926,6 +928,7 @@ mod tests {
                 request_id: "req-1".into(),
                 bearer_token: None,
                 assertion: Some(token.into_bytes()),
+                peer_credentials: None,
             })
             .unwrap();
         assert_eq!(ctx.principal_id(), "user-42");
@@ -956,6 +959,7 @@ mod tests {
                 request_id: "r".into(),
                 bearer_token: Some("mgmt".into()),
                 assertion: None,
+                peer_credentials: None,
             })
             .unwrap();
         assert_eq!(ctx.principal_id(), "admin");
