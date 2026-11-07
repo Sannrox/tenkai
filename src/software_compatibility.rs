@@ -834,6 +834,92 @@ pub(crate) fn holdable_unmet_requirements(
     )
 }
 
+/// Remaining profiles after overlay must still satisfy every required contract
+/// that a Tenkai-deployed provider satisfied before the plan (ADR 0043 §5).
+///
+/// Optional requirements may be absent. A required contract that had no matching
+/// deployed provider before the plan stays on observation rules. The refusal
+/// names the dependent product and the contract.
+pub(crate) fn refuse_unsatisfied_dependents(
+    remaining: &BTreeMap<String, CompatibilityProfile>,
+    previous: &BTreeMap<String, CompatibilityProfile>,
+) -> Result<()> {
+    for (dependent, profile) in remaining {
+        for component in profile.components.values() {
+            for (contract, requirement) in &component.requires {
+                let matching = matching_deployed_providers(
+                    remaining,
+                    contract,
+                    requirement,
+                    profile.version,
+                    dependent,
+                )?;
+                if matching.len() > 1 {
+                    bail!(
+                        "plan would leave installed dependent {dependent} with ambiguous contract {contract}"
+                    );
+                }
+                if !matching.is_empty() {
+                    continue;
+                }
+                if requirement.optional() {
+                    continue;
+                }
+                let before = matching_deployed_providers(
+                    previous,
+                    contract,
+                    requirement,
+                    profile.version,
+                    dependent,
+                )?;
+                if before.is_empty() {
+                    continue;
+                }
+                bail!(
+                    "plan would leave installed dependent {dependent} without required contract {contract} (>={})",
+                    requirement.minimum()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn matching_deployed_providers(
+    profiles: &BTreeMap<String, CompatibilityProfile>,
+    contract: &str,
+    requirement: &ContractRequirement,
+    profile_version: u32,
+    dependent: &str,
+) -> Result<Vec<String>> {
+    let mut matching = Vec::new();
+    for (provider, profile) in profiles {
+        if provider == dependent {
+            continue;
+        }
+        for component in profile.components.values() {
+            let Some(version) = component.provides.get(contract) else {
+                continue;
+            };
+            let actual = semver::Version::parse(version)
+                .with_context(|| format!("provided {contract} version {version} on {provider}"))?;
+            let minimum = semver::Version::parse(requirement.minimum()).with_context(|| {
+                format!(
+                    "required {contract} minimum {} on {dependent}",
+                    requirement.minimum()
+                )
+            })?;
+            if contract_satisfies(profile_version, &actual, &minimum) {
+                matching.push(provider.clone());
+                break;
+            }
+        }
+    }
+    matching.sort();
+    matching.dedup();
+    Ok(matching)
+}
+
 fn stricter_contract_minimum(left: &str, right: &str) -> String {
     match (semver::Version::parse(left), semver::Version::parse(right)) {
         (Ok(left_ver), Ok(right_ver)) if right_ver > left_ver => right.to_string(),
@@ -1676,6 +1762,87 @@ mod tests {
             holdable_unmet_requirements(&incompatible, &incompatible_unmet, &two),
             Some(vec![("database".into(), "1.5.0".into())])
         );
+    }
+
+    fn remaining_profile(
+        requires: &[(&str, &str, bool)],
+        provides: &[(&str, &str)],
+    ) -> CompatibilityProfile {
+        CompatibilityProfile {
+            version: 2,
+            components: BTreeMap::from([(
+                "main".into(),
+                ComponentRequirement {
+                    pin: ComponentPin::Revision("a".repeat(40)),
+                    requires: requires
+                        .iter()
+                        .map(|(contract, minimum, optional)| {
+                            (
+                                (*contract).into(),
+                                if *optional {
+                                    ContractRequirement::Detailed {
+                                        minimum: (*minimum).into(),
+                                        optional: true,
+                                    }
+                                } else {
+                                    ContractRequirement::Minimum((*minimum).into())
+                                },
+                            )
+                        })
+                        .collect(),
+                    provides: provides
+                        .iter()
+                        .map(|(contract, version)| ((*contract).into(), (*version).into()))
+                        .collect(),
+                },
+            )]),
+            capabilities: Vec::new(),
+            facts: BTreeMap::new(),
+            schema: None,
+            max_evidence_age_ms: 60_000,
+        }
+    }
+
+    #[test]
+    fn refuse_unsatisfied_dependents_names_the_dependent() {
+        let app = remaining_profile(&[("database", "1.0.0", false)], &[]);
+        let db = remaining_profile(&[], &[("database", "1.0.0")]);
+        let previous = BTreeMap::from([("app".into(), app.clone()), ("db".into(), db.clone())]);
+        let err = refuse_unsatisfied_dependents(
+            &BTreeMap::from([("app".into(), app.clone())]),
+            &previous,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("installed dependent app"), "{err}");
+        assert!(err.contains("database"), "{err}");
+        refuse_unsatisfied_dependents(
+            &BTreeMap::from([("app".into(), app.clone()), ("db".into(), db.clone())]),
+            &previous,
+        )
+        .unwrap();
+        let optional = remaining_profile(&[("database", "1.0.0", true)], &[]);
+        refuse_unsatisfied_dependents(
+            &BTreeMap::from([("app".into(), optional.clone())]),
+            &BTreeMap::from([("app".into(), optional), ("db".into(), db)]),
+        )
+        .unwrap();
+        refuse_unsatisfied_dependents(
+            &BTreeMap::from([("app".into(), app.clone())]),
+            &BTreeMap::from([("app".into(), app)]),
+        )
+        .unwrap();
+        let high = remaining_profile(&[("database", "2.0.0", false)], &[]);
+        let high_db = remaining_profile(&[], &[("database", "2.0.0")]);
+        let low = remaining_profile(&[], &[("database", "1.0.0")]);
+        let err = refuse_unsatisfied_dependents(
+            &BTreeMap::from([("app".into(), high.clone()), ("db".into(), low)]),
+            &BTreeMap::from([("app".into(), high), ("db".into(), high_db)]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("installed dependent app"), "{err}");
+        assert!(err.contains("database"), "{err}");
     }
 
     #[test]
