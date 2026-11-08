@@ -71,6 +71,10 @@ pub struct FeedbackExportPayload {
 }
 
 /// Action parameters required by `feedback.observation.record`.
+///
+/// `operation_id`, `observed_at_ms`, and `scope` are additive (#1100). A
+/// plane on the current package that ignores unknown keys keeps working;
+/// one that admits them groups retries of one plan as one operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeedbackActionParameters {
     pub object_id: String,
@@ -79,6 +83,17 @@ pub struct FeedbackActionParameters {
     pub occurrence_ids: String,
     pub classification: String,
     pub disposition: String,
+    /// Plan (or observation id when the outcome names no plan) this outcome
+    /// belongs to. Stable across attempts, lease generations, and
+    /// reconciliation of the same plan.
+    #[serde(default)]
+    pub operation_id: String,
+    /// Captured observation time, not delivery or ingest time.
+    #[serde(default)]
+    pub observed_at_ms: i64,
+    /// Environment, and tenant when the hub is tenant-mode.
+    #[serde(default)]
+    pub scope: String,
 }
 
 pub trait FeedbackProvider: Send + Sync {
@@ -285,6 +300,7 @@ pub fn bind_tenant_to_feedback_event(
 pub fn action_parameters(
     observation: &FeedbackObservation,
     source_evidence: &str,
+    tenant_id: &str,
 ) -> FeedbackActionParameters {
     FeedbackActionParameters {
         object_id: observation.id.clone(),
@@ -293,6 +309,35 @@ pub fn action_parameters(
         occurrence_ids: observation.id.clone(),
         classification: classification(observation.reason).into(),
         disposition: disposition(observation.reason).into(),
+        operation_id: operation_id(observation).into(),
+        observed_at_ms: observation.observed_at_ms,
+        scope: observation_scope(&observation.environment, tenant_id),
+    }
+}
+
+/// The plan this outcome belongs to, or the observation id when no plan is
+/// named. Distinct from [`FeedbackObservation::id`], which is one occurrence
+/// (attempt, lease generation, or reconciliation instant).
+fn operation_id(observation: &FeedbackObservation) -> &str {
+    let plan = observation.plan_id.trim();
+    if plan.is_empty() {
+        observation.id.as_str()
+    } else {
+        plan
+    }
+}
+
+/// Environment, optionally prefixed by the tenant. `%`, `/`, and `:` in the
+/// tenant are percent-encoded so the first `/` ends the tenant.
+fn observation_scope(environment: &str, tenant_id: &str) -> String {
+    if tenant_id.is_empty() {
+        environment.to_owned()
+    } else {
+        let tenant = tenant_id
+            .replace('%', "%25")
+            .replace('/', "%2F")
+            .replace(':', "%3A");
+        format!("{tenant}/{environment}")
     }
 }
 
@@ -610,7 +655,10 @@ impl ChiseiFeedbackProvider {
             intent: "upsert".into(),
             causality: None,
         };
-        Ok((envelope, action_parameters(&payload.observation, "")))
+        Ok((
+            envelope,
+            action_parameters(&payload.observation, "", &payload.tenant_id),
+        ))
     }
 
     fn authenticate<T>(
@@ -783,19 +831,150 @@ mod tests {
     #[test]
     fn action_parameters_are_derived_from_captured_fields() {
         let captured = observation("failed", Reason::TenkaiFailed);
-        let parameters = action_parameters(&captured, "evidence-1");
+        let parameters = action_parameters(&captured, "evidence-1", "");
         assert_eq!(parameters.object_id, captured.id);
         assert_eq!(parameters.occurrence_ids, captured.id);
+        assert_eq!(parameters.operation_id, captured.plan_id);
+        assert_eq!(parameters.observed_at_ms, captured.observed_at_ms);
+        assert_eq!(parameters.scope, "prod");
         assert_eq!(parameters.problem_signature, "api:tenkai_failed");
         assert_eq!(parameters.classification, "defect");
         assert_eq!(parameters.disposition, "open");
         assert_eq!(parameters.source_evidence, "evidence-1");
 
         let blocked = observation("blocked", Reason::GateBlocked);
-        assert_eq!(action_parameters(&blocked, "e").classification, "blocked");
+        assert_eq!(
+            action_parameters(&blocked, "e", "").classification,
+            "blocked"
+        );
         let ok = observation("succeeded", Reason::None);
-        assert_eq!(action_parameters(&ok, "e").disposition, "closed");
-        assert_eq!(action_parameters(&ok, "e").classification, "ok");
+        assert_eq!(action_parameters(&ok, "e", "").disposition, "closed");
+        assert_eq!(action_parameters(&ok, "e", "").classification, "ok");
+    }
+
+    fn attempt(
+        id: &str,
+        generation: u64,
+        observed_at_ms: i64,
+        status: &str,
+        reason: Reason,
+    ) -> FeedbackObservation {
+        FeedbackObservation::capture(Capture {
+            id,
+            operation: Operation::ApplyStep,
+            environment: "prod",
+            product: "api",
+            plan_id: "plan-1",
+            step_id: "step-1",
+            action: Some(Action::Upgrade),
+            release_id: "release:api:1.1.0",
+            status,
+            reason,
+            started_at_ms: Some(observed_at_ms.saturating_sub(100)),
+            lease_generation: generation,
+            observed_at_ms,
+            context: RetryContext::default(),
+        })
+    }
+
+    #[test]
+    fn three_attempts_of_one_plan_share_one_operation_id() {
+        let ids: Vec<String> = [
+            (
+                "deployment:prod:api:1000",
+                1,
+                1_000,
+                "failed",
+                Reason::ProductFailed,
+            ),
+            (
+                "deployment:prod:api:2000",
+                2,
+                2_000,
+                "failed",
+                Reason::ProductFailed,
+            ),
+            (
+                "deployment:prod:api:3000",
+                3,
+                3_000,
+                "succeeded",
+                Reason::None,
+            ),
+        ]
+        .into_iter()
+        .map(|(id, generation, observed_at_ms, status, reason)| {
+            action_parameters(
+                &attempt(id, generation, observed_at_ms, status, reason),
+                "e",
+                "",
+            )
+            .operation_id
+        })
+        .collect();
+        assert!(ids.iter().all(|id| id == "plan-1"), "{ids:?}");
+    }
+
+    #[test]
+    fn lease_takeover_keeps_the_plan_operation_id() {
+        let captured = FeedbackObservation::capture(Capture {
+            id: "deployment:prod:api:4000",
+            operation: Operation::ApplyStep,
+            environment: "prod",
+            product: "api",
+            plan_id: "plan-1",
+            step_id: "step-1",
+            action: Some(Action::Upgrade),
+            release_id: "release:api:1.1.0",
+            status: "failed",
+            reason: Reason::TenkaiFailed,
+            started_at_ms: Some(3_000),
+            lease_generation: 9,
+            observed_at_ms: 4_000,
+            context: RetryContext {
+                takeover: true,
+                ..RetryContext::default()
+            },
+        });
+        let parameters = action_parameters(&captured, "e", "");
+        assert_eq!(parameters.operation_id, "plan-1");
+        assert_ne!(parameters.occurrence_ids, parameters.operation_id);
+        assert!(captured.context.takeover);
+    }
+
+    #[test]
+    fn two_environments_with_the_same_reason_have_different_scopes() {
+        let prod = action_parameters(&observation("failed", Reason::ProductFailed), "e", "");
+        let stage = action_parameters(
+            &FeedbackObservation::capture(Capture {
+                id: "deployment:stage:api:2000",
+                operation: Operation::ApplyStep,
+                environment: "stage",
+                product: "api",
+                plan_id: "plan-1",
+                step_id: "step-1",
+                action: Some(Action::Upgrade),
+                release_id: "release:api:1.1.0",
+                status: "failed",
+                reason: Reason::ProductFailed,
+                started_at_ms: Some(1_000),
+                lease_generation: 3,
+                observed_at_ms: 2_000,
+                context: RetryContext::default(),
+            }),
+            "e",
+            "",
+        );
+        assert_eq!(prod.problem_signature, stage.problem_signature);
+        assert_eq!(prod.scope, "prod");
+        assert_eq!(stage.scope, "stage");
+        assert_ne!(prod.scope, stage.scope);
+        let tenant = action_parameters(
+            &observation("failed", Reason::ProductFailed),
+            "e",
+            "tenant:a",
+        );
+        assert_eq!(tenant.scope, "tenant%3Aa/prod");
     }
 
     #[test]
@@ -875,6 +1054,10 @@ mod tests {
             Some("product_failed")
         );
         assert_eq!(parameters.object_id, captured.id);
+        assert_eq!(parameters.operation_id, captured.plan_id);
+        assert_eq!(parameters.observed_at_ms, captured.observed_at_ms);
+        assert_ne!(parameters.observed_at_ms, envelope.collected_at_ms);
+        assert_eq!(parameters.scope, "prod");
         let content_json = String::from_utf8(envelope.content_json).unwrap();
         assert!(!content_json.contains("detail"), "{content_json}");
         assert!(!content_json.contains("tenant_id"), "{content_json}");
@@ -1234,8 +1417,11 @@ mod tests {
             observed_at_ms: 4_000,
             context: RetryContext::default(),
         });
-        let parameters = action_parameters(&captured, "e");
+        let parameters = action_parameters(&captured, "e", "");
         assert_eq!(parameters.problem_signature, "plan_failed:plan_failed");
+        assert_eq!(parameters.operation_id, "plan-1");
+        assert_eq!(parameters.observed_at_ms, 4_000);
+        assert_eq!(parameters.scope, "prod");
         let record = record(&captured).unwrap();
         let event: ProviderEvent = serde_json::from_str(&record.payload_json).unwrap();
         assert_eq!(event.binding.environment_id, "prod");
