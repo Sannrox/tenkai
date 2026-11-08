@@ -1439,6 +1439,9 @@ pub struct EnvironmentInspectReport {
     /// Non-secret product overlays as `product.key=value`.
     #[serde(default)]
     pub overlays: BTreeMap<String, String>,
+    /// Effective non-secret config and declared secret names per product (#1019).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config: Vec<EnvironmentProductConfig>,
     pub lease: crate::apply::EnvironmentLeaseInspect,
     /// Most recent plan for this environment by `created_at`, if any.
     pub latest_plan: Option<EnvironmentPlanSummary>,
@@ -1642,6 +1645,21 @@ pub struct EnvironmentPlanStepSummary {
     pub from: Option<String>,
     pub to: String,
     pub release_id: String,
+}
+
+/// Effective overlay config for one product, with secret names only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EnvironmentProductConfig {
+    pub product: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub defaults: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub overlay: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub digest: String,
+    /// Declared secret key names. Values are never stored or returned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<String>,
 }
 
 /// One channel subscription, keyed by instance (ADR 0044 §1).
@@ -1958,6 +1976,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             subscriptions,
             facts: Default::default(),
             overlays: Default::default(),
+            config: Vec::new(),
             lease,
             latest_plan: None,
             maintenance: None,
@@ -2017,6 +2036,7 @@ async fn inspect_environment_base(
     let subscriptions = subscription_views_from_status(&env_obj, rows);
     let facts = environment_facts_from_object(&env_obj);
     let overlays = environment_overlays_from_object(&env_obj);
+    let config = product_config_views(ctx, &env_obj).await?;
     let lease = crate::apply::inspect_environment_lease(ctx, env).await?;
     let latest_plan = latest_plan_for_environment(ctx, env, &env_obj.properties, execution).await?;
     let observed = crate::workshop_module::observed_from_object(&env_obj)?;
@@ -2050,6 +2070,7 @@ async fn inspect_environment_base(
         subscriptions,
         facts,
         overlays,
+        config,
         lease,
         latest_plan,
         maintenance: Some(maintenance),
@@ -3029,6 +3050,147 @@ fn environment_overlays_from_object(env_obj: &Object) -> BTreeMap<String, String
     overlays
 }
 
+pub(crate) async fn release_config_schema(
+    ctx: &mut Ctx,
+    release: &str,
+) -> Result<Option<crate::manifest::ConfigSection>> {
+    let Some(object) = ctx.get(release).await? else {
+        return Ok(None);
+    };
+    let Some(raw) = object.properties.get("manifest") else {
+        return Ok(None);
+    };
+    Ok(crate::manifest::parse_raw(raw)?.config)
+}
+
+async fn subscribed_config_schema(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+    product: &str,
+) -> Result<Option<crate::manifest::ConfigSection>> {
+    let Some(sub) = list_subscriptions(ctx, env_obj)
+        .await?
+        .into_iter()
+        .find(|sub| sub.product == product)
+    else {
+        return Ok(None);
+    };
+    let Some(release) = sub.channel.properties.get("current_release").cloned() else {
+        return Ok(None);
+    };
+    release_config_schema(ctx, &release).await
+}
+
+pub(crate) fn admit_overlay_key(
+    schema: &crate::manifest::ConfigSection,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    if schema.secrets.iter().any(|name| name == key) {
+        bail!("overlay {key} is a declared secret name; secret values are not overlays");
+    }
+    let Some(spec) = schema.overlay.get(key) else {
+        bail!("overlay {key} is not declared by the release config schema");
+    };
+    admit_overlay_value(spec, key, value)
+}
+
+fn admit_overlay_value(
+    spec: &crate::manifest::OverlayKeySchema,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    use crate::manifest::OverlayValueType;
+    match spec.value_type {
+        OverlayValueType::String => Ok(()),
+        OverlayValueType::Integer => {
+            if value.parse::<i64>().is_err() {
+                bail!("overlay {key} must be an integer");
+            }
+            Ok(())
+        }
+        OverlayValueType::Boolean => {
+            if matches!(value, "true" | "false") {
+                Ok(())
+            } else {
+                bail!("overlay {key} must be true or false");
+            }
+        }
+        OverlayValueType::Enum => {
+            if spec.values.iter().any(|allowed| allowed == value) {
+                Ok(())
+            } else {
+                bail!("overlay {key} is not an allowed value");
+            }
+        }
+    }
+}
+
+/// Plan admission: overlays plus defaults must satisfy the candidate schema.
+pub(crate) fn admit_product_overlays(
+    schema: &crate::manifest::ConfigSection,
+    overlays: &BTreeMap<String, String>,
+) -> Result<()> {
+    for key in overlays.keys() {
+        if !schema.overlay.contains_key(key) {
+            bail!("overlay {key} is not declared by the release config schema");
+        }
+    }
+    for (key, spec) in &schema.overlay {
+        match overlays.get(key) {
+            Some(value) => admit_overlay_value(spec, key, value)?,
+            None if spec.required && spec.default.is_none() => {
+                bail!("overlay {key} is required by the release config schema");
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+async fn product_config_views(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+) -> Result<Vec<EnvironmentProductConfig>> {
+    let mut views = Vec::new();
+    for sub in list_subscriptions(ctx, env_obj).await? {
+        let overlay = product_overlays(env_obj, &sub.product)?;
+        let schema = match sub.channel.properties.get("current_release") {
+            Some(release) => release_config_schema(ctx, release).await?,
+            None => None,
+        };
+        let Some(schema) = schema else {
+            if overlay.is_empty() {
+                continue;
+            }
+            views.push(EnvironmentProductConfig {
+                product: sub.product,
+                defaults: BTreeMap::new(),
+                digest: overlay_digest(&overlay),
+                overlay,
+                secrets: Vec::new(),
+            });
+            continue;
+        };
+        let mut defaults = BTreeMap::new();
+        for (key, spec) in &schema.overlay {
+            if let Some(value) = spec.default.as_ref()
+                && !overlay.contains_key(key)
+            {
+                defaults.insert(key.clone(), value.clone());
+            }
+        }
+        views.push(EnvironmentProductConfig {
+            product: sub.product,
+            digest: overlay_digest(&overlay),
+            overlay,
+            defaults,
+            secrets: schema.secrets,
+        });
+    }
+    Ok(views)
+}
+
 fn persist_product_overlays(
     env_obj: &mut Object,
     product: &str,
@@ -3064,6 +3226,9 @@ pub async fn set_environment_overlay(
     validate_identifier("overlay key", key)?;
     reject_credential_material("overlay", key, value)?;
     let mut env_obj = environment(ctx, env).await?;
+    if let Some(schema) = subscribed_config_schema(ctx, &env_obj, product).await? {
+        admit_overlay_key(&schema, key, value)?;
+    }
     let mut values = product_overlays(&env_obj, product)?;
     values.insert(key.to_string(), value.to_string());
     persist_product_overlays(&mut env_obj, product, &values);
@@ -4673,6 +4838,138 @@ mod tests {
             "{err}"
         );
         assert!(err.contains("db-a") && err.contains("db-b"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn overlay_set_and_plan_refuse_keys_the_release_schema_does_not_declare() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-config-schema-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("tenkai.toml"),
+            r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+
+[config]
+secrets = ["db-password"]
+
+[config.overlay.replicas]
+type = "integer"
+required = true
+default = "1"
+
+[config.overlay.region]
+type = "enum"
+values = ["eu", "us"]
+"#,
+        )
+        .unwrap();
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::catalog::publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("config-schema");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
+
+        let unknown = set_environment_overlay(&mut ctx, "local", "api", "colour", "blue")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("colour"), "{unknown}");
+        let typed = set_environment_overlay(&mut ctx, "local", "api", "replicas", "many")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            typed.contains("replicas") && typed.contains("integer"),
+            "{typed}"
+        );
+        let secret = set_environment_overlay(&mut ctx, "local", "api", "db-password", "s3cret")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(secret.contains("db-password"), "{secret}");
+        set_environment_overlay(&mut ctx, "local", "api", "region", "eu")
+            .await
+            .unwrap();
+        crate::plan::create(&mut ctx, "local").await.unwrap();
+
+        std::fs::write(
+            root.join("tenkai.toml"),
+            r#"
+[product]
+name = "api"
+version = "2.0.0"
+
+[deploy]
+install = "true"
+
+[config]
+secrets = ["db-password"]
+
+[config.overlay.replicas]
+type = "integer"
+required = true
+
+[config.overlay.region]
+type = "enum"
+values = ["eu", "us"]
+"#,
+        )
+        .unwrap();
+        crate::catalog::publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        crate::catalog::promote(&mut ctx, &actor, "api@2.0.0", "stable")
+            .await
+            .unwrap();
+        let plan_err = crate::plan::create(&mut ctx, "local")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            plan_err.contains("replicas") && plan_err.contains("required"),
+            "{plan_err}"
+        );
+
+        let inspect = inspect_environment(&mut ctx, "local").await.unwrap();
+        let config = inspect
+            .config
+            .iter()
+            .find(|row| row.product == "api")
+            .expect("config");
+        assert_eq!(config.overlay.get("region").map(String::as_str), Some("eu"));
+        assert_eq!(config.secrets, vec!["db-password".to_string()]);
+        assert!(!serde_json::to_string(&inspect).unwrap().contains("s3cret"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

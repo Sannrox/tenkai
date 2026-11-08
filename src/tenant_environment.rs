@@ -355,6 +355,7 @@ fn partition_local_inspect(name: &str) -> EnvironmentInspectReport {
         subscriptions: Vec::new(),
         facts: Default::default(),
         overlays: Default::default(),
+        config: Vec::new(),
         lease: crate::apply::EnvironmentLeaseInspect {
             held: false,
             owner: None,
@@ -721,6 +722,7 @@ mod tests {
             }],
             facts: Default::default(),
             overlays: Default::default(),
+            config: Vec::new(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: true,
                 owner: Some("foreign-controller".into()),

@@ -15,6 +15,9 @@ pub struct Manifest {
     pub product: ProductSection,
     #[serde(default)]
     pub deploy: DeploySection,
+    /// Overlay and secret-name schema signed with the release (#1019).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ConfigSection>,
     #[serde(default)]
     pub routing: Option<RoutingSection>,
     /// Open-weight model descriptor (required when `kind = "model_runtime"`).
@@ -244,6 +247,42 @@ impl<'de> Deserialize<'de> for DeployInstances {
 
 fn is_one_instance(value: &DeployInstances) -> bool {
     *value == DeployInstances::One
+}
+
+/// Overlay keys and secret names a release accepts (#1019).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigSection {
+    /// Non-secret overlay keys, keyed by name.
+    #[serde(default)]
+    pub overlay: std::collections::BTreeMap<String, OverlayKeySchema>,
+    /// Secret key names this release reads. Names only; values are never stored.
+    #[serde(default)]
+    pub secrets: Vec<String>,
+}
+
+/// One overlay key in a release config schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverlayKeySchema {
+    #[serde(rename = "type")]
+    pub value_type: OverlayValueType,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// Allowed values when `value_type` is `enum`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OverlayValueType {
+    String,
+    Integer,
+    Boolean,
+    Enum,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1216,6 +1255,7 @@ mod tests {
                 kind: ProductKind::RoutingConfig,
             },
             deploy: DeploySection::default(),
+            config: None,
             routing: Some(RoutingSection {
                 config: "routing.json".into(),
                 allowed_providers: vec!["local".into()],
@@ -1251,6 +1291,7 @@ mod tests {
                 kind: ProductKind::Software,
             },
             deploy: DeploySection::default(),
+            config: None,
             routing: None,
             model: None,
             runtime: None,
@@ -1750,5 +1791,34 @@ allowed_providers = ["local"]
 "#;
         let err = parse_raw(raw).unwrap_err().to_string();
         assert!(err.contains("deploy.executor = \"helm\""), "{err}");
+    }
+
+    #[test]
+    fn config_section_declares_overlay_keys_and_secret_names() {
+        let manifest = parse_raw(
+            r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+
+[config]
+secrets = ["db-password"]
+
+[config.overlay.replicas]
+type = "integer"
+required = true
+default = "1"
+"#,
+        )
+        .unwrap();
+        let config = manifest.config.expect("config");
+        assert_eq!(config.secrets, vec!["db-password".to_string()]);
+        let replicas = config.overlay.get("replicas").expect("replicas");
+        assert_eq!(replicas.value_type, OverlayValueType::Integer);
+        assert!(replicas.required);
+        assert_eq!(replicas.default.as_deref(), Some("1"));
     }
 }

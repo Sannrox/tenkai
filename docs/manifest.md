@@ -102,6 +102,33 @@ in its commands, or `${TENKAI_INSTANCE}` in native Kubernetes YAML, so two
 instances do not collide. The default instance is named after the product and
 keeps today's derived names.
 
+## Config schema
+
+Optional `[config]` is signed with the release. It names the overlay keys an
+environment may set and the secret names the release reads. Values of secrets
+are never stored here.
+
+```toml
+[config]
+secrets = ["db-password"]
+
+[config.overlay.replicas]
+type = "integer"     # string, integer, boolean, or enum
+required = true
+default = "1"
+
+[config.overlay.region]
+type = "enum"
+values = ["eu", "us"]
+```
+
+`tenkaictl env overlay set` checks each key against the subscribed channel
+head. Planning checks the candidate release. A release that omits `[config]`
+keeps today's free overlay keys. Servers older than this field refuse a
+manifest that declares it (`tenkai.toml` denies unknown tables), so omit it
+until every server that reads the catalog understands it. See
+[manage environments](manage-environments.md).
+
 ## Delivery signals
 
 Optional `[delivery]` flags are part of the signed manifest. Both default to

@@ -453,6 +453,7 @@ mod tests {
             }],
             facts: Default::default(),
             overlays: Default::default(),
+            config: Vec::new(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,
@@ -505,6 +506,7 @@ mod tests {
             }],
             facts: Default::default(),
             overlays: Default::default(),
+            config: Vec::new(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: true,
                 owner: Some("owner".into()),
@@ -547,6 +549,7 @@ mod tests {
             }],
             facts: Default::default(),
             overlays: Default::default(),
+            config: Vec::new(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,
@@ -576,6 +579,7 @@ mod tests {
             subscriptions: Vec::new(),
             facts: Default::default(),
             overlays: Default::default(),
+            config: Vec::new(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,
@@ -644,6 +648,7 @@ mod tests {
             }],
             facts: Default::default(),
             overlays: Default::default(),
+            config: Vec::new(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,
