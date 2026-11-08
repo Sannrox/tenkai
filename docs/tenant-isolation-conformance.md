@@ -95,6 +95,7 @@ and are not registered.
 | `environment.get` | `GET /v1/environments/{env}` | Non-disclosing deny on cross-tenant |
 | `environment.status` | `GET /v1/environments/{env}/status` | Same as get |
 | `environment.dependencies` | `GET /v1/environments/{env}/dependencies` | Same as get |
+| `environment.history` | `GET /v1/environments/{env}/history` | Same as get |
 | `environment.runtime` | `GET /v1/environments/{env}/runtime` | Same as get |
 | `event.list` | `GET /v1/events` | Page the caller tenant's change events; other partitions stay invisible |
 | `environment.retire` | `POST /v1/environments/{env}/retire` | Require management capability and tenant visibility; preserve tenant retirement evidence |
@@ -177,6 +178,7 @@ When `ServerConfig.requirements.tenant_mode` is true and a
 | `GET /v1/environments/{environment}` | Cross-tenant ids → non-disclosing `resource not found` |
 | `GET /v1/environments/{environment}/status` | Same non-disclosing deny |
 | `GET /v1/environments/{environment}/dependencies` | Same non-disclosing deny |
+| `GET /v1/environments/{environment}/history` | Same non-disclosing deny |
 | `GET /v1/events` | Pages only the caller tenant's change events |
 | `POST /v1/environments/{environment}/retire` | Authenticated tenant management capability; retirement is isolated to that tenant |
 

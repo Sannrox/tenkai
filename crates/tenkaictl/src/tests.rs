@@ -713,6 +713,32 @@ fn parses_env_list_and_inspect() {
             command: EnvCommand::Inspect { ref env }
         } if env == "prod"
     ));
+    let history = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "history",
+        "prod",
+        "--product",
+        "api",
+        "--limit",
+        "10",
+        "--cursor",
+        "1000:tenkai:deployment:prod:api:1000",
+    ])
+    .unwrap();
+    assert!(matches!(
+        history.command,
+        Command::Env {
+            command: EnvCommand::History {
+                ref env,
+                ref product,
+                limit: Some(10),
+                ref cursor,
+            }
+        } if env == "prod"
+            && product.as_deref() == Some("api")
+            && cursor.as_deref() == Some("1000:tenkai:deployment:prod:api:1000")
+    ));
     let dependencies = Cli::try_parse_from([
         "tenkaictl",
         "env",

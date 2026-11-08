@@ -25,10 +25,10 @@ use super::imports::{
 };
 use super::inspect::{
     auth_session, backup_status, change_events, environment_approval_policy,
-    environment_dependencies, environment_status, fleet_status, health, inspect_advisory_feed,
-    inspect_environment, inspect_product_criticality, list_channels, list_environments,
-    list_migrations, list_releases, observed_runtime, oidc_client, openmetrics, plan_approvals,
-    query_exposures, ready, reconcile, take_backup,
+    environment_dependencies, environment_history, environment_status, fleet_status, health,
+    inspect_advisory_feed, inspect_environment, inspect_product_criticality, list_channels,
+    list_environments, list_migrations, list_releases, observed_runtime, oidc_client, openmetrics,
+    plan_approvals, query_exposures, ready, reconcile, take_backup,
 };
 use super::lifecycle::{
     apply_plan, approve_plan, channel_hold, clear_product_criticality, environment_hold,
@@ -225,6 +225,10 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/dependencies",
             get(environment_dependencies),
+        )
+        .route(
+            "/v1/environments/{environment}/history",
+            get(environment_history),
         )
         .route(
             "/v1/environments/{environment}/approval-policy",

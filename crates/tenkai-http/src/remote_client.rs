@@ -127,6 +127,30 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn environment_history(
+        &self,
+        environment: &str,
+        query: &tenkai::deployment_history::DeploymentHistoryQuery,
+    ) -> anyhow::Result<tenkai::deployment_history::DeploymentHistoryPage> {
+        let mut pairs = url::form_urlencoded::Serializer::new(String::new());
+        if let Some(limit) = query.limit {
+            pairs.append_pair("limit", &limit.to_string());
+        }
+        if let Some(cursor) = query.cursor.as_deref() {
+            pairs.append_pair("cursor", cursor);
+        }
+        if let Some(product) = query.product.as_deref() {
+            pairs.append_pair("product", product);
+        }
+        let encoded = pairs.finish();
+        let path = if encoded.is_empty() {
+            format!("/v1/environments/{environment}/history")
+        } else {
+            format!("/v1/environments/{environment}/history?{encoded}")
+        };
+        self.request_json(reqwest::Method::GET, &path).await
+    }
+
     pub async fn environment_approval_policy(
         &self,
         environment: &str,

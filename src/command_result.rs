@@ -19,6 +19,7 @@ pub enum CommandName {
     Apply,
     Status,
     InspectEnvironment,
+    HistoryEnvironment,
     Rollback,
     Restart,
     Recall,

@@ -123,6 +123,10 @@ async fn development_fixture_surface_is_explicit_authorized_and_tenant_scoped() 
             "/v1/environments/fx-62757965722d64656d6f-environment-prod-eu/dependencies",
             "\"holds\":[]",
         ),
+        (
+            "/v1/environments/fx-62757965722d64656d6f-environment-prod-eu/history",
+            "\"items\":[]",
+        ),
         ("/v1/fleet/status", "\"posture\":\"behind\""),
     ] {
         let response = fixture_app

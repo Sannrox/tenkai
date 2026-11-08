@@ -3,7 +3,7 @@ use tenkai::{apply, client, connectivity, plan, preview};
 
 use crate::args::OutputFormat;
 use crate::env_args::{DependencyFormat, EnvCommand};
-use crate::output::print_machine_result;
+use crate::output::{print_history_page, print_machine_result};
 
 pub(crate) async fn run(
     ctx: &mut client::Ctx,
@@ -94,6 +94,29 @@ pub(crate) async fn run(
             } else {
                 // JSON keeps multi-env inspect machine-readable without secrets.
                 println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+        }
+        EnvCommand::History {
+            env,
+            product,
+            limit,
+            cursor,
+        } => {
+            let page = tenkai::deployment_history::list_deployment_history(
+                ctx,
+                &env,
+                &tenkai::deployment_history::DeploymentHistoryQuery {
+                    limit,
+                    cursor,
+                    product,
+                },
+            )
+            .await?;
+            if output == OutputFormat::JsonV1 {
+                // The machine form is the history page, not a command-result envelope.
+                println!("{}", serde_json::to_string_pretty(&page)?);
+            } else {
+                print_history_page(&page);
             }
         }
         EnvCommand::Dependencies { env, format } => {

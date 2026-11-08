@@ -648,6 +648,8 @@ pub fn known_object_types() -> Vec<ObjectType> {
                 prop("status", true, "succeeded|failed|rolled_back"),
                 prop("detail", false, "Failure or rollback detail"),
                 prop("lease_generation", false, "Mutation fencing generation"),
+                prop("action", false, "Plan step action"),
+                prop("plan_id", false, "Plan this attempt executed"),
             ],
         ),
         object_type(

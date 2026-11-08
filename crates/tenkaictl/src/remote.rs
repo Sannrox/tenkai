@@ -6,7 +6,7 @@ use crate::client_config::{self, ClientConfig};
 use crate::env_args::EnvCommand;
 use crate::fleet_args::FleetCommand;
 use crate::fleet_watch::{FleetWatchOptions, print_fleet_status, run_fleet_watch};
-use crate::output::{print_machine_result, print_reconcile_report};
+use crate::output::{print_history_page, print_machine_result, print_reconcile_report};
 
 pub(crate) async fn run(
     mut cli: Cli,
@@ -171,6 +171,33 @@ pub(crate) async fn run(
                 return print_machine_result(&crate::output::inspect_result(&report));
             }
             println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Command::Env {
+            command:
+                EnvCommand::History {
+                    env,
+                    product,
+                    limit,
+                    cursor,
+                },
+        } => {
+            let page = client
+                .environment_history(
+                    &env,
+                    &tenkai::deployment_history::DeploymentHistoryQuery {
+                        limit,
+                        cursor,
+                        product,
+                    },
+                )
+                .await?;
+            if output == OutputFormat::JsonV1 {
+                // The machine form is the history page, not a command-result envelope.
+                println!("{}", serde_json::to_string_pretty(&page)?);
+            } else {
+                print_history_page(&page);
+            }
             Ok(())
         }
         Command::Env {

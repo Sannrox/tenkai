@@ -55,6 +55,9 @@ pub(crate) fn command_name(command: &Command, target: Target) -> Option<CommandN
             command: EnvCommand::Inspect { .. },
         } => CommandName::InspectEnvironment,
         Command::Env {
+            command: EnvCommand::History { .. },
+        } => CommandName::HistoryEnvironment,
+        Command::Env {
             command: EnvCommand::Subscribe { .. },
         } => CommandName::Subscribe,
         Command::Env {
@@ -218,6 +221,39 @@ pub(crate) fn inspect_result(report: &plan::EnvironmentInspectReport) -> Command
     CommandResultV1::succeeded(CommandName::InspectEnvironment)
         .resource("environment", &report.id)
         .counts(None, Some(report.subscriptions.len()))
+}
+
+pub(crate) fn print_history_page(page: &tenkai::deployment_history::DeploymentHistoryPage) {
+    if page.items.is_empty() {
+        println!("no deployment attempts recorded");
+        return;
+    }
+    println!(
+        "{:<24} {:<16} {:<8} {:<8} {:<10} {:<12} {:<28} detail",
+        "time", "instance", "from", "to", "action", "status", "plan"
+    );
+    for item in &page.items {
+        println!(
+            "{:<24} {:<16} {:<8} {:<8} {:<10} {:<12} {:<28} {}",
+            format_attempt_time(item.created_at),
+            item.instance,
+            item.from_version.as_deref().unwrap_or("none"),
+            item.to_version,
+            item.action.as_deref().unwrap_or("-"),
+            item.status,
+            item.plan_id.as_deref().unwrap_or("-"),
+            item.detail
+        );
+    }
+    if let Some(cursor) = &page.next_cursor {
+        println!("next: --cursor {cursor}");
+    }
+}
+
+fn format_attempt_time(millis: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(millis)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| millis.to_string())
 }
 
 pub(crate) fn promote_result(spec: &str, channel: &str) -> CommandResultV1 {
@@ -412,6 +448,7 @@ mod tests {
             (CommandName::Apply, "plan"),
             (CommandName::Status, "environment"),
             (CommandName::InspectEnvironment, "environment"),
+            (CommandName::HistoryEnvironment, "environment"),
             (CommandName::Rollback, "plan"),
             (CommandName::Restart, "plan"),
             (CommandName::Recall, "release"),

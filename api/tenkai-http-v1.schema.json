@@ -1500,6 +1500,103 @@
       ],
       "type": "object"
     },
+    "DeploymentAttemptView": {
+      "description": "One recorded deployment attempt, as stored.",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "created_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "detail": {
+          "default": "",
+          "type": "string"
+        },
+        "from_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "lease_generation": {
+          "type": "string"
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "to_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "instance",
+        "product",
+        "to_version",
+        "status"
+      ],
+      "type": "object"
+    },
+    "DeploymentHistoryPage": {
+      "description": "One page of [`DeploymentAttemptView`] values.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/DeploymentAttemptView"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "DeploymentHistoryQuery": {
+      "description": "Query parameters for `GET /v1/environments/{environment}/history`.",
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "product": {
+          "description": "Instance name. Unnamed instances equal the product.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "DerivedCriticality": {
       "description": "Imported derived criticality. `stale` is computed at read time.",
       "properties": {
@@ -2335,6 +2432,13 @@
         },
         "id": {
           "type": "string"
+        },
+        "latest_failures": {
+          "description": "Latest failed or rolled back attempt per instance (#1054).",
+          "items": {
+            "$ref": "#/$defs/DeploymentAttemptView"
+          },
+          "type": "array"
         },
         "latest_plan": {
           "anyOf": [
@@ -6957,6 +7061,17 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/EnvironmentDependencies"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}/history",
+      "request": {
+        "$ref": "#/$defs/DeploymentHistoryQuery"
+      },
+      "response": {
+        "$ref": "#/$defs/DeploymentHistoryPage"
       }
     },
     {

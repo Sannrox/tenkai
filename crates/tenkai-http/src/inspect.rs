@@ -220,6 +220,24 @@ pub(super) async fn environment_dependencies(
     )
 }
 
+pub(super) async fn environment_history(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    Query(query): Query<tenkai::deployment_history::DeploymentHistoryQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .environment_history(&credential, &environment, query)
+            .await,
+    )
+}
+
 pub(super) async fn observed_runtime(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,

@@ -486,6 +486,7 @@ mod tests {
             preview: None,
             delivery_hold: None,
             criticality: None,
+            latest_failures: Vec::new(),
         };
         let behind = EnvironmentInspectReport {
             name: "beta".into(),
@@ -530,6 +531,7 @@ mod tests {
             preview: None,
             delivery_hold: None,
             criticality: None,
+            latest_failures: Vec::new(),
         };
         let unhealthy = EnvironmentInspectReport {
             name: "gamma".into(),
@@ -574,6 +576,7 @@ mod tests {
             preview: None,
             delivery_hold: None,
             criticality: None,
+            latest_failures: Vec::new(),
         };
         let empty = EnvironmentInspectReport {
             name: "delta".into(),
@@ -604,6 +607,7 @@ mod tests {
             preview: None,
             delivery_hold: None,
             criticality: None,
+            latest_failures: Vec::new(),
         };
         let report = fleet_status_from_inspects(vec![behind, empty, unhealthy, current]);
         assert_eq!(report.environment_count, 4);
@@ -674,6 +678,7 @@ mod tests {
             preview: None,
             delivery_hold: None,
             criticality: None,
+            latest_failures: Vec::new(),
         };
         let report = fleet_status_from_inspects(vec![stale]);
         assert_eq!(report.environments[0].posture, "behind");

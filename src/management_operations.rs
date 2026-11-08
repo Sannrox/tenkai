@@ -22,6 +22,7 @@ use crate::auth_context::{
 };
 use crate::catalog::{ChannelPage, ReleasePage};
 use crate::client::Ctx;
+use crate::deployment_history::{DeploymentHistoryPage, DeploymentHistoryQuery};
 use crate::environment_dependencies::EnvironmentDependencies;
 use crate::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryResult};
 use crate::host_identity::AuthSession;
@@ -1071,6 +1072,27 @@ impl ManagementOperations {
             .environment_dependencies(environment.to_string())
             .await
             .map_err(map_environment_error)
+    }
+
+    pub async fn environment_history(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        query: DeploymentHistoryQuery,
+    ) -> Result<DeploymentHistoryPage, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        if self.tenant_mode {
+            return self
+                .tenant_operations()?
+                .history(&context, environment)
+                .await
+                .map_err(map_tenant_error);
+        }
+        let mut ctx = self.application_ctx()?;
+        crate::deployment_history::list_deployment_history(&mut ctx, environment, &query)
+            .await
+            .map_err(map_history_error)
     }
 
     pub async fn observed_runtime(
@@ -2842,6 +2864,18 @@ fn map_plan_lifecycle_error(error: anyhow::Error) -> ManagementError {
     }
 }
 
+fn map_history_error(error: anyhow::Error) -> ManagementError {
+    let message = format!("{error:#}");
+    if message.contains("limit must be")
+        || message.contains("history cursor is invalid")
+        || message.contains("must start with an ASCII letter")
+    {
+        ManagementError::BadRequest(message)
+    } else {
+        map_environment_error(error)
+    }
+}
+
 fn map_environment_error(error: anyhow::Error) -> ManagementError {
     let message = format!("{error:#}");
     if message.contains("not registered") {
@@ -3070,6 +3104,7 @@ mod tests {
                     preview: None,
                     delivery_hold: None,
                     criticality: None,
+                    latest_failures: Vec::new(),
                 })
             })
         }
