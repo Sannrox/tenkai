@@ -435,7 +435,7 @@ async fn compute_snapshot_with_policy(
     policy: ConvergencePolicy,
     executors: &crate::software_executor::SoftwareExecutors,
 ) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
-    let env_obj = crate::environment::active_environment(ctx, env).await?;
+    let mut env_obj = crate::environment::active_environment(ctx, env).await?;
     crate::preview::admit_plan(&env_obj, crate::now_millis())?;
     let subscriptions = crate::environment::list_subscriptions(ctx, &env_obj).await?;
 
@@ -458,6 +458,7 @@ async fn compute_snapshot_with_policy(
     let mut host_products = std::collections::HashSet::new();
     let mut held_model = false;
     let mut held_routing = false;
+    let mut spec_drift_keys = BTreeSet::new();
     let mut hold_sets = BTreeMap::new();
     let mut hold_clears = BTreeSet::new();
     let mut product_instances: BTreeMap<String, Vec<(String, crate::manifest::DeployInstances)>> =
@@ -695,6 +696,23 @@ async fn compute_snapshot_with_policy(
                         }
                         crate::software_executor::SoftwareObserveStatus::Present
                         | crate::software_executor::SoftwareObserveStatus::Unknown => {}
+                    }
+                    // Spec drift is report-only: never Restart, never a Plan,
+                    // never fail the snapshot. Observation errors stay unknown.
+                    let drift = executor
+                        .observe_spec_drift(&request)
+                        .unwrap_or_else(|_| crate::spec_drift::SpecDriftView::unknown());
+                    if let Some(key) = crate::environment::stamp_spec_drift(
+                        &mut env_obj,
+                        &product,
+                        if instance == product {
+                            ""
+                        } else {
+                            instance.as_str()
+                        },
+                        &drift,
+                    ) {
+                        spec_drift_keys.insert(key);
                     }
                 }
                 let overlay_digest = crate::environment::overlay_digest(
@@ -1045,7 +1063,35 @@ async fn compute_snapshot_with_policy(
         })
         .collect();
     crate::environment::persist_dependency_holds(ctx, env, &hold_sets, &hold_clears).await?;
+    persist_spec_drift(ctx, env, &env_obj, &spec_drift_keys).await?;
     Ok((inputs, steps))
+}
+
+async fn persist_spec_drift(
+    ctx: &mut Ctx,
+    env: &str,
+    observed: &crate::pb::sekai::Object,
+    keys: &BTreeSet<String>,
+) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let mut current = crate::environment::active_environment(ctx, env).await?;
+    let mut changed = false;
+    for key in keys {
+        let property = format!("spec_drift.{key}");
+        if let Some(value) = observed.properties.get(&property)
+            && current.properties.get(&property) != Some(value)
+        {
+            current.properties.insert(property, value.clone());
+            changed = true;
+        }
+    }
+    if changed {
+        current.updated = crate::now_millis();
+        ctx.put(current).await?;
+    }
+    Ok(())
 }
 
 enum DependencyAdmission {

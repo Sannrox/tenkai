@@ -315,6 +315,9 @@ pub(crate) async fn run(
                             hold.held_at, hold.actor, hold.reason
                         );
                     }
+                    if let Some(drift) = &r.spec_drift {
+                        crate::output::print_spec_drift(drift);
+                    }
                 }
             }
             Ok(())

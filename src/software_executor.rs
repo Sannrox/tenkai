@@ -287,6 +287,15 @@ pub trait SoftwareExecutor: Send + Sync {
         let _ = (environment, cluster_config);
         Ok(Vec::new())
     }
+    /// Compare the applied spec with the live target without acting (#1028).
+    /// Default is `unknown`: this adapter does not compute fingerprints.
+    fn observe_spec_drift(
+        &self,
+        request: &SoftwareApplyRequest,
+    ) -> Result<crate::spec_drift::SpecDriftView> {
+        let _ = request;
+        Ok(crate::spec_drift::SpecDriftView::unknown())
+    }
     /// Apply one generation and return wall time per phase. Default times `apply`.
     fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
         let started = Instant::now();

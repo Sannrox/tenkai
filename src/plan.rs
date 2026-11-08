@@ -40,6 +40,7 @@ pub use crate::environment::{
 pub(crate) use crate::environment::{
     inspect_environment_for_policy, update_runtime_deployments_object,
 };
+pub use crate::spec_drift::{SpecDriftObject, SpecDriftView};
 
 pub use crate::deploy_webhook::{
     clear_environment_webhooks, list_environment_webhooks, set_environment_webhook,

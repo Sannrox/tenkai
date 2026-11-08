@@ -32,7 +32,7 @@ out of scope here. Custom-resource operators are refused.
 
 | Type | Role |
 | --- | --- |
-| `SoftwareExecutor` | apply / remove / observe / restart, plus `cleanup_failed_apply` (defaults to remove) |
+| `SoftwareExecutor` | apply / remove / observe / restart, plus `cleanup_failed_apply` (defaults to remove) and report-only `observe_spec_drift` (#1028) |
 | `SoftwareExecutors` | the process default plus adapters for declared kinds; resolves one per release |
 | `FakeSoftwareExecutor` | CI without cluster |
 | `HelmSoftwareExecutor` | Helm chart path (`tenkai-executor`) |

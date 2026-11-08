@@ -719,6 +719,7 @@ mod tests {
                 applied_overlay: None,
                 state: "current".into(),
                 delivery_hold: None,
+                spec_drift: None,
             }],
             facts: Default::default(),
             overlays: Default::default(),
@@ -769,6 +770,7 @@ mod tests {
                     overlay_stale: false,
                     delivery_hold: None,
                     dependency_hold: None,
+                    spec_drift: None,
                 }])
             })
         }

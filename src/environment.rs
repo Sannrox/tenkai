@@ -858,6 +858,7 @@ fn transition_deployment(
                 .properties
                 .remove(&format!("deployment_error.{key}"));
             stamp_applied_overlays(environment, product, instance);
+            environment.properties.remove(&format!("spec_drift.{key}"));
             clear_unknown_origin(environment, key);
         }
         DeploymentTransition::Deployed { version, previous } => {
@@ -880,6 +881,7 @@ fn transition_deployment(
                 .properties
                 .remove(&format!("deployment_error.{key}"));
             stamp_applied_overlays(environment, product, instance);
+            environment.properties.remove(&format!("spec_drift.{key}"));
             clear_unknown_origin(environment, key);
         }
         DeploymentTransition::Removed { version } => {
@@ -890,6 +892,8 @@ fn transition_deployment(
                 "deployment_error",
                 "applied_dependencies",
                 "applied_config",
+                "applied_spec",
+                "spec_drift",
             ] {
                 environment.properties.remove(&format!("{prefix}.{key}"));
             }
@@ -1341,6 +1345,10 @@ pub struct StatusRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub dependency_hold: Option<StatusDependencyHold>,
+    /// Report-only live-spec comparison (#1028). Omitted when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub spec_drift: Option<crate::spec_drift::SpecDriftView>,
 }
 
 /// Unmet contract named by a dependency hold.
@@ -1380,16 +1388,26 @@ pub fn subscription_state(
 
 /// Classify one status row. A dependency hold is `waiting`; health stays on
 /// the row so recovery output can still print from `unknown`/`unhealthy`.
+/// Spec drift only overrides a row that would otherwise be `current`.
 pub fn status_state(row: &StatusRow) -> &'static str {
     if row.dependency_hold.is_some() {
-        "waiting"
+        return "waiting";
+    }
+    let state = subscription_state(
+        row.deployed.as_deref(),
+        &row.head,
+        row.health.as_deref(),
+        row.overlay_stale,
+    );
+    if state == "current"
+        && row
+            .spec_drift
+            .as_ref()
+            .is_some_and(crate::spec_drift::SpecDriftView::is_modified)
+    {
+        crate::spec_drift::SPEC_DRIFT_MODIFIED
     } else {
-        subscription_state(
-            row.deployed.as_deref(),
-            &row.head,
-            row.health.as_deref(),
-            row.overlay_stale,
-        )
+        state
     }
 }
 
@@ -1604,6 +1622,10 @@ pub struct EnvironmentSubscriptionView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub delivery_hold: Option<crate::delivery_hold::DeliveryHold>,
+    /// Report-only live-spec comparison (#1028). Omitted when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub spec_drift: Option<crate::spec_drift::SpecDriftView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1756,9 +1778,9 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
         .await?;
         let overlay_digest = overlay_digest_for(env_obj, &product);
         let applied_key = if instance.is_empty() {
-            &product
+            product.clone()
         } else {
-            &instance
+            instance.clone()
         };
         let applied = env_obj
             .properties
@@ -1821,6 +1843,7 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             product,
             delivery_hold,
             dependency_hold,
+            spec_drift: spec_drift_from_object(env_obj, &applied_key),
         });
     }
     rows.sort_by(|a, b| {
@@ -1848,7 +1871,7 @@ fn subscription_views_from_status(
                 .get(&format!("applied_config.{applied_key}"))
                 .cloned()
                 .filter(|value| !value.is_empty());
-            let config_stale = overlay_digest != applied_overlay.clone().unwrap_or_default();
+            let state = status_state(&row).to_string();
             EnvironmentSubscriptionView {
                 product: row.product.clone(),
                 instance: if row.instance.is_empty() {
@@ -1863,18 +1886,9 @@ fn subscription_views_from_status(
                 error: row.error,
                 overlay_digest: (!overlay_digest.is_empty()).then_some(overlay_digest),
                 applied_overlay,
-                state: if row.dependency_hold.is_some() {
-                    "waiting".into()
-                } else {
-                    subscription_state(
-                        row.deployed.as_deref(),
-                        &row.head,
-                        row.health.as_deref(),
-                        config_stale,
-                    )
-                    .to_string()
-                },
+                state,
                 delivery_hold: row.delivery_hold,
+                spec_drift: row.spec_drift,
             }
         })
         .collect()
@@ -3011,6 +3025,42 @@ fn overlay_digest_for(env_obj: &Object, product: &str) -> String {
         .unwrap_or_default()
 }
 
+fn spec_drift_from_object(env_obj: &Object, key: &str) -> Option<crate::spec_drift::SpecDriftView> {
+    let raw = env_obj.properties.get(&format!("spec_drift.{key}"))?;
+    let view: crate::spec_drift::SpecDriftView = serde_json::from_str(raw).ok()?;
+    (view.status != crate::spec_drift::SPEC_DRIFT_UNKNOWN).then_some(view)
+}
+
+/// Record a report-only spec-drift observation. Never creates a Plan.
+/// Unknown does not replace a stored `current` or `modified` report.
+/// Returns the property key when a value was written.
+pub(crate) fn stamp_spec_drift(
+    environment: &mut Object,
+    product: &str,
+    instance: &str,
+    drift: &crate::spec_drift::SpecDriftView,
+) -> Option<String> {
+    let key = if instance.is_empty() {
+        product
+    } else {
+        instance
+    };
+    let property = format!("spec_drift.{key}");
+    if drift.status == crate::spec_drift::SPEC_DRIFT_UNKNOWN {
+        return None;
+    }
+    match serde_json::to_string(drift) {
+        Ok(raw) => {
+            environment.properties.insert(property, raw);
+            Some(key.to_string())
+        }
+        Err(_) => {
+            environment.properties.remove(&property);
+            None
+        }
+    }
+}
+
 fn stamp_applied_overlays(environment: &mut Object, product: &str, instance: &str) {
     let key = if instance.is_empty() {
         product
@@ -3556,6 +3606,14 @@ mod tests {
     #[test]
     fn deployed_observation_replaces_unknown_state() {
         let mut environment = environment_object();
+        environment.properties.insert(
+            "spec_drift.api".into(),
+            serde_json::to_string(&crate::spec_drift::SpecDriftView {
+                status: crate::spec_drift::SPEC_DRIFT_MODIFIED.into(),
+                objects: Vec::new(),
+            })
+            .unwrap(),
+        );
 
         transition_deployment(
             &mut environment,
@@ -3587,6 +3645,7 @@ mod tests {
                 .properties
                 .contains_key("deployment_unknown_plan.api")
         );
+        assert!(!environment.properties.contains_key("spec_drift.api"));
         assert_eq!(environment.updated, 42);
     }
 
@@ -3757,6 +3816,7 @@ mod tests {
             head: "1.0.0".into(),
             overlay_stale: false,
             delivery_hold: None,
+            spec_drift: None,
             dependency_hold: Some(StatusDependencyHold {
                 release_id: "tenkai:release:app@1.0.0".into(),
                 contracts: vec![UnmetContract {
@@ -3771,6 +3831,84 @@ mod tests {
         let mut missing = waiting.clone();
         missing.dependency_hold = None;
         assert_eq!(status_state(&missing), "missing");
+        let mut drifted = missing.clone();
+        drifted.deployed = Some("1.0.0".into());
+        drifted.health = Some("healthy".into());
+        drifted.spec_drift = Some(crate::spec_drift::SpecDriftView {
+            status: crate::spec_drift::SPEC_DRIFT_MODIFIED.into(),
+            objects: vec![crate::spec_drift::SpecDriftObject {
+                kind: "Deployment".into(),
+                name: "web".into(),
+                status: crate::spec_drift::SPEC_DRIFT_MODIFIED.into(),
+                fields: vec!["containers".into()],
+            }],
+        });
+        assert_eq!(
+            status_state(&drifted),
+            crate::spec_drift::SPEC_DRIFT_MODIFIED
+        );
+        drifted.health = Some("unknown".into());
+        assert_eq!(status_state(&drifted), "unknown");
+        drifted.health = Some("healthy".into());
+        drifted.head = "2.0.0".into();
+        assert_eq!(status_state(&drifted), "behind");
+        drifted.head = "1.0.0".into();
+        drifted.overlay_stale = true;
+        assert_eq!(status_state(&drifted), "config_stale");
+        drifted.overlay_stale = false;
+        drifted.spec_drift = None;
+        assert_eq!(status_state(&drifted), "current");
+    }
+
+    #[test]
+    fn unknown_spec_drift_does_not_replace_current() {
+        let mut environment = environment_object();
+        let current = crate::spec_drift::SpecDriftView {
+            status: crate::spec_drift::SPEC_DRIFT_CURRENT.into(),
+            objects: Vec::new(),
+        };
+        stamp_spec_drift(&mut environment, "api", "", &current);
+        let stored = environment
+            .properties
+            .get("spec_drift.api")
+            .cloned()
+            .expect("stored current");
+        assert!(
+            stored.contains(crate::spec_drift::SPEC_DRIFT_CURRENT),
+            "{stored}"
+        );
+        stamp_spec_drift(
+            &mut environment,
+            "api",
+            "",
+            &crate::spec_drift::SpecDriftView::unknown(),
+        );
+        assert_eq!(
+            environment
+                .properties
+                .get("spec_drift.api")
+                .map(String::as_str),
+            Some(stored.as_str())
+        );
+        assert_eq!(
+            spec_drift_from_object(&environment, "api")
+                .expect("current")
+                .status,
+            crate::spec_drift::SPEC_DRIFT_CURRENT
+        );
+        let mut empty = environment_object();
+        stamp_spec_drift(
+            &mut empty,
+            "api",
+            "",
+            &crate::spec_drift::SpecDriftView::unknown(),
+        );
+        assert!(!empty.properties.contains_key("spec_drift.api"));
+        empty.properties.insert(
+            "spec_drift.api".into(),
+            serde_json::to_string(&crate::spec_drift::SpecDriftView::unknown()).unwrap(),
+        );
+        assert_eq!(spec_drift_from_object(&empty, "api"), None);
     }
 
     #[test]

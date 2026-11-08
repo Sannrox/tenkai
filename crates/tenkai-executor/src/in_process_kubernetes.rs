@@ -91,6 +91,17 @@ pub trait ClusterApplyApi: Send + Sync {
         name: &str,
         kind: &str,
     ) -> Result<Option<WorkloadObservation>>;
+    /// Live object JSON for spec-drift comparison (#1028). Default is none.
+    fn observe_object(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<Value>> {
+        let _ = (cluster_config, namespace, name, kind);
+        Ok(None)
+    }
     fn remove(&self, cluster_config: &Path, namespace: &str, name: &str, kind: &str) -> Result<()>;
     /// The workload object and the pods of its current revision, read to
     /// explain why it is not Available. `None` when this adapter cannot tell.
@@ -202,6 +213,16 @@ impl<T: ClusterApplyApi + ?Sized> ClusterApplyApi for &T {
         (**self).observe(cluster_config, namespace, name, kind)
     }
 
+    fn observe_object(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<Value>> {
+        (**self).observe_object(cluster_config, namespace, name, kind)
+    }
+
     fn remove(&self, cluster_config: &Path, namespace: &str, name: &str, kind: &str) -> Result<()> {
         (**self).remove(cluster_config, namespace, name, kind)
     }
@@ -292,6 +313,19 @@ impl MemoryClusterApi {
             .expect("cluster mutex")
             .get(&object_key(namespace, kind, name))
             .map(|stored| stored.object.clone())
+    }
+
+    pub fn mutate_object(
+        &self,
+        namespace: &str,
+        kind: &str,
+        name: &str,
+        mutate: impl FnOnce(&mut Value),
+    ) {
+        let key = object_key(namespace, kind, name);
+        if let Some(stored) = self.objects.lock().expect("cluster mutex").get_mut(&key) {
+            mutate(&mut stored.object);
+        }
     }
 
     pub fn set_conditions(
@@ -408,6 +442,16 @@ impl ClusterApplyApi for MemoryClusterApi {
                 version_label: object_version_label(&stored.object),
                 conditions: stored.conditions.clone(),
             }))
+    }
+
+    fn observe_object(
+        &self,
+        _cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<Value>> {
+        Ok(self.object(namespace, kind, name))
     }
 
     fn remove(
@@ -559,6 +603,21 @@ impl ClusterApplyApi for LiveKubeApi {
         kind: &str,
     ) -> Result<Option<WorkloadObservation>> {
         block_on(bounded(live_observe(cluster_config, namespace, name, kind)))
+    }
+
+    fn observe_object(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<Value>> {
+        block_on(bounded(live_observe_object(
+            cluster_config,
+            namespace,
+            name,
+            kind,
+        )))
     }
 
     fn remove(&self, cluster_config: &Path, namespace: &str, name: &str, kind: &str) -> Result<()> {
@@ -992,6 +1051,45 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
         }
     }
 
+    fn observe_spec_drift(
+        &self,
+        request: &SoftwareApplyRequest,
+    ) -> Result<tenkai::spec_drift::SpecDriftView> {
+        validate_request(request)?;
+        let Ok(cluster_config) = Self::require_cluster_config(request) else {
+            return Ok(tenkai::spec_drift::SpecDriftView::unknown());
+        };
+        let manifests = kubernetes_manifests_dir(&request.workdir)?;
+        let files = list_manifest_files(&manifests)?;
+        if files.is_empty() {
+            return Ok(tenkai::spec_drift::SpecDriftView::unknown());
+        }
+        let mut objects = Vec::new();
+        for path in &files {
+            for applied in parse_manifest_objects(path, request.instance_name())? {
+                let (kind, name) = object_identity(&applied)?;
+                if !is_workload(&kind) {
+                    continue;
+                }
+                match self
+                    .api
+                    .observe_object(cluster_config, &request.environment, &name, &kind)?
+                {
+                    None => objects.push(tenkai::spec_drift::SpecDriftObject {
+                        kind,
+                        name,
+                        status: tenkai::spec_drift::SPEC_DRIFT_UNKNOWN.into(),
+                        fields: Vec::new(),
+                    }),
+                    Some(live) => objects.push(tenkai::spec_drift::compare_workload_spec(
+                        &kind, &name, &applied, &live,
+                    )),
+                }
+            }
+        }
+        Ok(tenkai::spec_drift::SpecDriftView::from_objects(objects))
+    }
+
     fn support_workloads(
         &self,
         environment: &str,
@@ -1153,6 +1251,7 @@ fn support_workload(
         revision,
         pods,
         events: counted,
+        spec_drift: None,
     }
 }
 
@@ -1497,6 +1596,25 @@ async fn live_observe(
             .await?
             .map(|(observation, _)| observation),
     )
+}
+
+async fn live_observe_object(
+    cluster_config: &Path,
+    namespace: &str,
+    name: &str,
+    kind: &str,
+) -> Result<Option<Value>> {
+    let client = live_client(cluster_config).await?;
+    let api_version = builtin_api_version(kind)?;
+    let api = dynamic_api(client, namespace, kind, api_version)?;
+    match api.get_opt(name).await {
+        Ok(Some(object)) => Ok(Some(serde_json::to_value(&object).unwrap_or(Value::Null))),
+        Ok(None) => Ok(None),
+        Err(error) if is_not_found(&error) => Ok(None),
+        Err(error) => Err(anyhow::anyhow!(
+            "reading {kind}/{name} in {namespace}: {error}"
+        )),
+    }
 }
 
 async fn live_observe_with_rollout(
@@ -2224,12 +2342,26 @@ mod tests {
     use tenkai::software_executor::SoftwareApplyRequest;
 
     fn write_deployment(root: &Path, version: &str, replicas: u64) -> PathBuf {
+        write_deployment_with_containers(
+            root,
+            version,
+            replicas,
+            "        - name: app\n          image: app:1\n",
+        )
+    }
+
+    fn write_deployment_with_containers(
+        root: &Path,
+        version: &str,
+        replicas: u64,
+        containers: &str,
+    ) -> PathBuf {
         let manifests = root.join("manifests");
         std::fs::create_dir_all(&manifests).unwrap();
         std::fs::write(
             manifests.join("deploy.yaml"),
             format!(
-                "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: edge\nspec:\n  replicas: {replicas}\n"
+                "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: edge\nspec:\n  replicas: {replicas}\n  template:\n    spec:\n      containers:\n{containers}"
             ),
         )
         .unwrap();
@@ -2279,6 +2411,61 @@ mod tests {
         assert_eq!(live.version_label.as_deref(), Some("1.0.0"));
         let _ = std::fs::remove_dir_all(root_a);
         let _ = std::fs::remove_dir_all(root_b);
+    }
+
+    #[test]
+    fn extra_container_is_spec_drift_and_observe_stays_present() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-ssa-drift-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let kubeconfig = write_deployment(&root, "1.0.0", 1);
+        let api = MemoryClusterApi::new();
+        let executor = InProcessKubernetesExecutor::new(&api)
+            .with_timeout(Duration::from_millis(200))
+            .with_poll_interval(Duration::from_millis(20));
+        let request = request(&root, &kubeconfig, "1.0.0");
+        executor.apply(&request).unwrap();
+        assert_eq!(
+            executor.observe(&request).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+        assert_eq!(
+            executor.observe_spec_drift(&request).unwrap().status,
+            tenkai::spec_drift::SPEC_DRIFT_CURRENT
+        );
+        api.mutate_object("lab", "Deployment", "edge", |object| {
+            let containers = object
+                .pointer_mut("/spec/template/spec/containers")
+                .and_then(Value::as_array_mut)
+                .expect("containers");
+            containers.push(serde_json::json!({
+                "name": "sidecar",
+                "image": "proxy:1",
+                "env": [{"name": "TOKEN", "value": "secret-value"}]
+            }));
+            object["status"]["replicas"] = serde_json::json!(9);
+            object["metadata"]["annotations"] = serde_json::json!({
+                "deployment.kubernetes.io/revision": "9"
+            });
+        });
+        assert_eq!(
+            executor.observe(&request).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+        let drift = executor.observe_spec_drift(&request).unwrap();
+        assert_eq!(drift.status, tenkai::spec_drift::SPEC_DRIFT_MODIFIED);
+        assert_eq!(drift.objects[0].fields, vec!["containers"]);
+        let encoded = serde_json::to_string(&drift).unwrap();
+        assert!(!encoded.contains("secret-value"), "{encoded}");
+        executor.apply(&request).unwrap();
+        assert_eq!(
+            executor.observe_spec_drift(&request).unwrap().status,
+            tenkai::spec_drift::SPEC_DRIFT_CURRENT
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

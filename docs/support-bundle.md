@@ -47,7 +47,9 @@ A `tenkai.support-bundle.v1` file holds:
   other free text. A cluster that cannot be read is a collection error; the
   rest of the bundle is still written. Event reasons are omitted when they
   cannot be listed. Older bundles omit this field. Helm releases are not
-  collected.
+  collected. When reconcile has recorded spec drift, each workload may carry
+  `spec_drift` (`current` or `modified outside Tenkai` with cheap field names).
+  Secret and env values are never included. Older bundles omit the field.
 - **Collection errors:** an environment that could not be read is named,
   without detail, and the rest of the bundle is still written.
 

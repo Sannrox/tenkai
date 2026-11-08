@@ -806,6 +806,7 @@ mod tests {
             head: "2.0.0".into(),
             overlay_stale: false,
             delivery_hold: None,
+            spec_drift: None,
             dependency_hold: Some(StatusDependencyHold {
                 release_id: "tenkai:release:app@2.0.0".into(),
                 contracts: vec![UnmetContract {

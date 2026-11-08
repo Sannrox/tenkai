@@ -3014,6 +3014,10 @@
         "product": {
           "type": "string"
         },
+        "spec_drift": {
+          "$ref": "#/$defs/SpecDriftView",
+          "description": "Report-only live-spec comparison (#1028). Omitted when unknown."
+        },
         "state": {
           "type": "string"
         }
@@ -5995,6 +5999,53 @@
       ],
       "type": "object"
     },
+    "SpecDriftObject": {
+      "description": "One named object in a spec-drift report.",
+      "properties": {
+        "fields": {
+          "description": "Cheap top-level names: `containers`, `images`, `env`. Never values.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "description": "`unknown`, `current`, or `modified outside Tenkai`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "status"
+      ],
+      "type": "object"
+    },
+    "SpecDriftView": {
+      "description": "Per-instance drift shown on inspect, status, and support bundles.",
+      "properties": {
+        "objects": {
+          "items": {
+            "$ref": "#/$defs/SpecDriftObject"
+          },
+          "type": "array"
+        },
+        "status": {
+          "description": "`unknown`, `current`, or `modified outside Tenkai`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
     "StagedBundle": {
       "description": "One archive in the staging directory.",
       "properties": {
@@ -6110,6 +6161,10 @@
         },
         "product": {
           "type": "string"
+        },
+        "spec_drift": {
+          "$ref": "#/$defs/SpecDriftView",
+          "description": "Report-only live-spec comparison (#1028). Omitted when unknown."
         }
       },
       "required": [

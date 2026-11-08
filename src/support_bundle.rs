@@ -137,6 +137,9 @@ pub struct SupportWorkload {
     pub pods: Vec<SupportPod>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<SupportEventCount>,
+    /// Report-only live-spec comparison (#1028). Omitted when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_drift: Option<crate::spec_drift::SpecDriftView>,
 }
 
 /// One pod of a support-bundle workload: counts and enumerated reasons only.
@@ -435,7 +438,18 @@ async fn collect_store(
                             })
                             .await
                             {
-                                Ok(Ok(found)) => workloads.extend(found),
+                                Ok(Ok(found)) => {
+                                    workloads.extend(found.into_iter().map(|mut workload| {
+                                        workload.spec_drift = spec_drift_for_workload(
+                                            report
+                                                .subscriptions
+                                                .iter()
+                                                .filter_map(|row| row.spec_drift.as_ref()),
+                                            &workload,
+                                        );
+                                        workload
+                                    }));
+                                }
                                 _ => collection_errors
                                     .push(format!("environment {name}: cluster unreadable")),
                             }
@@ -449,6 +463,28 @@ async fn collect_store(
         }
     }
     store
+}
+
+fn spec_drift_for_workload<'a>(
+    reports: impl IntoIterator<Item = &'a crate::spec_drift::SpecDriftView>,
+    workload: &SupportWorkload,
+) -> Option<crate::spec_drift::SpecDriftView> {
+    for view in reports {
+        if view.status == crate::spec_drift::SPEC_DRIFT_UNKNOWN {
+            continue;
+        }
+        if let Some(object) = view.objects.iter().find(|object| {
+            object.kind == workload.kind
+                && object.name == workload.name
+                && object.status != crate::spec_drift::SPEC_DRIFT_UNKNOWN
+        }) {
+            return Some(crate::spec_drift::SpecDriftView {
+                status: object.status.clone(),
+                objects: vec![object.clone()],
+            });
+        }
+    }
+    None
 }
 
 fn collect_env_workloads(environment: &str, cluster_config: &Path) -> Result<Vec<SupportWorkload>> {
@@ -613,9 +649,46 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
                 reason: "BackOff".into(),
                 count: 6,
             }],
+            spec_drift: None,
         };
         let rendered = serde_json::to_string(&workload).unwrap();
         assert!(!rendered.contains("host not found"), "{rendered}");
+
+        let other = crate::spec_drift::SpecDriftView {
+            status: crate::spec_drift::SPEC_DRIFT_MODIFIED.into(),
+            objects: vec![crate::spec_drift::SpecDriftObject {
+                kind: "Deployment".into(),
+                name: "other".into(),
+                status: crate::spec_drift::SPEC_DRIFT_MODIFIED.into(),
+                fields: vec!["containers".into()],
+            }],
+        };
+        let matching = crate::spec_drift::SpecDriftView {
+            status: crate::spec_drift::SPEC_DRIFT_MODIFIED.into(),
+            objects: vec![crate::spec_drift::SpecDriftObject {
+                kind: "Deployment".into(),
+                name: "web".into(),
+                status: crate::spec_drift::SPEC_DRIFT_MODIFIED.into(),
+                fields: vec!["images".into()],
+            }],
+        };
+        let attached = spec_drift_for_workload([&other, &matching], &workload).unwrap();
+        assert_eq!(attached.objects[0].name, "web");
+        assert_eq!(attached.objects[0].fields, vec!["images"]);
+        assert_eq!(
+            spec_drift_for_workload([&crate::spec_drift::SpecDriftView::unknown()], &workload),
+            None
+        );
+        let mixed = crate::spec_drift::SpecDriftView {
+            status: crate::spec_drift::SPEC_DRIFT_MODIFIED.into(),
+            objects: vec![crate::spec_drift::SpecDriftObject {
+                kind: "Deployment".into(),
+                name: "web".into(),
+                status: crate::spec_drift::SPEC_DRIFT_UNKNOWN.into(),
+                fields: Vec::new(),
+            }],
+        };
+        assert_eq!(spec_drift_for_workload([&mixed], &workload), None);
 
         let old = serde_json::json!({
             "created_at_ms": 1,
