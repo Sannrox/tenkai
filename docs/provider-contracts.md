@@ -192,8 +192,32 @@ submission:
    evidence binding.
 2. `SekaiService.SubmitActionInstance` for `feedback.observation.record`,
    passing the admitted submission id. Action parameters (`object_id`,
-   `problem_signature`, `occurrence_ids`, `classification`, `disposition`)
-   are derived from the captured fields. No new core RPC.
+   `problem_signature`, `occurrence_ids`, `classification`, `disposition`,
+   `operation_id`, `observed_at_ms`, `scope`) are derived from the captured
+   fields. No new core RPC.
+
+Occurrence identity:
+
+- `occurrence_ids` is the observation id: one committed outcome. An apply
+  attempt uses the deployment attempt id; a plan-level block, failure, or
+  orphan recovery uses `tenkai:plan:<plan_id>:<operation>:<lease_generation>`;
+  a reconciliation uses `<deployment_id>:reconciled:<observed_at_ms>`. A
+  retry, lease takeover, or later reconciliation is a distinct occurrence.
+- `operation_id` is the plan id when the outcome names a plan, otherwise the
+  observation id. It is stable across attempts, lease generations, and
+  reconciliation of that plan.
+- `observed_at_ms` is the captured observation time, not delivery or ingest
+  time.
+- `scope` is the environment. On a tenant-mode hub it is
+  `<tenant>/<environment>`, with `%`, `/`, and `:` in the tenant
+  percent-encoded (`%25`, `%2F`, `%3A`) so the first `/` ends the tenant.
+- `problem_signature` stays `{product}:{reason}` (or `{operation}:{reason}`
+  when product is empty). Consumers that cluster by signature plus `scope`
+  keep environments and tenants apart.
+
+`operation_id`, `observed_at_ms`, and `scope` are additive. A plane on the
+current package that ignores unknown Action keys keeps working. Rely on them
+only after the plane admits those keys.
 
 Target:
 
