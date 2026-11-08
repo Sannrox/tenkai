@@ -360,6 +360,30 @@ fn remote_configuration_commands_map_to_their_changes() {
         panic!("expected env command");
     };
     assert!(crate::remote_env_config::change(&command).is_none());
+
+    let bind = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "bind",
+        "prod",
+        "app",
+        "database=db-a",
+        "--generation",
+        "7",
+        "--reason",
+        "select db-a",
+    ])
+    .unwrap();
+    let Command::Env { command } = bind.command else {
+        panic!("expected env command");
+    };
+    let (env, change, remote) = crate::remote_env_config::change(&command).unwrap().unwrap();
+    assert_eq!(env, "prod");
+    assert_eq!(change.path(env), "/v1/environments/prod/bindings");
+    assert_eq!(
+        (remote.generation, remote.reason.as_deref()),
+        (Some(7), Some("select db-a"))
+    );
 }
 
 #[test]

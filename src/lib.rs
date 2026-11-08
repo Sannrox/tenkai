@@ -186,6 +186,7 @@ pub mod dev_sign;
 pub mod development_fixtures;
 pub mod embedded;
 pub mod environment;
+pub mod environment_bindings;
 pub mod environment_config;
 pub mod environment_dependencies;
 pub mod exports;

@@ -69,8 +69,14 @@ pub(super) async fn run(
     }
     if let Some(profile) = &content.manifest.compatibility {
         let env = crate::environment::environment(ctx, &content.environment).await?;
-        match crate::dependency_document::json_for_product(ctx, &env, &content.product, profile)
-            .await
+        match crate::dependency_document::json_for_release(
+            ctx,
+            &env,
+            content.instance_name(),
+            profile,
+            &content.manifest_digest,
+        )
+        .await
         {
             Ok(Some(json)) => {
                 if let Err(error) = host.write_spool_file(

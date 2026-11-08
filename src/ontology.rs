@@ -141,9 +141,16 @@ pub fn instance_id(env: &str, name: &str) -> String {
     format!("tenkai:instance:{env}:{name}")
 }
 
+/// Sentinel instance for a digest-bound contract observation (ADR 0044).
+pub const OBSERVED_INSTANCE: &str = "observed";
+
 /// Explicit instance names are DNS labels of at most 40 characters.
-/// Default instance names equal the product and are not re-validated.
+/// Default instance names equal the product and are not re-validated except
+/// for the reserved observation sentinel.
 pub fn validate_instance_name(name: &str) -> Result<()> {
+    if name == OBSERVED_INSTANCE {
+        bail!("instance name {name} is reserved");
+    }
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         bail!("instance name must be a DNS label of at most 40 characters");
@@ -160,14 +167,18 @@ pub fn validate_instance_name(name: &str) -> Result<()> {
 
 /// `instance` when set, otherwise the product name (ADR 0044 §1 default).
 pub fn instance_or_product(instance: Option<&str>, product: &str) -> Result<String> {
-    match instance.map(str::trim).filter(|name| !name.is_empty()) {
-        None => Ok(product.to_string()),
-        Some(name) if name == product => Ok(product.to_string()),
+    let name = match instance.map(str::trim).filter(|name| !name.is_empty()) {
+        None => product.to_string(),
+        Some(name) if name == product => product.to_string(),
         Some(name) => {
             validate_instance_name(name)?;
-            Ok(name.to_string())
+            name.to_string()
         }
+    };
+    if name == OBSERVED_INSTANCE {
+        bail!("instance name {name} is reserved");
     }
+    Ok(name)
 }
 pub fn health_gate_evidence_id(plan_id: &str, step_id: &str) -> String {
     format!("{plan_id}:health-gate:{step_id}")
@@ -209,6 +220,9 @@ mod tests {
             "db-a"
         );
         assert!(instance_or_product(Some("db_a"), "database").is_err());
+        assert!(instance_or_product(Some(OBSERVED_INSTANCE), "database").is_err());
+        assert!(instance_or_product(None, OBSERVED_INSTANCE).is_err());
+        assert!(validate_instance_name(OBSERVED_INSTANCE).is_err());
     }
 
     #[test]

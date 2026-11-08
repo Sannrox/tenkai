@@ -426,6 +426,20 @@ pub fn http_contract() -> Value {
             response: lifecycle.clone(),
         },
         Route {
+            method: "PUT",
+            path: "/v1/environments/{environment}/bindings",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/environments/{environment}/bindings",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
             method: "DELETE",
             path: "/v1/environments/{environment}/facts",
             auth: Auth::Management,

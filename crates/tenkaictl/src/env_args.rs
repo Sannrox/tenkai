@@ -104,6 +104,23 @@ pub(crate) enum EnvCommand {
     },
     /// Set the environment connectivity class (connected, intermittent, isolated).
     Connectivity { env: String, class: String },
+    /// Bind a dependent instance's contract to a provider instance.
+    Bind {
+        env: String,
+        dependent: String,
+        /// `<contract>=<provider-instance>`
+        spec: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
+    /// Remove one environment binding.
+    Unbind {
+        env: String,
+        dependent: String,
+        contract: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
     /// Manage environment capability / inventory facts (architecture, memory, …).
     Facts {
         #[command(subcommand)]

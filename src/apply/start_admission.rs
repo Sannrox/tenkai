@@ -65,8 +65,13 @@ pub(super) async fn admit(
         .iter()
         .filter(|step| step.action != Action::Remove)
     {
-        crate::software_compatibility::require_release(ctx, &plan.environment, &step.release_id)
-            .await?;
+        crate::software_compatibility::require_release(
+            ctx,
+            &plan.environment,
+            &step.release_id,
+            step.instance_name(),
+        )
+        .await?;
     }
     if !policy.skip_gates {
         if let Some(detail) =

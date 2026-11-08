@@ -512,6 +512,7 @@ mod tests {
             release_digest: "target-digest".into(),
             artifact_digest: "target-artifact-digest".into(),
             deployed_version: Some(from.into()),
+            providers: Default::default(),
         }];
         let mut steps = vec![Step {
             id: String::new(),

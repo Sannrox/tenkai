@@ -31,6 +31,25 @@ pub(super) async fn register_environment(
     )
 }
 
+pub(super) async fn configure_bindings(
+    state: State<Arc<AppState>>,
+    method: Method,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    configure(
+        state,
+        method,
+        environment,
+        None,
+        ConfigResource::Bindings,
+        headers,
+        body,
+    )
+    .await
+}
+
 pub(super) async fn configure_facts(
     state: State<Arc<AppState>>,
     method: Method,

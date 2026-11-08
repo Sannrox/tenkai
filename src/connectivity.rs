@@ -3687,6 +3687,7 @@ install = "true"
                 release_digest: release_digest.into(),
                 artifact_digest: artifact_digest.into(),
                 deployed_version: None,
+                providers: Default::default(),
             }],
             steps: vec![crate::plan::Step {
                 id: String::new(),

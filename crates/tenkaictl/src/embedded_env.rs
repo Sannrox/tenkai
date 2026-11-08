@@ -186,6 +186,32 @@ pub(crate) async fn run(
         EnvCommand::Compatibility { command } => {
             crate::embedded_env_config::compatibility(ctx, command).await?;
         }
+        EnvCommand::Bind {
+            env,
+            dependent,
+            spec,
+            ..
+        } => {
+            let Some((contract, provider)) = spec.split_once('=') else {
+                bail!("expected <contract>=<provider>, got {spec:?}");
+            };
+            println!(
+                "{}",
+                tenkai::environment_bindings::bind(ctx, &env, &dependent, contract, provider)
+                    .await?
+            );
+        }
+        EnvCommand::Unbind {
+            env,
+            dependent,
+            contract,
+            ..
+        } => {
+            println!(
+                "{}",
+                tenkai::environment_bindings::unbind(ctx, &env, &dependent, &contract).await?
+            );
+        }
         EnvCommand::Facts { command } => {
             crate::embedded_env_config::facts(ctx, command).await?;
         }

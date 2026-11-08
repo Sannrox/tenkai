@@ -324,6 +324,7 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
             release_digest: "abc".into(),
             artifact_digest: "abc".into(),
             deployed_version: None,
+            providers: Default::default(),
         }],
         steps: vec![Step {
             id: format!("{}:step:0", plan_id(env, created_at, "digest-a")),

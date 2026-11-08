@@ -16,6 +16,16 @@ struct PendingChange {
     kind: crate::manifest::ProductKind,
 }
 
+impl PendingChange {
+    fn instance_name(&self) -> &str {
+        if self.instance.is_empty() {
+            &self.product
+        } else {
+            &self.instance
+        }
+    }
+}
+
 fn refuse_second_one_instance(
     env: &str,
     product_instances: &BTreeMap<String, Vec<(String, crate::manifest::DeployInstances)>>,
@@ -498,16 +508,18 @@ async fn compute_snapshot_with_policy(
         }
         let target = pin_release(ctx, &release, env).await?;
         if policy.observe_live {
-            match admit_reconcile_dependency(ctx, env, &release).await? {
+            match admit_reconcile_dependency(ctx, env, &release, &instance).await? {
                 DependencyAdmission::Hold {
                     release_id,
                     contracts,
+                    candidates,
                 } => {
                     hold_sets.insert(
-                        product.clone(),
+                        instance.clone(),
                         crate::environment::DependencyHoldWrite {
                             release_id,
                             contracts,
+                            candidates,
                         },
                     );
                     held_model |= selected.kind == crate::manifest::ProductKind::ModelRuntime;
@@ -515,14 +527,14 @@ async fn compute_snapshot_with_policy(
                     continue;
                 }
                 DependencyAdmission::Proceed => {
-                    if crate::environment::dependency_hold(&env_obj.properties, &product).is_some()
+                    if crate::environment::dependency_hold(&env_obj.properties, &instance).is_some()
                     {
-                        hold_clears.insert(product.clone());
+                        hold_clears.insert(instance.clone());
                     }
                 }
             }
         } else {
-            crate::software_compatibility::require_release(ctx, env, &release).await?;
+            crate::software_compatibility::require_release(ctx, env, &release, &instance).await?;
         }
         crate::topology::require_placement(ctx, env, &release).await?;
         // The root-side applier's record, not the server's view, says what a
@@ -581,6 +593,10 @@ async fn compute_snapshot_with_policy(
             release_digest: target.digest.clone(),
             artifact_digest: target.artifact_digest.clone(),
             deployed_version: deployed.clone(),
+            providers: crate::environment_bindings::EnvironmentBindings::from_properties(
+                &env_obj.properties,
+            )
+            .for_dependent(&instance),
         });
         if let Some((record, health)) = &host_record {
             host_products.insert(product.clone());
@@ -872,13 +888,14 @@ async fn compute_snapshot_with_policy(
         if matches!(entry.action, Action::Remove) {
             continue;
         }
-        if target_profiles.contains_key(&entry.product) {
+        let instance = entry.instance_name();
+        if target_profiles.contains_key(instance) {
             continue;
         }
         if let Some(manifest) = readable_manifest(ctx, &entry.release.release_id).await?
             && let Some(profile) = manifest.compatibility
         {
-            target_profiles.insert(entry.product.clone(), profile);
+            target_profiles.insert(instance.to_string(), profile);
         }
     }
     let mut installed_profiles = BTreeMap::new();
@@ -886,8 +903,7 @@ async fn compute_snapshot_with_policy(
         let Some(instance) = key.strip_prefix("deployed.") else {
             continue;
         };
-        let product = product_for_instance(&env_obj.properties, instance);
-        if installed_profiles.contains_key(&product) {
+        if installed_profiles.contains_key(instance) {
             continue;
         }
         if let Some(manifest) = readable_manifest(
@@ -897,9 +913,11 @@ async fn compute_snapshot_with_policy(
         .await?
             && let Some(profile) = manifest.compatibility
         {
-            installed_profiles.insert(product, profile);
+            installed_profiles.insert(instance.to_string(), profile);
         }
     }
+    let bindings =
+        crate::environment_bindings::EnvironmentBindings::from_properties(&env_obj.properties);
     schedule_dependency_rerenders(
         ctx,
         env,
@@ -912,10 +930,14 @@ async fn compute_snapshot_with_policy(
     .await?;
     let pending_actions = pending
         .iter()
-        .map(|entry| (entry.product.as_str(), entry.action))
+        .map(|entry| (entry.instance_name(), entry.action))
         .collect::<Vec<_>>();
-    let contract_order =
-        contract_plan_order(&pending_actions, &target_profiles, &installed_profiles)?;
+    let contract_order = contract_plan_order_bound(
+        &pending_actions,
+        &target_profiles,
+        &installed_profiles,
+        &bindings,
+    )?;
     // Enforce model_runtime ↔ routing_config rollout order (see docs). The
     // runtime agent's own release always runs last: switching restarts the
     // agent, so nothing may follow it in the plan (#685). Host releases run
@@ -927,16 +949,16 @@ async fn compute_snapshot_with_policy(
     let reverse_providers: BTreeSet<&str> = pending
         .iter()
         .filter(|entry| reverse_contract_action(entry.action))
-        .map(|entry| entry.product.as_str())
+        .map(|entry| entry.instance_name())
         .collect();
     let rerender_after_reverse: BTreeSet<&str> = contract_order
         .installed_edges
         .iter()
         .filter(|(provider, dependent, _)| {
             reverse_providers.contains(provider.as_str())
-                && pending
-                    .iter()
-                    .any(|entry| entry.product == *dependent && entry.action == Action::Restart)
+                && pending.iter().any(|entry| {
+                    entry.instance_name() == dependent.as_str() && entry.action == Action::Restart
+                })
         })
         .map(|(_, dependent, _)| dependent.as_str())
         .collect();
@@ -964,13 +986,13 @@ async fn compute_snapshot_with_policy(
         };
         agent(&a.product)
             .cmp(&agent(&b.product))
-            .then_with(|| band(&a.product, a.action).cmp(&band(&b.product, b.action)))
+            .then_with(|| band(a.instance_name(), a.action).cmp(&band(b.instance_name(), b.action)))
             .then_with(|| not_host(&a.product).cmp(&not_host(&b.product)))
             .then_with(|| {
                 model_routing_rollout_rank(a.kind, a.action)
                     .cmp(&model_routing_rollout_rank(b.kind, b.action))
             })
-            .then_with(|| contract(&a.product).cmp(&contract(&b.product)))
+            .then_with(|| contract(a.instance_name()).cmp(&contract(b.instance_name())))
             .then_with(|| a.product.cmp(&b.product))
             .then_with(|| a.instance.cmp(&b.instance))
     });
@@ -983,7 +1005,7 @@ async fn compute_snapshot_with_policy(
     refuse_inverted_contract_order(
         &pending
             .iter()
-            .map(|entry| (entry.product.as_str(), entry.action))
+            .map(|entry| (entry.instance_name(), entry.action))
             .collect::<Vec<_>>(),
         &contract_order.target_edges,
         &contract_order.installed_edges,
@@ -1029,6 +1051,7 @@ enum DependencyAdmission {
     Hold {
         release_id: String,
         contracts: Vec<(String, String)>,
+        candidates: std::collections::BTreeMap<String, Vec<String>>,
     },
     Proceed,
 }
@@ -1038,8 +1061,11 @@ async fn admit_reconcile_dependency(
     ctx: &mut Ctx,
     env: &str,
     release: &str,
+    instance: &str,
 ) -> Result<DependencyAdmission> {
-    let Some(eval) = crate::software_compatibility::report_eval(ctx, env, release).await? else {
+    let Some(eval) =
+        crate::software_compatibility::report_eval(ctx, env, release, instance).await?
+    else {
         return Ok(DependencyAdmission::Proceed);
     };
     if eval.outcome.failures.is_empty() {
@@ -1062,9 +1088,20 @@ async fn admit_reconcile_dependency(
         }
         .into());
     };
+    let mut candidates = std::collections::BTreeMap::new();
+    for failure in &eval.outcome.failures {
+        if let crate::software_compatibility::CompatibilityFailure::AmbiguousContract {
+            contract,
+            candidates: names,
+        } = failure
+        {
+            candidates.insert(contract.clone(), names.clone());
+        }
+    }
     Ok(DependencyAdmission::Hold {
         release_id: release.to_string(),
         contracts: unmet,
+        candidates,
     })
 }
 
@@ -1159,8 +1196,12 @@ fn profile_provides_requires(
 }
 
 /// Unique provider in `profiles` for each required contract of another profile.
+///
+/// Several providers of one contract are not a unique edge unless a binding
+/// selects one of them. A binding to `observed` is not a plan step.
 fn cross_release_contract_edges(
     profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
+    bindings: &crate::environment_bindings::EnvironmentBindings,
 ) -> Vec<ContractEdge> {
     let mut providers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut requires: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -1180,16 +1221,25 @@ fn cross_release_contract_edges(
             let Some(offered) = providers.get(contract) else {
                 continue;
             };
-            if offered.len() != 1 {
-                continue;
-            }
-            let Some(provider) = offered.iter().next() else {
+            let provider = if let Some(bound) = bindings.get(dependent, contract) {
+                if bound == crate::environment_bindings::OBSERVED_INSTANCE
+                    || !offered.contains(bound)
+                {
+                    continue;
+                }
+                bound
+            } else if offered.len() == 1 {
+                let Some(provider) = offered.iter().next() else {
+                    continue;
+                };
+                provider.as_str()
+            } else {
                 continue;
             };
             if provider == dependent {
                 continue;
             }
-            edges.push((provider.clone(), dependent.clone(), contract.clone()));
+            edges.push((provider.to_string(), dependent.clone(), contract.clone()));
         }
     }
     edges
@@ -1366,75 +1416,123 @@ async fn schedule_dependency_rerenders(
     env_obj: &crate::pb::sekai::Object,
     host_products: &std::collections::HashSet<String>,
 ) -> Result<()> {
+    let bindings =
+        crate::environment_bindings::EnvironmentBindings::from_properties(&env_obj.properties);
     let pending_actions: Vec<(&str, Action)> = pending
         .iter()
-        .map(|entry| (entry.product.as_str(), entry.action))
+        .map(|entry| (entry.instance_name(), entry.action))
         .collect();
     let remaining = overlay_profiles(installed_profiles, target_profiles, &pending_actions);
     let mut remaining_versions = BTreeMap::new();
     for (key, version) in &env_obj.properties {
-        if let Some(product) = key.strip_prefix("deployed.") {
-            remaining_versions.insert(product.to_string(), version.clone());
+        if let Some(instance) = key.strip_prefix("deployed.") {
+            remaining_versions.insert(instance.to_string(), version.clone());
         }
     }
     for entry in pending.iter() {
         if matches!(entry.action, Action::Remove) {
-            remaining_versions.remove(&entry.product);
+            remaining_versions.remove(entry.instance_name());
         } else {
-            remaining_versions.insert(entry.product.clone(), entry.to.clone());
+            remaining_versions.insert(entry.instance_name().to_string(), entry.to.clone());
         }
     }
     let mut current_deployed = BTreeMap::new();
     let mut remaining_deployed = BTreeMap::new();
-    for (product, profile) in installed_profiles {
-        if let Some(version) = env_obj.properties.get(&format!("deployed.{product}")) {
-            current_deployed.insert(product.clone(), (version.clone(), profile.clone()));
+    for (instance, profile) in installed_profiles {
+        if let Some(version) = env_obj.properties.get(&format!("deployed.{instance}")) {
+            current_deployed.insert(
+                instance.clone(),
+                crate::dependency_document::DeployedRelease {
+                    product: product_for_instance(&env_obj.properties, instance),
+                    version: version.clone(),
+                    profile: profile.clone(),
+                },
+            );
         }
     }
-    for (product, profile) in &remaining {
-        if let Some(version) = remaining_versions.get(product) {
-            remaining_deployed.insert(product.clone(), (version.clone(), profile.clone()));
+    for (instance, profile) in &remaining {
+        if let Some(version) = remaining_versions.get(instance) {
+            remaining_deployed.insert(
+                instance.clone(),
+                crate::dependency_document::DeployedRelease {
+                    product: product_for_instance(&env_obj.properties, instance),
+                    version: version.clone(),
+                    profile: profile.clone(),
+                },
+            );
         }
     }
-    let pending_products: BTreeSet<String> =
-        pending.iter().map(|entry| entry.product.clone()).collect();
+    let pending_instances: BTreeSet<String> = pending
+        .iter()
+        .map(|entry| entry.instance_name().to_string())
+        .collect();
     let mut extra = Vec::new();
-    for (product, profile) in installed_profiles {
-        if pending_products.contains(product) || host_products.contains(product) {
+    for (instance, profile) in installed_profiles {
+        let product = product_for_instance(&env_obj.properties, instance);
+        if pending_instances.contains(instance) || host_products.contains(&product) {
             continue;
         }
-        let Some(version) = env_obj.properties.get(&format!("deployed.{product}")) else {
+        let Some(version) = env_obj.properties.get(&format!("deployed.{instance}")) else {
             continue;
         };
-        let current =
-            crate::dependency_document::document_for(product, profile, &current_deployed)?;
-        let result = match remaining.get(product) {
-            Some(remaining_profile) => crate::dependency_document::document_for(
-                product,
-                remaining_profile,
-                &remaining_deployed,
-            )?,
+        let observed =
+            match crate::dependency_document::instance_release_digest(ctx, env_obj, instance)
+                .await?
+            {
+                Some(digest) => {
+                    crate::software_compatibility::observed_contract_versions(ctx, env, &digest)
+                        .await?
+                }
+                None => BTreeMap::new(),
+            };
+        // Ambiguous current must not share a plan with Restart: apply
+        // preflight still sees both providers. After the extra provider is
+        // gone, a later plan Restarts because applied != unique remaining.
+        let current = match crate::dependency_document::document_for_bound(
+            instance,
+            profile,
+            &current_deployed,
+            &bindings,
+            &observed,
+        ) {
+            Ok(document) => document,
+            Err(_) => continue,
+        };
+        let result = match remaining.get(instance) {
+            Some(remaining_profile) => {
+                match crate::dependency_document::document_for_bound(
+                    instance,
+                    remaining_profile,
+                    &remaining_deployed,
+                    &bindings,
+                    &observed,
+                ) {
+                    Ok(document) => document,
+                    Err(_) => continue,
+                }
+            }
             None => None,
         };
         let result_digest = match &result {
             Some(document) => document.digest()?,
             None => String::new(),
         };
-        let applied = crate::dependency_document::applied_digest(env_obj, product);
+        let applied = crate::dependency_document::applied_digest(env_obj, instance);
         let changed = current != result || (!result_digest.is_empty() && result_digest != applied);
         if !changed {
             continue;
         }
-        let Some(manifest) = readable_manifest(ctx, &release_id(product, version)).await? else {
+        let release = deployed_release_id(&env_obj.properties, instance, version);
+        let Some(manifest) = readable_manifest(ctx, &release).await? else {
             continue;
         };
         if manifest.deploy.executor == Some(crate::software_executor::SoftwareExecutorKind::Host) {
             continue;
         }
-        let target = pin_release(ctx, &release_id(product, version), env).await?;
+        let target = pin_release(ctx, &release, env).await?;
         extra.push(PendingChange {
-            instance: product.clone(),
-            product: product.clone(),
+            instance: instance.clone(),
+            product,
             action: Action::Restart,
             from: Some(version.clone()),
             to: version.clone(),
@@ -1447,16 +1545,35 @@ async fn schedule_dependency_rerenders(
     Ok(())
 }
 
+#[cfg(test)]
 fn contract_plan_order(
     pending: &[(&str, Action)],
     target_profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
     installed_profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
 ) -> Result<ContractPlanOrder> {
-    let target_edges = cross_release_contract_edges(target_profiles);
-    let installed_edges = cross_release_contract_edges(installed_profiles);
+    contract_plan_order_bound(
+        pending,
+        target_profiles,
+        installed_profiles,
+        &crate::environment_bindings::EnvironmentBindings::default(),
+    )
+}
+
+fn contract_plan_order_bound(
+    pending: &[(&str, Action)],
+    target_profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
+    installed_profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
+    bindings: &crate::environment_bindings::EnvironmentBindings,
+) -> Result<ContractPlanOrder> {
+    let target_edges = cross_release_contract_edges(target_profiles, bindings);
+    let installed_edges = cross_release_contract_edges(installed_profiles, bindings);
     let remaining = overlay_profiles(installed_profiles, target_profiles, pending);
-    crate::software_compatibility::refuse_unsatisfied_dependents(&remaining, installed_profiles)?;
-    let overlay_edges = cross_release_contract_edges(&remaining);
+    crate::software_compatibility::refuse_unsatisfied_dependents_bound(
+        &remaining,
+        installed_profiles,
+        bindings,
+    )?;
+    let overlay_edges = cross_release_contract_edges(&remaining, bindings);
     refuse_cross_release_cycle(&overlay_edges)?;
     refuse_mixed_direction_edges(pending, &overlay_edges)?;
     refuse_mixed_direction_edges(pending, &installed_edges)?;
@@ -1796,12 +1913,11 @@ pub(super) async fn rollback_step_with_recovery(
         if name == instance {
             continue;
         }
-        let other = product_for_instance(&env_obj.properties, name);
         if let Some(manifest) =
             readable_manifest(ctx, &deployed_release_id(&env_obj.properties, name, value)).await?
             && let Some(profile) = manifest.compatibility
         {
-            remaining.insert(other, profile);
+            remaining.insert(name.to_string(), profile);
         }
     }
     let mut previous = remaining.clone();
@@ -1809,15 +1925,19 @@ pub(super) async fn rollback_step_with_recovery(
         && let Some(manifest) = readable_manifest(ctx, &release_id(&product, version)).await?
         && let Some(profile) = manifest.compatibility
     {
-        previous.insert(product.clone(), profile);
+        previous.insert(instance.to_string(), profile);
     }
     if let Some(manifest) = readable_manifest(ctx, &prev_id).await?
         && let Some(profile) = manifest.compatibility
     {
-        remaining.insert(product.clone(), profile);
+        remaining.insert(instance.to_string(), profile);
     }
-    crate::software_compatibility::refuse_unsatisfied_dependents(&remaining, &previous)?;
-    crate::software_compatibility::require_release(ctx, env, &prev_id).await?;
+    let bindings =
+        crate::environment_bindings::EnvironmentBindings::from_properties(&env_obj.properties);
+    crate::software_compatibility::refuse_unsatisfied_dependents_bound(
+        &remaining, &previous, &bindings,
+    )?;
+    crate::software_compatibility::require_release(ctx, env, &prev_id, instance).await?;
     let restore = match current.as_deref() {
         Some(version) => {
             let current_id = release_id(&product, version);
@@ -1874,7 +1994,7 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
         bail!("cannot restart recalled release {current_id}");
     }
     let target = pin_release(ctx, &current_id, env).await?;
-    crate::software_compatibility::require_release(ctx, env, &current_id).await?;
+    crate::software_compatibility::require_release(ctx, env, &current_id, instance).await?;
     let step_instance = if instance == product.as_str() {
         String::new()
     } else {
@@ -2095,6 +2215,36 @@ mod tests {
         .unwrap()
         .ranks;
         assert!(ranks["db"] < ranks["app"], "{ranks:?}");
+    }
+
+    #[test]
+    fn contract_order_honors_a_binding_when_several_providers_exist() {
+        let profiles = BTreeMap::from([
+            ("app".into(), test_profile(&[("database", "1.0.0")], &[])),
+            ("db-a".into(), test_profile(&[], &[("database", "1.0.0")])),
+            ("db-b".into(), test_profile(&[], &[("database", "1.1.0")])),
+        ]);
+        let pending = &[
+            ("app", Action::Restart),
+            ("db-a", Action::Upgrade),
+            ("db-b", Action::Install),
+        ];
+        let unbound = contract_plan_order(pending, &profiles, &profiles)
+            .unwrap()
+            .ranks;
+        assert!(
+            unbound["app"] < unbound["db-a"],
+            "unbound several providers keep name order: {unbound:?}"
+        );
+        let mut bindings = crate::environment_bindings::EnvironmentBindings::default();
+        bindings.insert("app", "database", "db-a");
+        let bound = contract_plan_order_bound(pending, &profiles, &profiles, &bindings)
+            .unwrap()
+            .ranks;
+        assert!(
+            bound["db-a"] < bound["app"],
+            "bound provider precedes its dependent: {bound:?}"
+        );
     }
 
     #[test]
@@ -2826,6 +2976,179 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unbound_several_providers_hold_until_a_binding_selects_one() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-bind-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        let pin = "a".repeat(40);
+        let app_raw = publish_compat_release(
+            &mut ctx,
+            &root,
+            "app",
+            "[compatibility.components.app.requires]\ndatabase = \"1.0.0\"\n",
+        )
+        .await;
+        let db_a_raw = publish_compat_release(
+            &mut ctx,
+            &root,
+            "db-a",
+            "[compatibility.components.db-a.provides]\ndatabase = \"1.0.0\"\n",
+        )
+        .await;
+        let db_b_raw = publish_compat_release(
+            &mut ctx,
+            &root,
+            "db-b",
+            "[compatibility.components.db-b.provides]\ndatabase = \"1.1.0\"\n",
+        )
+        .await;
+        let actor = crate::auth_context::test_management_context("env-bind");
+        for product in ["app", "db-a", "db-b"] {
+            crate::catalog::promote(&mut ctx, &actor, &format!("{product}@1.0.0"), "stable")
+                .await
+                .unwrap();
+            subscribe(&mut ctx, "local", product, "stable")
+                .await
+                .unwrap();
+        }
+        for (product, raw, provides) in [
+            ("app", app_raw.as_str(), BTreeMap::new()),
+            (
+                "db-a",
+                db_a_raw.as_str(),
+                BTreeMap::from([("database".into(), "1.0.0".into())]),
+            ),
+            (
+                "db-b",
+                db_b_raw.as_str(),
+                BTreeMap::from([("database".into(), "1.1.0".into())]),
+            ),
+        ] {
+            crate::software_compatibility::record_evidence(
+                &mut ctx,
+                "local",
+                compat_evidence(
+                    crate::manifest::digest(raw),
+                    product,
+                    &pin,
+                    if product == "app" {
+                        BTreeMap::from([("database".into(), "1.0.0".into())])
+                    } else {
+                        BTreeMap::new()
+                    },
+                    provides,
+                    BTreeMap::new(),
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        crate::environment::reconcile_deployment(&mut ctx, "local", "db-a", Some("1.0.0"))
+            .await
+            .unwrap();
+        crate::environment::reconcile_deployment(&mut ctx, "local", "db-b", Some("1.0.0"))
+            .await
+            .unwrap();
+
+        let err = crate::plan::create(&mut ctx, "local").await.unwrap_err();
+        let blocked = err
+            .downcast_ref::<crate::software_compatibility::CompatibilityBlocked>()
+            .unwrap_or_else(|| panic!("{err}"));
+        assert!(
+            blocked.report.failures.contains(
+                &crate::software_compatibility::CompatibilityFailure::AmbiguousContract {
+                    contract: "database".into(),
+                    candidates: vec!["db-a".into(), "db-b".into()],
+                }
+            ),
+            "{blocked:?}"
+        );
+
+        let held = crate::plan::create_for_reconcile(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert!(
+            !held.steps.iter().any(|step| step.product == "app"),
+            "{held:?}"
+        );
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        let hold = crate::environment::dependency_hold(&env.properties, "app").unwrap();
+        assert_eq!(
+            hold.candidates.get("database"),
+            Some(&vec!["db-a".to_string(), "db-b".to_string()])
+        );
+
+        let missing =
+            crate::environment_bindings::bind(&mut ctx, "local", "app", "database", "missing")
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(missing.contains("app"), "{missing}");
+        assert!(missing.contains("database"), "{missing}");
+        assert!(missing.contains("missing"), "{missing}");
+
+        let bound = crate::environment_bindings::bind(&mut ctx, "local", "app", "database", "db-a")
+            .await
+            .unwrap();
+        assert!(bound.contains("db-a"), "{bound}");
+
+        let planned = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert!(
+            planned.steps.iter().any(|step| step.product == "app"),
+            "{planned:?}"
+        );
+        let app_input = planned
+            .inputs
+            .iter()
+            .find(|input| input.product == "app")
+            .unwrap();
+        assert_eq!(
+            app_input.providers.get("database").map(String::as_str),
+            Some("db-a")
+        );
+        crate::environment::reconcile_deployment(&mut ctx, "local", "app", Some("1.0.0"))
+            .await
+            .unwrap();
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        let profile = crate::dependency_document::stored_profile(&mut ctx, "app", "1.0.0")
+            .await
+            .unwrap()
+            .unwrap();
+        let document =
+            crate::dependency_document::json_for_product(&mut ctx, &env, "app", &profile)
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(document.contains("\"product\":\"db-a\""), "{document}");
+
+        let unbind = crate::environment_bindings::unbind(&mut ctx, "local", "app", "database")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(unbind.contains("app"), "{unbind}");
+        assert!(unbind.contains("database"), "{unbind}");
+
+        let rebound =
+            crate::environment_bindings::bind(&mut ctx, "local", "app", "database", "db-b")
+                .await
+                .unwrap();
+        assert!(rebound.contains("db-b"), "{rebound}");
+        let rebound_plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert_ne!(planned.content_id, rebound_plan.content_id);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn optional_provider_arrival_rerenders_installed_dependent() {
         let root = std::env::temp_dir().join(format!(
             "tenkai-dep-doc-arrive-{}-{}",
@@ -2908,6 +3231,161 @@ mod tests {
             steps,
             vec![("db", Action::Install), ("app", Action::Restart)],
             "{steps:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn removing_original_unique_provider_rerenders_to_remaining() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-dep-rerender-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        let pin = "a".repeat(40);
+        let app_raw = publish_compat_release(
+            &mut ctx,
+            &root,
+            "app",
+            "[compatibility.components.app.requires]\ndatabase = \"1.0.0\"\n",
+        )
+        .await;
+        let db_a_raw = publish_compat_release(
+            &mut ctx,
+            &root,
+            "db-a",
+            "[compatibility.components.db-a.provides]\ndatabase = \"1.0.0\"\n",
+        )
+        .await;
+        let db_b_raw = publish_compat_release(
+            &mut ctx,
+            &root,
+            "db-b",
+            "[compatibility.components.db-b.provides]\ndatabase = \"1.1.0\"\n",
+        )
+        .await;
+        let actor = crate::auth_context::test_management_context("env-rerender");
+        for product in ["app", "db-a", "db-b"] {
+            crate::catalog::promote(&mut ctx, &actor, &format!("{product}@1.0.0"), "stable")
+                .await
+                .unwrap();
+            subscribe(&mut ctx, "local", product, "stable")
+                .await
+                .unwrap();
+        }
+        for (product, raw, provides) in [
+            ("app", app_raw.as_str(), BTreeMap::new()),
+            (
+                "db-a",
+                db_a_raw.as_str(),
+                BTreeMap::from([("database".into(), "1.0.0".into())]),
+            ),
+            (
+                "db-b",
+                db_b_raw.as_str(),
+                BTreeMap::from([("database".into(), "1.1.0".into())]),
+            ),
+        ] {
+            crate::software_compatibility::record_evidence(
+                &mut ctx,
+                "local",
+                compat_evidence(
+                    crate::manifest::digest(raw),
+                    product,
+                    &pin,
+                    if product == "app" {
+                        BTreeMap::from([("database".into(), "1.0.0".into())])
+                    } else {
+                        BTreeMap::new()
+                    },
+                    provides,
+                    BTreeMap::new(),
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        crate::environment::reconcile_deployment(&mut ctx, "local", "db-a", Some("1.0.0"))
+            .await
+            .unwrap();
+        crate::environment::reconcile_deployment(&mut ctx, "local", "app", Some("1.0.0"))
+            .await
+            .unwrap();
+        crate::environment::reconcile_deployment(&mut ctx, "local", "db-b", Some("1.0.0"))
+            .await
+            .unwrap();
+        let env_obj = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        let mut installed_profiles = BTreeMap::new();
+        for instance in ["app", "db-a", "db-b"] {
+            installed_profiles.insert(
+                instance.to_string(),
+                crate::dependency_document::stored_profile(&mut ctx, instance, "1.0.0")
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        let pin = pin_release(&mut ctx, "tenkai:release:db-a@1.0.0", "local")
+            .await
+            .unwrap();
+        let mut pending = vec![PendingChange {
+            instance: String::new(),
+            product: "db-a".into(),
+            action: Action::Remove,
+            from: Some("1.0.0".into()),
+            to: "1.0.0".into(),
+            release: pin,
+            restore: None,
+            kind: crate::manifest::ProductKind::Software,
+        }];
+        schedule_dependency_rerenders(
+            &mut ctx,
+            "local",
+            &mut pending,
+            &installed_profiles,
+            &BTreeMap::new(),
+            &env_obj,
+            &std::collections::HashSet::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            pending
+                .iter()
+                .all(|entry| entry.product != "app" || entry.action != Action::Restart),
+            "same-plan Restart while both providers are live cannot pass apply preflight"
+        );
+        let mut remaining_env = env_obj.clone();
+        remaining_env.properties.remove("deployed.db-a");
+        remaining_env.properties.remove("deployed_release.db-a");
+        installed_profiles.remove("db-a");
+        let mut follow_up = Vec::new();
+        schedule_dependency_rerenders(
+            &mut ctx,
+            "local",
+            &mut follow_up,
+            &installed_profiles,
+            &BTreeMap::new(),
+            &remaining_env,
+            &std::collections::HashSet::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            follow_up
+                .iter()
+                .any(|entry| entry.product == "app" && entry.action == Action::Restart),
+            "expected app Restart after uniqueness returns, got {:?}",
+            follow_up
+                .iter()
+                .map(|entry| (entry.product.as_str(), entry.action))
+                .collect::<Vec<_>>(),
         );
         std::fs::remove_dir_all(root).unwrap();
     }

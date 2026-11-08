@@ -33,6 +33,7 @@ pub(super) async fn activate(
         &content.environment,
         &content.manifest,
         &content.manifest_digest,
+        content.instance_name(),
     )
     .await?;
     // Every activation, a restore included, lands only in an allowed placement.
@@ -287,6 +288,7 @@ pub(super) async fn restart(
         &content.environment,
         &content.manifest,
         &content.manifest_digest,
+        content.instance_name(),
     )
     .await?;
     // Every activation, a restore included, lands only in an allowed placement.
@@ -534,10 +536,15 @@ async fn software_request(
     // Apply and its failed-apply cleanup run under the same lease.
     request.apply_attempt = format!("lease-{}", lease.generation);
     if let Some(profile) = &content.manifest.compatibility {
-        request.dependency_document =
-            crate::dependency_document::json_for_product(ctx, &env_obj, &content.product, profile)
-                .await?
-                .unwrap_or_default();
+        request.dependency_document = crate::dependency_document::json_for_release(
+            ctx,
+            &env_obj,
+            content.instance_name(),
+            profile,
+            &content.manifest_digest,
+        )
+        .await?
+        .unwrap_or_default();
     }
     Ok(request)
 }
