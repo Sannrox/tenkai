@@ -310,6 +310,7 @@ mod tests {
                     applied_overlay: None,
                     state: state.into(),
                     delivery_hold: None,
+                    spec_drift: None,
                 }]
             },
             facts: Default::default(),

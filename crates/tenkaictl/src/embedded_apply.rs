@@ -151,6 +151,9 @@ pub(crate) async fn run(
                         hold.held_at, hold.actor, hold.reason
                     );
                 }
+                if let Some(drift) = &r.spec_drift {
+                    crate::output::print_spec_drift(drift);
+                }
                 if matches!(r.health.as_deref(), Some("unknown") | Some("unhealthy"))
                     && let Some(error) = r.error.as_deref()
                 {

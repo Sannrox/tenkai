@@ -279,6 +279,7 @@ pub mod signer;
 pub mod smtp_digest;
 pub mod software_compatibility;
 pub mod software_executor;
+pub mod spec_drift;
 pub mod spoke_standby;
 pub mod staged_artifact;
 pub mod storage;

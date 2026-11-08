@@ -188,6 +188,32 @@ pub(crate) fn status_result(env: &str, rows: usize) -> CommandResultV1 {
         .counts(None, Some(rows))
 }
 
+pub(crate) fn print_spec_drift(drift: &tenkai::spec_drift::SpecDriftView) {
+    if drift.status == tenkai::spec_drift::SPEC_DRIFT_UNKNOWN {
+        return;
+    }
+    if drift.objects.is_empty() {
+        println!("  spec {}", drift.status);
+        return;
+    }
+    for object in &drift.objects {
+        if object.status == tenkai::spec_drift::SPEC_DRIFT_CURRENT {
+            continue;
+        }
+        if object.fields.is_empty() {
+            println!("  {} {} {}", object.kind, object.name, object.status);
+        } else {
+            println!(
+                "  {} {} {}: {}",
+                object.kind,
+                object.name,
+                object.status,
+                object.fields.join(", ")
+            );
+        }
+    }
+}
+
 pub(crate) fn inspect_result(report: &plan::EnvironmentInspectReport) -> CommandResultV1 {
     CommandResultV1::succeeded(CommandName::InspectEnvironment)
         .resource("environment", &report.id)

@@ -156,6 +156,7 @@ impl FixtureEnvironmentProjection {
                     overlay_stale: false,
                     delivery_hold: None,
                     dependency_hold: None,
+                    spec_drift: None,
                 }
             })
             .collect()
@@ -184,6 +185,7 @@ impl FixtureEnvironmentProjection {
                 overlay_digest: None,
                 applied_overlay: None,
                 delivery_hold: None,
+                spec_drift: None,
             })
             .collect();
         crate::plan::EnvironmentInspectReport {

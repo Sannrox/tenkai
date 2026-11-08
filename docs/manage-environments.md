@@ -27,6 +27,18 @@ not named is the product. `env subscribe <env> <product>=<channel>
 `--instance` defaults to the product. Instance names are DNS labels of at
 most 40 characters and unique in the environment.
 
+After reconcile, `env inspect` and `tenkaictl status` report out-of-band
+target changes as `modified outside Tenkai` per instance when the row would
+otherwise be `current`. In-process Kubernetes compares the applied pod
+template with the live object. Host file and unit digest comparison is a
+library helper; the unprivileged server does not periodically read dest files.
+Kubernetes-managed fields (replica status, controller annotations, defaulted
+image pull policy) and secret/env values are not compared. Drift never creates
+a plan, never restarts, and never blocks reconcile. A server or adapter that
+does not compute fingerprints omits the field (`unknown`), and does not
+replace `current`. The next apply either clears the stored report or names the
+fields that remain after the following reconcile.
+
 A release may declare `[config]` overlay keys (type, required, default) and
 secret names. `env overlay set` refuses a key or type the subscribed channel
 head does not declare. Planning refuses a candidate whose schema the
