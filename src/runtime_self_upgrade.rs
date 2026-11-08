@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::atomic_state::sync_dir;
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -318,13 +319,11 @@ impl Home {
     }
 
     pub fn write_pending(&self, pending: &Pending) -> Result<()> {
-        let temporary = self
-            .root
-            .join(format!(".{PENDING}.{}", uuid::Uuid::new_v4().simple()));
-        std::fs::write(&temporary, serde_json::to_vec(pending)?)?;
-        std::fs::File::open(&temporary)?.sync_all()?;
-        std::fs::rename(&temporary, self.root.join(PENDING))?;
-        sync_dir(&self.root)
+        crate::atomic_state::write_file(
+            &self.root.join(PENDING),
+            &serde_json::to_vec(pending)?,
+            None,
+        )
     }
 
     /// Run before every start of the agent, from a version known to run
@@ -351,13 +350,11 @@ impl Home {
         if attempts > MAX_START_ATTEMPTS {
             return self.revert();
         }
-        let temporary = self
-            .root
-            .join(format!(".{ATTEMPTS}.{}", uuid::Uuid::new_v4().simple()));
-        std::fs::write(&temporary, attempts.to_string())?;
-        std::fs::File::open(&temporary)?.sync_all()?;
-        std::fs::rename(&temporary, self.root.join(ATTEMPTS))?;
-        sync_dir(&self.root)?;
+        crate::atomic_state::write_file(
+            &self.root.join(ATTEMPTS),
+            attempts.to_string().as_bytes(),
+            None,
+        )?;
         Ok(None)
     }
 
@@ -492,12 +489,6 @@ pub(crate) fn probe_within(
         stdout,
         stderr: Vec::new(),
     })
-}
-
-pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
-    std::fs::File::open(dir)
-        .and_then(|dir| dir.sync_all())
-        .with_context(|| format!("syncing {}", dir.display()))
 }
 
 #[cfg(test)]

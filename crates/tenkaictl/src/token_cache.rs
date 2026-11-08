@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -121,17 +120,12 @@ impl TokenCache {
             .parent()
             .context("token cache path has no parent directory")?;
         ensure_private_dir(parent)?;
-        let data = serde_json::to_vec_pretty(logins)?;
-        let tmp = unique_tmp(parent)?;
-        let stored = write_private_file(&tmp, &data).and_then(|_| {
-            fs::rename(&tmp, &self.path).with_context(|| {
-                format!("replacing {} from {}", self.path.display(), tmp.display())
-            })
-        });
-        if stored.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        stored
+        tenkai::atomic_state::write_file(
+            &self.path,
+            &serde_json::to_vec_pretty(logins)?,
+            Some(0o600),
+        )
+        .with_context(|| format!("replacing {}", self.path.display()))
     }
 }
 
@@ -145,18 +139,6 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn unique_tmp(parent: &Path) -> Result<PathBuf> {
-    let mut nonce = [0u8; 8];
-    if getrandom::getrandom(&mut nonce).is_err() {
-        bail!("entropy for token cache temp file");
-    }
-    Ok(parent.join(format!(
-        "tokens.json.{}.{:016x}.tmp",
-        std::process::id(),
-        u64::from_be_bytes(nonce)
-    )))
-}
-
 #[cfg(unix)]
 fn lock_file_exclusive(file: &File) -> std::io::Result<()> {
     use std::os::fd::AsRawFd as _;
@@ -167,27 +149,6 @@ fn lock_file_exclusive(file: &File) -> std::io::Result<()> {
     } else {
         Err(std::io::Error::last_os_error())
     }
-}
-
-fn write_private_file(path: &Path, data: &[u8]) -> Result<()> {
-    let mut opts = OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut file = opts
-        .open(path)
-        .with_context(|| path.display().to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    }
-    file.write_all(data)?;
-    file.sync_all()?;
-    Ok(())
 }
 
 pub(crate) fn config_dir_from_env() -> Result<PathBuf> {

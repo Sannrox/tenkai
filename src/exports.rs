@@ -29,6 +29,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::atomic_state::sync_dir;
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -422,15 +423,11 @@ impl Exports {
         // Readers see only `*.json`: write under a temporary name, then
         // rename, so no reader or crash ever meets a partial event.
         let events = self.dir.join(id).join(EVENTS_DIR);
-        let temporary = events.join(format!(".event-{}.tmp", uuid::Uuid::new_v4()));
-        let published = (|| {
-            write_new_synced(&temporary, &serde_json::to_vec_pretty(event)?)?;
-            std::fs::rename(&temporary, events.join(event_file(event)))?;
-            sync_dir(&events)
-        })();
-        if published.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
+        let published = crate::atomic_state::write_file(
+            &events.join(event_file(event)),
+            &serde_json::to_vec_pretty(event)?,
+            None,
+        );
         published?;
         let mut artifact = Vec::new();
         std::io::Read::read_to_end(&mut artifact_file, &mut artifact)?;
@@ -538,11 +535,6 @@ fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<()> {
         std::fs::File::create_new(path).with_context(|| format!("creating {}", path.display()))?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    Ok(())
-}
-
-fn sync_dir(path: &Path) -> Result<()> {
-    std::fs::File::open(path)?.sync_all()?;
     Ok(())
 }
 

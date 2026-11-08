@@ -110,7 +110,7 @@ fn take_copy(connection: &Connection, database: &Path, found: u32) -> anyhow::Re
             }
         };
         // The copy's name is durable before the migration may begin.
-        crate::runtime_self_upgrade::sync_dir(dir)?;
+        crate::atomic_state::sync_dir(dir)?;
         Ok(copy)
     });
     let copy = kept.inspect_err(|_| {
