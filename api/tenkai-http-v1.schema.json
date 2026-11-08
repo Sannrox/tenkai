@@ -2297,6 +2297,13 @@
           "description": "The plan approval policy file this environment uses, as configured,\nwhen one is set (#820).",
           "type": "string"
         },
+        "config": {
+          "description": "Effective non-secret config and declared secret names per product (#1019).",
+          "items": {
+            "$ref": "#/$defs/EnvironmentProductConfig"
+          },
+          "type": "array"
+        },
         "constraints": {
           "default": [],
           "description": "Environment constraints (`version_pin`, `version_range`, `require_fact`).",
@@ -2664,6 +2671,40 @@
         "state",
         "created_at",
         "step_count"
+      ],
+      "type": "object"
+    },
+    "EnvironmentProductConfig": {
+      "description": "Effective overlay config for one product, with secret names only.",
+      "properties": {
+        "defaults": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "overlay": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "product": {
+          "type": "string"
+        },
+        "secrets": {
+          "description": "Declared secret key names. Values are never stored or returned.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "product"
       ],
       "type": "object"
     },

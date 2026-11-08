@@ -518,6 +518,7 @@ mod tests {
                     executor: None,
                     instances: crate::manifest::DeployInstances::One,
                 },
+                config: None,
                 routing: None,
                 model: None,
                 runtime: None,

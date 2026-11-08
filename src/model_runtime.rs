@@ -1683,6 +1683,7 @@ mod tests {
                 kind: ProductKind::ModelRuntime,
             },
             deploy: DeploySection::default(),
+            config: None,
             routing: None,
             model: Some(sample.model.clone()),
             runtime: Some(sample.runtime.clone()),

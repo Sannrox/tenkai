@@ -3048,6 +3048,7 @@ mod tests {
                     subscriptions: Vec::new(),
                     facts: Default::default(),
                     overlays: Default::default(),
+                    config: Vec::new(),
                     lease: crate::apply::EnvironmentLeaseInspect {
                         held: false,
                         owner: None,

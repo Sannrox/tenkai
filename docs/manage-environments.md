@@ -27,6 +27,13 @@ not named is the product. `env subscribe <env> <product>=<channel>
 `--instance` defaults to the product. Instance names are DNS labels of at
 most 40 characters and unique in the environment.
 
+A release may declare `[config]` overlay keys (type, required, default) and
+secret names. `env overlay set` refuses a key or type the subscribed channel
+head does not declare. Planning refuses a candidate whose schema the
+environment overlays do not satisfy. `env inspect` shows defaults, overlays,
+the digest, and secret names only. A release that omits `[config]` behaves as
+today.
+
 `env add --connectivity <class>` also sets the connectivity class.
 
 ### Criticality

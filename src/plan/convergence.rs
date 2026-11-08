@@ -1831,6 +1831,16 @@ fn assemble_plan(
     })
 }
 
+async fn admit_step_overlay_schema(ctx: &mut Ctx, env: &str, step: &Step) -> Result<()> {
+    let Some(schema) = crate::environment::release_config_schema(ctx, &step.release_id).await?
+    else {
+        return Ok(());
+    };
+    let env_obj = crate::environment::environment(ctx, env).await?;
+    let overlays = crate::environment::product_overlays(&env_obj, &step.product)?;
+    crate::environment::admit_product_overlays(&schema, &overlays)
+}
+
 async fn create_with_content(
     ctx: &mut Ctx,
     executors: &crate::software_executor::SoftwareExecutors,
@@ -1842,6 +1852,7 @@ async fn create_with_content(
     let mut steps = bind_host_steps(ctx, executors, env, steps).await?;
     for step in &steps {
         require_same_executor(ctx, executors, step).await?;
+        admit_step_overlay_schema(ctx, env, step).await?;
     }
     let mut plan = assemble_plan(env, inputs, &mut steps, recalled_recovery_reason)?;
     // Optional advisory priors (default off). Never hard-block or change steps.

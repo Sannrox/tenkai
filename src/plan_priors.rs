@@ -393,6 +393,7 @@ mod tests {
             subscriptions: Vec::new(),
             facts: std::collections::BTreeMap::from([("architecture".into(), "x86_64".into())]),
             overlays: Default::default(),
+            config: Vec::new(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,
@@ -543,6 +544,7 @@ mod tests {
             subscriptions: Vec::new(),
             facts: std::collections::BTreeMap::from([("architecture".into(), "x86_64".into())]),
             overlays: Default::default(),
+            config: Vec::new(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,

@@ -114,6 +114,7 @@ impl ReconcilePort for FixedReconciler {
                 subscriptions: Vec::new(),
                 facts: Default::default(),
                 overlays: Default::default(),
+                config: Vec::new(),
                 lease: tenkai::apply::EnvironmentLeaseInspect {
                     held: false,
                     owner: None,

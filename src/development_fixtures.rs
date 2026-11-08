@@ -193,6 +193,7 @@ impl FixtureEnvironmentProjection {
             subscriptions,
             facts: BTreeMap::new(),
             overlays: BTreeMap::new(),
+            config: Vec::new(),
             lease: crate::apply::EnvironmentLeaseInspect {
                 held: false,
                 owner: None,
