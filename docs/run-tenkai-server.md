@@ -437,6 +437,18 @@ tenkai-runtime
   `tenkaictl --target remote secret trust <env> sha256:<hex>` pins one.
   On first use a TTY shows fingerprints and asks; a non-TTY client refuses
   an unpinned key by fingerprint.
+- **Local approval policy (ADR 0045 §4).** Before a runtime opens a sealed
+  value it recomputes the plan digest and evaluates the plan's approval
+  envelopes against a policy installed on that host
+  (`TENKAI_RUNTIME_APPROVAL_POLICY`, the same TOML shape as
+  `host-approval-policy.toml`). Gate skips, requester identity and
+  criticality are server state, so the policy is evaluated at its strictest
+  quorum, as the host applier does. Offline revocation
+  (`TENKAI_KEY_REVOCATIONS` with `TENKAI_KEY_REVOCATION_TRUST_ROOTS`) and
+  signer windows apply. Without the policy a sealed step is refused with a
+  named reason. Other steps are unchanged. Keep the policy file and its
+  parent directory owned by the runtime user and not group- or
+  other-writable, so the server cannot replace the file.
 
 ### Trust posture
 

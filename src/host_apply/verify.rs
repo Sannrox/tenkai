@@ -180,9 +180,8 @@ pub fn verify_request(
     if request.signature.statement.artifact_digest != step.artifact_digest {
         bail!("the release signature and the plan step name different artifact digests");
     }
-    let approvals = trust.policy.evaluate(plan, &request.approvals, now_ms);
+    let approvals = trust.policy.verify_plan(plan, &request.approvals, now_ms)?;
     let purposes = super::policy::plan_purposes(plan);
-    approvals.require_all(&purposes)?;
 
     Ok(VerifiedHostStep {
         instance: instance.into(),

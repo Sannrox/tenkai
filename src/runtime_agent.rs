@@ -293,6 +293,9 @@ pub struct RuntimeClient {
     restart: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The host preflight config whose checks runner attestation carries.
     preflight: Option<PathBuf>,
+    /// Local approval policy and trust roots, installed on this host
+    /// (ADR 0045 §4). Absent: sealed steps are refused with a named reason.
+    local_policy: Option<crate::host_apply::HostApprovalPolicy>,
 }
 
 impl RuntimeClient {
@@ -337,6 +340,7 @@ impl RuntimeClient {
             home: None,
             restart: Default::default(),
             preflight: None,
+            local_policy: None,
         })
     }
 
@@ -344,6 +348,13 @@ impl RuntimeClient {
     /// attestation (#675).
     pub fn with_preflight(mut self, path: PathBuf) -> Self {
         self.preflight = Some(path);
+        self
+    }
+
+    /// Verify sealed steps against this host-owned approval policy
+    /// (ADR 0045 §4). Without it, those steps are refused.
+    pub fn with_local_policy(mut self, policy: crate::host_apply::HostApprovalPolicy) -> Self {
+        self.local_policy = Some(policy);
         self
     }
 
@@ -534,6 +545,7 @@ impl RuntimeClient {
             return Ok(true);
         }
         let work = self.pull().await?;
+        let approvals = work.approvals;
         let (Some(plan), Some(claim)) = (work.plan, work.claim) else {
             return Ok(false);
         };
@@ -548,6 +560,52 @@ impl RuntimeClient {
             return Ok(true);
         }
         validate_plan(&plan, &self.environment)?;
+
+        if !self.heartbeat(&plan.id, claim.generation).await? {
+            bail!("runtime claim was fenced before local approval");
+        }
+        for step in &plan.steps {
+            match crate::runtime_local_approval::decide_step(
+                self.local_policy.as_ref(),
+                &plan,
+                step,
+                &approvals,
+                crate::now_millis(),
+            )? {
+                crate::runtime_local_approval::StepDecision::Allowed => {}
+                crate::runtime_local_approval::StepDecision::Wait(reason) => {
+                    eprintln!(
+                        "runtime local approval pending for step {} (continuing): {reason}",
+                        step.id
+                    );
+                    return Ok(true);
+                }
+                crate::runtime_local_approval::StepDecision::Refuse(reason) => {
+                    let receipts = plan
+                        .steps
+                        .iter()
+                        .map(|later| RuntimeStepReceipt {
+                            step_id: later.id.clone(),
+                            succeeded: false,
+                            detail: if later.id == step.id {
+                                reason.clone()
+                            } else {
+                                "not executed after an earlier step failed".into()
+                            },
+                        })
+                        .collect();
+                    self.complete(RuntimeCompletion {
+                        plan_id: plan.id,
+                        generation: claim.generation,
+                        succeeded: false,
+                        detail: "environment runtime reported a failed step".into(),
+                        receipts,
+                    })
+                    .await?;
+                    return Ok(true);
+                }
+            }
+        }
 
         let mut receipts = Vec::with_capacity(plan.steps.len());
         let mut succeeded = true;

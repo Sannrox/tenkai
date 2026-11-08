@@ -826,6 +826,7 @@ mod tests {
                 artifact_digest: String::new(),
                 workdir: String::new(),
                 host: None,
+                sealed: None,
                 restore: None,
             }],
         )

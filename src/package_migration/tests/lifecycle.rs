@@ -46,6 +46,7 @@ async fn compatible_migration_approves_executes_resumes_and_rolls_back() {
             artifact_digest: declaration.target.digest.clone(),
             workdir: root.join("1.1.0").to_string_lossy().into(),
             host: None,
+            sealed: None,
             restore: None,
         }],
     )

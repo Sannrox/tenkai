@@ -1025,6 +1025,7 @@ async fn compute_snapshot_with_policy(
                         action: HostAction::Health,
                         expected_generation: 0,
                     }),
+                sealed: None,
                 order: index as u32,
                 instance: if entry.instance == entry.product {
                     String::new()
@@ -1966,6 +1967,7 @@ pub(super) async fn rollback_step_with_recovery(
         artifact_digest: target.artifact_digest,
         workdir: target.workdir,
         host: None,
+        sealed: None,
         restore,
         product,
         instance: step_instance,
@@ -2008,6 +2010,7 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
         artifact_digest: target.artifact_digest,
         workdir: target.workdir,
         host: None,
+        sealed: None,
         restore: None,
         product,
         instance: step_instance,
