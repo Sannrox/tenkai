@@ -130,12 +130,13 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, Remot
                 events,
                 remote,
             } => crate::embedded_env_config::parse_webhook_events(events.as_deref()).map(
-                |(events, operational)| {
+                |(events, operational, feedback)| {
                     let change = Change::SetWebhook {
                         url: url.clone(),
                         secret_env: secret_env.clone(),
                         events,
                         operational,
+                        feedback,
                     };
                     (env.as_str(), change, remote.clone())
                 },

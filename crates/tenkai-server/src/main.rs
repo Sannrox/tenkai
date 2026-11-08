@@ -1513,6 +1513,27 @@ async fn main() -> Result<()> {
                                 );
                             }
                         }
+                        match tenkai::feedback_webhook::deliver_batch(
+                            &*webhook_store,
+                            &ProcessWebhookSecrets,
+                            Duration::from_secs(5),
+                            tenkai::now_millis(),
+                            10,
+                        ).await {
+                            Ok((delivered, deferred)) if delivered > 0 || deferred > 0 => {
+                                eprintln!(
+                                    "tenkai.feedback_webhook delivered={} deferred={}",
+                                    delivered, deferred
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!(
+                                    "tenkai.feedback_webhook outcome=degraded detail={}",
+                                    error
+                                );
+                            }
+                        }
                     }
                 }
             }

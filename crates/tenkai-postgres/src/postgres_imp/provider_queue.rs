@@ -36,6 +36,11 @@ pub(crate) fn enqueue_provider_event_in(
             || digest != event.binding_digest
             || !provider_event_payloads_match(&payload, &event.payload_json)
         {
+            // Same first-wins rule as SQLite: a replayed observation id may
+            // carry a new body and must not roll back capture (#1102).
+            if event.provider_kind == "feedback_webhook" {
+                return Ok(());
+            }
             return Err(StoreError::ImmutableConflict {
                 kind: "provider event",
                 id: event.id.clone(),

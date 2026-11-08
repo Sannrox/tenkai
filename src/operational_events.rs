@@ -616,9 +616,10 @@ pub struct WebhookDelivery {
     pub last_error: String,
 }
 
-/// Apply-outcome and operational deliveries for `scope` (an environment, or
-/// [`HOST_SCOPE`]), at most `limit` of each kind: apply outcomes, then
-/// operational events, each newest recorded first.
+/// Apply-outcome, operational, and feedback deliveries for `scope` (an
+/// environment, or [`HOST_SCOPE`]), at most `limit` of each kind: apply
+/// outcomes, then operational events, then feedback observations, each
+/// newest recorded first.
 pub fn deliveries(
     store: &dyn OperationalStore,
     scope: &str,
@@ -628,6 +629,7 @@ pub fn deliveries(
     let kinds = [
         crate::deploy_webhook::DEPLOY_WEBHOOK_KIND.to_string(),
         OPERATIONAL_WEBHOOK_KIND.to_string(),
+        crate::feedback_webhook::FEEDBACK_WEBHOOK_KIND.to_string(),
     ]
     .into_iter()
     .chain(
@@ -681,6 +683,7 @@ mod tests {
             secret_env: "OPS_HOOK_SECRET".into(),
             events: Vec::new(),
             operational,
+            feedback: Vec::new(),
         }
     }
 
@@ -946,6 +949,7 @@ mod tests {
             secret_env: "OPS_HOOK_SECRET".into(),
             events: Vec::new(),
             operational: vec![OperationalEvent::ClockDrift],
+            feedback: Vec::new(),
         };
         announce(
             &store,

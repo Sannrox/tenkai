@@ -181,6 +181,7 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
             secret_env: "DEPLOY_HOOK_SECRET".into(),
             events: vec![tenkai::deploy_webhook::WebhookEvent::ApplyFailed],
             operational: Vec::new(),
+            feedback: Vec::new(),
         },
         Change::SetCriticality {
             level: tenkai::criticality::CriticalityLevel::High,
@@ -349,6 +350,7 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
                 secret_env: "DEPLOY_HOOK_SECRET".into(),
                 events: Vec::new(),
                 operational: Vec::new(),
+                feedback: Vec::new(),
             },
             "webhook URL must use HTTPS".into(),
         ),
@@ -445,12 +447,21 @@ async fn inspect_reports_webhooks_and_the_policy_path_for_conditional_edits() {
             secret_env: "EDGE_HOOK_SECRET_820".into(),
             events: vec![tenkai::deploy_webhook::WebhookEvent::ApplyFailed],
             operational: Vec::new(),
+            feedback: Vec::new(),
         },
         Change::SetWebhook {
             url: "https://hooks.example/audit".into(),
             secret_env: "AUDIT_HOOK_SECRET".into(),
             events: Vec::new(),
             operational: vec![tenkai::deploy_webhook::OperationalEvent::PlanHeld],
+            feedback: Vec::new(),
+        },
+        Change::SetWebhook {
+            url: "https://hooks.example/feedback".into(),
+            secret_env: "FEEDBACK_HOOK_SECRET".into(),
+            events: Vec::new(),
+            operational: Vec::new(),
+            feedback: vec![tenkai::deploy_webhook::FeedbackEvent::Observation],
         },
         Change::SetApprovalPolicy {
             path: policy.to_string_lossy().into_owned(),
@@ -474,6 +485,7 @@ async fn inspect_reports_webhooks_and_the_policy_path_for_conditional_edits() {
         [
             ("https://hooks.example/deploy", "EDGE_HOOK_SECRET_820"),
             ("https://hooks.example/audit", "AUDIT_HOOK_SECRET"),
+            ("https://hooks.example/feedback", "FEEDBACK_HOOK_SECRET"),
         ]
     );
     assert_eq!(
@@ -483,6 +495,10 @@ async fn inspect_reports_webhooks_and_the_policy_path_for_conditional_edits() {
     assert_eq!(
         report.webhooks[1].operational,
         [tenkai::deploy_webhook::OperationalEvent::PlanHeld]
+    );
+    assert_eq!(
+        report.webhooks[2].feedback,
+        [tenkai::deploy_webhook::FeedbackEvent::Observation]
     );
     let canonical = policy.canonicalize().unwrap();
     assert_eq!(
@@ -495,8 +511,9 @@ async fn inspect_reports_webhooks_and_the_policy_path_for_conditional_edits() {
         let mut keys: Vec<_> = hook.as_object().unwrap().keys().cloned().collect();
         keys.sort();
         assert!(
-            keys.iter()
-                .all(|key| ["events", "operational", "secret_env", "url"].contains(&key.as_str())),
+            keys.iter().all(|key| {
+                ["events", "feedback", "operational", "secret_env", "url"].contains(&key.as_str())
+            }),
             "{keys:?}"
         );
     }
@@ -530,7 +547,7 @@ async fn inspect_reports_webhooks_and_the_policy_path_for_conditional_edits() {
         .to_string();
     assert!(stale.contains("generation"), "{stale}");
     let after = client.inspect_environment("edge").await.unwrap();
-    assert_eq!(after.webhooks.len(), 1);
+    assert_eq!(after.webhooks.len(), 2);
     assert!(
         after.approval_policy.is_some(),
         "the stale edit wrote nothing"

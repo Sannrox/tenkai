@@ -99,9 +99,9 @@ outcomes, and a version that does not know operational events ignores the
 field and keeps delivering the apply outcomes. An endpoint receives an
 operational event only when `operational` lists it. An endpoint whose
 `events` is empty receives every apply outcome, unless it lists operational
-events only: then it receives no apply outcome. With `tenkaictl env
-webhooks set --events`, apply and operational names may be mixed; each is
-stored in its field.
+or feedback events only: then it receives no apply outcome. With `tenkaictl env
+webhooks set --events`, apply, operational, and `feedback.observation`
+names may be mixed; each is stored in its field.
 
 | Event | Scope | Fires when |
 | --- | --- | --- |
@@ -136,10 +136,39 @@ identities and codes only, never a hold reason or an error message. It is
 signed and retried exactly like apply outcomes, on its own outbox kind, so a
 down sink never blocks reconcile, apply or import.
 
-Delivery status, for apply outcomes and operational events, is at
+## Feedback observations
+
+Endpoints may also subscribe to captured feedback observations (#1102). They
+are listed in the endpoint's separate `feedback` field, so a version that
+does not know the event ignores the field and keeps delivering apply and
+operational events. An endpoint receives `feedback.observation` only when
+`feedback` lists it.
+
+```bash
+tenkaictl env webhooks set lab \
+  --url https://hooks.example.test/tenkai \
+  --secret-env TENKAI_WEBHOOK_SECRET \
+  --events feedback.observation
+```
+
+Capture stays local and always-on. Disabled or unreachable endpoints never
+interrupt deployment. The posted body is the captured observation
+(`tenkai.feedback_observation.v1`): identity, environment, product, plan,
+step, status, reason, lease generation, and `observed_at_ms`. It is signed
+and retried exactly like apply outcomes, on its own outbox kind, so a down
+sink never blocks apply or recovery. The outbox identity is a digest of the
+destination URL and the observation id; replaying the same outcome reuses
+that row and `X-Tenkai-Idempotency-Key`.
+
+The Sekai export (`TENKAI_FEEDBACK_PROVIDER` / `TENKAI_FEEDBACK_NAMESPACE`)
+stays until a receiver exists on that side. Until then both paths work, and
+an operator enables one or the other.
+
+Delivery status, for apply outcomes, operational events, and feedback
+observations, is at
 `GET /v1/environments/{environment}/webhooks/deliveries` and, for host
 webhooks, at `GET /v1/webhooks/deliveries`: apply outcomes, then operational
-events, each newest recorded first. Each
+events, then feedback observations, each newest recorded first. Each
 delivery shows its state (`pending`, `retrying`, `delivered`), attempts, next attempt, delivery
 time and the last error.
 

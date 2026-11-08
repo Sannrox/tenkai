@@ -241,6 +241,9 @@ pub(crate) fn enqueue_provider_event_in(
             || existing.1 != event.binding_digest
             || !provider_event_payloads_match(&existing.2, &event.payload_json)
         {
+            if keep_first_feedback_webhook(event) {
+                return Ok(());
+            }
             return Err(StoreError::ImmutableConflict {
                 kind: "provider event",
                 id: event.id.clone(),
@@ -258,6 +261,13 @@ pub(crate) fn enqueue_provider_event_in(
             event.claim_token, event.claim_until, environment_id, observed_at],
     )?;
     Ok(())
+}
+
+/// `feedback.observation` webhooks are keyed by observation id. A replay of
+/// the same id may carry a new body (`observed_at_ms` from `now_millis()`);
+/// keep the first row so capture still commits, as observations do.
+fn keep_first_feedback_webhook(event: &ProviderEventRecord) -> bool {
+    event.provider_kind == "feedback_webhook"
 }
 
 /// A first-delivery collection timestamp is the only field allowed to be
