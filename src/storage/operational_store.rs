@@ -212,9 +212,10 @@ pub trait OperationalStore: Send + Sync {
     /// Spend the enrollment `token_digest` of `environment` once, before it
     /// expires at `now`,
     /// and record `credential_digest` as its credential, and, when given,
-    /// the runner's attestation binding (#675), in one transaction: of two
-    /// concurrent redemptions, one wins, and any failure leaves the token
-    /// unspent. Unknown, spent and expired enrollments are all `InvalidData`.
+    /// the runner's attestation binding (#675) and sealing public key
+    /// (ADR 0045), in one transaction: of two concurrent redemptions, one
+    /// wins, and any failure leaves the token unspent. Unknown, spent and
+    /// expired enrollments are all `InvalidData`.
     fn redeem_runtime_enrollment(
         &self,
         _environment: &str,
@@ -222,6 +223,7 @@ pub trait OperationalStore: Send + Sync {
         _credential_digest: &str,
         _now: i64,
         _attestation: Option<&RuntimeAttestationRecord>,
+        _sealing: Option<&RuntimeSealingKeyRecord>,
     ) -> Result<RuntimeCredentialRecord> {
         Err(StoreError::AdapterUnavailable(
             "runtime enrollment is not implemented by this store".into(),
@@ -306,6 +308,23 @@ pub trait OperationalStore: Send + Sync {
     fn runtime_attestations(&self) -> Result<Vec<RuntimeAttestationRecord>> {
         Err(StoreError::AdapterUnavailable(
             "runner attestation is not implemented by this store".into(),
+        ))
+    }
+    /// Record or replace one runtime instance's sealing public key (ADR 0045).
+    fn record_runtime_sealing_key(&self, _record: &RuntimeSealingKeyRecord) -> Result<()> {
+        Err(StoreError::AdapterUnavailable(
+            "runtime sealing keys are not implemented by this store".into(),
+        ))
+    }
+    /// Sealing keys of unrevoked runtimes of `environment`.
+    fn runtime_sealing_keys(&self, _environment: &str) -> Result<Vec<RuntimeSealingKeyRecord>> {
+        Err(StoreError::AdapterUnavailable(
+            "runtime sealing keys are not implemented by this store".into(),
+        ))
+    }
+    fn runtime_sealing_key(&self, _runner_id: &str) -> Result<Option<RuntimeSealingKeyRecord>> {
+        Err(StoreError::AdapterUnavailable(
+            "runtime sealing keys are not implemented by this store".into(),
         ))
     }
     /// Owners holding an unexpired runtime plan claim at `now`.

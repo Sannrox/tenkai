@@ -353,6 +353,7 @@ impl OperationalStore for SqliteStore {
         credential_digest: &str,
         now: i64,
         attestation: Option<&RuntimeAttestationRecord>,
+        sealing: Option<&RuntimeSealingKeyRecord>,
     ) -> Result<RuntimeCredentialRecord> {
         self.redeem_runtime_enrollment_sqlite(
             environment,
@@ -360,6 +361,7 @@ impl OperationalStore for SqliteStore {
             credential_digest,
             now,
             attestation,
+            sealing,
         )
     }
 
@@ -423,5 +425,17 @@ impl OperationalStore for SqliteStore {
 
     fn runtime_attestations(&self) -> Result<Vec<RuntimeAttestationRecord>> {
         self.runtime_attestations_sqlite()
+    }
+
+    fn record_runtime_sealing_key(&self, record: &RuntimeSealingKeyRecord) -> Result<()> {
+        self.record_runtime_sealing_key_sqlite(record)
+    }
+
+    fn runtime_sealing_keys(&self, environment: &str) -> Result<Vec<RuntimeSealingKeyRecord>> {
+        self.runtime_sealing_keys_sqlite(environment)
+    }
+
+    fn runtime_sealing_key(&self, runner_id: &str) -> Result<Option<RuntimeSealingKeyRecord>> {
+        self.runtime_sealing_key_sqlite(runner_id)
     }
 }

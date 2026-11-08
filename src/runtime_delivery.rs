@@ -1231,6 +1231,9 @@ pub struct RuntimeCertificateRequest {
     /// server asked for it with `attestation_missing`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation: Option<crate::runner_attestation::RunnerAttestation>,
+    /// HPKE P-256 sealing public key (ADR 0045). Absent on older runtimes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealing_public_key: Option<String>,
 }
 
 /// A renewed runner certificate and the runner CA that issued it.
@@ -1288,6 +1291,7 @@ impl RuntimeDeliveryOperations {
         if let Some(binding) = &binding {
             self.bind_attestation(environment, &identity.runner_id, binding)?;
         }
+        let sealing = parse_sealing_key(request.sealing_public_key.as_deref())?;
         let certificate = ca
             .issue_bound(
                 &request.csr,
@@ -1300,11 +1304,48 @@ impl RuntimeDeliveryOperations {
             )
             .map_err(|error| RuntimeDeliveryError::InvalidRequest(format!("{error:#}")))?;
         self.note_certificate(&identity.runner_id, environment);
+        if let Some(key) = sealing {
+            self.record_sealing_key(environment, &identity.runner_id, key)?;
+        }
         Ok(RuntimeCertificate {
             certificate,
             ca: ca.trust_bundle(),
         })
     }
+
+    fn record_sealing_key(
+        &self,
+        environment: &str,
+        runner_id: &str,
+        key: crate::sealing_key::SealingPublicKey,
+    ) -> Result<(), RuntimeDeliveryError> {
+        self.store
+            .record_runtime_sealing_key(&crate::storage::RuntimeSealingKeyRecord {
+                runner_id: runner_id.into(),
+                environment_id: environment.into(),
+                public_key: key.to_wire(),
+                fingerprint: key.fingerprint(),
+                recorded_at: crate::now_millis(),
+            })
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))
+    }
+
+    /// Unrevoked runtimes of `environment` that advertised a sealing key.
+    pub fn environment_recipient_keys(
+        &self,
+        environment: &str,
+    ) -> Result<Vec<crate::storage::RuntimeSealingKeyRecord>, RuntimeDeliveryError> {
+        self.store
+            .runtime_sealing_keys(environment)
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))
+    }
+}
+
+fn parse_sealing_key(
+    raw: Option<&str>,
+) -> Result<Option<crate::sealing_key::SealingPublicKey>, RuntimeDeliveryError> {
+    crate::sealing_key::parse_offered(raw)
+        .map_err(|error| RuntimeDeliveryError::InvalidRequest(error.to_string()))
 }
 
 /// What a runtime agent sends to exchange its enrollment token (#630).
@@ -1320,6 +1361,9 @@ pub struct RuntimeEnrollRequest {
     /// server asked for it with `attestation_missing`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation: Option<crate::runner_attestation::RunnerAttestation>,
+    /// HPKE P-256 sealing public key (ADR 0045). Absent on older runtimes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealing_public_key: Option<String>,
 }
 
 /// The agent's own credential, shown only in this response. `credential_id`
@@ -1354,6 +1398,9 @@ impl RuntimeDeliveryOperations {
         if !request.token.starts_with(ENROLLMENT_TOKEN_PREFIX) {
             return Err(RuntimeDeliveryError::InvalidCredential);
         }
+        // A sealing key this server cannot record is refused before the token
+        // is spent, so a malformed offer does not consume enrollment.
+        let sealing = parse_sealing_key(request.sealing_public_key.as_deref())?;
         // A drifted clock must not stretch a token's expiry.
         crate::clock_guard::require_trusted_time("runtime enrollment")
             .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
@@ -1399,15 +1446,24 @@ impl RuntimeDeliveryOperations {
         // Spent, registered and bound in one transaction: a failure leaves
         // the token usable and no runner.
         let now = crate::now_millis();
+        let credential_digest = digest(&credential);
         let bound = binding
             .as_ref()
-            .map(|binding| binding_record(environment, &digest(&credential), binding, now));
+            .map(|binding| binding_record(environment, &credential_digest, binding, now));
+        let sealing_record = sealing.map(|key| crate::storage::RuntimeSealingKeyRecord {
+            runner_id: credential_digest.clone(),
+            environment_id: environment.into(),
+            public_key: key.to_wire(),
+            fingerprint: key.fingerprint(),
+            recorded_at: now,
+        });
         let record = match self.store.redeem_runtime_enrollment(
             environment,
             &digest(&request.token),
-            &digest(&credential),
+            &credential_digest,
             now,
             bound.as_ref(),
+            sealing_record.as_ref(),
         ) {
             Ok(record) => record,
             Err(crate::storage::StoreError::InvalidData { .. }) => {
@@ -1893,6 +1949,7 @@ mod tests {
             token,
             csr: Some(csr.clone()),
             attestation: None,
+            sealing_public_key: None,
         };
         assert!(matches!(
             operations.enroll("prod", &request).await,
@@ -1949,6 +2006,7 @@ mod tests {
             let request = RuntimeCertificateRequest {
                 csr: csr.clone(),
                 attestation: None,
+                sealing_public_key: None,
             };
             operations
                 .renew_certificate(
@@ -2057,6 +2115,7 @@ mod tests {
             token: token.clone(),
             csr: Some(key.1.clone()),
             attestation,
+            sealing_public_key: None,
         };
         // Refused enrollments spend no token: missing, then contradicting.
         assert_eq!(
@@ -2081,6 +2140,7 @@ mod tests {
                 token: forged_token.clone(),
                 csr: Some(key.1.clone()),
                 attestation,
+                sealing_public_key: None,
             };
             assert!(matches!(
                 operations.enroll("prod", &forged).await,
@@ -2121,6 +2181,7 @@ mod tests {
                 let request = RuntimeCertificateRequest {
                     csr: csr.into(),
                     attestation,
+                    sealing_public_key: None,
                 };
                 let token = certificate
                     .is_none()
@@ -2335,6 +2396,7 @@ mod tests {
                 token,
                 csr: None,
                 attestation: None,
+                sealing_public_key: None,
             }
         };
         let request = issue();
@@ -2384,6 +2446,7 @@ mod tests {
                         token: "runtime-secret".into(),
                         csr: None,
                         attestation: None,
+                        sealing_public_key: None,
                     }
                 )
                 .await,
@@ -2656,6 +2719,7 @@ mod tests {
                     token,
                     csr: None,
                     attestation: None,
+                    sealing_public_key: None,
                 },
             )
             .await
@@ -2685,6 +2749,7 @@ mod tests {
                 &RuntimeCertificateRequest {
                     csr,
                     attestation: None,
+                    sealing_public_key: None,
                 },
             )
             .await
@@ -2693,5 +2758,201 @@ mod tests {
             operations.store.certified_runtime_runners().unwrap(),
             [enrolled.credential_id]
         );
+    }
+
+    #[tokio::test]
+    async fn sealing_keys_are_bound_to_one_runtime_and_dropped_on_revoke() {
+        use crate::runtime_credentials::{ENROLLMENT_TOKEN_PREFIX, digest, mint};
+        let (operations, _) = operations();
+        let first =
+            crate::sealing_key::SealingKey::open_or_generate(&std::env::temp_dir().join(format!(
+                "tenkai-sealing-first-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            )))
+            .unwrap();
+        let second =
+            crate::sealing_key::SealingKey::open_or_generate(&std::env::temp_dir().join(format!(
+                "tenkai-sealing-second-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            )))
+            .unwrap();
+        let rotated =
+            crate::sealing_key::SealingKey::open_or_generate(&std::env::temp_dir().join(format!(
+                "tenkai-sealing-rotated-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            )))
+            .unwrap();
+        let issue = || {
+            let token = mint(ENROLLMENT_TOKEN_PREFIX).unwrap();
+            operations
+                .store
+                .create_runtime_enrollment(&crate::storage::RuntimeEnrollmentRecord {
+                    token_digest: digest(&token),
+                    environment_id: "prod".into(),
+                    expires_at: i64::MAX,
+                    created_by: "operator".into(),
+                })
+                .unwrap();
+            token
+        };
+        let a = operations
+            .enroll(
+                "prod",
+                &RuntimeEnrollRequest {
+                    token: issue(),
+                    csr: None,
+                    attestation: None,
+                    sealing_public_key: Some(first.to_wire()),
+                },
+            )
+            .await
+            .unwrap();
+        let b = operations
+            .enroll(
+                "prod",
+                &RuntimeEnrollRequest {
+                    token: issue(),
+                    csr: None,
+                    attestation: None,
+                    sealing_public_key: Some(second.to_wire()),
+                },
+            )
+            .await
+            .unwrap();
+        let offered: Vec<_> = operations
+            .environment_recipient_keys("prod")
+            .unwrap()
+            .into_iter()
+            .map(|record| record.fingerprint)
+            .collect();
+        assert!(offered.contains(&first.fingerprint()));
+        assert!(offered.contains(&second.fingerprint()));
+
+        operations
+            .store
+            .revoke_runtime_credential(
+                &b.credential_id,
+                1,
+                &crate::storage::RuntimeRevocation {
+                    reason: "lost".into(),
+                    revoked_by: "operator".into(),
+                },
+            )
+            .unwrap();
+        let offered: Vec<_> = operations
+            .environment_recipient_keys("prod")
+            .unwrap()
+            .into_iter()
+            .map(|record| record.fingerprint)
+            .collect();
+        assert_eq!(offered, vec![first.fingerprint()]);
+
+        operations
+            .renew_certificate(
+                Some(&a.credential),
+                RuntimeCaller {
+                    instance: Some("instance-a"),
+                    version: None,
+                    certificate: None,
+                },
+                "prod",
+                &RuntimeCertificateRequest {
+                    csr: rcgen::CertificateParams::new(Vec::<String>::new())
+                        .unwrap()
+                        .serialize_request(&rcgen::KeyPair::generate().unwrap())
+                        .unwrap()
+                        .pem()
+                        .unwrap(),
+                    attestation: None,
+                    sealing_public_key: Some(rotated.to_wire()),
+                },
+            )
+            .await
+            .unwrap_err();
+        // Renewal without a runner CA is refused; the recorded key is unchanged.
+        let offered: Vec<_> = operations
+            .environment_recipient_keys("prod")
+            .unwrap()
+            .into_iter()
+            .map(|record| record.fingerprint)
+            .collect();
+        assert_eq!(offered, vec![first.fingerprint()]);
+
+        let (cert, ca_key) = crate::runner_ca::RunnerCa::generate("runner CA").unwrap();
+        let ca = Arc::new(crate::runner_ca::RunnerCa::from_pem(&cert, &ca_key).unwrap());
+        let operations = operations.with_runner_ca(ca);
+        operations
+            .renew_certificate(
+                Some(&a.credential),
+                RuntimeCaller {
+                    instance: Some("instance-a"),
+                    version: None,
+                    certificate: None,
+                },
+                "prod",
+                &RuntimeCertificateRequest {
+                    csr: rcgen::CertificateParams::new(Vec::<String>::new())
+                        .unwrap()
+                        .serialize_request(&rcgen::KeyPair::generate().unwrap())
+                        .unwrap()
+                        .pem()
+                        .unwrap(),
+                    attestation: None,
+                    sealing_public_key: Some(rotated.to_wire()),
+                },
+            )
+            .await
+            .unwrap();
+        let offered = operations.environment_recipient_keys("prod").unwrap();
+        assert_eq!(offered.len(), 1);
+        assert_eq!(offered[0].runner_id, a.credential_id);
+        assert_eq!(offered[0].fingerprint, rotated.fingerprint());
+        assert_ne!(offered[0].fingerprint, first.fingerprint());
+        assert_ne!(offered[0].fingerprint, second.fingerprint());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_sealing_key_is_refused_before_the_token_is_spent() {
+        use crate::runtime_credentials::{ENROLLMENT_TOKEN_PREFIX, digest, mint};
+        let (operations, _) = operations();
+        let token = mint(ENROLLMENT_TOKEN_PREFIX).unwrap();
+        operations
+            .store
+            .create_runtime_enrollment(&crate::storage::RuntimeEnrollmentRecord {
+                token_digest: digest(&token),
+                environment_id: "prod".into(),
+                expires_at: i64::MAX,
+                created_by: "operator".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            operations
+                .enroll(
+                    "prod",
+                    &RuntimeEnrollRequest {
+                        token: token.clone(),
+                        csr: None,
+                        attestation: None,
+                        sealing_public_key: Some("not-a-key".into()),
+                    },
+                )
+                .await,
+            Err(RuntimeDeliveryError::InvalidRequest(_))
+        ));
+        operations
+            .enroll(
+                "prod",
+                &RuntimeEnrollRequest {
+                    token,
+                    csr: None,
+                    attestation: None,
+                    sealing_public_key: None,
+                },
+            )
+            .await
+            .unwrap();
     }
 }

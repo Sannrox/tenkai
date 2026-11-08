@@ -267,6 +267,17 @@ pub struct RuntimeActivityRecord {
     pub last_inventory_at: Option<i64>,
 }
 
+/// A runner's HPKE sealing public key (ADR 0045). Bound to one enrolled
+/// runtime instance; renewal replaces only that instance's key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSealingKeyRecord {
+    pub runner_id: String,
+    pub environment_id: String,
+    pub public_key: String,
+    pub fingerprint: String,
+    pub recorded_at: i64,
+}
+
 /// A runner's latest bound attestation and latest attestation refusal
 /// (#675). A write with `evidence_digest` binds and clears the refusal; a
 /// write without it records only the refusal and keeps the binding.

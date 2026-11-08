@@ -470,6 +470,18 @@ impl RemoteClient {
         self.request_json(reqwest::Method::GET, "/v1/runners").await
     }
 
+    /// Unrevoked sealing public keys of `environment` (ADR 0045).
+    pub async fn list_environment_recipients(
+        &self,
+        environment: &str,
+    ) -> anyhow::Result<tenkai::management_operations::EnvironmentRecipients> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/environments/{environment}/recipient-keys"),
+        )
+        .await
+    }
+
     /// One runner of the registry (#673).
     pub async fn inspect_runtime_runner(
         &self,

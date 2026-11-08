@@ -38,6 +38,30 @@ fn upsert_attestation(
     Ok(())
 }
 
+fn upsert_sealing_key(
+    tx: &mut postgres::Transaction<'_>,
+    record: &RuntimeSealingKeyRecord,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO runtime_sealing_keys(runner_id,environment_id,public_key,fingerprint,recorded_at)
+         VALUES($1,$2,$3,$4,$5)
+         ON CONFLICT(runner_id) DO UPDATE SET
+             environment_id=excluded.environment_id,
+             public_key=excluded.public_key,
+             fingerprint=excluded.fingerprint,
+             recorded_at=excluded.recorded_at",
+        &[
+            &record.runner_id,
+            &record.environment_id,
+            &record.public_key,
+            &record.fingerprint,
+            &record.recorded_at,
+        ],
+    )
+    .map_err(pg)?;
+    Ok(())
+}
+
 fn refused(detail: &str) -> StoreError {
     StoreError::InvalidData {
         kind: "runtime enrollment",
@@ -75,6 +99,7 @@ impl Inner {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn redeem_runtime_enrollment(
         &self,
         schema: &str,
@@ -83,11 +108,13 @@ impl Inner {
         credential_digest: &str,
         now: i64,
         attestation: Option<&RuntimeAttestationRecord>,
+        sealing: Option<&RuntimeSealingKeyRecord>,
     ) -> Result<RuntimeCredentialRecord> {
         let environment_id = environment.to_owned();
         let token_digest = token_digest.to_owned();
         let credential_digest = credential_digest.to_owned();
         let attestation = attestation.cloned();
+        let sealing = sealing.cloned();
         self.with_writer_schema(schema, move |tx| {
             let spent = tx
                 .execute(
@@ -108,6 +135,9 @@ impl Inner {
             .map_err(pg)?;
             if let Some(attestation) = &attestation {
                 upsert_attestation(tx, attestation)?;
+            }
+            if let Some(sealing) = &sealing {
+                upsert_sealing_key(tx, sealing)?;
             }
             Ok(RuntimeCredentialRecord {
                 credential_digest,
@@ -357,6 +387,72 @@ impl Inner {
                     refused_at: row.get(7),
                 })
                 .collect())
+        })
+    }
+
+    pub fn record_runtime_sealing_key(
+        &self,
+        schema: &str,
+        record: &RuntimeSealingKeyRecord,
+    ) -> Result<()> {
+        let record = record.clone();
+        self.with_writer_schema(schema, move |tx| {
+            upsert_sealing_key(tx, &record)?;
+            Ok(())
+        })
+    }
+
+    pub fn runtime_sealing_keys(
+        &self,
+        schema: &str,
+        environment: &str,
+    ) -> Result<Vec<RuntimeSealingKeyRecord>> {
+        let environment = environment.to_owned();
+        self.with_schema(schema, move |tx| {
+            let rows = tx
+                .query(
+                    "SELECT s.runner_id,s.environment_id,s.public_key,s.fingerprint,s.recorded_at
+                     FROM runtime_sealing_keys s
+                     INNER JOIN runtime_credentials c ON c.credential_digest=s.runner_id
+                     WHERE s.environment_id=$1 AND c.revoked_at IS NULL
+                     ORDER BY s.runner_id",
+                    &[&environment],
+                )
+                .map_err(pg)?;
+            Ok(rows
+                .into_iter()
+                .map(|row| RuntimeSealingKeyRecord {
+                    runner_id: row.get(0),
+                    environment_id: row.get(1),
+                    public_key: row.get(2),
+                    fingerprint: row.get(3),
+                    recorded_at: row.get(4),
+                })
+                .collect())
+        })
+    }
+
+    pub fn runtime_sealing_key(
+        &self,
+        schema: &str,
+        runner_id: &str,
+    ) -> Result<Option<RuntimeSealingKeyRecord>> {
+        let runner_id = runner_id.to_owned();
+        self.with_schema(schema, move |tx| {
+            Ok(tx
+                .query_opt(
+                    "SELECT runner_id,environment_id,public_key,fingerprint,recorded_at
+                     FROM runtime_sealing_keys WHERE runner_id=$1",
+                    &[&runner_id],
+                )
+                .map_err(pg)?
+                .map(|row| RuntimeSealingKeyRecord {
+                    runner_id: row.get(0),
+                    environment_id: row.get(1),
+                    public_key: row.get(2),
+                    fingerprint: row.get(3),
+                    recorded_at: row.get(4),
+                }))
         })
     }
 

@@ -368,6 +368,24 @@ pub(super) async fn list_runtime_runners(
     super::auth::manage_result(state.management.list_runtime_runners(&credential).await)
 }
 
+/// Unrevoked sealing keys of an environment (ADR 0045).
+pub(super) async fn list_environment_recipients(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match super::auth::require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    super::auth::manage_result(
+        state
+            .management
+            .list_environment_recipients(&credential, &environment)
+            .await,
+    )
+}
+
 /// One runner of the registry.
 pub(super) async fn inspect_runtime_runner(
     State(state): State<Arc<AppState>>,

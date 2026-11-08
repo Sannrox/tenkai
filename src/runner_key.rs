@@ -96,6 +96,25 @@ impl HardwareStore {
             key_label: locator.key_label.clone(),
         })
     }
+
+    /// The store named by `dir/key.store`, when that locator exists. A
+    /// hardware runner key reopens from this file even when the process
+    /// environment names a file store.
+    pub fn from_dir(dir: &Path) -> Result<Option<Self>> {
+        let path = dir.join(RUNNER_KEY_STORE);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let locator: StoreFile = serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?,
+        )
+        .with_context(|| format!("parsing {}", path.display()))?;
+        if locator.schema != STORE_SCHEMA || locator.kind != "pkcs11" {
+            bail!("unsupported runner key store {}", locator.schema);
+        }
+        Ok(Some(Self::from_locator(&locator)?))
+    }
 }
 
 fn kind_from_env() -> Result<KeyStoreKind> {
@@ -169,16 +188,14 @@ impl RunnerKey {
                 dir.display()
             ),
             (true, false) => {
-                let locator: StoreFile = serde_json::from_str(
-                    &std::fs::read_to_string(&store)
-                        .with_context(|| format!("reading {}", store.display()))?,
-                )
-                .with_context(|| format!("parsing {}", store.display()))?;
-                if locator.schema != STORE_SCHEMA || locator.kind != "pkcs11" {
-                    bail!("unsupported runner key store {}", locator.schema);
-                }
+                let hardware = HardwareStore::from_dir(dir)?.with_context(|| {
+                    format!(
+                        "reading the hardware runner key locator in {}",
+                        dir.display()
+                    )
+                })?;
                 Ok(Some(Self::Hardware(Arc::new(HardwareRunnerKey::open(
-                    &HardwareStore::from_locator(&locator)?,
+                    &hardware,
                 )?))))
             }
             (false, true) => {
@@ -242,7 +259,31 @@ impl RunnerKey {
         let hardware = HardwareStore::from_env()?;
         Self::open_or_generate_with(dir, hardware.as_ref())
     }
+}
 
+impl HardwareStore {
+    /// A non-extractable P-256 public point for HPKE sealing, generated in
+    /// this token as `{key_label}-sealing`. The private half never leaves
+    /// the store.
+    pub fn open_or_generate_sealing_point(&self) -> Result<Vec<u8>> {
+        let sealing = Self {
+            module: self.module.clone(),
+            token_label: self.token_label.clone(),
+            pin: self.pin.clone(),
+            key_label: format!("{}-sealing", self.key_label),
+        };
+        match spawn_store(&sealing, false, P256Role::Derive) {
+            Ok(key) => Ok(key.point.clone()),
+            Err(open) => spawn_store(&sealing, true, P256Role::Derive)
+                .map(|key| key.point.clone())
+                .with_context(|| {
+                    format!("opening or generating the hardware sealing key: {open:#}")
+                }),
+        }
+    }
+}
+
+impl RunnerKey {
     pub fn hardware_backed(&self) -> bool {
         matches!(self, Self::Hardware(_))
     }
@@ -383,11 +424,11 @@ impl fmt::Debug for HardwareRunnerKey {
 
 impl HardwareRunnerKey {
     fn open(store: &HardwareStore) -> Result<Self> {
-        spawn_store(store, false)
+        spawn_store(store, false, P256Role::Sign)
     }
 
     fn provision(store: &HardwareStore) -> Result<Self> {
-        spawn_store(store, true)
+        spawn_store(store, true, P256Role::Sign)
     }
 
     fn sign_ecdsa(&self, message: &[u8]) -> Result<Vec<u8>> {
@@ -421,7 +462,13 @@ impl HardwareRunnerKey {
     }
 }
 
-fn spawn_store(store: &HardwareStore, mint: bool) -> Result<HardwareRunnerKey> {
+#[derive(Clone, Copy)]
+enum P256Role {
+    Sign,
+    Derive,
+}
+
+fn spawn_store(store: &HardwareStore, mint: bool, role: P256Role) -> Result<HardwareRunnerKey> {
     let (commands, inbox) = std::sync::mpsc::channel();
     let worker_store = store.clone();
     let token_label = store.token_label.clone();
@@ -429,7 +476,7 @@ fn spawn_store(store: &HardwareStore, mint: bool) -> Result<HardwareRunnerKey> {
     let (ready, wait) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("tenkai-runner-key".into())
-        .spawn(move || match connect(&worker_store, mint) {
+        .spawn(move || match connect(&worker_store, mint, role) {
             Ok((session, private, point)) => {
                 let _ = ready.send(Ok(point));
                 while let Ok(command) = inbox.recv() {
@@ -536,7 +583,11 @@ impl rustls::sign::Signer for RustlsKey {
     }
 }
 
-fn connect(store: &HardwareStore, mint: bool) -> Result<(Session, ObjectHandle, Vec<u8>)> {
+fn connect(
+    store: &HardwareStore,
+    mint: bool,
+    role: P256Role,
+) -> Result<(Session, ObjectHandle, Vec<u8>)> {
     let pkcs11 = crate::pkcs11_provider::load_pkcs11(&store.module)
         .map_err(|_| anyhow::anyhow!("loading PKCS#11 module {}", store.module.display()))?;
     let slot = crate::pkcs11_provider::slot_with_label(&pkcs11, &store.token_label)
@@ -551,9 +602,9 @@ fn connect(store: &HardwareStore, mint: bool) -> Result<(Session, ObjectHandle, 
         Err(error) => bail!("PKCS#11 login failed: {error}"),
     }
     if mint {
-        ensure_provisioned(&session, &store.key_label)?;
+        ensure_provisioned(&session, &store.key_label, role)?;
     }
-    let (private, point) = restore(&session, &store.key_label)?;
+    let (private, point) = restore(&session, &store.key_label, role)?;
     Ok((session, private, point))
 }
 
@@ -570,11 +621,11 @@ fn find_labeled(
         .map_err(|error| anyhow::anyhow!("listing PKCS#11 runner keys: {error}"))
 }
 
-fn restore(session: &Session, key_label: &str) -> Result<(ObjectHandle, Vec<u8>)> {
+fn restore(session: &Session, key_label: &str, role: P256Role) -> Result<(ObjectHandle, Vec<u8>)> {
     match find_labeled(session, ObjectClass::PRIVATE_KEY, key_label)?.as_slice() {
         [] => bail!("hardware runner key {key_label} is not provisioned"),
         [private] => {
-            require_not_extractable(session, *private, key_label)?;
+            require_not_extractable(session, *private, key_label, role)?;
             let id = object_id(session, *private)?;
             let public = unique_object(
                 session
@@ -639,27 +690,33 @@ fn parse_p256_point(point: &[u8]) -> Result<Vec<u8>> {
     Ok(raw.to_vec())
 }
 
-fn require_not_extractable(session: &Session, handle: ObjectHandle, key_label: &str) -> Result<()> {
+fn require_not_extractable(
+    session: &Session,
+    handle: ObjectHandle,
+    key_label: &str,
+    role: P256Role,
+) -> Result<()> {
+    let usage = match role {
+        P256Role::Sign => AttributeType::Sign,
+        P256Role::Derive => AttributeType::Derive,
+    };
     let attributes = session
         .get_attributes(
             handle,
-            &[
-                AttributeType::Extractable,
-                AttributeType::Sensitive,
-                AttributeType::Sign,
-            ],
+            &[AttributeType::Extractable, AttributeType::Sensitive, usage],
         )
         .map_err(|error| {
             anyhow::anyhow!("reading PKCS#11 runner key {key_label} protection attributes: {error}")
         })?;
     let mut extractable = None;
     let mut sensitive = None;
-    let mut sign = None;
+    let mut usable = None;
     for attribute in attributes {
         match attribute {
             Attribute::Extractable(value) => extractable = Some(value),
             Attribute::Sensitive(value) => sensitive = Some(value),
-            Attribute::Sign(value) => sign = Some(value),
+            Attribute::Sign(value) if matches!(role, P256Role::Sign) => usable = Some(value),
+            Attribute::Derive(value) if matches!(role, P256Role::Derive) => usable = Some(value),
             _ => {}
         }
     }
@@ -669,16 +726,21 @@ fn require_not_extractable(session: &Session, handle: ObjectHandle, key_label: &
     if sensitive != Some(true) {
         bail!("hardware runner key {key_label} is not sensitive");
     }
-    if sign != Some(true) {
-        bail!("hardware runner key {key_label} cannot sign");
+    match role {
+        P256Role::Sign if usable != Some(true) => {
+            bail!("hardware runner key {key_label} cannot sign")
+        }
+        P256Role::Derive if usable != Some(true) => {
+            bail!("hardware sealing key {key_label} cannot derive")
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
-fn ensure_provisioned(session: &Session, key_label: &str) -> Result<()> {
+fn ensure_provisioned(session: &Session, key_label: &str, role: P256Role) -> Result<()> {
     match find_labeled(session, ObjectClass::PRIVATE_KEY, key_label)?.as_slice() {
         [] => {
-            mint_p256(session, key_label)?;
+            mint_p256(session, key_label, role)?;
             Ok(())
         }
         [_] => Ok(()),
@@ -689,13 +751,21 @@ fn ensure_provisioned(session: &Session, key_label: &str) -> Result<()> {
     }
 }
 
-fn mint_p256(session: &Session, key_label: &str) -> Result<()> {
+fn mint_p256(session: &Session, key_label: &str, role: P256Role) -> Result<()> {
     let label = key_label.as_bytes().to_vec();
     let mut id = [0_u8; 16];
     SystemRandom::new()
         .fill(&mut id)
         .map_err(|_| anyhow::anyhow!("generating PKCS#11 runner key id"))?;
     let id = id.to_vec();
+    let public_usage = match role {
+        P256Role::Sign => Attribute::Verify(true),
+        P256Role::Derive => Attribute::Derive(true),
+    };
+    let private_usage = match role {
+        P256Role::Sign => Attribute::Sign(true),
+        P256Role::Derive => Attribute::Derive(true),
+    };
     session
         .generate_key_pair(
             &Mechanism::EccKeyPairGen,
@@ -705,7 +775,7 @@ fn mint_p256(session: &Session, key_label: &str) -> Result<()> {
                 Attribute::Label(label.clone()),
                 Attribute::Id(id.clone()),
                 Attribute::Token(true),
-                Attribute::Verify(true),
+                public_usage,
                 Attribute::EcParams(PRIME256V1_OID.to_vec()),
             ],
             &[
@@ -717,7 +787,7 @@ fn mint_p256(session: &Session, key_label: &str) -> Result<()> {
                 Attribute::Private(true),
                 Attribute::Sensitive(true),
                 Attribute::Extractable(false),
-                Attribute::Sign(true),
+                private_usage,
             ],
         )
         .map_err(|error| anyhow::anyhow!("generating a hardware runner key: {error}"))?;

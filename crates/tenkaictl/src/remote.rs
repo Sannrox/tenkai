@@ -380,6 +380,16 @@ pub(crate) async fn run(
                 Ok(())
             }
         },
+        Command::Secret { command } => match command {
+            crate::args::SecretCommand::Trust { env, fingerprint } => {
+                crate::secret::require_fingerprint(&fingerprint)?;
+                crate::secret::trust(cli.server_url.as_deref(), &env, &fingerprint)
+            }
+            crate::args::SecretCommand::Recipients { env } => {
+                let offered = client.list_environment_recipients(&env).await?;
+                crate::secret::show_recipients(cli.server_url.as_deref(), &env, offered.recipients)
+            }
+        },
         Command::Exposure { command } => match command {
             crate::args::ExposureCommand::Import { .. } => {
                 bail!(

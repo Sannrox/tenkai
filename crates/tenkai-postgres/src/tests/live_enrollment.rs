@@ -55,6 +55,7 @@ fn live_postgres_runtime_enrollment_is_single_use_across_replicas() {
         &token.token_digest,
         "c0",
         10,
+        None,
         None
     )));
     let barrier = Arc::new(Barrier::new(2));
@@ -63,11 +64,11 @@ fn live_postgres_runtime_enrollment_is_single_use_across_replicas() {
     let results = std::thread::scope(|scope| {
         let left = scope.spawn(|| {
             barrier.wait();
-            a.redeem_runtime_enrollment("prod", &digest, &credential_a, 10, None)
+            a.redeem_runtime_enrollment("prod", &digest, &credential_a, 10, None, None)
         });
         let right = scope.spawn(|| {
             barrier.wait();
-            b.redeem_runtime_enrollment("prod", &digest, &credential_b, 10, None)
+            b.redeem_runtime_enrollment("prod", &digest, &credential_b, 10, None, None)
         });
         [left.join().unwrap(), right.join().unwrap()]
     });
@@ -89,6 +90,7 @@ fn live_postgres_runtime_enrollment_is_single_use_across_replicas() {
         &expired.token_digest,
         "cx",
         100,
+        None,
         None
     )));
     // Runner attestation (#675): a usable-token check spends nothing, and
@@ -118,6 +120,7 @@ fn live_postgres_runtime_enrollment_is_single_use_across_replicas() {
             bound_at: Some(10),
             ..Default::default()
         }),
+        None,
     )
     .unwrap();
     assert!(

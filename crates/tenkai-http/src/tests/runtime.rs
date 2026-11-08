@@ -369,6 +369,97 @@ async fn an_agent_enrolls_once_works_with_its_credential_and_stops_when_revoked(
     );
 }
 
+#[tokio::test]
+async fn recipient_keys_omit_revoked_runtimes() {
+    let (app, _store) = app_with_reconciler(FixedReconciler::for_runtime());
+    let call = |method: &str, path: &str, bearer: Option<&str>, body: serde_json::Value| {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("x-tenkai-runtime-instance", "rt-1");
+        if let Some(bearer) = bearer {
+            request = request.header("authorization", format!("Bearer {bearer}"));
+        }
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(request.body(Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+            )
+        }
+    };
+    let dir = std::env::temp_dir().join(format!(
+        "tenkai-http-sealing-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let key = tenkai::sealing_key::SealingKey::open_or_generate(&dir).unwrap();
+    let (status, issued) = call(
+        "POST",
+        "/v1/environments/prod/runtime-enrollments",
+        Some("management-secret"),
+        serde_json::json!({"ttl_seconds": 60}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{issued}");
+    let token = issued["token"].as_str().unwrap();
+    let (status, enrolled) = call(
+        "POST",
+        "/v1/runtime/environments/prod/enroll",
+        None,
+        serde_json::json!({
+            "token": token,
+            "sealing_public_key": key.to_wire()
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{enrolled}");
+    let id = enrolled["credential_id"].as_str().unwrap().to_string();
+    let (status, offered) = call(
+        "GET",
+        "/v1/environments/prod/recipient-keys",
+        Some("management-secret"),
+        serde_json::json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{offered}");
+    assert_eq!(offered["recipients"][0]["fingerprint"], key.fingerprint());
+    assert_eq!(
+        offered["recipients"][0]["capability"],
+        tenkai::sealing_key::SEALED_SECRETS_CAPABILITY
+    );
+    let (status, _) = call(
+        "POST",
+        &format!("/v1/runners/{id}/revoke"),
+        Some("management-secret"),
+        serde_json::json!({"reason": "retired"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, offered) = call(
+        "GET",
+        "/v1/environments/prod/recipient-keys",
+        Some("management-secret"),
+        serde_json::json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{offered}");
+    assert!(
+        offered["recipients"].as_array().unwrap().is_empty(),
+        "{offered}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// #809: a runner enrolled with a CSR, which the runner CA certified,
 /// reports `client_certificate`; one enrolled without a CSR and a static
 /// token report `bearer`.

@@ -597,6 +597,13 @@ pub fn http_contract() -> Value {
         },
         Route {
             method: "GET",
+            path: "/v1/environments/{environment}/recipient-keys",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<tenkai::management_operations::EnvironmentRecipients>(&mut g),
+        },
+        Route {
+            method: "GET",
             path: "/v1/runners/{credential_id}",
             auth: Auth::Management,
             request: None,
