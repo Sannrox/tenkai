@@ -42,27 +42,9 @@ pub(super) async fn execute(
     // audited recovery; signature and integrity are still checked.
     let admit_recalled =
         (recalled_recovery && step.action == Action::Rollback) || step.action == Action::Remove;
-    let mut content = admit_release(
-        ctx,
-        &target,
-        environment,
-        &step.product,
-        step.instance_name(),
-        admit_recalled,
-    )
-    .await?;
+    let mut content = admit_release(ctx, &target, environment, step, admit_recalled).await?;
     let mut restore_content = match step.restore.as_ref() {
-        Some(pin) => Some(
-            admit_release(
-                ctx,
-                pin,
-                environment,
-                &step.product,
-                step.instance_name(),
-                admit_recalled,
-            )
-            .await?,
-        ),
+        Some(pin) => Some(admit_release(ctx, pin, environment, step, admit_recalled).await?),
         None => None,
     };
     // A host release runs only as a host step, and a host step only runs a
@@ -768,15 +750,7 @@ async fn compensate_activation(
     };
     let mut restored = step.from.is_none();
     if let (Some(previous), Some(pin)) = (step.from.as_deref(), step.restore.as_ref())
-        && let Ok(previous_content) = admit_release(
-            ctx,
-            pin,
-            environment,
-            &step.product,
-            step.instance_name(),
-            false,
-        )
-        .await
+        && let Ok(previous_content) = admit_release(ctx, pin, environment, step, false).await
     {
         match product_execution::activate(ctx, lease, &previous_content, adapters).await {
             Ok(Ok(())) => {
@@ -784,8 +758,7 @@ async fn compensate_activation(
                     ctx,
                     lease,
                     environment,
-                    &step.product,
-                    step.instance_name(),
+                    step,
                     previous,
                     Some(&step.to),
                 )
@@ -852,8 +825,7 @@ async fn restore_after_health_gate(
             workdir: step.workdir.clone(),
         },
         environment,
-        &step.product,
-        step.instance_name(),
+        step,
         false,
     )
     .await
@@ -884,16 +856,7 @@ async fn restore_after_health_gate(
         )
         .await;
     }
-    let mut previous = match admit_release(
-        ctx,
-        pin,
-        environment,
-        &step.product,
-        step.instance_name(),
-        false,
-    )
-    .await
-    {
+    let mut previous = match admit_release(ctx, pin, environment, step, false).await {
         Ok(content) => content,
         Err(error) => {
             return record_live_restore_failure(

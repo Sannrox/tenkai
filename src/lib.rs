@@ -270,6 +270,7 @@ pub mod runtime_local_approval;
 pub mod runtime_protocol;
 pub mod runtime_self_upgrade;
 pub mod schema_contract;
+pub mod sealed_secret;
 pub mod sealing_key;
 pub mod secret_source;
 pub mod server_self_upgrade;

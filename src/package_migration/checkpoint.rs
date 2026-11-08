@@ -231,7 +231,7 @@ pub(super) async fn create_pin_plan(
         artifact_digest: descriptor.artifact_digest,
         workdir: descriptor.content_path,
         host: None,
-        sealed: None,
+        sealed: Vec::new(),
         restore,
     };
     plan::create_from_steps(ctx, &record.environment, vec![step]).await

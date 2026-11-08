@@ -172,13 +172,13 @@ mod tests {
                 workdir: "/var/lib/tenkai/releases/unused".into(),
                 restore: None,
                 host: None,
-                sealed: Some(SealedStep {
+                sealed: vec![SealedStep {
                     secret: "db".into(),
                     key: "password".into(),
                     digest:
                         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                             .into(),
-                }),
+                }],
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,
@@ -205,7 +205,7 @@ mod tests {
     fn ordinary_steps_do_not_need_a_local_policy() {
         let now = crate::now_millis();
         let mut plan = sealed_plan(now);
-        plan.steps[0].sealed = None;
+        plan.steps[0].sealed.clear();
         require_step(None, &plan, &plan.steps[0], &[], now).unwrap();
     }
 
@@ -341,13 +341,13 @@ mod tests {
     fn a_step_without_a_sealed_binding_encodes_as_before() {
         let plan = sealed_plan(crate::now_millis());
         let bound = serde_json::to_value(&plan.steps[0]).unwrap();
-        assert_eq!(bound["sealed"]["secret"], "db");
+        assert_eq!(bound["sealed"][0]["secret"], "db");
         let mut unbound_plan = plan;
-        unbound_plan.steps[0].sealed = None;
+        unbound_plan.steps[0].sealed.clear();
         let unbound = serde_json::to_value(&unbound_plan.steps[0]).unwrap();
         assert!(unbound.get("sealed").is_none(), "{unbound}");
         let decoded: crate::plan::Step = serde_json::from_value(unbound).unwrap();
-        assert_eq!(decoded.sealed, None);
+        assert!(decoded.sealed.is_empty());
     }
 
     #[test]

@@ -103,7 +103,7 @@ mod tests {
             artifact_digest: "sha256:artifact".into(),
             workdir: ".".into(),
             host: None,
-            sealed: None,
+            sealed: Vec::new(),
             restore: None,
         }
     }

@@ -443,7 +443,7 @@ mod tests {
             artifact_digest: policy.artifact_digest.clone(),
             workdir: ".".into(),
             host: None,
-            sealed: None,
+            sealed: Vec::new(),
             restore: None,
         }];
         let content_id = plan_content_id(environment, created_at, &steps);

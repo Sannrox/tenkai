@@ -554,3 +554,66 @@ async fn inspect_reports_webhooks_and_the_policy_path_for_conditional_edits() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[tokio::test]
+async fn sealed_secret_wraps_must_name_an_offered_recipient() {
+    let root = temp_root("sealed");
+    let (app, _config, _store) = lifecycle_router(&root).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = RemoteClient::new(format!("http://{addr}"), "management-secret").unwrap();
+    let stranger = tenkai::sealing_key::SealingKey::open_or_generate(&root.join("stranger"))
+        .unwrap()
+        .public()
+        .clone();
+    let target = tenkai::sealed_secret::SealedTarget::new(
+        "stage",
+        "api",
+        tenkai::sealed_secret::SecretRef::parse("db/password").unwrap(),
+    )
+    .unwrap();
+    let sealed = tenkai::sealed_secret::seal(&target, b"s3cret", &[stranger]).unwrap();
+    let generation = current_generation(&client, "stage").await;
+    let refused = client
+        .configure_environment(
+            "stage",
+            Change::SetSealedSecret {
+                instance: "api".into(),
+                secret: "db".into(),
+                key: "password".into(),
+                sealed,
+            },
+            "rotate",
+            generation,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("not a recipient key of stage"),
+        "{refused:#}"
+    );
+    let missing = client
+        .configure_environment(
+            "stage",
+            Change::DeleteSealedSecret {
+                instance: "api".into(),
+                secret: "db".into(),
+                key: "password".into(),
+                present_in_target: false,
+            },
+            "rotate",
+            generation,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{missing:#}").contains("has no sealed db/password"),
+        "{missing:#}"
+    );
+    let listed = client.list_sealed_secrets("stage").await.unwrap();
+    assert!(listed.secrets.is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}

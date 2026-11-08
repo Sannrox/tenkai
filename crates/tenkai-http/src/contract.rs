@@ -448,6 +448,27 @@ pub fn http_contract() -> Value {
             response: lifecycle.clone(),
         },
         Route {
+            method: "GET",
+            path: "/v1/environments/{environment}/sealed-secrets",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<tenkai::sealed_secret::SealedSecretList>(&mut g),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/environments/{environment}/sealed-secrets",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/environments/{environment}/sealed-secrets",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
             method: "DELETE",
             path: "/v1/environments/{environment}/facts",
             auth: Auth::Management,

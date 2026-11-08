@@ -351,8 +351,16 @@ pub async fn reconcile_deployment(
         }
         _ => Vec::new(),
     };
-    update_reconciled_deployment_object(ctx, &mut object, product, product, deployed, observed_at)
-        .await?;
+    update_reconciled_deployment_object(
+        ctx,
+        &mut object,
+        product,
+        product,
+        deployed,
+        None,
+        observed_at,
+    )
+    .await?;
     ctx.put_with_provider_events(object, &provider_events, &feedback)
         .await?;
     Ok(match deployed {
@@ -367,6 +375,7 @@ async fn update_reconciled_deployment_object(
     product: &str,
     instance: &str,
     deployed: Option<&str>,
+    sealed: Option<&[crate::plan::SealedStep]>,
     observed_at: i64,
 ) -> Result<()> {
     let key = if instance.is_empty() {
@@ -397,7 +406,7 @@ async fn update_reconciled_deployment_object(
         .properties
         .insert(format!("deployment_health.{key}"), "healthy".into());
     object.properties.remove(&format!("deployment_error.{key}"));
-    stamp_applied_overlays(object, product, instance);
+    stamp_applied_overlays(object, product, instance, sealed);
     crate::dependency_document::stamp(ctx, object, key).await?;
     object.properties.remove(&format!("deployed_prev.{key}"));
     for prefix in [
@@ -427,6 +436,7 @@ pub(crate) async fn update_runtime_deployments_object(
             &step.product,
             step.instance_name(),
             Some(&step.to),
+            Some(&step.sealed),
             observed_at,
         )
         .await?;
@@ -451,16 +461,13 @@ pub(crate) async fn record_deployed(
     ctx: &mut Ctx,
     lease: &crate::apply::EnvironmentLease,
     environment_name: &str,
-    product: &str,
-    instance: &str,
+    step: &Step,
     version: &str,
     previous: Option<&str>,
 ) -> Result<()> {
-    let key = if instance.is_empty() {
-        product
-    } else {
-        instance
-    };
+    let product = step.product.as_str();
+    let instance = step.instance_name();
+    let key = instance;
     let mut object = environment(ctx, environment_name).await?;
     object
         .properties
@@ -478,7 +485,7 @@ pub(crate) async fn record_deployed(
         .properties
         .insert(format!("deployment_health.{key}"), "healthy".into());
     object.properties.remove(&format!("deployment_error.{key}"));
-    stamp_applied_overlays(&mut object, product, instance);
+    stamp_applied_overlays(&mut object, product, instance, Some(&step.sealed));
     crate::dependency_document::stamp(ctx, &mut object, key).await?;
     object.updated = crate::now_millis();
     guarded_update(ctx, lease, object).await
@@ -497,6 +504,7 @@ pub(crate) async fn record_unknown(
         &mut object,
         product,
         instance,
+        None,
         &DeploymentTransition::Unknown,
         detail,
         crate::now_millis(),
@@ -594,6 +602,7 @@ pub(crate) async fn record_deployment_observation(
             environment,
             &observation.step.product,
             instance,
+            Some(&observation.step.sealed),
             &observation.transition,
             observation.detail,
             deployment.updated,
@@ -841,6 +850,7 @@ fn transition_deployment(
     environment: &mut Object,
     product: &str,
     instance: &str,
+    sealed: Option<&[crate::plan::SealedStep]>,
     transition: &DeploymentTransition,
     detail: &str,
     observed_at: i64,
@@ -859,7 +869,7 @@ fn transition_deployment(
             environment
                 .properties
                 .remove(&format!("deployment_error.{key}"));
-            stamp_applied_overlays(environment, product, instance);
+            stamp_applied_overlays(environment, product, instance, sealed);
             environment.properties.remove(&format!("spec_drift.{key}"));
             clear_unknown_origin(environment, key);
         }
@@ -882,7 +892,7 @@ fn transition_deployment(
             environment
                 .properties
                 .remove(&format!("deployment_error.{key}"));
-            stamp_applied_overlays(environment, product, instance);
+            stamp_applied_overlays(environment, product, instance, sealed);
             environment.properties.remove(&format!("spec_drift.{key}"));
             clear_unknown_origin(environment, key);
         }
@@ -1781,12 +1791,16 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             &crate::delivery_hold::HoldScope::channel(&product, &channel),
         )
         .await?;
-        let overlay_digest = overlay_digest_for(env_obj, &product);
         let applied_key = if instance.is_empty() {
             product.clone()
         } else {
             instance.clone()
         };
+        let overlay_digest = crate::sealed_secret::instance_config_digest(
+            env_obj,
+            &overlay_digest_for(env_obj, &product),
+            &applied_key,
+        );
         let applied = env_obj
             .properties
             .get(&format!("applied_config.{applied_key}"))
@@ -1865,12 +1879,16 @@ fn subscription_views_from_status(
 ) -> Vec<EnvironmentSubscriptionView> {
     rows.into_iter()
         .map(|row| {
-            let overlay_digest = overlay_digest_for(env_obj, &row.product);
             let applied_key = if row.instance.is_empty() {
                 &row.product
             } else {
                 &row.instance
             };
+            let overlay_digest = crate::sealed_secret::instance_config_digest(
+                env_obj,
+                &overlay_digest_for(env_obj, &row.product),
+                applied_key,
+            );
             let applied_overlay = env_obj
                 .properties
                 .get(&format!("applied_config.{applied_key}"))
@@ -3069,24 +3087,39 @@ pub(crate) fn stamp_spec_drift(
     }
 }
 
-fn stamp_applied_overlays(environment: &mut Object, product: &str, instance: &str) {
+/// Record the configuration an instance now runs. `sealed` is what the
+/// executed step named; `None` (an out-of-band reconcile) reads the
+/// environment's current sealed records.
+fn stamp_applied_overlays(
+    environment: &mut Object,
+    product: &str,
+    instance: &str,
+    sealed: Option<&[crate::plan::SealedStep]>,
+) {
     let key = if instance.is_empty() {
         product
     } else {
         instance
     };
     let digest = overlay_digest_for(environment, product);
-    if digest.is_empty() {
+    let applied = match sealed {
+        Some(sealed) => crate::sealed_secret::config_digest(&digest, sealed),
+        None => crate::sealed_secret::instance_config_digest(environment, &digest, key),
+    };
+    if applied.is_empty() {
         environment
             .properties
             .remove(&format!("applied_config.{key}"));
+    } else {
+        environment
+            .properties
+            .insert(format!("applied_config.{key}"), applied);
+    }
+    if digest.is_empty() {
         environment
             .properties
             .remove(&format!("config_digest.{product}"));
     } else {
-        environment
-            .properties
-            .insert(format!("applied_config.{key}"), digest.clone());
         environment
             .properties
             .insert(format!("config_digest.{product}"), digest);
@@ -3627,6 +3660,7 @@ mod tests {
             &mut environment,
             "api",
             "api",
+            None,
             &DeploymentTransition::Deployed {
                 version: "2.0.0".into(),
                 previous: Some("1.0.0".into()),
@@ -3658,6 +3692,31 @@ mod tests {
     }
 
     #[test]
+    fn applied_config_records_the_sealed_values_the_step_ran_with() {
+        // The environment holds no sealed value by the time the step lands
+        // (rotated or deleted mid-run); the stamp still names what ran.
+        let mut environment = environment_object();
+        let ran = [crate::plan::SealedStep {
+            secret: "db".into(),
+            key: "password".into(),
+            digest: "sha256:1".into(),
+        }];
+        transition_deployment(
+            &mut environment,
+            "api",
+            "api",
+            Some(&ran),
+            &DeploymentTransition::Refreshed,
+            "",
+            42,
+        );
+        assert_eq!(
+            environment.properties.get("applied_config.api").unwrap(),
+            &crate::sealed_secret::config_digest("", &ran)
+        );
+    }
+
+    #[test]
     fn unknown_observation_clears_claimed_deployment() {
         let mut environment = environment_object();
         environment
@@ -3671,6 +3730,7 @@ mod tests {
             &mut environment,
             "api",
             "api",
+            None,
             &DeploymentTransition::Unknown,
             "cleanup failed",
             84,
@@ -4307,7 +4367,7 @@ mod tests {
                 artifact_digest: "abc".into(),
                 workdir: ".".into(),
                 host: None,
-                sealed: None,
+                sealed: Vec::new(),
                 restore: None,
             }],
             state: crate::plan::PlanState::Computed,
@@ -4546,7 +4606,7 @@ mod tests {
                 artifact_digest: "abc".into(),
                 workdir: ".".into(),
                 host: None,
-                sealed: None,
+                sealed: Vec::new(),
                 restore: None,
             }],
             state: crate::plan::PlanState::Computed,
@@ -4672,7 +4732,7 @@ mod tests {
                 artifact_digest: "abc".into(),
                 workdir: ".".into(),
                 host: None,
-                sealed: None,
+                sealed: Vec::new(),
                 restore: None,
             }],
             state: crate::plan::PlanState::Computed,

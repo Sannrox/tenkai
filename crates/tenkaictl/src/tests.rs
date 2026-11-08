@@ -300,6 +300,39 @@ fn parses_secret_trust_and_recipients() {
 }
 
 #[test]
+fn secret_set_takes_no_value_argument() {
+    let set = Cli::try_parse_from([
+        "tenkaictl",
+        "secret",
+        "set",
+        "prod",
+        "api",
+        "db/password",
+        "--generation",
+        "3",
+        "--reason",
+        "rotate",
+    ])
+    .unwrap();
+    assert!(matches!(
+        set.command,
+        Command::Secret {
+            command: SecretCommand::Set { ref env, ref instance, ref secret, ref remote },
+        } if env == "prod" && instance == "api" && secret == "db/password"
+            && remote.generation == Some(3)
+    ));
+    for value in [
+        &["s3cret"][..],
+        &["--value", "s3cret"][..],
+        &["--from-env", "DB_PASSWORD"][..],
+    ] {
+        let mut args = vec!["tenkaictl", "secret", "set", "prod", "api", "db/password"];
+        args.extend_from_slice(value);
+        assert!(Cli::try_parse_from(args).is_err(), "{value:?}");
+    }
+}
+
+#[test]
 fn remote_target_is_explicit_and_carries_no_cli_secret() {
     let cli = Cli::try_parse_from([
         "tenkaictl",

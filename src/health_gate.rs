@@ -730,7 +730,7 @@ mod tests {
             artifact_digest: "sha256:bbbb".into(),
             workdir: "/tmp".into(),
             host: None,
-            sealed: None,
+            sealed: Vec::new(),
             restore: Some(ReleasePin {
                 release_id: "tenkai:release:api@1.0.0".into(),
                 digest: "sha256:cccc".into(),

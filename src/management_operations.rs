@@ -1803,6 +1803,15 @@ impl ManagementOperations {
                     .into(),
             ));
         }
+        // A wrap for a key the server does not offer would reach no runtime.
+        if let crate::environment_config::EnvironmentConfigChange::SetSealedSecret {
+            sealed, ..
+        } = &request.change
+        {
+            let recipients = self.environment_recipient_fingerprints(environment)?;
+            crate::sealed_secret::require_recipients(environment, sealed, &recipients)
+                .map_err(|error| ManagementError::BadRequest(error.to_string()))?;
+        }
         let actor = &context.audit_principal();
         let action = request.change.action();
         self.audit(actor, &format!("environment.configure.{action}.requested"))?;
@@ -2981,7 +2990,7 @@ mod tests {
             artifact_digest: "sha256:artifact".into(),
             workdir: ".".into(),
             host: None,
-            sealed: None,
+            sealed: Vec::new(),
             restore: None,
         };
         use crate::apply::{Outcome, StepOutcomeStatus};

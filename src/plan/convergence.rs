@@ -683,6 +683,15 @@ async fn compute_snapshot_with_policy(
                     } else {
                         instance.clone()
                     };
+                    request.config_digest = crate::sealed_secret::instance_config_digest(
+                        &env_obj,
+                        &request.config_digest,
+                        if instance.is_empty() {
+                            &product
+                        } else {
+                            &instance
+                        },
+                    );
                     request.cluster_config_path =
                         crate::software_executor::cluster_config_path_from_properties(
                             &env_obj.properties,
@@ -715,20 +724,25 @@ async fn compute_snapshot_with_policy(
                         spec_drift_keys.insert(key);
                     }
                 }
-                let overlay_digest = crate::environment::overlay_digest(
-                    &crate::environment::product_overlays(&env_obj, &product).unwrap_or_default(),
-                );
                 let applied_key = if instance.is_empty() {
                     &product
                 } else {
                     &instance
                 };
+                let config_digest = crate::sealed_secret::instance_config_digest(
+                    &env_obj,
+                    &crate::environment::overlay_digest(
+                        &crate::environment::product_overlays(&env_obj, &product)
+                            .unwrap_or_default(),
+                    ),
+                    applied_key,
+                );
                 let applied = env_obj
                     .properties
                     .get(&format!("applied_config.{applied_key}"))
                     .cloned()
                     .unwrap_or_default();
-                if overlay_digest != applied {
+                if config_digest != applied {
                     restart = true;
                 }
                 if env_obj
@@ -1034,7 +1048,13 @@ async fn compute_snapshot_with_policy(
         .enumerate()
         .map(|index_entry| {
             let (index, entry) = index_entry;
-            Step {
+            // Any step that runs the instance writes its sealed values first.
+            let sealed = if entry.action == Action::Remove {
+                Vec::new()
+            } else {
+                crate::sealed_secret::step_bindings(&env_obj, entry.instance_name())?
+            };
+            Ok(Step {
                 id: format!("{}:step:{index}", env_id(env)),
                 // Binding sets the generation from the applier's record.
                 host: host_health_only
@@ -1043,7 +1063,7 @@ async fn compute_snapshot_with_policy(
                         action: HostAction::Health,
                         expected_generation: 0,
                     }),
-                sealed: None,
+                sealed,
                 order: index as u32,
                 instance: if entry.instance == entry.product {
                     String::new()
@@ -1059,9 +1079,9 @@ async fn compute_snapshot_with_policy(
                 artifact_digest: entry.release.artifact_digest,
                 workdir: entry.release.workdir,
                 restore: entry.restore,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     crate::environment::persist_dependency_holds(ctx, env, &hold_sets, &hold_clears).await?;
     persist_spec_drift(ctx, env, &env_obj, &spec_drift_keys).await?;
     Ok((inputs, steps))
@@ -2024,7 +2044,7 @@ pub(super) async fn rollback_step_with_recovery(
         artifact_digest: target.artifact_digest,
         workdir: target.workdir,
         host: None,
-        sealed: None,
+        sealed: crate::sealed_secret::step_bindings(&env_obj, instance)?,
         restore,
         product,
         instance: step_instance,
@@ -2067,7 +2087,7 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
         artifact_digest: target.artifact_digest,
         workdir: target.workdir,
         host: None,
-        sealed: None,
+        sealed: crate::sealed_secret::step_bindings(&env_obj, instance)?,
         restore: None,
         product,
         instance: step_instance,

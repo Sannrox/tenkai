@@ -447,6 +447,44 @@ impl ManagementOperations {
             .ok_or_else(|| ManagementError::NotFound("runner not found".into()))
     }
 
+    /// Fingerprints of `environment`'s unrevoked recipient keys.
+    pub(super) fn environment_recipient_fingerprints(
+        &self,
+        environment: &str,
+    ) -> Result<std::collections::BTreeSet<String>, ManagementError> {
+        self.require_host_runtime_credentials()?;
+        Ok(self
+            .store
+            .runtime_sealing_keys(environment)
+            .map_err(|error| ManagementError::Unavailable(error.to_string()))?
+            .into_iter()
+            .filter_map(|record| {
+                crate::sealing_key::SealingPublicKey::from_wire(&record.public_key)
+                    .ok()
+                    .map(|key| key.fingerprint())
+            })
+            .collect())
+    }
+
+    /// Sealed keys of `environment` with their digests and recipients
+    /// (ADR 0045 §2). Never a value.
+    pub async fn list_sealed_secrets(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+    ) -> Result<crate::sealed_secret::SealedSecretList, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.require_host_runtime_credentials()?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_environment_grant(credential, &context, Some(environment), "sealed secrets")?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        let mut ctx = self.application_ctx()?;
+        crate::sealed_secret::list(&mut ctx, environment)
+            .await
+            .map_err(map_config_error)
+    }
+
     /// Unrevoked runtime sealing keys of `environment` (ADR 0045). Retired
     /// and revoked runtimes are omitted.
     pub async fn list_environment_recipients(

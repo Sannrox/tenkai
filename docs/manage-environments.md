@@ -54,6 +54,54 @@ environment overlays do not satisfy. `env inspect` shows defaults, overlays,
 the digest, and secret names only. A release that omits `[config]` behaves as
 today.
 
+### Sealed secrets
+
+A value for a declared secret can be set sealed (ADR 0045). The client seals
+it to the environment's pinned runtime recipient keys; the server stores only
+the ciphertext and one wrap per recipient, and cannot open it.
+
+```sh
+printf '%s' "$value" | tenkaictl --target remote secret set prod api db/password \
+  --generation 7 --reason "rotate db password"
+tenkaictl --target remote secret list prod
+tenkaictl --target remote secret delete prod api db/password --generation 8 --reason "moved"
+```
+
+- `secret set` reads the exact bytes of standard input, so use `printf '%s'`
+  rather than `echo` unless the value ends in a newline. It never takes the
+  value from an argument or an environment variable, and refuses a terminal.
+- Every offered recipient key must be pinned first
+  (`secret recipients`, `secret trust`); an unpinned key is refused by
+  fingerprint.
+- The secret name must be one the instance's subscribed release declares.
+- `secret list` shows instance, `secret/key`, the sealed digest, who set it,
+  when, and how many recipients can open it. No command returns a value.
+- Deleting a key of a secret the release declares is refused, naming the
+  release, unless `--present-in-target` states the key exists in the target
+  by other means.
+
+A change is not written to the target. It changes the instance's
+configuration digest, which covers each ciphertext digest but not the wraps,
+so the next plan carries the same-version Restart an overlay change does,
+and only for instances that read the key. Every non-remove step for the
+instance names its sealed keys and digests (`sealed` in the plan), so they
+are covered by the plan digest and its approval; a plan is stale, and not
+executed, once those digests change. Adding a wrap changes nothing.
+Because every step for such an instance is a sealed step, a runtime refuses
+it without a local approval policy (`TENKAI_RUNTIME_APPROVAL_POLICY`,
+[runtime protocol](runtime-protocol-v1.md)) and waits for the plan's
+approvals. Install that policy on every runtime of the environment before
+the first `secret set`; deleting the last sealed key of an instance lifts
+the requirement. Changes are generation-fenced and audited like other environment
+configuration (`PUT`/`DELETE /v1/environments/{environment}/sealed-secrets`,
+`GET` to list).
+
+Servers that predate sealed secrets ignore the stored records and never plan
+them. Set the first sealed value only once every server and runtime of the
+environment understands them: an older server computes the configuration
+digest without them and would plan its own restart. Writing values to the
+target is not part of this release.
+
 `env add --connectivity <class>` also sets the connectivity class.
 
 ### Criticality

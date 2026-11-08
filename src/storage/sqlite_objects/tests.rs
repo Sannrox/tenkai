@@ -339,7 +339,7 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
             artifact_digest: "abc".into(),
             workdir: ".".into(),
             host: None,
-            sealed: None,
+            sealed: Vec::new(),
             restore: None,
         }],
         state: PlanState::Computed,

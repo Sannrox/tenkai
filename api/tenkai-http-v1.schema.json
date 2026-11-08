@@ -2195,6 +2195,65 @@
             "contract"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Store a value the client sealed for one instance's secret key\n(ADR 0045 §2). Never a plain value.",
+          "properties": {
+            "instance": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "set_sealed_secret",
+              "type": "string"
+            },
+            "sealed": {
+              "$ref": "#/$defs/SealedValue"
+            },
+            "secret": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "instance",
+            "secret",
+            "key",
+            "sealed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Remove one sealed key. `present_in_target` states that a release\nreading it finds the key in the target by other means.",
+          "properties": {
+            "instance": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "delete_sealed_secret",
+              "type": "string"
+            },
+            "present_in_target": {
+              "type": "boolean"
+            },
+            "secret": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "instance",
+            "secret",
+            "key"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -5939,6 +5998,118 @@
       ],
       "type": "object"
     },
+    "SealedSecretEntry": {
+      "description": "One sealed key as `secret list` shows it. Never a value.",
+      "properties": {
+        "digest": {
+          "description": "`sha256:` digest of the sealed ciphertext.",
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "recipients": {
+          "description": "Recipient fingerprints that can open the value.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "secret": {
+          "type": "string"
+        },
+        "set_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "set_by": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "instance",
+        "secret",
+        "key",
+        "digest",
+        "set_by",
+        "set_at",
+        "recipients"
+      ],
+      "type": "object"
+    },
+    "SealedSecretList": {
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "secrets": {
+          "items": {
+            "$ref": "#/$defs/SealedSecretEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "environment",
+        "secrets"
+      ],
+      "type": "object"
+    },
+    "SealedValue": {
+      "additionalProperties": false,
+      "description": "A sealed value as the client submits it and the server stores it.",
+      "properties": {
+        "ciphertext": {
+          "description": "Standard base64 of the 12-byte nonce followed by the AES-256-GCM\nciphertext and tag of the value under the data key.",
+          "type": "string"
+        },
+        "format_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wraps": {
+          "description": "One HPKE wrap of the data key per recipient.",
+          "items": {
+            "$ref": "#/$defs/SealedWrap"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "format_version",
+        "ciphertext",
+        "wraps"
+      ],
+      "type": "object"
+    },
+    "SealedWrap": {
+      "additionalProperties": false,
+      "description": "The data key wrapped for one recipient key.",
+      "properties": {
+        "encapsulated_key": {
+          "description": "Standard base64 HPKE encapsulated key.",
+          "type": "string"
+        },
+        "fingerprint": {
+          "description": "`sha256:<hex>` fingerprint of the recipient's sealing key.",
+          "type": "string"
+        },
+        "wrapped_key": {
+          "description": "Standard base64 HPKE ciphertext of the data key.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fingerprint",
+        "encapsulated_key",
+        "wrapped_key"
+      ],
+      "type": "object"
+    },
     "ServiceStatus": {
       "properties": {
         "backup": {
@@ -7204,6 +7375,37 @@
       "auth": "management",
       "method": "DELETE",
       "path": "/v1/environments/{environment}/bindings",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}/sealed-secrets",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/SealedSecretList"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/environments/{environment}/sealed-secrets",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/environments/{environment}/sealed-secrets",
       "request": {
         "$ref": "#/$defs/EnvironmentConfigRequest"
       },

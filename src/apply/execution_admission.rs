@@ -47,6 +47,9 @@ enum Rejection {
     BindingsChanged {
         product: String,
     },
+    SealedChanged {
+        product: String,
+    },
 }
 
 impl fmt::Display for Rejection {
@@ -85,6 +88,9 @@ impl fmt::Display for Rejection {
                 formatter,
                 "is stale for {product}: dependency bindings changed"
             ),
+            Self::SealedChanged { product } => {
+                write!(formatter, "is stale for {product}: sealed secrets changed")
+            }
         }
     }
 }
@@ -138,13 +144,25 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
         }
     }
     for step in &plan.steps {
+        let instance = step.instance_name();
+        // The plan digest and its approval cover the sealed digests a step
+        // names; a rotation since then needs its own plan.
+        if step.action != Action::Remove
+            && crate::sealed_secret::step_bindings(&environment, instance)
+                .ok()
+                .as_ref()
+                != Some(&step.sealed)
+        {
+            return Ok(Err(Rejection::SealedChanged {
+                product: step.product.clone(),
+            }));
+        }
         // The root-side applier admits a host step only at the generation
         // and from the release its own record names, so the server's view,
         // unknown after a failed host step, does not hold it back.
         if step.host.is_some() {
             continue;
         }
-        let instance = step.instance_name();
         if step.action != Action::Rollback
             && environment
                 .properties
@@ -272,7 +290,7 @@ mod tests {
                 artifact_digest: "artifact-digest".into(),
                 workdir: "/srv/api".into(),
                 host: None,
-                sealed: None,
+                sealed: Vec::new(),
                 restore: None,
             }],
             state: PlanState::Computed,
@@ -499,7 +517,7 @@ mod tests {
                 artifact_digest: "artifact".into(),
                 workdir: "/srv/api".into(),
                 host: None,
-                sealed: None,
+                sealed: Vec::new(),
                 restore: None,
             }],
             state: PlanState::Computed,

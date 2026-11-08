@@ -110,12 +110,13 @@ pub struct Step {
     /// drops it, computes a different digest, and fails approval closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<HostStep>,
-    /// Set only on steps that write a sealed secret (ADR 0045 §4). Absent on
-    /// every other step and omitted from the encoding, so plan digests of
-    /// steps without it are unchanged. A binary that predates the field
-    /// drops it, computes a different digest, and fails approval closed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sealed: Option<SealedStep>,
+    /// Sealed values the runtime writes before this step (ADR 0045 §4): every
+    /// sealed key of the instance, in key order. Empty on every other step
+    /// and omitted from the encoding, so plan digests of steps without it are
+    /// unchanged. A binary that predates the field drops it, computes a
+    /// different digest, and fails approval closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sealed: Vec<SealedStep>,
 }
 
 impl Step {
@@ -131,7 +132,7 @@ impl Step {
     /// Whether the environment runtime must verify this step against a local
     /// approval policy before it runs (ADR 0045 §4).
     pub fn requires_local_approval_policy(&self) -> bool {
-        self.sealed.is_some()
+        !self.sealed.is_empty()
     }
 }
 
@@ -163,7 +164,7 @@ pub struct HostStep {
     pub expected_generation: u64,
 }
 
-/// The sealed value a runtime writes for this step (ADR 0045 §4). The
+/// One sealed value a runtime writes for a step (ADR 0045 §4). The
 /// ciphertext is not in the plan; only its digest is, so a rotation changes
 /// the digest and needs approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -743,7 +744,7 @@ mod tests {
                 artifact_digest: "target-artifact-digest".into(),
                 workdir: "/srv/api".into(),
                 host: None,
-                sealed: None,
+                sealed: Vec::new(),
                 restore: Some(ReleasePin {
                     release_id: "tenkai:release:api@1.0.0".into(),
                     digest: "restore-digest".into(),

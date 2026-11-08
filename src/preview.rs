@@ -464,7 +464,7 @@ mod tests {
             artifact_digest: "artifact".into(),
             workdir: "/srv/api".into(),
             host: None,
-            sealed: None,
+            sealed: Vec::new(),
             restore: None,
         }
     }
