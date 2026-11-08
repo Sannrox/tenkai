@@ -30,10 +30,7 @@ fn embed_console() -> Result<(), Box<dyn std::error::Error>> {
             println!("cargo:rerun-if-changed={}", PathBuf::from(&path).display());
             std::fs::read(&path)?
         }
-        None => reqwest::blocking::get(pin.url())?
-            .error_for_status()?
-            .bytes()?
-            .to_vec(),
+        None => download_console(&pin.url())?,
     };
     pin.verify(&bundle)?;
 
@@ -86,4 +83,34 @@ fn embed_console() -> Result<(), Box<dyn std::error::Error>> {
     generated.push_str("];\n");
     std::fs::write(root.with_file_name("console_bundle.rs"), generated)?;
     Ok(())
+}
+
+/// GitHub release downloads sometimes answer 504. Retry 5xx, 429, timeouts
+/// and connect errors.
+#[cfg(feature = "ui")]
+fn download_console(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    const ATTEMPTS: u32 = 5;
+    let mut last = None;
+    for attempt in 1..=ATTEMPTS {
+        match reqwest::blocking::get(url).and_then(|response| response.error_for_status()) {
+            Ok(response) => return Ok(response.bytes()?.to_vec()),
+            Err(error) if attempt < ATTEMPTS && retryable_console_fetch(&error) => {
+                std::thread::sleep(std::time::Duration::from_secs(1 << (attempt.min(3) - 1)));
+                last = Some(error);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(last
+        .ok_or("console bundle download failed without an error")?
+        .into())
+}
+
+#[cfg(feature = "ui")]
+fn retryable_console_fetch(error: &reqwest::Error) -> bool {
+    error.is_timeout()
+        || error.is_connect()
+        || error.status().is_some_and(|status| {
+            status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        })
 }
