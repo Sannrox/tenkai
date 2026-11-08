@@ -8,13 +8,22 @@
 //! a file that must never be overwritten are different operations and live
 //! with their callers.
 
+use std::ffi::OsString;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+
+/// Fixed sibling (`path` + `.pending`) that earlier versions wrote through.
+/// The verified writes remove one a crash left behind.
+pub fn pending_path(path: &Path) -> PathBuf {
+    let mut os = OsString::from(path.as_os_str());
+    os.push(".pending");
+    PathBuf::from(os)
+}
 
 /// Remove a file, treating absence as success.
 pub fn remove_if_exists(path: &Path) -> Result<()> {
@@ -52,6 +61,7 @@ pub fn write_bytes_verified(
     let parent = parent(path);
     std::fs::create_dir_all(parent)
         .with_context(|| format!("create state directory {}", parent.display()))?;
+    remove_if_exists(&pending_path(path))?;
     replace(path, bytes, None, verify)
 }
 
@@ -218,6 +228,7 @@ mod tests {
         let path = root.join("active.json");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&path, b"{\"name\":\"prior\",\"n\":9}\n").unwrap();
+        std::fs::write(pending_path(&path), b"left by an older version").unwrap();
 
         let err = write_json_verified::<Sample, Sample, _>(
             &path,
