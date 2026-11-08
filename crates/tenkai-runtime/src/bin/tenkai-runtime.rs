@@ -48,6 +48,11 @@ struct Cli {
     /// (#675). Without it, attestation carries only the probed host facts.
     #[arg(long, env = "TENKAI_RUNTIME_PREFLIGHT_CONFIG")]
     preflight_config: Option<PathBuf>,
+    /// Local approval policy the runtime verifies sealed steps against
+    /// (ADR 0045 §4). Installed on this host, outside the server's reach.
+    /// Without it, a sealed step is refused with a named reason.
+    #[arg(long, env = "TENKAI_RUNTIME_APPROVAL_POLICY")]
+    approval_policy: Option<PathBuf>,
 }
 
 /// Manage the agent's own versions under `--home`.
@@ -137,6 +142,10 @@ async fn main() -> Result<()> {
     }
     if let Some(path) = cli.preflight_config {
         client = client.with_preflight(path);
+    }
+    tenkai::key_revocation::load_configured()?;
+    if let Some(path) = cli.approval_policy {
+        client = client.with_local_policy(tenkai::runtime_local_approval::load(&path)?);
     }
     if let Some(home) = cli.home {
         client = client.with_home(tenkai::runtime_self_upgrade::Home::new(home))?;

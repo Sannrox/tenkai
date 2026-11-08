@@ -934,7 +934,10 @@ pub(crate) async fn execution_envelopes(
     Ok(envelopes)
 }
 
-async fn list_collected_envelopes(ctx: &mut Ctx, plan_id: &str) -> Result<Vec<ApprovalEnvelope>> {
+pub(crate) async fn list_collected_envelopes(
+    ctx: &mut Ctx,
+    plan_id: &str,
+) -> Result<Vec<ApprovalEnvelope>> {
     let objects = ctx
         .find_by_property(
             crate::ontology::KIND_PLAN_APPROVAL_ENVELOPE,

@@ -3702,6 +3702,7 @@ install = "true"
                 artifact_digest: artifact_digest.into(),
                 workdir: workdir.into(),
                 host: None,
+                sealed: None,
                 restore: None,
             }],
             state: PlanState::Computed,

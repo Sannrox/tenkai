@@ -109,6 +109,12 @@ pub struct Step {
     /// drops it, computes a different digest, and fails approval closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<HostStep>,
+    /// Set only on steps that write a sealed secret (ADR 0045 §4). Absent on
+    /// every other step and omitted from the encoding, so plan digests of
+    /// steps without it are unchanged. A binary that predates the field
+    /// drops it, computes a different digest, and fails approval closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<SealedStep>,
 }
 
 impl Step {
@@ -119,6 +125,12 @@ impl Step {
         } else {
             &self.instance
         }
+    }
+
+    /// Whether the environment runtime must verify this step against a local
+    /// approval policy before it runs (ADR 0045 §4).
+    pub fn requires_local_approval_policy(&self) -> bool {
+        self.sealed.is_some()
     }
 }
 
@@ -148,6 +160,18 @@ pub struct HostStep {
     /// Generation of the applier's per-environment, per-product record this
     /// step was planned against. The applier refuses any other.
     pub expected_generation: u64,
+}
+
+/// The sealed value a runtime writes for this step (ADR 0045 §4). The
+/// ciphertext is not in the plan; only its digest is, so a rotation changes
+/// the digest and needs approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealedStep {
+    pub secret: String,
+    pub key: String,
+    /// `sha256:<hex>` of the sealed ciphertext this step writes.
+    pub digest: String,
 }
 
 /// The one action a host step runs.
@@ -718,6 +742,7 @@ mod tests {
                 artifact_digest: "target-artifact-digest".into(),
                 workdir: "/srv/api".into(),
                 host: None,
+                sealed: None,
                 restore: Some(ReleasePin {
                     release_id: "tenkai:release:api@1.0.0".into(),
                     digest: "restore-digest".into(),

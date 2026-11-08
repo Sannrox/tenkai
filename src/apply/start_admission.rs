@@ -455,6 +455,7 @@ mod tests {
             artifact_digest: "fixture".into(),
             workdir: ".".into(),
             host: None,
+            sealed: None,
             restore: None,
         }
     }

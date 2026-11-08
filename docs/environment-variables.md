@@ -114,6 +114,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_RUNTIME_PKCS11_PIN` | unset | Secret setting: PIN for that token (`TENKAI_RUNTIME_PKCS11_PIN_FILE` or the secret directory) |
 | `TENKAI_RUNTIME_PKCS11_KEY_LABEL` | `tenkai-runner` | PKCS#11 object label of the hardware runner key |
 | `TENKAI_RUNTIME_PREFLIGHT_CONFIG` | unset | `tenkai-runtime`: host preflight config whose checks the agent runs and signs when its environment requires runner attestation; without it, attestation carries only the probed host facts ([attested runners](run-tenkai-server.md#attested-runners)) |
+| `TENKAI_RUNTIME_APPROVAL_POLICY` | unset | `tenkai-runtime`: host-owned approval policy the runtime evaluates sealed steps against (ADR 0045 §4). Same TOML shape as the host applier policy. Without it, a sealed step is refused. The file and its parent directory must be owned by the runtime user and not group- or other-writable |
 | `TENKAI_TLS_MIN_VERSION` | `1.3` | Lowest TLS version accepted: `1.3` or `1.2` |
 | `TENKAI_ENABLE_METRICS` | `false` | Enable the Prometheus scrape endpoint (`--enable-metrics`) |
 | `TENKAI_AGENT_ACTOR_POLICY` | `require_approval` | Mutations whose token `act` chain names an agent: `require_approval` allows only plans, which still need approval under the environment's policy; `forbid` refuses all ([auth request context](auth-request-context.md#delegated-calls-and-agent-actors)) |

@@ -6,7 +6,7 @@ There is no served gRPC `RuntimeService`.
 
 | HTTP | Request | Result |
 | --- | --- | --- |
-| `GET /v1/runtime/environments/{environment}/work` | Bearer token and `x-tenkai-runtime-instance`. No body. | JSON `RuntimeWork` (`environment`, optional `plan`, optional `claim`) |
+| `GET /v1/runtime/environments/{environment}/work` | Bearer token and `x-tenkai-runtime-instance`. No body. | JSON `RuntimeWork` (`environment`, optional `plan`, optional `claim`, optional `approvals`) |
 | `POST /v1/runtime/environments/{environment}/complete` | JSON `RuntimeCompletion` (`plan_id`, `generation`, `succeeded`, `detail`, `receipts`) | `204` |
 | `POST /v1/runtime/environments/{environment}/heartbeat` | JSON `RuntimeHeartbeat` (`plan_id`, `generation`) | JSON claim |
 | `POST /v1/runtime/environments/{environment}/inventory` | JSON `RuntimeInventoryReport` (`facts`, `source`) | JSON `RuntimeInventoryResponse` |
@@ -46,6 +46,16 @@ The server records the key against that enrolled runner and serves
 unrevoked keys on
 `GET /v1/environments/{environment}/recipient-keys` (read capability).
 A runtime that has sent a key advertises the `sealed_secrets` capability.
+
+`approvals` is the plan's approval envelopes (ADR 0037). The server includes
+them only when a step writes a sealed secret, so a runtime that predates the
+field keeps decoding idle work and ordinary plans. The runtime recomputes
+the plan digest, finds the sealed step, and evaluates the envelopes against
+a local approval policy installed with it (`TENKAI_RUNTIME_APPROVAL_POLICY`),
+at the same strict quorum the host applier uses. Without that policy, or when
+the envelopes bind different executable content, a sealed step is refused
+with a named reason. Incomplete envelopes keep the claim and retry; they do
+not fail the plan. Other steps are unchanged.
 
 ### Runner attestation statement
 

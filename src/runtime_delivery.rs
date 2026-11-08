@@ -577,6 +577,50 @@ pub struct RuntimeWork {
     pub environment: String,
     pub plan: Option<Plan>,
     pub claim: Option<RuntimeClaim>,
+    /// Plan-approval envelopes the runtime verifies locally for sealed
+    /// steps (ADR 0045 §4). Omitted when empty so a runtime that predates
+    /// the field keeps decoding idle work and plans without sealed steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvals: Vec<crate::plan_approval::ApprovalEnvelope>,
+}
+
+fn idle_work(environment: &str) -> RuntimeWork {
+    RuntimeWork {
+        environment: environment.into(),
+        plan: None,
+        claim: None,
+        approvals: Vec::new(),
+    }
+}
+
+async fn delivered_work(
+    ctx: &mut Ctx,
+    environment: &str,
+    plan: Plan,
+    claim: RuntimeClaim,
+) -> Result<RuntimeWork, RuntimeDeliveryError> {
+    let approvals = if plan
+        .steps
+        .iter()
+        .any(crate::plan::Step::requires_local_approval_policy)
+    {
+        // Keep envelopes whose digest does not match so the runtime can
+        // refuse a forged plan instead of treating it as "not yet approved".
+        let mut envelopes = crate::plan_approval::list_collected_envelopes(ctx, &plan.id)
+            .await
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+        let mut seen = std::collections::BTreeSet::new();
+        envelopes.retain(|envelope| seen.insert(envelope.signature.clone()));
+        envelopes
+    } else {
+        Vec::new()
+    };
+    Ok(RuntimeWork {
+        environment: environment.into(),
+        plan: Some(plan),
+        claim: Some(claim),
+        approvals,
+    })
 }
 
 /// Which binary of which agent self-upgrade step a runtime asks for (#685).
@@ -795,11 +839,7 @@ impl RuntimeDeliveryOperations {
             match crate::apply::runtime_may_take_over(&mut ctx, environment).await {
                 Ok(true) => {}
                 Ok(false) => {
-                    return Ok(RuntimeWork {
-                        environment: environment.into(),
-                        plan: None,
-                        claim: None,
-                    });
+                    return Ok(idle_work(environment));
                 }
                 Err(error) => return Err(RuntimeDeliveryError::Unavailable(error.to_string())),
             }
@@ -810,11 +850,7 @@ impl RuntimeDeliveryOperations {
             .await
             .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
         let Some(plan) = plan else {
-            return Ok(RuntimeWork {
-                environment: environment.into(),
-                plan: None,
-                claim: None,
-            });
+            return Ok(idle_work(environment));
         };
         let Some(mut ctx) = self.reconciler.application_ctx() else {
             return Err(RuntimeDeliveryError::Unavailable(
@@ -845,11 +881,7 @@ impl RuntimeDeliveryOperations {
                 .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?
                 .is_some();
         if held {
-            return Ok(RuntimeWork {
-                environment: environment.into(),
-                plan: None,
-                claim: None,
-            });
+            return Ok(idle_work(environment));
         }
         // A drifted clock must not touch leases: it could expire or take
         // over another runtime's claim. Only a durable completion this owner
@@ -863,6 +895,7 @@ impl RuntimeDeliveryOperations {
                     environment: environment.into(),
                     plan: Some(plan),
                     claim: Some(claim),
+                    approvals: Vec::new(),
                 }),
                 _ => Err(RuntimeDeliveryError::Unavailable(refusal.to_string())),
             };
@@ -895,22 +928,14 @@ impl RuntimeDeliveryOperations {
                     )
                     .await
                     .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
-                    return Ok(RuntimeWork {
-                        environment: environment.into(),
-                        plan: None,
-                        claim: None,
-                    });
+                    return Ok(idle_work(environment));
                 }
                 // Placement admits new execution only: a claim holding a
                 // durable completion is replayed whatever the facts say now.
                 if claim.completion_json.is_none() {
                     require_runtime_placement(&mut ctx, environment, &plan).await?;
                 }
-                Ok(RuntimeWork {
-                    environment: environment.into(),
-                    plan: Some(plan),
-                    claim: Some(claim),
-                })
+                delivered_work(&mut ctx, environment, plan, claim).await
             }
             None => {
                 // Another runtime's claim. If it stored its completion and
@@ -928,11 +953,7 @@ impl RuntimeDeliveryOperations {
                         .await
                         .map_err(|error| RuntimeDeliveryError::Internal(format!("{error:#}")))?;
                 }
-                Ok(RuntimeWork {
-                    environment: environment.into(),
-                    plan: None,
-                    claim: None,
-                })
+                Ok(idle_work(environment))
             }
         }
     }

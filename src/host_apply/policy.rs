@@ -140,7 +140,7 @@ impl HostApprovalPolicy {
             let statement = &envelope.statement;
             if statement.policy_provider == crate::approval_policy::POLICY_PROVIDER {
                 rejected.push(format!(
-                    "{}: automatic approvals never authorize host steps",
+                    "{}: automatic approvals never authorize a local-policy step",
                     envelope.key_id
                 ));
                 continue;
@@ -187,10 +187,48 @@ impl HostApprovalPolicy {
         .map(|purpose| (purpose, self.rules(purpose)))
         .collect();
         HostApprovals {
+            refusal_prefix: "host approval policy",
             rules,
             candidates,
             rejected,
         }
+    }
+
+    /// Same as [`Self::evaluate`], with a refusal prefix the runtime uses so
+    /// operators can tell a local-policy refusal from a host-applier one.
+    pub fn evaluate_as(
+        &self,
+        refusal_prefix: &'static str,
+        plan: &Plan,
+        envelopes: &[ApprovalEnvelope],
+        now_ms: i64,
+    ) -> HostApprovals {
+        let mut approvals = self.evaluate(plan, envelopes, now_ms);
+        approvals.refusal_prefix = refusal_prefix;
+        approvals
+    }
+
+    /// Recompute the plan digest (via envelope verification), evaluate the
+    /// envelopes, and require every purpose the plan needs from its steps.
+    pub fn verify_plan(
+        &self,
+        plan: &Plan,
+        envelopes: &[ApprovalEnvelope],
+        now_ms: i64,
+    ) -> Result<HostApprovals> {
+        self.verify_plan_as("host approval policy", plan, envelopes, now_ms)
+    }
+
+    pub fn verify_plan_as(
+        &self,
+        refusal_prefix: &'static str,
+        plan: &Plan,
+        envelopes: &[ApprovalEnvelope],
+        now_ms: i64,
+    ) -> Result<HostApprovals> {
+        let approvals = self.evaluate_as(refusal_prefix, plan, envelopes, now_ms);
+        approvals.require_all(&plan_purposes(plan))?;
+        Ok(approvals)
     }
 }
 
@@ -228,6 +266,7 @@ struct Candidate {
 /// them against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostApprovals {
+    refusal_prefix: &'static str,
     rules: BTreeMap<QuorumPurpose, Vec<QuorumRule>>,
     candidates: Vec<Candidate>,
     rejected: Vec<String>,
@@ -251,6 +290,7 @@ impl HostApprovals {
             )
         }));
         Self {
+            refusal_prefix: self.refusal_prefix,
             rules: self.rules.clone(),
             candidates: valid,
             rejected,
@@ -286,10 +326,11 @@ impl HostApprovals {
         }
         let refusal = missing.join("; ");
         if self.rejected.is_empty() {
-            bail!("host approval policy: {refusal}");
+            bail!("{}: {refusal}", self.refusal_prefix);
         }
         bail!(
-            "host approval policy: {refusal}; not counted: {}",
+            "{}: {refusal}; not counted: {}",
+            self.refusal_prefix,
             self.rejected.join("; ")
         )
     }
