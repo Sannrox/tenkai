@@ -51,6 +51,19 @@ pub(crate) enum EnvCommand {
     List,
     /// Inspect one environment: subscriptions, deployed versions, lease/fence, latest plan.
     Inspect { env: String },
+    /// List recorded deployment attempts newest first.
+    History {
+        env: String,
+        /// Instance name. Unnamed instances equal the product.
+        #[arg(long)]
+        product: Option<String>,
+        /// Page size (1-100). Default 50.
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Exclusive cursor from the previous page.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// Show dependency holds, providers, and remaining-dependent impact.
     Dependencies {
         env: String,

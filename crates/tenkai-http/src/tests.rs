@@ -4,6 +4,7 @@ mod catalog_list;
 mod change_events;
 mod config;
 mod delivery_hold;
+mod deployment_history;
 mod environment_config;
 mod exports;
 mod fixtures;

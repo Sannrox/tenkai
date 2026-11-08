@@ -63,6 +63,7 @@ fn http_exposed_tenant_rpcs_are_subset_of_registry() {
     assert!(http_exposed_tenant_rpc_ids().contains(&"event.list"));
     assert!(http_exposed_tenant_rpc_ids().contains(&"environment.runtime"));
     assert!(http_exposed_tenant_rpc_ids().contains(&"environment.dependencies"));
+    assert!(http_exposed_tenant_rpc_ids().contains(&"environment.history"));
 }
 
 #[test]

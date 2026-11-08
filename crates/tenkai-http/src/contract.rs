@@ -23,6 +23,7 @@ use tenkai::criticality::{
     DerivedEnvelope, DerivedImportResult, EffectiveCriticality, SetCriticalityRequest,
 };
 use tenkai::delivery_hold::DeliveryHoldView;
+use tenkai::deployment_history::{DeploymentHistoryPage, DeploymentHistoryQuery};
 use tenkai::environment::{EnvironmentInspectReport, EnvironmentListEntry, StatusRow};
 use tenkai::environment_config::{EnvironmentConfigRequest, RegisterEnvironmentRequest};
 use tenkai::environment_dependencies::EnvironmentDependencies;
@@ -347,6 +348,13 @@ pub fn http_contract() -> Value {
             auth: Auth::Read,
             request: None,
             response: schema::<EnvironmentDependencies>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/environments/{environment}/history",
+            auth: Auth::Read,
+            request: Some(schema::<DeploymentHistoryQuery>(&mut g)),
+            response: schema::<DeploymentHistoryPage>(&mut g),
         },
         Route {
             method: "GET",

@@ -10,6 +10,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::auth_context::AuthenticatedRequestContext;
+use crate::deployment_history::DeploymentHistoryPage;
 use crate::environment_dependencies::EnvironmentDependencies;
 use crate::plan::{EnvironmentInspectReport, EnvironmentListEntry, FleetStatusReport, StatusRow};
 use crate::reconciler::TickReport;
@@ -173,6 +174,18 @@ impl TenantEnvironmentOperations {
     ) -> Result<EnvironmentDependencies, TenantEnvironmentError> {
         self.visible_fixture(context, environment).await?;
         Ok(EnvironmentDependencies::empty(environment))
+    }
+
+    pub async fn history(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &str,
+    ) -> Result<DeploymentHistoryPage, TenantEnvironmentError> {
+        self.visible_fixture(context, environment).await?;
+        Ok(DeploymentHistoryPage {
+            items: Vec::new(),
+            next_cursor: None,
+        })
     }
 
     pub async fn reconcile(
@@ -377,6 +390,7 @@ fn partition_local_inspect(name: &str) -> EnvironmentInspectReport {
         retirement: None,
         delivery_hold: None,
         criticality: None,
+        latest_failures: Vec::new(),
     }
 }
 
@@ -590,6 +604,28 @@ mod tests {
 
         let error = operations.inspect(&tenant_a, "env-b").await.unwrap_err();
         assert!(matches!(error, TenantEnvironmentError::NotFound));
+        let history = operations.history(&tenant_a, "env-b").await.unwrap_err();
+        assert!(matches!(history, TenantEnvironmentError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn history_is_empty_after_the_environment_is_visible() {
+        let store = Arc::new(InMemoryTenantOperationalStore::new());
+        let tenant_a = context("tenant-a");
+        store
+            .put_environment_for(
+                &tenant_a,
+                &EnvironmentRecord {
+                    id: "prod".into(),
+                    revision: 0,
+                    configuration_json: "{}".into(),
+                },
+            )
+            .unwrap();
+        let operations = TenantEnvironmentOperations::new(store, Arc::new(View::default()));
+        let page = operations.history(&tenant_a, "prod").await.unwrap();
+        assert!(page.items.is_empty());
+        assert!(page.next_cursor.is_none());
     }
 
     #[tokio::test]
@@ -745,6 +781,7 @@ mod tests {
             preview: None,
             delivery_hold: None,
             criticality: None,
+            latest_failures: Vec::new(),
         }
     }
 

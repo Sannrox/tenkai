@@ -415,6 +415,7 @@ mod tests {
             preview: None,
             delivery_hold: None,
             criticality: None,
+            latest_failures: Vec::new(),
         };
         annotate_plan_with_priors(
             &mut plan,
@@ -566,6 +567,7 @@ mod tests {
             preview: None,
             delivery_hold: None,
             criticality: None,
+            latest_failures: Vec::new(),
         };
         let config = PriorConfig {
             enabled: true,

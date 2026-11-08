@@ -537,6 +537,8 @@ pub(crate) async fn record_deployment_observation(
             ("status".into(), "failed".into()),
             ("detail".into(), "deployment bookkeeping incomplete".into()),
             ("lease_generation".into(), lease.generation.to_string()),
+            ("action".into(), observation.step.action.to_string()),
+            ("plan_id".into(), observation.plan_id.to_string()),
         ]),
         created: observed_at,
         updated: observed_at,
@@ -1514,6 +1516,9 @@ pub struct EnvironmentInspectReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub criticality: Option<EnvironmentCriticality>,
+    /// Latest failed or rolled back attempt per instance (#1054).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub latest_failures: Vec<crate::deployment_history::DeploymentAttemptView>,
 }
 
 /// Inspect copy of declared/derived criticality. Lives here so this module
@@ -2006,6 +2011,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             retirement,
             delivery_hold,
             criticality,
+            latest_failures: Vec::new(),
         });
     }
     Ok(fleet_status_from_inspects(reports))
@@ -2073,6 +2079,7 @@ async fn inspect_environment_base(
         .context("current time is outside the supported maintenance-window range")?;
     let maintenance = maintenance_inspect(crate::maintenance::list(ctx, env).await, now);
     let criticality = criticality_from_properties(&env_obj.properties, crate::now_millis());
+    let latest_failures = crate::deployment_history::latest_failures(ctx, env).await?;
     Ok(EnvironmentInspectReport {
         name: env_obj.name,
         id: env_obj.id,
@@ -2101,6 +2108,7 @@ async fn inspect_environment_base(
         retirement,
         delivery_hold,
         criticality,
+        latest_failures,
     })
 }
 

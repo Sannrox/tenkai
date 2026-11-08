@@ -337,6 +337,7 @@ mod tests {
             preview: None,
             delivery_hold: None,
             criticality: None,
+            latest_failures: Vec::new(),
         }
     }
 

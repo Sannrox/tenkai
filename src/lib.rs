@@ -182,6 +182,7 @@ pub mod delivery_hold;
 pub mod delivery_manifest;
 pub mod dependency_document;
 pub mod deploy_webhook;
+pub mod deployment_history;
 pub mod dev_sign;
 pub mod development_fixtures;
 pub mod embedded;

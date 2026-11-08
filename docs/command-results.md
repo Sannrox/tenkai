@@ -17,6 +17,7 @@ remains `--output human`; existing scripts and operator output are unchanged.
 | `restart` | yes | no |
 | `status` | yes | yes |
 | `env inspect` (`inspect_environment`) | yes | yes |
+| `env history` (`history_environment`) | page JSON | page JSON |
 | `env list` (`list_environments`) | yes | yes |
 | `fleet status` (`fleet_status`) | yes | yes |
 
@@ -44,8 +45,10 @@ The fixed fields are:
 
 - `schema`: exactly `tenkai.command-result/v1`.
 - `command`: `invocation`, `publish`, `promote`, `plan`, `apply`, `status`,
-  `inspect_environment`, `rollback`, `restart`, `recall`, `approve`,
-  `subscribe`, `list_environments`, or `fleet_status`.
+  `inspect_environment`, `history_environment`, `rollback`, `restart`, `recall`,
+  `approve`, `subscribe`, `list_environments`, or `fleet_status`.
+  `env history --output json-v1` prints the history page JSON on success; a
+  failure still uses a `history_environment` envelope.
 - `outcome`: `succeeded`, `failed`, `awaiting_approval`, or `unknown`.
 - `retry`: `not_needed`, `correct_request`, `reconcile_before_retry`, or
   `not_safe`.
