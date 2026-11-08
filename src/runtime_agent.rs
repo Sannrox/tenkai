@@ -89,6 +89,11 @@ pub async fn enrolled_credential(
     let csr = certificate_dir
         .map(|dir| crate::runner_key::RunnerKey::open_or_generate(dir)?.csr())
         .transpose()?;
+    let sealing_dir = certificate_dir
+        .map(PathBuf::from)
+        .or_else(|| credential_file.parent().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let sealing = crate::sealing_key::SealingKey::open_or_generate(&sealing_dir)?;
     // No redirects: the token goes only to the protected URL checked above.
     let client = crate::outbound_tls::client()?
         .timeout(Duration::from_secs(10))
@@ -99,24 +104,42 @@ pub async fn enrolled_credential(
         token,
         csr,
         attestation: None,
+        sealing_public_key: Some(sealing.to_wire()),
     };
-    let mut response = client.post(&url).json(&request).send().await?;
-    if response.status() == reqwest::StatusCode::PRECONDITION_REQUIRED {
-        let (Some(dir), Some(csr)) = (certificate_dir, &request.csr) else {
-            bail!("the server requires runner attestation, which needs --certificate-dir");
-        };
-        let schema = crate::runner_attestation::AttestationSchema::for_challenge(
-            &response.text().await.unwrap_or_default(),
-        )?;
-        request.attestation = Some(host_attestation(dir, environment, csr, preflight, schema)?);
-        response = client.post(&url).json(&request).send().await?;
-    }
-    let status = response.status();
-    if !status.is_success() {
+    let mut attempts = 0;
+    let enrolled: crate::runtime_delivery::RuntimeEnrolled = loop {
+        attempts += 1;
+        anyhow::ensure!(attempts <= 4, "runtime enrollment retry loop exhausted");
+        let response = client.post(&url).json(&request).send().await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::PRECONDITION_REQUIRED {
+            if request.attestation.is_some() {
+                let detail = response.text().await.unwrap_or_default();
+                bail!("runtime enrollment refused: {status} {detail}");
+            }
+            let (Some(dir), Some(csr)) = (certificate_dir, &request.csr) else {
+                bail!("the server requires runner attestation, which needs --certificate-dir");
+            };
+            let schema = crate::runner_attestation::AttestationSchema::for_challenge(
+                &response.text().await.unwrap_or_default(),
+            )?;
+            request.attestation = Some(host_attestation(dir, environment, csr, preflight, schema)?);
+            continue;
+        }
+        if status.is_success() {
+            break response.json().await?;
+        }
         let detail = response.text().await.unwrap_or_default();
+        if request.sealing_public_key.is_some()
+            && unknown_field_rejected(status, &detail, "sealing_public_key")
+        {
+            // An older replica (`deny_unknown_fields`) during a rolling
+            // deploy: omit the additive field and retry. The token is unspent.
+            request.sealing_public_key = None;
+            continue;
+        }
         bail!("runtime enrollment refused: {status} {detail}");
-    }
-    let enrolled: crate::runtime_delivery::RuntimeEnrolled = response.json().await?;
+    };
     if let Some(dir) = certificate_dir {
         let (Some(certificate), Some(ca)) = (&enrolled.certificate, &enrolled.ca) else {
             bail!("the server returned no runner certificate for the CSR");
@@ -128,6 +151,10 @@ pub async fn enrolled_credential(
     eprintln!(
         "enrolled runtime credential {} for {}",
         enrolled.credential_id, enrolled.environment
+    );
+    eprintln!(
+        "sealing key fingerprint {} (sealed_secrets)",
+        sealing.fingerprint()
     );
     Ok(enrolled.credential)
 }
@@ -423,7 +450,10 @@ impl RuntimeClient {
             .as_ref()
             .context("the runner key is missing from the certificate directory")?;
         let csr = key.csr()?;
-        let send = |attestation| {
+        let mut sealing_public_key =
+            Some(crate::sealing_key::SealingKey::open_or_generate(dir)?.to_wire());
+        let send = |attestation: Option<crate::runner_attestation::RunnerAttestation>,
+                    sealing_public_key: Option<String>| {
             client
                 .post(format!(
                     "{}/v1/runtime/environments/{}/certificate",
@@ -435,23 +465,49 @@ impl RuntimeClient {
                 .json(&crate::runtime_delivery::RuntimeCertificateRequest {
                     csr: csr.clone(),
                     attestation,
+                    sealing_public_key,
                 })
                 .send()
         };
         // Evidence only when this server asks for it on this request (#675),
         // in a schema it names (#849): a server of an earlier release, during
         // a rolling deploy or after a rollback, refuses the unknown field and
-        // names no schemas, so it gets v1.
-        let mut response = send(None).await?;
-        if response.status() == reqwest::StatusCode::PRECONDITION_REQUIRED {
-            let schema = crate::runner_attestation::AttestationSchema::for_challenge(
-                &response.text().await.unwrap_or_default(),
-            )?;
-            let evidence = host_evidence(&self.environment, self.preflight.as_deref())?;
-            response = send(Some(key.sign_attestation(schema, evidence, &csr)?)).await?;
-        }
-        let renewed: crate::runtime_delivery::RuntimeCertificate =
-            decode_response(response, "renewing the runner certificate").await?;
+        // names no schemas, so it gets v1. The same retry drops
+        // `sealing_public_key` when that replica predates it.
+        let mut attestation = None;
+        let mut attempts = 0;
+        let renewed: crate::runtime_delivery::RuntimeCertificate = loop {
+            attempts += 1;
+            anyhow::ensure!(
+                attempts <= 4,
+                "runner certificate renewal retry loop exhausted"
+            );
+            let response = send(attestation.clone(), sealing_public_key.clone()).await?;
+            let status = response.status();
+            if status == reqwest::StatusCode::PRECONDITION_REQUIRED {
+                if attestation.is_some() {
+                    let detail = response.text().await.unwrap_or_default();
+                    bail!("renewing the runner certificate returned {status}: {detail}");
+                }
+                let schema = crate::runner_attestation::AttestationSchema::for_challenge(
+                    &response.text().await.unwrap_or_default(),
+                )?;
+                let evidence = host_evidence(&self.environment, self.preflight.as_deref())?;
+                attestation = Some(key.sign_attestation(schema, evidence, &csr)?);
+                continue;
+            }
+            if status.is_success() {
+                break decode_response(response, "renewing the runner certificate").await?;
+            }
+            let detail = response.text().await.unwrap_or_default();
+            if sealing_public_key.is_some()
+                && unknown_field_rejected(status, &detail, "sealing_public_key")
+            {
+                sealing_public_key = None;
+                continue;
+            }
+            bail!("renewing the runner certificate returned {status}: {detail}");
+        };
         replace_file(&dir.join(RUNNER_CA), &renewed.ca)?;
         replace_file(&dir.join(RUNNER_CERT), &renewed.certificate)?;
         let (identity, not_after) = key
@@ -1068,6 +1124,15 @@ async fn terminate_process_group(child: &mut tokio::process::Child) {
     let _ = child.wait().await;
 }
 
+/// An older replica refused an additive JSON field (`deny_unknown_fields`).
+fn unknown_field_rejected(status: StatusCode, body: &str, field: &str) -> bool {
+    matches!(
+        status,
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+    ) && body.contains("unknown field")
+        && body.contains(field)
+}
+
 async fn decode_response<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,
     operation: &str,
@@ -1114,6 +1179,20 @@ fn validate_plan(plan: &Plan, environment: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_sealing_field_is_a_retryable_old_replica() {
+        assert!(unknown_field_rejected(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Failed to deserialize the JSON body into the target type: unknown field `sealing_public_key`, expected one of `token`, `csr`, `attestation`",
+            "sealing_public_key",
+        ));
+        assert!(!unknown_field_rejected(
+            StatusCode::BAD_REQUEST,
+            "the sealing public key is not an uncompressed P-256 point",
+            "sealing_public_key",
+        ));
+    }
 
     #[tokio::test]
     async fn the_credential_file_is_kept_owner_only_and_never_replaced() {
@@ -1243,6 +1322,14 @@ mod tests {
                     async move {
                         use axum::http::StatusCode;
                         let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        if !requires.load(Ordering::SeqCst)
+                            && raw.get("sealing_public_key").is_some()
+                        {
+                            return (
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                "unknown field `sealing_public_key`".into(),
+                            );
+                        }
                         let schema = raw
                             .get("attestation")
                             .map(|attestation| attestation["schema"].as_str().unwrap().to_owned());

@@ -10,7 +10,7 @@ use std::sync::RwLock;
 /// Stamp written to `tenkai_tenant_schema_versions` after a successful migrate.
 /// A stored value greater than this is left in place so a rolling older
 /// replica does not downgrade or re-run `CREATE INDEX`.
-pub(crate) const TENANT_SCHEMA_VERSION: u32 = 2;
+pub(crate) const TENANT_SCHEMA_VERSION: u32 = 3;
 
 /// True when `stored` is this binary's stamp or newer.
 pub(crate) fn tenant_schema_is_current(stored: Option<i32>, current: u32) -> bool {

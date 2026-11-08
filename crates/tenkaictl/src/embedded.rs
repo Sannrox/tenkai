@@ -118,6 +118,9 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
         Command::Runtime { .. } => anyhow::bail!(
             "runtime agents enroll with a Tenkai server; run this with --target remote"
         ),
+        Command::Secret { .. } => anyhow::bail!(
+            "recipient pins are checked against a Tenkai server; run this with --target remote"
+        ),
         Command::Restore { .. }
         | Command::SupportBundle { .. }
         | Command::RestoreDrill { .. }

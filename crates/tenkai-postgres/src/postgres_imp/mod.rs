@@ -9,7 +9,7 @@ pub(crate) use tenkai::storage::{
     OfflineStepImportRecord, PlanRecord, PlanStatus, ProviderEventRecord, ReceiptRecord,
     ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeActivityRecord,
     RuntimeAttestationRecord, RuntimeClaim, RuntimeCredentialRecord, RuntimeEnrollmentRecord,
-    RuntimeRevocation, RuntimeRunnerRecord, SCHEMA_VERSION, StoreError,
+    RuntimeRevocation, RuntimeRunnerRecord, RuntimeSealingKeyRecord, SCHEMA_VERSION, StoreError,
     provider_event_payloads_match, rollback_intent_digest,
 };
 

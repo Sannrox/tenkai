@@ -10,8 +10,8 @@ There is no served gRPC `RuntimeService`.
 | `POST /v1/runtime/environments/{environment}/complete` | JSON `RuntimeCompletion` (`plan_id`, `generation`, `succeeded`, `detail`, `receipts`) | `204` |
 | `POST /v1/runtime/environments/{environment}/heartbeat` | JSON `RuntimeHeartbeat` (`plan_id`, `generation`) | JSON claim |
 | `POST /v1/runtime/environments/{environment}/inventory` | JSON `RuntimeInventoryReport` (`facts`, `source`) | JSON `RuntimeInventoryResponse` |
-| `POST /v1/runtime/environments/{environment}/enroll` | No bearer. JSON `RuntimeEnrollRequest` (`token`: a single-use enrollment token; optional `csr`; optional `attestation`) | `201`, JSON `RuntimeEnrolled` (`environment`, `credential`, `credential_id`); `403` for an unknown, spent, expired or foreign token |
-| `POST /v1/runtime/environments/{environment}/certificate` | Runner certificate (or, once it expired, the enrolled bearer) and `x-tenkai-runtime-instance`. JSON `RuntimeCertificateRequest` (`csr`; optional `attestation`) | JSON `RuntimeCertificate` (`certificate`, `ca`) ([runner certificates](run-tenkai-server.md#runner-certificates)) |
+| `POST /v1/runtime/environments/{environment}/enroll` | No bearer. JSON `RuntimeEnrollRequest` (`token`: a single-use enrollment token; optional `csr`; optional `attestation`; optional `sealing_public_key`) | `201`, JSON `RuntimeEnrolled` (`environment`, `credential`, `credential_id`); `403` for an unknown, spent, expired or foreign token |
+| `POST /v1/runtime/environments/{environment}/certificate` | Runner certificate (or, once it expired, the enrolled bearer) and `x-tenkai-runtime-instance`. JSON `RuntimeCertificateRequest` (`csr`; optional `attestation`; optional `sealing_public_key`) | JSON `RuntimeCertificate` (`certificate`, `ca`) ([runner certificates](run-tenkai-server.md#runner-certificates)) |
 
 An environment that requires runner attestation (#675) answers an
 enrollment or renewal without `attestation` with `428`, spending no token,
@@ -36,6 +36,16 @@ runtime inventory report contradicting an operator-declared fact is `409`
 ([attested runners](run-tenkai-server.md#attested-runners)). An agent sends
 `attestation` only after a `428`, so agents and servers without it are
 unchanged.
+
+`sealing_public_key` is the runtime's HPKE DHKEM(P-256, HKDF-SHA256) public
+key: standard-base64 of the uncompressed 65-byte P-256 point (ADR 0045).
+The private half never leaves the runtime. A malformed key is refused
+before an enrollment token is spent. A replica that predates the field
+refuses it as an unknown field (`422`); the agent omits it and retries.
+The server records the key against that enrolled runner and serves
+unrevoked keys on
+`GET /v1/environments/{environment}/recipient-keys` (read capability).
+A runtime that has sent a key advertises the `sealed_secrets` capability.
 
 ### Runner attestation statement
 

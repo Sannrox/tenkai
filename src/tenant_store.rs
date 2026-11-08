@@ -22,7 +22,7 @@ use crate::storage::{
     OfflineStepImportRecord, OperationalStore, PlanRecord, PlanStatus, ProviderEventRecord,
     ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeActivityRecord,
     RuntimeAttestationRecord, RuntimeClaim, RuntimeCredentialRecord, RuntimeEnrollmentRecord,
-    RuntimeRevocation, RuntimeRunnerRecord, SCHEMA_VERSION, SqliteStore,
+    RuntimeRevocation, RuntimeRunnerRecord, RuntimeSealingKeyRecord, SCHEMA_VERSION, SqliteStore,
 };
 use crate::tenant_isolation::{
     IsolationError, TenantIsolationHarness, TenantResources, TwoTenantFixture,
@@ -881,6 +881,7 @@ impl OperationalStore for TenantPartition {
         credential_digest: &str,
         now: i64,
         attestation: Option<&RuntimeAttestationRecord>,
+        sealing: Option<&RuntimeSealingKeyRecord>,
     ) -> Result<RuntimeCredentialRecord> {
         self.store.redeem_runtime_enrollment(
             environment,
@@ -888,6 +889,7 @@ impl OperationalStore for TenantPartition {
             credential_digest,
             now,
             attestation,
+            sealing,
         )
     }
     fn runtime_enrollment_usable(
@@ -931,6 +933,15 @@ impl OperationalStore for TenantPartition {
     }
     fn runtime_attestations(&self) -> Result<Vec<RuntimeAttestationRecord>> {
         self.store.runtime_attestations()
+    }
+    fn record_runtime_sealing_key(&self, record: &RuntimeSealingKeyRecord) -> Result<()> {
+        self.store.record_runtime_sealing_key(record)
+    }
+    fn runtime_sealing_keys(&self, environment: &str) -> Result<Vec<RuntimeSealingKeyRecord>> {
+        self.store.runtime_sealing_keys(environment)
+    }
+    fn runtime_sealing_key(&self, runner_id: &str) -> Result<Option<RuntimeSealingKeyRecord>> {
+        self.store.runtime_sealing_key(runner_id)
     }
 }
 

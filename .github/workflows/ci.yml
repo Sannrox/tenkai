@@ -23,9 +23,16 @@ jobs:
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
+    env:
+      TENKAI_UI_BUNDLE: ${{ github.workspace }}/.tenkai-console.zip
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tenkai-console.zip
+          key: console-${{ hashFiles('ui/console.pin') }}
+      - run: bash scripts/fetch-console-bundle.sh
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.96.1
@@ -34,7 +41,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y softhsm2
       - run: make test
       - run: make test-integration
-      # Downloads the pinned console release and fails on a checksum mismatch.
+      # Uses TENKAI_UI_BUNDLE; fails on a checksum mismatch.
       - run: cargo test --locked -p tenkai-http --features ui --lib ui
       - run: cargo test --locked -p tenkai-postgres --features postgres
 
@@ -121,11 +128,18 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    env:
+      TENKAI_UI_BUNDLE: ${{ github.workspace }}/.tenkai-console.zip
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tenkai-console.zip
+          key: console-${{ hashFiles('ui/console.pin') }}
+      - run: bash scripts/fetch-console-bundle.sh
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.96.1
@@ -338,6 +352,8 @@ jobs:
     name: Semver
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    env:
+      TENKAI_UI_BUNDLE: ${{ github.workspace }}/.tenkai-console.zip
     permissions:
       contents: read
       pull-requests: read
@@ -345,6 +361,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tenkai-console.zip
+          key: console-${{ hashFiles('ui/console.pin') }}
+      - run: bash scripts/fetch-console-bundle.sh
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:

@@ -12,9 +12,9 @@ mod runtime_enrollment;
 pub use exports::ExportRequest;
 pub use grant_rules::{CreateGrantRuleRequest, GrantRuleList, RemoveGrantRuleRequest};
 pub use runtime_enrollment::{
-    RuntimeCredentialRevoked, RuntimeEnrollmentIssued, RuntimeEnrollmentRequest,
-    RuntimeRevokeRequest, RuntimeRunner, RuntimeRunnerAttestation, RuntimeRunnerInstance,
-    RuntimeRunnerList,
+    EnvironmentRecipient, EnvironmentRecipients, RuntimeCredentialRevoked, RuntimeEnrollmentIssued,
+    RuntimeEnrollmentRequest, RuntimeRevokeRequest, RuntimeRunner, RuntimeRunnerAttestation,
+    RuntimeRunnerInstance, RuntimeRunnerList,
 };
 
 use crate::auth_context::{

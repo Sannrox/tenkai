@@ -41,6 +41,7 @@ mod remote_delivery;
 mod remote_env_config;
 mod remote_hold;
 mod revocations;
+mod secret;
 mod self_upgrade;
 mod spoke_standby;
 #[cfg(test)]

@@ -184,6 +184,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: RuntimeCommand,
     },
+    /// Pin and inspect environment recipient keys for sealed secrets.
+    Secret {
+        #[command(subcommand)]
+        command: SecretCommand,
+    },
     /// The read-only seed registry over the local artifact store.
     Registry {
         #[command(subcommand)]
@@ -422,6 +427,14 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: DevCommand,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SecretCommand {
+    /// Trust a recipient key fingerprint for an environment.
+    Trust { env: String, fingerprint: String },
+    /// List recipient keys the server offers for an environment.
+    Recipients { env: String },
 }
 
 #[derive(Subcommand)]

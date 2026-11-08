@@ -5,7 +5,7 @@ use tenkai::storage::{
     OfflineStepImportRecord, OperationalStore, PlanRecord, PlanStatus, ProviderEventRecord,
     ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeActivityRecord,
     RuntimeAttestationRecord, RuntimeClaim, RuntimeCredentialRecord, RuntimeEnrollmentRecord,
-    RuntimeRevocation, RuntimeRunnerRecord,
+    RuntimeRevocation, RuntimeRunnerRecord, RuntimeSealingKeyRecord,
 };
 
 use super::PostgresTenantPartition;
@@ -312,6 +312,7 @@ impl OperationalStore for PostgresTenantPartition {
         credential_digest: &str,
         now: i64,
         attestation: Option<&RuntimeAttestationRecord>,
+        sealing: Option<&RuntimeSealingKeyRecord>,
     ) -> Result<RuntimeCredentialRecord> {
         self.inner.redeem_runtime_enrollment(
             &self.schema,
@@ -320,6 +321,7 @@ impl OperationalStore for PostgresTenantPartition {
             credential_digest,
             now,
             attestation,
+            sealing,
         )
     }
 
@@ -373,5 +375,17 @@ impl OperationalStore for PostgresTenantPartition {
 
     fn runtime_attestations(&self) -> Result<Vec<RuntimeAttestationRecord>> {
         self.inner.runtime_attestations(&self.schema)
+    }
+
+    fn record_runtime_sealing_key(&self, record: &RuntimeSealingKeyRecord) -> Result<()> {
+        self.inner.record_runtime_sealing_key(&self.schema, record)
+    }
+
+    fn runtime_sealing_keys(&self, environment: &str) -> Result<Vec<RuntimeSealingKeyRecord>> {
+        self.inner.runtime_sealing_keys(&self.schema, environment)
+    }
+
+    fn runtime_sealing_key(&self, runner_id: &str) -> Result<Option<RuntimeSealingKeyRecord>> {
+        self.inner.runtime_sealing_key(&self.schema, runner_id)
     }
 }

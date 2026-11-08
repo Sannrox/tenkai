@@ -32,7 +32,33 @@ pub(super) fn ensure_runtime_enrollment_tables(connection: &Connection) -> Resul
              runner_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
              evidence_digest TEXT, key_fingerprint TEXT, checked_at INTEGER,
              bound_at INTEGER, refusal_reason TEXT, refused_at INTEGER
+         );
+         CREATE TABLE IF NOT EXISTS runtime_sealing_keys (
+             runner_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
+             public_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
+             recorded_at INTEGER NOT NULL
          );",
+    )?;
+    Ok(())
+}
+
+/// Record a runtime's sealing public key (ADR 0045).
+fn upsert_sealing_key(connection: &Connection, record: &RuntimeSealingKeyRecord) -> Result<()> {
+    connection.execute(
+        "INSERT INTO runtime_sealing_keys(runner_id,environment_id,public_key,fingerprint,recorded_at)
+         VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(runner_id) DO UPDATE SET
+             environment_id=excluded.environment_id,
+             public_key=excluded.public_key,
+             fingerprint=excluded.fingerprint,
+             recorded_at=excluded.recorded_at",
+        params![
+            record.runner_id,
+            record.environment_id,
+            record.public_key,
+            record.fingerprint,
+            record.recorded_at
+        ],
     )?;
     Ok(())
 }
@@ -118,6 +144,7 @@ impl SqliteStore {
         credential_digest: &str,
         now: i64,
         attestation: Option<&RuntimeAttestationRecord>,
+        sealing: Option<&RuntimeSealingKeyRecord>,
     ) -> Result<RuntimeCredentialRecord> {
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -139,6 +166,9 @@ impl SqliteStore {
         )?;
         if let Some(attestation) = attestation {
             upsert_attestation(&tx, attestation)?;
+        }
+        if let Some(sealing) = sealing {
+            upsert_sealing_key(&tx, sealing)?;
         }
         tx.commit()?;
         Ok(RuntimeCredentialRecord {
@@ -315,6 +345,60 @@ impl SqliteStore {
         upsert_attestation(&*self.connection()?, record)
     }
 
+    pub(super) fn record_runtime_sealing_key_sqlite(
+        &self,
+        record: &RuntimeSealingKeyRecord,
+    ) -> Result<()> {
+        upsert_sealing_key(&*self.connection()?, record)
+    }
+
+    pub(super) fn runtime_sealing_keys_sqlite(
+        &self,
+        environment: &str,
+    ) -> Result<Vec<RuntimeSealingKeyRecord>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT s.runner_id,s.environment_id,s.public_key,s.fingerprint,s.recorded_at
+             FROM runtime_sealing_keys s
+             INNER JOIN runtime_credentials c ON c.credential_digest=s.runner_id
+             WHERE s.environment_id=?1 AND c.revoked_at IS NULL
+             ORDER BY s.runner_id",
+        )?;
+        let rows = statement.query_map([environment], |row| {
+            Ok(RuntimeSealingKeyRecord {
+                runner_id: row.get(0)?,
+                environment_id: row.get(1)?,
+                public_key: row.get(2)?,
+                fingerprint: row.get(3)?,
+                recorded_at: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(super) fn runtime_sealing_key_sqlite(
+        &self,
+        runner_id: &str,
+    ) -> Result<Option<RuntimeSealingKeyRecord>> {
+        Ok(self
+            .connection()?
+            .query_row(
+                "SELECT runner_id,environment_id,public_key,fingerprint,recorded_at
+                 FROM runtime_sealing_keys WHERE runner_id=?1",
+                [runner_id],
+                |row| {
+                    Ok(RuntimeSealingKeyRecord {
+                        runner_id: row.get(0)?,
+                        environment_id: row.get(1)?,
+                        public_key: row.get(2)?,
+                        fingerprint: row.get(3)?,
+                        recorded_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     pub(super) fn runtime_attestations_sqlite(&self) -> Result<Vec<RuntimeAttestationRecord>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
@@ -376,17 +460,17 @@ mod tests {
         ));
         // Another environment's redemption refuses and does not spend it.
         assert!(refused(
-            store.redeem_runtime_enrollment("stage", "t1", "c0", 10, None)
+            store.redeem_runtime_enrollment("stage", "t1", "c0", 10, None, None)
         ));
         let credential = store
-            .redeem_runtime_enrollment("prod", "t1", "c1", 10, None)
+            .redeem_runtime_enrollment("prod", "t1", "c1", 10, None, None)
             .unwrap();
         assert_eq!(
             (credential.environment_id.as_str(), credential.revoked_at),
             ("prod", None)
         );
         assert!(refused(
-            store.redeem_runtime_enrollment("prod", "t1", "c2", 20, None)
+            store.redeem_runtime_enrollment("prod", "t1", "c2", 20, None, None)
         ));
         assert!(store.runtime_credential("c2").unwrap().is_none());
 
@@ -394,11 +478,11 @@ mod tests {
             .create_runtime_enrollment(&enrollment("t2", "prod", 100))
             .unwrap();
         assert!(refused(
-            store.redeem_runtime_enrollment("prod", "t2", "c3", 100, None)
+            store.redeem_runtime_enrollment("prod", "t2", "c3", 100, None, None)
         ));
-        assert!(refused(
-            store.redeem_runtime_enrollment("prod", "unknown", "c4", 10, None)
-        ));
+        assert!(refused(store.redeem_runtime_enrollment(
+            "prod", "unknown", "c4", 10, None, None
+        )));
 
         let first = RuntimeRevocation {
             reason: "host retired".into(),
@@ -547,7 +631,7 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .redeem_runtime_enrollment("prod", "t1", "c1", 10, Some(&binding))
+                .redeem_runtime_enrollment("prod", "t1", "c1", 10, Some(&binding), None)
                 .is_err()
         );
         assert!(store.runtime_credential("c1").unwrap().is_none());
@@ -558,10 +642,54 @@ mod tests {
             .execute_batch("ALTER TABLE runtime_attestations_away RENAME TO runtime_attestations")
             .unwrap();
         store
-            .redeem_runtime_enrollment("prod", "t1", "c1", 10, Some(&binding))
+            .redeem_runtime_enrollment("prod", "t1", "c1", 10, Some(&binding), None)
             .unwrap();
         let [bound] = store.runtime_attestations().unwrap().try_into().unwrap();
         assert_eq!(bound.evidence_digest.as_deref(), Some("sha256:e1"));
+        assert!(!store.runtime_enrollment_usable("prod", "t1", 10).unwrap());
+    }
+
+    /// Redemption, credential and sealing key commit together (ADR 0045):
+    /// a sealing write that fails leaves the token unspent and no runner.
+    #[test]
+    fn a_failed_sealing_write_rolls_back_the_redemption() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store
+            .create_runtime_enrollment(&enrollment("t1", "prod", 1_000))
+            .unwrap();
+        let sealing = RuntimeSealingKeyRecord {
+            runner_id: "c1".into(),
+            environment_id: "prod".into(),
+            public_key: "p256:dead".into(),
+            fingerprint: "sha256:dead".into(),
+            recorded_at: 10,
+        };
+        store
+            .connection()
+            .unwrap()
+            .execute_batch("ALTER TABLE runtime_sealing_keys RENAME TO runtime_sealing_keys_away")
+            .unwrap();
+        assert!(
+            store
+                .redeem_runtime_enrollment("prod", "t1", "c1", 10, None, Some(&sealing))
+                .is_err()
+        );
+        assert!(store.runtime_credential("c1").unwrap().is_none());
+        assert!(store.runtime_enrollment_usable("prod", "t1", 10).unwrap());
+        store
+            .connection()
+            .unwrap()
+            .execute_batch("ALTER TABLE runtime_sealing_keys_away RENAME TO runtime_sealing_keys")
+            .unwrap();
+        store
+            .redeem_runtime_enrollment("prod", "t1", "c1", 10, None, Some(&sealing))
+            .unwrap();
+        let [recorded] = store
+            .runtime_sealing_keys("prod")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(recorded.fingerprint, "sha256:dead");
         assert!(!store.runtime_enrollment_usable("prod", "t1", 10).unwrap());
     }
 
@@ -579,8 +707,10 @@ mod tests {
             .create_runtime_enrollment(&enrollment("t1", "prod", i64::MAX))
             .unwrap();
         let results = std::thread::scope(|scope| {
-            let a = scope.spawn(|| first.redeem_runtime_enrollment("prod", "t1", "ca", 10, None));
-            let b = scope.spawn(|| second.redeem_runtime_enrollment("prod", "t1", "cb", 10, None));
+            let a =
+                scope.spawn(|| first.redeem_runtime_enrollment("prod", "t1", "ca", 10, None, None));
+            let b = scope
+                .spawn(|| second.redeem_runtime_enrollment("prod", "t1", "cb", 10, None, None));
             [a.join().unwrap(), b.join().unwrap()]
         });
         assert_eq!(

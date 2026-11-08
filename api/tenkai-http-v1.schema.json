@@ -2660,6 +2660,48 @@
       ],
       "type": "object"
     },
+    "EnvironmentRecipient": {
+      "description": "One unrevoked runtime recipient key an operator or client may pin.",
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "public_key": {
+          "type": "string"
+        },
+        "runtime_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runtime_id",
+        "fingerprint",
+        "public_key",
+        "capability"
+      ],
+      "type": "object"
+    },
+    "EnvironmentRecipients": {
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "recipients": {
+          "items": {
+            "$ref": "#/$defs/EnvironmentRecipient"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "environment",
+        "recipients"
+      ],
+      "type": "object"
+    },
     "EnvironmentResult": {
       "properties": {
         "environment": {
@@ -5600,6 +5642,10 @@
         "revoked_by": {
           "type": "string"
         },
+        "sealing_fingerprint": {
+          "description": "HPKE sealing key fingerprint when this runner advertised one (ADR 0045).",
+          "type": "string"
+        },
         "state": {
           "description": "`active`, `revoked`, or `static` for a configured token, which only\nserver configuration changes.",
           "type": "string"
@@ -7161,6 +7207,15 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/RuntimeRunnerList"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}/recipient-keys",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/EnvironmentRecipients"
       }
     },
     {

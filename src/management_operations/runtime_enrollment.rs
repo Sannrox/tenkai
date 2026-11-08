@@ -86,6 +86,25 @@ pub struct RuntimeRunner {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub attestation: Option<RuntimeRunnerAttestation>,
+    /// HPKE sealing key fingerprint when this runner advertised one (ADR 0045).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub sealing_fingerprint: Option<String>,
+}
+
+/// One unrevoked runtime recipient key an operator or client may pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EnvironmentRecipient {
+    pub runtime_id: String,
+    pub fingerprint: String,
+    pub public_key: String,
+    pub capability: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EnvironmentRecipients {
+    pub environment: String,
+    pub recipients: Vec<EnvironmentRecipient>,
 }
 
 /// A runner's attestation state (#675). Digests only, never evidence content.
@@ -363,6 +382,12 @@ impl ManagementOperations {
                         RunnerAuth::Bearer
                     }),
                     attestation: attestation(&id),
+                    sealing_fingerprint: self
+                        .store
+                        .runtime_sealing_key(&id)
+                        .ok()
+                        .flatten()
+                        .map(|record| record.fingerprint),
                     state: if runner.credential.revoked_at.is_some() {
                         "revoked"
                     } else {
@@ -388,6 +413,7 @@ impl ManagementOperations {
                 .map(|(id, environment)| RuntimeRunner {
                     instances: instances(id),
                     attestation: None,
+                    sealing_fingerprint: None,
                     id: id.clone(),
                     environment: environment.clone(),
                     state: "static".into(),
@@ -419,5 +445,38 @@ impl ManagementOperations {
             .into_iter()
             .find(|runner| runner.id == runner_id)
             .ok_or_else(|| ManagementError::NotFound("runner not found".into()))
+    }
+
+    /// Unrevoked runtime sealing keys of `environment` (ADR 0045). Retired
+    /// and revoked runtimes are omitted.
+    pub async fn list_environment_recipients(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+    ) -> Result<EnvironmentRecipients, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.require_host_runtime_credentials()?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_environment_grant(credential, &context, Some(environment), "recipient keys")?;
+        let recipients = self
+            .store
+            .runtime_sealing_keys(environment)
+            .map_err(|error| ManagementError::Unavailable(error.to_string()))?
+            .into_iter()
+            .filter_map(|record| {
+                let key =
+                    crate::sealing_key::SealingPublicKey::from_wire(&record.public_key).ok()?;
+                Some(EnvironmentRecipient {
+                    runtime_id: record.runner_id,
+                    fingerprint: key.fingerprint(),
+                    public_key: key.to_wire(),
+                    capability: crate::sealing_key::SEALED_SECRETS_CAPABILITY.into(),
+                })
+            })
+            .collect();
+        Ok(EnvironmentRecipients {
+            environment: environment.into(),
+            recipients,
+        })
     }
 }

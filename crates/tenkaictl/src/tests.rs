@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use crate::args::{
-    Cli, Command, DarkSiteCommand, KeysCommand, RemediateCommand, SpokeStandbyCommand, Target,
+    Cli, Command, DarkSiteCommand, KeysCommand, RemediateCommand, SecretCommand,
+    SpokeStandbyCommand, Target,
 };
 use crate::env_args::{EnvCommand, MaintenanceCommand, OverlayCommand};
 use crate::topology_args::TopologyCommand;
@@ -269,6 +270,33 @@ fn status_without_target_or_env_stays_unspecified() {
     let cli = Cli::try_parse_from(["tenkaictl", "status"]).unwrap();
     assert_eq!(cli.target, None);
     assert!(matches!(cli.command, Command::Status { env: None }));
+}
+
+#[test]
+fn parses_secret_trust_and_recipients() {
+    let trust = Cli::try_parse_from([
+        "tenkaictl",
+        "secret",
+        "trust",
+        "prod",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ])
+    .unwrap();
+    assert!(matches!(
+        trust.command,
+        Command::Secret {
+            command: SecretCommand::Trust { ref env, ref fingerprint },
+        } if env == "prod"
+            && fingerprint
+                == "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ));
+    let recipients = Cli::try_parse_from(["tenkaictl", "secret", "recipients", "prod"]).unwrap();
+    assert!(matches!(
+        recipients.command,
+        Command::Secret {
+            command: SecretCommand::Recipients { ref env },
+        } if env == "prod"
+    ));
 }
 
 #[test]

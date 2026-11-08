@@ -423,6 +423,20 @@ tenkai-runtime
   from its first step: once its lease is gone, it is failed, as server
   recovery fails it, and a rollback plan recovers the environment. Issuing and redeeming tokens needs a trusted clock. Issue
   enrollments once every server replica runs this version.
+- **Sealing key (ADR 0045).** The agent generates an HPKE sealing key pair
+  beside the runner key (`sealing-key.pem`, owner-only), or in the same
+  PKCS#11 token as `{label}-sealing` when the runner key is hardware-backed.
+  It sends the public key at enrollment and at certificate renewal. The
+  server records it against that runner. The agent prints
+  `sealing key fingerprint sha256:<hex> (sealed_secrets)` at enrollment so
+  an operator can compare it out of band. A replica that predates the field
+  ignores it after the agent retries without it. Retired or revoked runners
+  are omitted from
+  `GET /v1/environments/{environment}/recipient-keys`.
+  `tenkaictl --target remote secret recipients <env>` lists them;
+  `tenkaictl --target remote secret trust <env> sha256:<hex>` pins one.
+  On first use a TTY shows fingerprints and asks; a non-TTY client refuses
+  an unpinned key by fingerprint.
 
 ### Trust posture
 
@@ -687,6 +701,10 @@ environment-scoped credential sees only its environment's runners.
   bearer stays valid for renewal unless certificates are required. A
   runner certified before this release, or by a replica one release
   behind, reads `bearer` until its next renewal, within a day.
+- **Sealing fingerprint.** `sealing_fingerprint` is `sha256:<hex>` of the
+  runner's recorded HPKE public key when it advertised one. Inspect shows
+  it; `GET /v1/environments/{environment}/recipient-keys` lists unrevoked
+  keys for clients that pin them.
 - **Revocation.** A reason is required, and it and the revoking principal
   are shown on inspect. The earlier bodyless
   `POST /v1/runtime-credentials/{id}/revoke` keeps working for released
