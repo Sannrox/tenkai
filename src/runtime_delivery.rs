@@ -822,18 +822,21 @@ impl RuntimeDeliveryOperations {
             ));
         };
         for step in &plan.steps {
-            crate::software_compatibility::require_release(&mut ctx, environment, &step.release_id)
-                .await
-                .map_err(|error| {
-                    match error
-                        .downcast_ref::<crate::software_compatibility::CompatibilityBlocked>()
-                    {
-                        Some(blocked) => RuntimeDeliveryError::InvalidRequest(blocked.to_string()),
-                        None => RuntimeDeliveryError::Unavailable(
-                            "software compatibility preflight unavailable".into(),
-                        ),
-                    }
-                })?;
+            crate::software_compatibility::require_release(
+                &mut ctx,
+                environment,
+                &step.release_id,
+                step.instance_name(),
+            )
+            .await
+            .map_err(|error| match error
+                .downcast_ref::<crate::software_compatibility::CompatibilityBlocked>(
+            ) {
+                Some(blocked) => RuntimeDeliveryError::InvalidRequest(blocked.to_string()),
+                None => RuntimeDeliveryError::Unavailable(
+                    "software compatibility preflight unavailable".into(),
+                ),
+            })?;
         }
         // A held queued plan stays queued; a claimed Running plan finishes.
         let held = plan.state == crate::plan::PlanState::Computed
@@ -989,18 +992,21 @@ impl RuntimeDeliveryOperations {
             return Err(RuntimeDeliveryError::ForeignEnvironment);
         }
         for step in &plan.steps {
-            crate::software_compatibility::require_release(&mut ctx, environment, &step.release_id)
-                .await
-                .map_err(|error| {
-                    match error
-                        .downcast_ref::<crate::software_compatibility::CompatibilityBlocked>()
-                    {
-                        Some(blocked) => RuntimeDeliveryError::InvalidRequest(blocked.to_string()),
-                        None => RuntimeDeliveryError::Unavailable(
-                            "software compatibility preflight unavailable".into(),
-                        ),
-                    }
-                })?;
+            crate::software_compatibility::require_release(
+                &mut ctx,
+                environment,
+                &step.release_id,
+                step.instance_name(),
+            )
+            .await
+            .map_err(|error| match error
+                .downcast_ref::<crate::software_compatibility::CompatibilityBlocked>(
+            ) {
+                Some(blocked) => RuntimeDeliveryError::InvalidRequest(blocked.to_string()),
+                None => RuntimeDeliveryError::Unavailable(
+                    "software compatibility preflight unavailable".into(),
+                ),
+            })?;
         }
         let expires_at = crate::now_millis().saturating_add(2 * 60 * 1000);
         let claim = self

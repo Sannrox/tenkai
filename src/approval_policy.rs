@@ -1179,6 +1179,7 @@ mod tests {
                 release_digest: "abc".into(),
                 artifact_digest: "abc".into(),
                 deployed_version: None,
+                providers: Default::default(),
             }],
             steps: vec![Step {
                 id: "step-0".into(),

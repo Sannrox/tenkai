@@ -6,6 +6,8 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::environment_bindings::{EnvironmentBindings, OBSERVED_INSTANCE};
+
 /// Contract requirements use same-major semantic versions at or above the minimum.
 /// Profile version 2 also requires the minor to match below 1.0 (ADR 0043 §1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -129,17 +131,35 @@ pub enum CompatibilityFailure {
     InvalidEvidence,
     AmbiguousEvidence,
     PreflightUnavailable,
-    AmbiguousComponent { component: String },
+    AmbiguousComponent {
+        component: String,
+    },
     ReleaseBinding,
     EnvironmentBinding,
     StaleEvidence,
-    MissingComponent { component: String },
-    ComponentChanged { component: String },
-    MissingCapability { capability: String },
-    UnsatisfiedFact { fact: String },
-    MissingContract { contract: String },
-    AmbiguousContract { contract: String },
-    IncompatibleContract { contract: String },
+    MissingComponent {
+        component: String,
+    },
+    ComponentChanged {
+        component: String,
+    },
+    MissingCapability {
+        capability: String,
+    },
+    UnsatisfiedFact {
+        fact: String,
+    },
+    MissingContract {
+        contract: String,
+    },
+    AmbiguousContract {
+        contract: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        candidates: Vec<String>,
+    },
+    IncompatibleContract {
+        contract: String,
+    },
     UnsupportedSchema,
     MigrationState,
 }
@@ -235,13 +255,24 @@ impl From<CompatibilityEval> for CompatibilityReport {
     }
 }
 
-/// Last-successful deployments that offer a contract: name -> `(product@version, contract version)`.
-type DeployedOffers = BTreeMap<String, Vec<(String, String)>>;
+/// One last-successful deployment that offers a contract.
+///
+/// `instance` is the deployed key (`deployed.{instance}`); `release` is
+/// `product@version` for `satisfied_by`. Identity for bindings and
+/// `AmbiguousContract` is `instance`, never a parse of `release`.
+struct DeployedProvide {
+    instance: String,
+    release: String,
+    contract_version: String,
+}
+
+/// Last-successful deployments that offer a contract.
+type DeployedOffers = BTreeMap<String, Vec<DeployedProvide>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ContractOfferSource<'a> {
     Observed,
-    Deployed(&'a str),
+    Deployed { instance: &'a str, release: &'a str },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -463,6 +494,8 @@ pub fn evaluate(
         now_ms,
         None,
         &BTreeMap::new(),
+        "",
+        &EnvironmentBindings::default(),
     )
     .map(Into::into)
 }
@@ -477,6 +510,8 @@ fn evaluate_owned(
     now_ms: i64,
     owned: Option<&BTreeSet<String>>,
     deployed: &DeployedOffers,
+    dependent: &str,
+    bindings: &EnvironmentBindings,
 ) -> Result<CompatibilityEval> {
     profile.validate()?;
     let mut report = CompatibilityOutcome::with_failures(release_digest, Vec::new());
@@ -548,6 +583,8 @@ fn evaluate_owned(
             profile.version,
             &required.requires,
             &contracts,
+            dependent,
+            bindings,
             &mut report.failures,
             &mut report.satisfied_by,
         )?;
@@ -584,6 +621,8 @@ fn evaluate_owned(
             1,
             &retained,
             &contracts,
+            dependent,
+            bindings,
             &mut report.failures,
             &mut BTreeMap::new(),
         )?;
@@ -628,6 +667,17 @@ fn contract_offers<'a>(
     evidence: Option<&'a CompatibilityEvidence>,
     deployed: &'a DeployedOffers,
 ) -> BTreeMap<&'a str, Vec<ContractOffer<'a>>> {
+    contract_offers_with(evidence, deployed, true)
+}
+
+/// `include_component_provides` is the candidate's own constituents. Installed
+/// dependents already see those as deployed provides of the candidate; counting
+/// them again as instance `observed` makes a unique provider look ambiguous.
+fn contract_offers_with<'a>(
+    evidence: Option<&'a CompatibilityEvidence>,
+    deployed: &'a DeployedOffers,
+    include_component_provides: bool,
+) -> BTreeMap<&'a str, Vec<ContractOffer<'a>>> {
     let mut contracts: BTreeMap<&str, Vec<ContractOffer<'_>>> = BTreeMap::new();
     if let Some(evidence) = evidence {
         for (name, version) in &evidence.contracts {
@@ -639,26 +689,64 @@ fn contract_offers<'a>(
                     source: ContractOfferSource::Observed,
                 });
         }
-        for component in evidence.components.values() {
-            for (name, version) in &component.provides {
-                contracts
-                    .entry(name.as_str())
-                    .or_default()
-                    .push(ContractOffer {
-                        version,
-                        source: ContractOfferSource::Observed,
-                    });
+        if include_component_provides {
+            for component in evidence.components.values() {
+                for (name, version) in &component.provides {
+                    contracts
+                        .entry(name.as_str())
+                        .or_default()
+                        .push(ContractOffer {
+                            version,
+                            source: ContractOfferSource::Observed,
+                        });
+                }
             }
         }
     }
     for (name, offers) in deployed {
-        for (release, version) in offers {
+        for provide in offers {
             contracts
                 .entry(name.as_str())
                 .or_default()
                 .push(ContractOffer {
-                    version,
-                    source: ContractOfferSource::Deployed(release),
+                    version: &provide.contract_version,
+                    source: ContractOfferSource::Deployed {
+                        instance: &provide.instance,
+                        release: &provide.release,
+                    },
+                });
+        }
+    }
+    contracts
+}
+
+/// Installed dependents see their own digest-bound observation as `observed`,
+/// not the candidate's evidence.
+fn contract_offers_from_versions<'a>(
+    observed: &'a BTreeMap<String, String>,
+    deployed: &'a DeployedOffers,
+) -> BTreeMap<&'a str, Vec<ContractOffer<'a>>> {
+    let mut contracts: BTreeMap<&str, Vec<ContractOffer<'_>>> = BTreeMap::new();
+    for (name, version) in observed {
+        contracts
+            .entry(name.as_str())
+            .or_default()
+            .push(ContractOffer {
+                version,
+                source: ContractOfferSource::Observed,
+            });
+    }
+    for (name, offers) in deployed {
+        for provide in offers {
+            contracts
+                .entry(name.as_str())
+                .or_default()
+                .push(ContractOffer {
+                    version: &provide.contract_version,
+                    source: ContractOfferSource::Deployed {
+                        instance: &provide.instance,
+                        release: &provide.release,
+                    },
                 });
         }
     }
@@ -667,17 +755,21 @@ fn contract_offers<'a>(
 
 fn add_deployed_provides(
     deployed: &mut DeployedOffers,
-    product: &str,
+    instance: &str,
     version: &str,
     profile: &CompatibilityProfile,
 ) {
-    let release = format!("{product}@{version}");
+    let release = format!("{instance}@{version}");
     for component in profile.components.values() {
         for (contract, contract_version) in &component.provides {
             deployed
                 .entry(contract.clone())
                 .or_default()
-                .push((release.clone(), contract_version.clone()));
+                .push(DeployedProvide {
+                    instance: instance.to_string(),
+                    release: release.clone(),
+                    contract_version: contract_version.clone(),
+                });
         }
     }
 }
@@ -716,38 +808,65 @@ fn check_environment_constraints(
     }
 }
 
+fn offer_instance<'a>(offer: &ContractOffer<'a>) -> &'a str {
+    match offer.source {
+        ContractOfferSource::Observed => OBSERVED_INSTANCE,
+        ContractOfferSource::Deployed { instance, .. } => instance,
+    }
+}
+
 fn check_contracts(
     profile_version: u32,
     requirements: &BTreeMap<String, ContractRequirement>,
     contracts: &BTreeMap<&str, Vec<ContractOffer<'_>>>,
+    dependent: &str,
+    bindings: &EnvironmentBindings,
     failures: &mut Vec<CompatibilityFailure>,
     satisfied_by: &mut BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
     let mut unmet: BTreeMap<String, String> = BTreeMap::new();
     for (contract, requirement) in requirements {
-        let offers = contracts.get(contract.as_str()).map(Vec::as_slice);
-        let failure = match offers {
-            None | Some([]) if requirement.optional() => None,
-            None | Some([]) => Some(CompatibilityFailure::MissingContract {
-                contract: contract.clone(),
-            }),
-            Some([provided]) => {
-                let actual = semver::Version::parse(provided.version)?;
-                let minimum = semver::Version::parse(requirement.minimum())?;
-                if !contract_satisfies(profile_version, &actual, &minimum) {
-                    Some(CompatibilityFailure::IncompatibleContract {
-                        contract: contract.clone(),
-                    })
-                } else {
-                    if let ContractOfferSource::Deployed(release) = provided.source {
-                        satisfied_by.insert(contract.clone(), release.to_string());
-                    }
-                    None
-                }
+        let offers = contracts
+            .get(contract.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let mut satisfying: BTreeMap<&str, &ContractOffer<'_>> = BTreeMap::new();
+        let mut any_incompatible = false;
+        for offer in offers {
+            let actual = semver::Version::parse(offer.version)?;
+            let minimum = semver::Version::parse(requirement.minimum())?;
+            if contract_satisfies(profile_version, &actual, &minimum) {
+                satisfying.entry(offer_instance(offer)).or_insert(offer);
+            } else {
+                any_incompatible = true;
             }
-            Some(_) => Some(CompatibilityFailure::AmbiguousContract {
+        }
+        if let Some(bound) = bindings.get(dependent, contract) {
+            satisfying.retain(|instance, _| *instance == bound);
+        }
+        let failure = match satisfying.len() {
+            0 if offers.is_empty() && requirement.optional() => None,
+            0 if any_incompatible => Some(CompatibilityFailure::IncompatibleContract {
                 contract: contract.clone(),
             }),
+            0 if requirement.optional() => None,
+            0 => Some(CompatibilityFailure::MissingContract {
+                contract: contract.clone(),
+            }),
+            1 => {
+                let provided = *satisfying.values().next().expect("one satisfying offer");
+                if let ContractOfferSource::Deployed { release, .. } = provided.source {
+                    satisfied_by.insert(contract.clone(), release.to_string());
+                }
+                None
+            }
+            _ => {
+                let candidates = satisfying.keys().map(|name| (*name).to_string()).collect();
+                Some(CompatibilityFailure::AmbiguousContract {
+                    contract: contract.clone(),
+                    candidates,
+                })
+            }
         };
         if let Some(failure) = failure {
             if !requirement.optional()
@@ -755,6 +874,7 @@ fn check_contracts(
                     failure,
                     CompatibilityFailure::MissingContract { .. }
                         | CompatibilityFailure::IncompatibleContract { .. }
+                        | CompatibilityFailure::AmbiguousContract { .. }
                 )
             {
                 let minimum = requirement.minimum().to_string();
@@ -769,6 +889,40 @@ fn check_contracts(
         }
     }
     Ok(unmet)
+}
+
+/// Check each installed component's requires. Flattening into one map would
+/// keep the last duplicate contract key and drop a stricter or required entry.
+fn check_installed_requires(
+    installed_name: &str,
+    installed_profile: &CompatibilityProfile,
+    offers: &BTreeMap<&str, Vec<ContractOffer<'_>>>,
+    bindings: &EnvironmentBindings,
+    failures: &mut Vec<CompatibilityFailure>,
+) -> Result<()> {
+    for component in installed_profile.components.values() {
+        let mut component_failures = Vec::new();
+        let _ = check_contracts(
+            installed_profile.version,
+            &component.requires,
+            offers,
+            installed_name,
+            bindings,
+            &mut component_failures,
+            &mut BTreeMap::new(),
+        )?;
+        for failure in component_failures {
+            // Unbound several providers hold the dependent; they do not
+            // refuse the candidate that made the set several.
+            if let CompatibilityFailure::AmbiguousContract { contract, .. } = &failure
+                && bindings.get(installed_name, contract).is_none()
+            {
+                continue;
+            }
+            failures.push(failure);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn contract_satisfies(
@@ -818,7 +972,8 @@ pub(crate) fn holdable_unmet_requirements(
     for failure in &outcome.failures {
         match failure {
             CompatibilityFailure::MissingContract { contract }
-            | CompatibilityFailure::IncompatibleContract { contract } => {
+            | CompatibilityFailure::IncompatibleContract { contract }
+            | CompatibilityFailure::AmbiguousContract { contract, .. } => {
                 if !required.contains(contract.as_str()) {
                     return None;
                 }
@@ -853,22 +1008,38 @@ pub(crate) enum RemainingDependentKind {
     Unsatisfied { minimum: String },
 }
 
-/// First remaining dependent that would be unsatisfied or left ambiguous.
+/// First remaining dependent that would be unsatisfied or left without a unique bound provider.
+#[cfg(test)]
 pub(crate) fn remaining_dependent_refusal(
     remaining: &BTreeMap<String, CompatibilityProfile>,
     previous: &BTreeMap<String, CompatibilityProfile>,
 ) -> Result<Option<RemainingDependentRefusal>> {
+    remaining_dependent_refusal_bound(remaining, previous, &EnvironmentBindings::default())
+}
+
+/// [`remaining_dependent_refusal`] honoring environment bindings (ADR 0044 §3).
+pub(crate) fn remaining_dependent_refusal_bound(
+    remaining: &BTreeMap<String, CompatibilityProfile>,
+    previous: &BTreeMap<String, CompatibilityProfile>,
+    bindings: &EnvironmentBindings,
+) -> Result<Option<RemainingDependentRefusal>> {
     for (dependent, profile) in remaining {
         for component in profile.components.values() {
             for (contract, requirement) in &component.requires {
-                let matching = matching_deployed_providers(
+                let matching = bound_matching_providers(
                     remaining,
                     contract,
                     requirement,
                     profile.version,
                     dependent,
+                    bindings,
                 )?;
                 if matching.len() > 1 {
+                    // Unbound multi-provider is a hold on the dependent, not a
+                    // remaining-dependent refusal of the provider change.
+                    if bindings.get(dependent, contract).is_none() {
+                        continue;
+                    }
                     return Ok(Some(RemainingDependentRefusal {
                         dependent: dependent.clone(),
                         contract: contract.clone(),
@@ -881,12 +1052,13 @@ pub(crate) fn remaining_dependent_refusal(
                 if requirement.optional() {
                     continue;
                 }
-                let before = matching_deployed_providers(
+                let before = bound_matching_providers(
                     previous,
                     contract,
                     requirement,
                     profile.version,
                     dependent,
+                    bindings,
                 )?;
                 if before.is_empty() {
                     continue;
@@ -904,11 +1076,39 @@ pub(crate) fn remaining_dependent_refusal(
     Ok(None)
 }
 
+fn bound_matching_providers(
+    profiles: &BTreeMap<String, CompatibilityProfile>,
+    contract: &str,
+    requirement: &ContractRequirement,
+    profile_version: u32,
+    dependent: &str,
+    bindings: &EnvironmentBindings,
+) -> Result<Vec<String>> {
+    let matching =
+        matching_deployed_providers(profiles, contract, requirement, profile_version, dependent)?;
+    Ok(match bindings.get(dependent, contract) {
+        Some(provider) => matching
+            .into_iter()
+            .filter(|candidate| candidate == provider)
+            .collect(),
+        None => matching,
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn refuse_unsatisfied_dependents(
     remaining: &BTreeMap<String, CompatibilityProfile>,
     previous: &BTreeMap<String, CompatibilityProfile>,
 ) -> Result<()> {
-    match remaining_dependent_refusal(remaining, previous)? {
+    refuse_unsatisfied_dependents_bound(remaining, previous, &EnvironmentBindings::default())
+}
+
+pub(crate) fn refuse_unsatisfied_dependents_bound(
+    remaining: &BTreeMap<String, CompatibilityProfile>,
+    previous: &BTreeMap<String, CompatibilityProfile>,
+    bindings: &EnvironmentBindings,
+) -> Result<()> {
+    match remaining_dependent_refusal_bound(remaining, previous, bindings)? {
         None => Ok(()),
         Some(RemainingDependentRefusal {
             dependent,
@@ -962,7 +1162,7 @@ pub(crate) fn matching_deployed_providers(
     Ok(matching)
 }
 
-fn stricter_contract_minimum(left: &str, right: &str) -> String {
+pub(crate) fn stricter_contract_minimum(left: &str, right: &str) -> String {
     match (semver::Version::parse(left), semver::Version::parse(right)) {
         (Ok(left_ver), Ok(right_ver)) if right_ver > left_ver => right.to_string(),
         _ => left.to_string(),
@@ -970,6 +1170,54 @@ fn stricter_contract_minimum(left: &str, right: &str) -> String {
 }
 
 pub(crate) const EVIDENCE_KIND: &str = "tenkai.software_compatibility_evidence";
+
+/// Contract versions from the newest digest-bound observation in `environment`.
+///
+/// Same evidence set `report_manifest` uses. Empty when none, malformed, or
+/// two observations share the newest timestamp.
+pub(crate) async fn observed_contract_versions(
+    ctx: &mut crate::client::Ctx,
+    environment: &str,
+    release_digest: &str,
+) -> Result<BTreeMap<String, String>> {
+    if release_digest.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let records = ctx
+        .find_by_property_matching(crate::embedded::PropertyIndexQuery {
+            equals_key: Some("release_digest"),
+            equals_value: Some(release_digest),
+            ..crate::embedded::PropertyIndexQuery::new(EVIDENCE_KIND, "environment", environment)
+        })
+        .await?;
+    let mut observations = Vec::new();
+    for record in records {
+        let Some(raw) = record.properties.get("evidence") else {
+            continue;
+        };
+        let Ok(evidence) = serde_json::from_str::<CompatibilityEvidence>(raw) else {
+            continue;
+        };
+        observations.push(evidence);
+    }
+    observations.sort_by_key(|evidence| evidence.observed_at_ms);
+    if observations.len() > 1
+        && observations[observations.len() - 1].observed_at_ms
+            == observations[observations.len() - 2].observed_at_ms
+    {
+        return Ok(BTreeMap::new());
+    }
+    let Some(evidence) = observations.pop() else {
+        return Ok(BTreeMap::new());
+    };
+    let mut offers = evidence.contracts;
+    for component in evidence.components.values() {
+        for (contract, version) in &component.provides {
+            offers.entry(contract.clone()).or_insert(version.clone());
+        }
+    }
+    Ok(offers)
+}
 
 /// Persist immutable, environment-scoped observations without changing deployment state.
 pub async fn record_evidence(
@@ -1043,7 +1291,7 @@ pub async fn report(
     environment: &str,
     release: &str,
 ) -> Result<Option<CompatibilityReport>> {
-    Ok(report_eval(ctx, environment, release)
+    Ok(report_eval(ctx, environment, release, "")
         .await?
         .map(Into::into))
 }
@@ -1054,7 +1302,7 @@ pub async fn report_outcome(
     environment: &str,
     release: &str,
 ) -> Result<Option<CompatibilityOutcome>> {
-    Ok(report_eval(ctx, environment, release)
+    Ok(report_eval(ctx, environment, release, "")
         .await?
         .map(Into::into))
 }
@@ -1063,6 +1311,7 @@ pub(crate) async fn report_eval(
     ctx: &mut crate::client::Ctx,
     environment: &str,
     release: &str,
+    instance: &str,
 ) -> Result<Option<CompatibilityEval>> {
     let release = if release.starts_with("tenkai:release:") {
         release.to_string()
@@ -1087,7 +1336,7 @@ pub(crate) async fn report_eval(
     if object.properties.get("digest") != Some(&digest) {
         bail!("software compatibility release manifest digest changed");
     }
-    report_manifest(ctx, environment, &manifest, &digest).await
+    report_manifest(ctx, environment, &manifest, &digest, instance).await
 }
 
 pub(crate) async fn report_manifest(
@@ -1095,6 +1344,7 @@ pub(crate) async fn report_manifest(
     environment: &str,
     manifest: &crate::manifest::Manifest,
     digest: &str,
+    instance: &str,
 ) -> Result<Option<CompatibilityEval>> {
     let Some(profile) = &manifest.compatibility else {
         return Ok(None);
@@ -1154,14 +1404,24 @@ pub(crate) async fn report_manifest(
         .collect();
     installed.sort();
     let mut owned: BTreeSet<String> = profile.components.keys().cloned().collect();
+    let mut installed_names = Vec::new();
     let mut installed_profiles = Vec::new();
     let mut deployed = DeployedOffers::new();
     let mut ambiguous = Vec::new();
-    for (product, version) in installed {
-        if product == manifest.product.name {
+    let dependent = if instance.is_empty() {
+        manifest.product.name.as_str()
+    } else {
+        instance
+    };
+    for (installed_instance, version) in &installed {
+        if installed_instance == dependent {
             continue;
         }
-        let release = crate::ontology::release_id(&product, &version);
+        let release = env
+            .properties
+            .get(&format!("deployed_release.{installed_instance}"))
+            .cloned()
+            .unwrap_or_else(|| crate::ontology::release_id(installed_instance, version));
         let snapshot =
             crate::catalog::load_recoverable_snapshot(ctx, &release, environment).await?;
         let raw = snapshot
@@ -1180,9 +1440,16 @@ pub(crate) async fn report_manifest(
                 });
             }
         }
-        add_deployed_provides(&mut deployed, &product, &version, &installed_profile);
+        add_deployed_provides(
+            &mut deployed,
+            installed_instance,
+            version,
+            &installed_profile,
+        );
+        installed_names.push(installed_instance.clone());
         installed_profiles.push(installed_profile);
     }
+    let bindings = EnvironmentBindings::from_properties(&env.properties);
     let mut result = evaluate_owned(
         profile,
         digest,
@@ -1192,6 +1459,8 @@ pub(crate) async fn report_manifest(
         now,
         Some(&owned),
         &deployed,
+        dependent,
+        &bindings,
     )?;
     result.outcome.failures.extend(ambiguous);
     // Deployed releases satisfy contracts from their signed provides. Do not
@@ -1201,8 +1470,11 @@ pub(crate) async fn report_manifest(
     // Freshness stays the candidate profile's max_evidence_age_ms: deployed
     // provides do not expire (ADR 0043 §2), so an installed profile's evidence
     // age bound is not applied to another release's observation.
-    let offers = contract_offers(observations.last(), &deployed);
-    for installed_profile in &installed_profiles {
+    // The candidate was omitted from `deployed` so it does not satisfy its own
+    // requirements. Installed dependents bound to it still need its provides.
+    add_deployed_provides(&mut deployed, dependent, &manifest.product.version, profile);
+    for (installed_name, installed_profile) in installed_names.iter().zip(installed_profiles.iter())
+    {
         if let Some(evidence) = observations.last() {
             check_environment_constraints(
                 installed_profile,
@@ -1220,15 +1492,21 @@ pub(crate) async fn report_manifest(
                 }
             }
         }
-        for component in installed_profile.components.values() {
-            let _ = check_contracts(
-                installed_profile.version,
-                &component.requires,
-                &offers,
-                &mut result.outcome.failures,
-                &mut BTreeMap::new(),
-            )?;
-        }
+        let observed =
+            match crate::dependency_document::instance_release_digest(ctx, &env, installed_name)
+                .await?
+            {
+                Some(digest) => observed_contract_versions(ctx, environment, &digest).await?,
+                None => BTreeMap::new(),
+            };
+        let offers = contract_offers_from_versions(&observed, &deployed);
+        check_installed_requires(
+            installed_name,
+            installed_profile,
+            &offers,
+            &bindings,
+            &mut result.outcome.failures,
+        )?;
     }
     result.outcome.failures.sort();
     result.outcome.failures.dedup();
@@ -1239,11 +1517,15 @@ pub(crate) async fn require_release(
     ctx: &mut crate::client::Ctx,
     environment: &str,
     release: &str,
+    instance: &str,
 ) -> Result<()> {
-    if let Some(report) = report(ctx, environment, release).await?
-        && !report.failures.is_empty()
+    if let Some(eval) = report_eval(ctx, environment, release, instance).await?
+        && !eval.outcome.failures.is_empty()
     {
-        return Err(CompatibilityBlocked { report }.into());
+        return Err(CompatibilityBlocked {
+            report: eval.into(),
+        }
+        .into());
     }
     Ok(())
 }
@@ -1253,8 +1535,9 @@ pub(crate) async fn require_manifest(
     environment: &str,
     manifest: &crate::manifest::Manifest,
     digest: &str,
+    instance: &str,
 ) -> Result<()> {
-    let report = report_manifest(ctx, environment, manifest, digest)
+    let report = report_manifest(ctx, environment, manifest, digest, instance)
         .await
         .map_err(|_| CompatibilityBlocked {
             report: CompatibilityReport::with_failures(
@@ -1531,6 +1814,8 @@ mod tests {
             1_050,
             Some(&owned),
             &BTreeMap::new(),
+            "",
+            &EnvironmentBindings::default(),
         )
         .unwrap()
         .outcome;
@@ -1695,12 +1980,29 @@ mod tests {
             1_050,
         )
         .unwrap();
-        assert!(
-            report
-                .failures
-                .iter()
-                .all(|failure| matches!(failure, CompatibilityFailure::AmbiguousContract { .. }))
+        // Two observed offers of 1.3.0 are one `observed` instance; the
+        // retained requirement of 2.0.0 stays incompatible.
+        assert_eq!(
+            report.failures,
+            vec![CompatibilityFailure::IncompatibleContract {
+                contract: "database".into()
+            }]
         );
+    }
+
+    /// Test offers: first field is `instance@version` (and `satisfied_by` release).
+    fn deployed(entries: &[(&str, &str)]) -> Vec<DeployedProvide> {
+        entries
+            .iter()
+            .map(|(release, contract_version)| DeployedProvide {
+                instance: release
+                    .split_once('@')
+                    .map(|(name, _)| name.to_string())
+                    .unwrap_or_else(|| (*release).to_string()),
+                release: (*release).to_string(),
+                contract_version: (*contract_version).to_string(),
+            })
+            .collect()
     }
 
     fn evaluate_with_deployed(
@@ -1717,6 +2019,8 @@ mod tests {
             1_050,
             None,
             deployed,
+            "",
+            &EnvironmentBindings::default(),
         )
         .unwrap()
         .outcome
@@ -1888,13 +2192,201 @@ mod tests {
     }
 
     #[test]
-    fn deployed_release_satisfies_requirement_without_observed_contract() {
+    fn unbound_several_providers_are_not_a_remaining_dependent_refusal() {
+        let app = remaining_profile(&[("database", "1.0.0", false)], &[]);
+        let db = remaining_profile(&[], &[("database", "1.0.0")]);
+        let db2 = remaining_profile(&[], &[("database", "1.1.0")]);
+        let remaining = BTreeMap::from([
+            ("app".into(), app.clone()),
+            ("db".into(), db.clone()),
+            ("db2".into(), db2.clone()),
+        ]);
+        let previous = remaining.clone();
+        assert_eq!(
+            remaining_dependent_refusal(&remaining, &previous).unwrap(),
+            None
+        );
+        let mut bindings = EnvironmentBindings::default();
+        bindings.insert("app", "database", "db");
+        let without_db = BTreeMap::from([("app".into(), app.clone()), ("db2".into(), db2.clone())]);
+        let refusal = remaining_dependent_refusal_bound(&without_db, &previous, &bindings)
+            .unwrap()
+            .expect("bound provider removal");
+        assert_eq!(refusal.dependent, "app");
+        assert_eq!(refusal.contract, "database");
+        assert!(matches!(
+            refusal.kind,
+            RemainingDependentKind::Unsatisfied { .. }
+        ));
+    }
+
+    #[test]
+    fn a_binding_selects_one_of_several_satisfying_providers() {
         let (profile, mut evidence) = fixture();
         evidence.contracts.clear();
         let deployed = BTreeMap::from([(
             "database".into(),
-            vec![("compat-db@1.0.0".into(), "1.3.0".into())],
+            deployed(&[("db-a@1.0.0", "1.3.0"), ("db-b@1.0.0", "1.4.0")]),
         )]);
+        let unbound = evaluate_owned(
+            &profile,
+            &evidence.release_digest,
+            "test",
+            Some(&evidence),
+            &BTreeMap::new(),
+            1_050,
+            None,
+            &deployed,
+            "app",
+            &EnvironmentBindings::default(),
+        )
+        .unwrap()
+        .outcome;
+        assert_eq!(
+            unbound.failures,
+            vec![CompatibilityFailure::AmbiguousContract {
+                contract: "database".into(),
+                candidates: vec!["db-a".into(), "db-b".into()],
+            }]
+        );
+        assert!(
+            holdable_unmet_requirements(
+                &unbound,
+                &BTreeMap::from([("database".into(), "1.2.0".into())]),
+                &profile
+            )
+            .is_some()
+        );
+        let mut bindings = EnvironmentBindings::default();
+        bindings.insert("app", "database", "db-b");
+        let bound = evaluate_owned(
+            &profile,
+            &evidence.release_digest,
+            "test",
+            Some(&evidence),
+            &BTreeMap::new(),
+            1_050,
+            None,
+            &deployed,
+            "app",
+            &bindings,
+        )
+        .unwrap()
+        .outcome;
+        assert!(bound.failures.is_empty(), "{bound:?}");
+        assert_eq!(
+            bound.satisfied_by.get("database").map(String::as_str),
+            Some("db-b@1.0.0")
+        );
+        bindings.insert("app", "database", "missing");
+        let refused = evaluate_owned(
+            &profile,
+            &evidence.release_digest,
+            "test",
+            Some(&evidence),
+            &BTreeMap::new(),
+            1_050,
+            None,
+            &deployed,
+            "app",
+            &bindings,
+        )
+        .unwrap()
+        .outcome;
+        assert_eq!(
+            refused.failures,
+            vec![CompatibilityFailure::MissingContract {
+                contract: "database".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn named_instance_offer_is_bound_by_instance_not_catalog_product() {
+        let (profile, mut evidence) = fixture();
+        evidence.contracts.clear();
+        let catalog_release = DeployedProvide {
+            instance: "db-private".into(),
+            release: "database@1.0.0".into(),
+            contract_version: "1.3.0".into(),
+        };
+        let deployed = BTreeMap::from([("database".into(), vec![catalog_release])]);
+        let unique = evaluate_owned(
+            &profile,
+            &evidence.release_digest,
+            "test",
+            Some(&evidence),
+            &BTreeMap::new(),
+            1_050,
+            None,
+            &deployed,
+            "app",
+            &EnvironmentBindings::default(),
+        )
+        .unwrap()
+        .outcome;
+        assert!(unique.failures.is_empty(), "{unique:?}");
+        let mut bindings = EnvironmentBindings::default();
+        bindings.insert("app", "database", "db-private");
+        let bound = evaluate_owned(
+            &profile,
+            &evidence.release_digest,
+            "test",
+            Some(&evidence),
+            &BTreeMap::new(),
+            1_050,
+            None,
+            &deployed,
+            "app",
+            &bindings,
+        )
+        .unwrap()
+        .outcome;
+        assert!(bound.failures.is_empty(), "{bound:?}");
+        let several = BTreeMap::from([(
+            "database".into(),
+            vec![
+                DeployedProvide {
+                    instance: "db-a".into(),
+                    release: "database@1.0.0".into(),
+                    contract_version: "1.3.0".into(),
+                },
+                DeployedProvide {
+                    instance: "db-b".into(),
+                    release: "database@1.0.0".into(),
+                    contract_version: "1.4.0".into(),
+                },
+            ],
+        )]);
+        let unbound = evaluate_owned(
+            &profile,
+            &evidence.release_digest,
+            "test",
+            Some(&evidence),
+            &BTreeMap::new(),
+            1_050,
+            None,
+            &several,
+            "app",
+            &EnvironmentBindings::default(),
+        )
+        .unwrap()
+        .outcome;
+        assert_eq!(
+            unbound.failures,
+            vec![CompatibilityFailure::AmbiguousContract {
+                contract: "database".into(),
+                candidates: vec!["db-a".into(), "db-b".into()],
+            }]
+        );
+    }
+
+    #[test]
+    fn deployed_release_satisfies_requirement_without_observed_contract() {
+        let (profile, mut evidence) = fixture();
+        evidence.contracts.clear();
+        let deployed =
+            BTreeMap::from([("database".into(), deployed(&[("compat-db@1.0.0", "1.3.0")]))]);
         let report = evaluate_with_deployed(&profile, &evidence, &deployed);
         assert!(report.failures.is_empty(), "{report:?}");
         assert_eq!(
@@ -1906,15 +2398,14 @@ mod tests {
     #[test]
     fn deployed_and_observed_contract_is_ambiguous() {
         let (profile, evidence) = fixture();
-        let deployed = BTreeMap::from([(
-            "database".into(),
-            vec![("compat-db@1.0.0".into(), "1.3.0".into())],
-        )]);
+        let deployed =
+            BTreeMap::from([("database".into(), deployed(&[("compat-db@1.0.0", "1.3.0")]))]);
         let report = evaluate_with_deployed(&profile, &evidence, &deployed);
         assert_eq!(
             report.failures,
             vec![CompatibilityFailure::AmbiguousContract {
-                contract: "database".into()
+                contract: "database".into(),
+                candidates: vec!["compat-db".into(), OBSERVED_INSTANCE.into()],
             }]
         );
         assert!(report.satisfied_by.is_empty());
@@ -1926,15 +2417,146 @@ mod tests {
         evidence.contracts.clear();
         let deployed = BTreeMap::from([(
             "database".into(),
-            vec![
-                ("compat-db@1.0.0".into(), "1.3.0".into()),
-                ("compat-db-b@1.0.0".into(), "1.4.0".into()),
-            ],
+            deployed(&[("compat-db@1.0.0", "1.3.0"), ("compat-db-b@1.0.0", "1.4.0")]),
         )]);
         let report = evaluate_with_deployed(&profile, &evidence, &deployed);
         assert_eq!(
             report.failures,
             vec![CompatibilityFailure::AmbiguousContract {
+                contract: "database".into(),
+                candidates: vec!["compat-db".into(), "compat-db-b".into()],
+            }]
+        );
+    }
+
+    #[test]
+    fn installed_profile_checks_each_component_requirement() {
+        let pin = ComponentPin::Revision("a".repeat(40));
+        let profile = CompatibilityProfile {
+            version: 1,
+            components: BTreeMap::from([
+                (
+                    "web".into(),
+                    ComponentRequirement {
+                        pin: pin.clone(),
+                        requires: BTreeMap::from([(
+                            "database".into(),
+                            ContractRequirement::Minimum("2.0.0".into()),
+                        )]),
+                        provides: BTreeMap::new(),
+                    },
+                ),
+                (
+                    "worker".into(),
+                    ComponentRequirement {
+                        pin,
+                        requires: BTreeMap::from([(
+                            "database".into(),
+                            ContractRequirement::Minimum("1.0.0".into()),
+                        )]),
+                        provides: BTreeMap::new(),
+                    },
+                ),
+            ]),
+            capabilities: Vec::new(),
+            facts: BTreeMap::new(),
+            schema: None,
+            max_evidence_age_ms: 60_000,
+        };
+        let deployed = BTreeMap::from([("database".into(), deployed(&[("db@1.0.0", "1.5.0")]))]);
+        let offers = contract_offers(None, &deployed);
+        let mut failures = Vec::new();
+        check_installed_requires(
+            "app",
+            &profile,
+            &offers,
+            &EnvironmentBindings::default(),
+            &mut failures,
+        )
+        .unwrap();
+        assert!(
+            failures.contains(&CompatibilityFailure::IncompatibleContract {
+                contract: "database".into()
+            }),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn installed_unbound_several_providers_are_not_a_candidate_failure() {
+        let pin = ComponentPin::Revision("a".repeat(40));
+        let profile = CompatibilityProfile {
+            version: 2,
+            components: BTreeMap::from([(
+                "main".into(),
+                ComponentRequirement {
+                    pin,
+                    requires: BTreeMap::from([(
+                        "database".into(),
+                        ContractRequirement::Minimum("1.0.0".into()),
+                    )]),
+                    provides: BTreeMap::new(),
+                },
+            )]),
+            capabilities: Vec::new(),
+            facts: BTreeMap::new(),
+            schema: None,
+            max_evidence_age_ms: 60_000,
+        };
+        let deployed = BTreeMap::from([(
+            "database".into(),
+            deployed(&[("db-a@1.0.0", "1.0.0"), ("db-b@1.0.0", "1.1.0")]),
+        )]);
+        let offers = contract_offers(None, &deployed);
+        let mut failures = Vec::new();
+        check_installed_requires(
+            "app",
+            &profile,
+            &offers,
+            &EnvironmentBindings::default(),
+            &mut failures,
+        )
+        .unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn installed_bound_to_observed_uses_that_dependents_observation() {
+        let pin = ComponentPin::Revision("a".repeat(40));
+        let profile = CompatibilityProfile {
+            version: 2,
+            components: BTreeMap::from([(
+                "main".into(),
+                ComponentRequirement {
+                    pin,
+                    requires: BTreeMap::from([(
+                        "database".into(),
+                        ContractRequirement::Minimum("1.0.0".into()),
+                    )]),
+                    provides: BTreeMap::new(),
+                },
+            )]),
+            capabilities: Vec::new(),
+            facts: BTreeMap::new(),
+            schema: None,
+            max_evidence_age_ms: 60_000,
+        };
+        let mut bindings = EnvironmentBindings::default();
+        bindings.insert("app", "database", OBSERVED_INSTANCE);
+        let observed = BTreeMap::from([("database".into(), "1.3.0".into())]);
+        let none_deployed = DeployedOffers::new();
+        let offers = contract_offers_from_versions(&observed, &none_deployed);
+        let mut failures = Vec::new();
+        check_installed_requires("app", &profile, &offers, &bindings, &mut failures).unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+        let empty_observed = BTreeMap::new();
+        let candidate_only = contract_offers_from_versions(&empty_observed, &none_deployed);
+        let mut failures = Vec::new();
+        check_installed_requires("app", &profile, &candidate_only, &bindings, &mut failures)
+            .unwrap();
+        assert_eq!(
+            failures,
+            vec![CompatibilityFailure::MissingContract {
                 contract: "database".into()
             }]
         );
@@ -1957,10 +2579,8 @@ mod tests {
     fn incompatible_deployed_contract_is_refused() {
         let (profile, mut evidence) = fixture();
         evidence.contracts.clear();
-        let deployed = BTreeMap::from([(
-            "database".into(),
-            vec![("compat-db@1.0.0".into(), "2.0.0".into())],
-        )]);
+        let deployed =
+            BTreeMap::from([("database".into(), deployed(&[("compat-db@1.0.0", "2.0.0")]))]);
         let report = evaluate_with_deployed(&profile, &evidence, &deployed);
         assert_eq!(
             report.failures,
@@ -1971,7 +2591,7 @@ mod tests {
     }
 
     #[test]
-    fn two_components_in_one_release_providing_the_same_contract_stay_ambiguous() {
+    fn two_components_in_one_release_providing_the_same_contract_are_one_instance() {
         let (profile, mut evidence) = fixture();
         evidence.contracts.clear();
         let mut deployed = DeployedOffers::new();
@@ -2002,11 +2622,10 @@ mod tests {
         };
         add_deployed_provides(&mut deployed, "compat-db", "1.0.0", &provider);
         let report = evaluate_with_deployed(&profile, &evidence, &deployed);
+        assert!(report.failures.is_empty(), "{report:?}");
         assert_eq!(
-            report.failures,
-            vec![CompatibilityFailure::AmbiguousContract {
-                contract: "database".into()
-            }]
+            report.satisfied_by.get("database").map(String::as_str),
+            Some("compat-db@1.0.0")
         );
     }
 
@@ -2573,7 +3192,8 @@ mod tests {
             ambiguous
                 .failures
                 .contains(&CompatibilityFailure::AmbiguousContract {
-                    contract: "database".into()
+                    contract: "database".into(),
+                    candidates: vec!["compat-db".into(), OBSERVED_INSTANCE.into()],
                 }),
             "{ambiguous:?}"
         );

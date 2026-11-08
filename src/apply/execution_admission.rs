@@ -44,6 +44,9 @@ enum Rejection {
     Unsubscribed {
         product: String,
     },
+    BindingsChanged {
+        product: String,
+    },
 }
 
 impl fmt::Display for Rejection {
@@ -77,6 +80,10 @@ impl fmt::Display for Rejection {
             Self::Unsubscribed { product } => write!(
                 formatter,
                 "is stale for {product}: the environment no longer subscribes to it"
+            ),
+            Self::BindingsChanged { product } => write!(
+                formatter,
+                "is stale for {product}: dependency bindings changed"
             ),
         }
     }
@@ -196,6 +203,15 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
                 channel: input.channel.clone(),
             }));
         }
+        let live = crate::environment_bindings::EnvironmentBindings::from_properties(
+            &environment.properties,
+        )
+        .for_dependent(input.instance_name());
+        if live != input.providers {
+            return Ok(Err(Rejection::BindingsChanged {
+                product: input.product.clone(),
+            }));
+        }
     }
     Ok(Ok(()))
 }
@@ -241,6 +257,7 @@ mod tests {
                 release_digest: "release-digest".into(),
                 artifact_digest: "artifact-digest".into(),
                 deployed_version: Some("1.0.0".into()),
+                providers: Default::default(),
             }],
             steps: vec![Step {
                 id: "tenkai:plan:prod:test:step:0".into(),
@@ -316,6 +333,37 @@ mod tests {
             CandidateAdmission::Admissible
         );
         admit(&mut ctx, &plan).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn changed_bindings_are_superseded_but_actionable_at_execution() {
+        let mut ctx = context("changed-bindings");
+        put_current_state(&mut ctx).await;
+        let mut plan = plan();
+        plan.inputs[0]
+            .providers
+            .insert("database".into(), "db-a".into());
+        assert_eq!(
+            classify_candidate(&mut ctx, &plan).await.unwrap(),
+            CandidateAdmission::Superseded
+        );
+        assert!(
+            admit(&mut ctx, &plan)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("dependency bindings changed")
+        );
+        let mut environment = ctx.get(&env_id("prod")).await.unwrap().unwrap();
+        environment.properties.insert(
+            crate::environment_bindings::binding_key("api", "database"),
+            "db-a".into(),
+        );
+        ctx.put(environment).await.unwrap();
+        assert_eq!(
+            classify_candidate(&mut ctx, &plan).await.unwrap(),
+            CandidateAdmission::Admissible
+        );
     }
 
     #[tokio::test]

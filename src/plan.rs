@@ -196,6 +196,10 @@ pub struct DesiredStateInput {
     pub release_digest: String,
     pub artifact_digest: String,
     pub deployed_version: Option<String>,
+    /// Bound provider instances for this dependent (contract → provider).
+    /// Empty when unbound so existing plan hashes stay.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub providers: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -699,6 +703,7 @@ mod tests {
                 release_digest: "target-digest".into(),
                 artifact_digest: "target-artifact-digest".into(),
                 deployed_version: Some("1.0.0".into()),
+                providers: Default::default(),
             }],
             steps: vec![Step {
                 id: String::new(),
@@ -739,6 +744,43 @@ mod tests {
         plan.id = plan_id(&plan.environment, plan.created_at, &plan.content_id);
         plan.steps[0].id = format!("{}:step:0", plan.id);
         plan
+    }
+
+    #[test]
+    fn empty_providers_are_omitted_and_a_binding_changes_content_identity() {
+        let unbound = example_plan();
+        let mut bound = example_plan();
+        bound.inputs[0]
+            .providers
+            .insert("database".into(), "db-a".into());
+        let unbound_json = serde_json::to_value(&unbound.inputs[0]).unwrap();
+        assert!(unbound_json.get("providers").is_none(), "{unbound_json}");
+        let bound_json = serde_json::to_value(&bound.inputs[0]).unwrap();
+        assert_eq!(
+            bound_json
+                .get("providers")
+                .and_then(|value| value.get("database"))
+                .and_then(|value| value.as_str()),
+            Some("db-a")
+        );
+        assert_ne!(
+            content_address(
+                &unbound.environment,
+                unbound.created_at,
+                &unbound.inputs,
+                &unbound.steps,
+                None,
+            )
+            .unwrap(),
+            content_address(
+                &bound.environment,
+                bound.created_at,
+                &bound.inputs,
+                &bound.steps,
+                None,
+            )
+            .unwrap()
+        );
     }
 
     #[test]

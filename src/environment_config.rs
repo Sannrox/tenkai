@@ -3,7 +3,8 @@
 //! `POST /v1/environments` registers an environment. Generation-fenced
 //! `PUT`/`DELETE` routes under `/v1/environments/{environment}/` change its
 //! facts, constraints, maintenance windows, webhooks, approval policy,
-//! runner attestation policy (#675), and declared criticality (#694). Every
+//! runner attestation policy (#675), declared criticality (#694), and
+//! dependency bindings (ADR 0044). Every
 //! change runs the same embedded function, and so the same validation, as the
 //! CLI. Every change also appends an immutable audit event that records the
 //! actor and the reason.
@@ -115,6 +116,17 @@ pub enum EnvironmentConfigChange {
         reason: String,
     },
     ClearCriticality,
+    /// Bind a dependent instance's contract to a provider instance (ADR 0044 §3).
+    Bind {
+        dependent: String,
+        contract: String,
+        provider: String,
+    },
+    /// Remove one binding.
+    Unbind {
+        dependent: String,
+        contract: String,
+    },
 }
 
 /// The configuration resource a route serves.
@@ -127,6 +139,7 @@ pub enum ConfigResource {
     ApprovalPolicy,
     RunnerAttestation,
     Criticality,
+    Bindings,
 }
 
 impl ConfigResource {
@@ -139,6 +152,7 @@ impl ConfigResource {
             Self::ApprovalPolicy => "approval-policy",
             Self::RunnerAttestation => "runner-attestation",
             Self::Criticality => "criticality",
+            Self::Bindings => "bindings",
         }
     }
 }
@@ -161,6 +175,7 @@ impl EnvironmentConfigChange {
                 ConfigResource::RunnerAttestation
             }
             Self::SetCriticality { .. } | Self::ClearCriticality => ConfigResource::Criticality,
+            Self::Bind { .. } | Self::Unbind { .. } => ConfigResource::Bindings,
         }
     }
 
@@ -175,6 +190,7 @@ impl EnvironmentConfigChange {
                 | Self::ClearApprovalPolicy
                 | Self::ClearRunnerAttestation
                 | Self::ClearCriticality
+                | Self::Unbind { .. }
         )
     }
 
@@ -214,6 +230,8 @@ impl EnvironmentConfigChange {
             Self::ClearRunnerAttestation => "clear_runner_attestation",
             Self::SetCriticality { .. } => "set_criticality",
             Self::ClearCriticality => "clear_criticality",
+            Self::Bind { .. } => "bind",
+            Self::Unbind { .. } => "unbind",
         }
     }
 }
@@ -300,6 +318,17 @@ pub fn validate(change: &EnvironmentConfigChange) -> Result<()> {
         | Change::ClearApprovalPolicy
         | Change::ClearRunnerAttestation
         | Change::ClearCriticality => Ok(()),
+        Change::Bind {
+            dependent,
+            contract,
+            provider,
+        } => {
+            crate::environment_bindings::validate_binding_names(dependent, contract, Some(provider))
+        }
+        Change::Unbind {
+            dependent,
+            contract,
+        } => crate::environment_bindings::validate_binding_names(dependent, contract, None),
         Change::SetRunnerAttestation {
             max_age_ms,
             require_hardware_key,
@@ -571,6 +600,28 @@ async fn mutate(
         Change::ClearCriticality => {
             crate::criticality_store::clear_environment_locked(ctx, environment, lease).await?
         }
+        Change::Bind {
+            dependent,
+            contract,
+            provider,
+        } => {
+            crate::environment_bindings::bind_locked(
+                ctx,
+                environment,
+                dependent,
+                contract,
+                provider,
+                lease,
+            )
+            .await?
+        }
+        Change::Unbind {
+            dependent,
+            contract,
+        } => {
+            crate::environment_bindings::unbind_locked(ctx, environment, dependent, contract, lease)
+                .await?
+        }
     })
 }
 
@@ -713,5 +764,22 @@ mod tests {
         require_route(&set_criticality, ConfigResource::Criticality, false, None).unwrap();
         let clear_criticality = change(serde_json::json!({"kind": "clear_criticality"})).unwrap();
         require_route(&clear_criticality, ConfigResource::Criticality, true, None).unwrap();
+
+        let bind = change(serde_json::json!({
+            "kind": "bind",
+            "dependent": "app",
+            "contract": "database",
+            "provider": "db-a"
+        }))
+        .unwrap();
+        assert_eq!(bind.path("prod"), "/v1/environments/prod/bindings");
+        require_route(&bind, ConfigResource::Bindings, false, None).unwrap();
+        let unbind = change(serde_json::json!({
+            "kind": "unbind",
+            "dependent": "app",
+            "contract": "database"
+        }))
+        .unwrap();
+        require_route(&unbind, ConfigResource::Bindings, true, None).unwrap();
     }
 }

@@ -148,6 +148,23 @@ For a scripted two-environment walkthrough (list/inspect/status), run:
 ./scripts/demo-multi-env.sh
 ```
 
+## Dependency bindings
+
+Several providers of one contract need a binding that says which provider
+instance satisfies which contract for which dependent instance. One matching
+provider satisfies without a binding. Tenkai never picks among several.
+
+```bash
+tenkaictl env bind prod app database=db-a
+tenkaictl env unbind prod app database
+```
+
+Bindings are environment configuration: remote calls take `--generation` and
+`--reason` like facts. Binding to an instance that does not provide a
+satisfying version is refused. Unbinding a required contract on an installed
+dependent is refused. The dependency document names the provider instance;
+changing a binding re-renders the dependent.
+
 ## Facts and constraints
 
 Facts describe an environment; constraints decide which releases the planner

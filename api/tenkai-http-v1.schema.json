@@ -1021,6 +1021,12 @@
         },
         {
           "properties": {
+            "candidates": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "contract": {
               "type": "string"
             },
@@ -2035,6 +2041,54 @@
           },
           "required": [
             "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Bind a dependent instance's contract to a provider instance (ADR 0044 §3).",
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "dependent": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "bind",
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "dependent",
+            "contract",
+            "provider"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Remove one binding.",
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "dependent": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "unbind",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "dependent",
+            "contract"
           ],
           "type": "object"
         }
@@ -4844,6 +4898,9 @@
             "contract": {
               "type": "string"
             },
+            "instance": {
+              "type": "string"
+            },
             "product": {
               "type": "string"
             },
@@ -6207,6 +6264,13 @@
     "UnmetContract": {
       "description": "Unmet contract named by a dependency hold.",
       "properties": {
+        "candidates": {
+          "description": "Satisfying provider instances when the contract is ambiguous.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "contract": {
           "type": "string"
         },
@@ -6840,6 +6904,28 @@
       "auth": "management",
       "method": "PUT",
       "path": "/v1/environments/{environment}/facts",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/environments/{environment}/bindings",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/environments/{environment}/bindings",
       "request": {
         "$ref": "#/$defs/EnvironmentConfigRequest"
       },

@@ -135,6 +135,7 @@ pub(super) async fn execute(
             environment,
             &content.manifest,
             &content.manifest_digest,
+            content.instance_name(),
         )
         .await?;
         // Replica facts may have moved since the plan was made (#689).
@@ -940,6 +941,7 @@ async fn restore_after_health_gate(
         environment,
         &previous.manifest,
         &previous.manifest_digest,
+        previous.instance_name(),
     )
     .await
     {

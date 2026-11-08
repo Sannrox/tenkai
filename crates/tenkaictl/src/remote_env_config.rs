@@ -12,6 +12,35 @@ use crate::env_args::{
 /// when `command` is not one (lists and shows go elsewhere).
 pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, RemoteChange)>> {
     Some(match command {
+        EnvCommand::Bind {
+            env,
+            dependent,
+            spec,
+            remote,
+        } => spec
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("expected <contract>=<provider>, got {spec:?}"))
+            .map(|(contract, provider)| {
+                let change = Change::Bind {
+                    dependent: dependent.clone(),
+                    contract: contract.into(),
+                    provider: provider.into(),
+                };
+                (env.as_str(), change, remote.clone())
+            }),
+        EnvCommand::Unbind {
+            env,
+            dependent,
+            contract,
+            remote,
+        } => Ok((
+            env.as_str(),
+            Change::Unbind {
+                dependent: dependent.clone(),
+                contract: contract.clone(),
+            },
+            remote.clone(),
+        )),
         EnvCommand::Facts { command } => match command {
             FactsCommand::Set { env, spec, remote } => spec
                 .split_once('=')

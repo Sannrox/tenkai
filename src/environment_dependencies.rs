@@ -1,8 +1,7 @@
 //! Operator view of environment dependency holds, providers, and impact (ADR 0043).
 //!
 //! Derived only from stored deployments, subscription profiles, and
-//! `dependency_hold.*`. The payload has no endpoints, credentials, or instance
-//! names.
+//! `dependency_hold.*`. The payload has no endpoints or credentials.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -10,13 +9,11 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
-use crate::dependency_document::{self, MatchingProvider};
+use crate::dependency_document;
 use crate::environment::{
     DependencyHold, StatusRow, UnmetContract, dependency_hold, environment, status, status_state,
 };
-use crate::software_compatibility::{
-    CompatibilityProfile, RemainingDependentRefusal, remaining_dependent_refusal,
-};
+use crate::software_compatibility::{CompatibilityProfile, RemainingDependentRefusal};
 
 /// Environment dependency graph for status and `env dependencies`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -64,6 +61,8 @@ pub enum ProviderView {
         product: String,
         release: String,
         contract: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        instance: String,
     },
     Absent,
     Ambiguous {
@@ -111,7 +110,18 @@ impl EnvironmentDependencies {
                 let contracts = hold
                     .contracts
                     .iter()
-                    .map(|c| format!("{} >= {}", c.contract, c.minimum))
+                    .map(|c| {
+                        if c.candidates.is_empty() {
+                            format!("{} >= {}", c.contract, c.minimum)
+                        } else {
+                            format!(
+                                "{} >= {} [{}]",
+                                c.contract,
+                                c.minimum,
+                                c.candidates.join(", ")
+                            )
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 lines.push(format!("  {}  {contracts}", hold.product));
@@ -153,10 +163,17 @@ impl EnvironmentDependencies {
             for requirement in &product.requirements {
                 match &requirement.provider {
                     ProviderView::Unique {
-                        product: provider, ..
+                        product: provider,
+                        instance,
+                        ..
                     } => {
+                        let from = if instance.is_empty() {
+                            provider.as_str()
+                        } else {
+                            instance.as_str()
+                        };
                         lines.push(format!(
-                            "  \"{provider}\" -> \"{}\" [label=\"{}\"];",
+                            "  \"{from}\" -> \"{}\" [label=\"{}\"];",
                             product.product, requirement.contract
                         ));
                     }
@@ -183,7 +200,14 @@ fn provider_text(provider: &ProviderView) -> String {
             product,
             release,
             contract,
-        } => format!("{product}@{release} ({contract})"),
+            instance,
+        } => {
+            if instance.is_empty() || instance == product {
+                format!("{product}@{release} ({contract})")
+            } else {
+                format!("{instance} {product}@{release} ({contract})")
+            }
+        }
         ProviderView::Absent => "absent".into(),
         ProviderView::Ambiguous { products } => format!("ambiguous ({})", products.join(", ")),
     }
@@ -217,13 +241,13 @@ pub async fn for_environment(ctx: &mut Ctx, env: &str) -> Result<EnvironmentDepe
     let deployed = dependency_document::deployed_set(ctx, &env_obj).await?;
     let holds = holds_from_properties(&env_obj.properties);
     let mut products: BTreeMap<String, ViewedProduct> = BTreeMap::new();
-    for (product, (version, profile)) in &deployed {
+    for (instance, deployed) in &deployed {
         products.insert(
-            product.clone(),
+            instance.clone(),
             ViewedProduct {
-                version: Some(version.clone()),
+                version: Some(deployed.version.clone()),
                 state: "deployed".into(),
-                profile: Some(profile.clone()),
+                profile: Some(deployed.profile.clone()),
             },
         );
     }
@@ -233,9 +257,31 @@ pub async fn for_environment(ctx: &mut Ctx, env: &str) -> Result<EnvironmentDepe
     }
     let deployed_profiles: BTreeMap<String, CompatibilityProfile> = deployed
         .iter()
-        .map(|(product, (_, profile))| (product.clone(), profile.clone()))
+        .map(|(instance, deployed)| (instance.clone(), deployed.profile.clone()))
         .collect();
-    view_from(env, holds, &products, &deployed, &deployed_profiles)
+    let bindings =
+        crate::environment_bindings::EnvironmentBindings::from_properties(&env_obj.properties);
+    let mut observed = BTreeMap::new();
+    for name in products.keys() {
+        let Some(digest) =
+            dependency_document::instance_release_digest(ctx, &env_obj, name).await?
+        else {
+            continue;
+        };
+        observed.insert(
+            name.clone(),
+            crate::software_compatibility::observed_contract_versions(ctx, env, &digest).await?,
+        );
+    }
+    view_from(
+        env,
+        holds,
+        &products,
+        &deployed,
+        &deployed_profiles,
+        &bindings,
+        &observed,
+    )
 }
 
 struct ViewedProduct {
@@ -251,8 +297,13 @@ fn apply_status_row(
     row: &StatusRow,
     profile: Option<CompatibilityProfile>,
 ) {
+    let instance = if row.instance.is_empty() {
+        row.product.as_str()
+    } else {
+        row.instance.as_str()
+    };
     let entry = products
-        .entry(row.product.clone())
+        .entry(instance.to_string())
         .or_insert(ViewedProduct {
             version: row.deployed.clone(),
             state: status_state(row).to_string(),
@@ -308,22 +359,38 @@ fn view_from(
     environment: &str,
     holds: Vec<(String, DependencyHold)>,
     products: &BTreeMap<String, ViewedProduct>,
-    deployed: &BTreeMap<String, (String, CompatibilityProfile)>,
+    deployed: &BTreeMap<String, dependency_document::DeployedRelease>,
     deployed_profiles: &BTreeMap<String, CompatibilityProfile>,
+    bindings: &crate::environment_bindings::EnvironmentBindings,
+    observed: &BTreeMap<String, BTreeMap<String, String>>,
 ) -> Result<EnvironmentDependencies> {
     let members: BTreeSet<String> = products.keys().cloned().collect();
     let mut edges = Vec::new();
     let mut views = BTreeMap::new();
+    let empty = BTreeMap::new();
     for (name, product) in products {
-        let requirements = requirements_for(name, product.profile.as_ref(), deployed)?;
+        let requirements = requirements_for(
+            name,
+            product.profile.as_ref(),
+            deployed,
+            bindings,
+            observed.get(name).unwrap_or(&empty),
+        )?;
         for requirement in &requirements {
-            match &requirement.provider {
-                ProviderView::Unique {
-                    product: provider, ..
-                } if members.contains(provider) => {
-                    edges.push((provider.clone(), name.clone()));
+            if let ProviderView::Unique {
+                product: provider,
+                instance,
+                ..
+            } = &requirement.provider
+            {
+                let from = if instance.is_empty() {
+                    provider.as_str()
+                } else {
+                    instance.as_str()
+                };
+                if members.contains(from) {
+                    edges.push((from.to_string(), name.clone()));
                 }
-                _ => {}
             }
         }
         views.insert(
@@ -333,7 +400,7 @@ fn view_from(
                 version: product.version.clone(),
                 state: product.state.clone(),
                 requirements,
-                impact: impact_for(name, deployed_profiles)?,
+                impact: impact_for(name, deployed_profiles, bindings)?,
             },
         );
     }
@@ -348,7 +415,15 @@ fn view_from(
                 contracts: hold
                     .contracts
                     .into_iter()
-                    .map(|(contract, minimum)| UnmetContract { contract, minimum })
+                    .map(|(contract, minimum)| {
+                        let candidates =
+                            hold.candidates.get(&contract).cloned().unwrap_or_default();
+                        UnmetContract {
+                            contract,
+                            minimum,
+                            candidates,
+                        }
+                    })
                     .collect(),
                 held_at: hold.held_at,
             })
@@ -363,7 +438,9 @@ fn view_from(
 fn requirements_for(
     product: &str,
     profile: Option<&CompatibilityProfile>,
-    deployed: &BTreeMap<String, (String, CompatibilityProfile)>,
+    deployed: &BTreeMap<String, dependency_document::DeployedRelease>,
+    bindings: &crate::environment_bindings::EnvironmentBindings,
+    observed: &BTreeMap<String, String>,
 ) -> Result<Vec<RequirementView>> {
     let Some(profile) = profile else {
         return Ok(Vec::new());
@@ -379,28 +456,33 @@ fn requirements_for(
         if dependency_document::self_satisfies(profile, &contract, &requirement)? {
             continue;
         }
-        let matching = dependency_document::matching_providers(
+        let matching = crate::environment_bindings::select_matching(
             product,
             &contract,
-            &requirement,
-            profile.version,
-            deployed,
-        )?;
+            dependency_document::matching_providers(
+                product,
+                &contract,
+                &requirement,
+                profile.version,
+                deployed,
+                observed,
+            )?,
+            bindings,
+        );
         let provider = match matching.as_slice() {
             [] => ProviderView::Absent,
-            [
-                MatchingProvider {
-                    product,
-                    release,
-                    contract_version,
+            [provider] => ProviderView::Unique {
+                product: provider.product.clone(),
+                release: provider.release.clone(),
+                contract: provider.contract_version.clone(),
+                instance: if provider.instance == provider.product {
+                    String::new()
+                } else {
+                    provider.instance.clone()
                 },
-            ] => ProviderView::Unique {
-                product: product.clone(),
-                release: release.clone(),
-                contract: contract_version.clone(),
             },
             several => ProviderView::Ambiguous {
-                products: several.iter().map(|m| m.product.clone()).collect(),
+                products: several.iter().map(|m| m.instance.clone()).collect(),
             },
         };
         out.push(RequirementView {
@@ -416,20 +498,33 @@ fn requirements_for(
 fn impact_for(
     product: &str,
     deployed_profiles: &BTreeMap<String, CompatibilityProfile>,
+    bindings: &crate::environment_bindings::EnvironmentBindings,
 ) -> Result<ProductImpact> {
     if !deployed_profiles.contains_key(product) {
         return Ok(ProductImpact::default());
     }
     let mut without = deployed_profiles.clone();
     without.remove(product);
-    let remove = refusal_view(remaining_dependent_refusal(&without, deployed_profiles)?);
+    let remove = refusal_view(
+        crate::software_compatibility::remaining_dependent_refusal_bound(
+            &without,
+            deployed_profiles,
+            bindings,
+        )?,
+    );
     let mut dropped = deployed_profiles.clone();
     if let Some(profile) = dropped.get_mut(product) {
         for component in profile.components.values_mut() {
             component.provides.clear();
         }
     }
-    let drop_provides = refusal_view(remaining_dependent_refusal(&dropped, deployed_profiles)?);
+    let drop_provides = refusal_view(
+        crate::software_compatibility::remaining_dependent_refusal_bound(
+            &dropped,
+            deployed_profiles,
+            bindings,
+        )?,
+    );
     Ok(ProductImpact {
         remove,
         upgrade: drop_provides.clone(),
@@ -536,16 +631,36 @@ mod tests {
         }
     }
 
+    fn rel(
+        name: &str,
+        version: &str,
+        profile: CompatibilityProfile,
+    ) -> (String, dependency_document::DeployedRelease) {
+        (
+            name.into(),
+            dependency_document::DeployedRelease::of(name, version, profile),
+        )
+    }
+
     fn view(
         holds: Vec<(String, DependencyHold)>,
         products: BTreeMap<String, ViewedProduct>,
-        deployed: BTreeMap<String, (String, CompatibilityProfile)>,
+        deployed: BTreeMap<String, dependency_document::DeployedRelease>,
     ) -> EnvironmentDependencies {
         let deployed_profiles = deployed
             .iter()
-            .map(|(name, (_, profile))| (name.clone(), profile.clone()))
+            .map(|(name, deployed)| (name.clone(), deployed.profile.clone()))
             .collect();
-        view_from("local", holds, &products, &deployed, &deployed_profiles).unwrap()
+        view_from(
+            "local",
+            holds,
+            &products,
+            &deployed,
+            &deployed_profiles,
+            &crate::environment_bindings::EnvironmentBindings::default(),
+            &BTreeMap::new(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -553,8 +668,8 @@ mod tests {
         let db = profile(&[], &[("database", "1.0.0")]);
         let app = profile(&[("database", "1.0.0", false)], &[]);
         let deployed = BTreeMap::from([
-            ("app".into(), ("1.0.0".into(), app.clone())),
-            ("db".into(), ("1.2.0".into(), db.clone())),
+            rel("app", "1.0.0", app.clone()),
+            rel("db", "1.2.0", db.clone()),
         ]);
         let products = BTreeMap::from([
             ("app".into(), product("1.0.0", "current", app)),
@@ -573,6 +688,7 @@ mod tests {
                     product: "db".into(),
                     release: "1.2.0".into(),
                     contract: "1.0.0".into(),
+                    instance: String::new(),
                 },
             }]
         );
@@ -610,9 +726,9 @@ mod tests {
         let db = profile(&[], &[("database", "1.0.0")]);
         let other = profile(&[], &[("database", "1.0.0")]);
         let deployed = BTreeMap::from([
-            ("app".into(), ("1.0.0".into(), app.clone())),
-            ("db".into(), ("1.0.0".into(), db.clone())),
-            ("other".into(), ("1.0.0".into(), other.clone())),
+            rel("app", "1.0.0", app.clone()),
+            rel("db", "1.0.0", db.clone()),
+            rel("other", "1.0.0", other.clone()),
         ]);
         let products = BTreeMap::from([
             ("app".into(), product("1.0.0", "current", app)),
@@ -661,8 +777,8 @@ mod tests {
         let app = profile(&[("connector", "0.1.0", true)], &[]);
         let side = profile(&[], &[("connector", "0.1.0")]);
         let deployed = BTreeMap::from([
-            ("app".into(), ("1.0.0".into(), app.clone())),
-            ("side".into(), ("1.0.0".into(), side.clone())),
+            rel("app", "1.0.0", app.clone()),
+            rel("side", "1.0.0", side.clone()),
         ]);
         let products = BTreeMap::from([
             ("app".into(), product("1.0.0", "current", app)),
@@ -695,6 +811,7 @@ mod tests {
                 contracts: vec![UnmetContract {
                     contract: "database".into(),
                     minimum: "2.0.0".into(),
+                    candidates: Vec::new(),
                 }],
                 held_at: 1,
             }),
@@ -705,6 +822,7 @@ mod tests {
             release_id: "tenkai:release:app@2.0.0".into(),
             contracts: vec![("database".into(), "2.0.0".into())],
             held_at: 1,
+            candidates: BTreeMap::new(),
         };
         let view = view(vec![("app".into(), hold)], products, BTreeMap::new());
         assert_eq!(view.products[0].state, "waiting");
@@ -726,6 +844,7 @@ mod tests {
             release_id: "tenkai:release:app@1.0.0".into(),
             contracts: vec![("database".into(), "1.0.0".into())],
             held_at: 10,
+            candidates: BTreeMap::new(),
         };
         let products = BTreeMap::from([("app".into(), product("1.0.0", "waiting", app.clone()))]);
         let view = view(vec![("app".into(), hold)], products, BTreeMap::new());
@@ -735,6 +854,7 @@ mod tests {
             vec![UnmetContract {
                 contract: "database".into(),
                 minimum: "1.0.0".into(),
+                candidates: Vec::new(),
             }]
         );
         assert_eq!(view.products[0].state, "waiting");
@@ -752,8 +872,8 @@ mod tests {
         let db = profile(&[], &[("database", "1.0.0")]);
         let app = profile(&[("database", "1.0.0", false)], &[]);
         let deployed = BTreeMap::from([
-            ("app".into(), ("1.0.0".into(), app.clone())),
-            ("db".into(), ("1.0.0".into(), db.clone())),
+            rel("app", "1.0.0", app.clone()),
+            rel("db", "1.0.0", db.clone()),
         ]);
         let products = BTreeMap::from([
             ("app".into(), product("1.0.0", "current", app)),

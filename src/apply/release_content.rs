@@ -29,6 +29,17 @@ pub(super) struct ReleaseContent {
     pub(super) content_root: PathBuf,
 }
 
+impl ReleaseContent {
+    /// Instance this apply is for. Empty `instance` means the product.
+    pub(super) fn instance_name(&self) -> &str {
+        if self.instance.is_empty() {
+            &self.product
+        } else {
+            &self.instance
+        }
+    }
+}
+
 pub(super) fn verify_integrity(content: &ReleaseContent) -> Result<()> {
     let actual = manifest::identity_digest(
         &content.workdir,

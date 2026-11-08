@@ -398,7 +398,7 @@ async fn update_reconciled_deployment_object(
         .insert(format!("deployment_health.{key}"), "healthy".into());
     object.properties.remove(&format!("deployment_error.{key}"));
     stamp_applied_overlays(object, product, instance);
-    crate::dependency_document::stamp(ctx, object, product).await?;
+    crate::dependency_document::stamp(ctx, object, key).await?;
     object.properties.remove(&format!("deployed_prev.{key}"));
     for prefix in [
         "deployment_unknown_plan.",
@@ -479,7 +479,7 @@ pub(crate) async fn record_deployed(
         .insert(format!("deployment_health.{key}"), "healthy".into());
     object.properties.remove(&format!("deployment_error.{key}"));
     stamp_applied_overlays(&mut object, product, instance);
-    crate::dependency_document::stamp(ctx, &mut object, product).await?;
+    crate::dependency_document::stamp(ctx, &mut object, key).await?;
     object.updated = crate::now_millis();
     guarded_update(ctx, lease, object).await
 }
@@ -649,14 +649,18 @@ pub(crate) async fn record_deployment_observation(
         if observation.status == "succeeded" {
             match observation.transition {
                 DeploymentTransition::Deployed { .. } | DeploymentTransition::Refreshed => {
-                    crate::dependency_document::stamp(ctx, environment, &observation.step.product)
-                        .await?;
+                    crate::dependency_document::stamp(
+                        ctx,
+                        environment,
+                        observation.step.instance_name(),
+                    )
+                    .await?;
                 }
                 DeploymentTransition::Removed { .. } => {
                     environment.properties.remove(&format!(
                         "{}{}",
                         crate::dependency_document::APPLIED_PROPERTY_PREFIX,
-                        observation.step.product
+                        observation.step.instance_name()
                     ));
                 }
                 _ => {}
@@ -1344,6 +1348,9 @@ pub struct StatusRow {
 pub struct UnmetContract {
     pub contract: String,
     pub minimum: String,
+    /// Satisfying provider instances when the contract is ambiguous.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
 }
 
 /// Dependency hold carried on a status row (no product; the row already names it).
@@ -1759,7 +1766,7 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             held_failed_target_release(&env_obj.properties, &instance) == Some(release.as_str())
         });
         let dependency_hold =
-            dependency_hold(&env_obj.properties, &product).map(|hold| hold.to_status_view());
+            dependency_hold(&env_obj.properties, &instance).map(|hold| hold.to_status_view());
         rows.push(StatusRow {
             instance: instance.clone(),
             deployed: env_obj
@@ -2735,6 +2742,7 @@ pub struct DependencyHold {
     pub release_id: String,
     pub contracts: Vec<(String, String)>,
     pub held_at: i64,
+    pub candidates: BTreeMap<String, Vec<String>>,
 }
 
 impl DependencyHold {
@@ -2748,6 +2756,7 @@ impl DependencyHold {
                 .map(|(contract, minimum)| UnmetContract {
                     contract: contract.clone(),
                     minimum: minimum.clone(),
+                    candidates: self.candidates.get(contract).cloned().unwrap_or_default(),
                 })
                 .collect(),
             held_at: self.held_at,
@@ -2760,6 +2769,7 @@ impl DependencyHold {
 pub(crate) struct DependencyHoldWrite {
     pub release_id: String,
     pub contracts: Vec<(String, String)>,
+    pub candidates: BTreeMap<String, Vec<String>>,
 }
 
 /// Environment property key for a dependency hold of `product`.
@@ -2773,6 +2783,42 @@ fn dependency_hold_contracts_key(product: &str) -> String {
 
 fn dependency_hold_at_key(product: &str) -> String {
     format!("dependency_hold_at.{product}")
+}
+
+fn dependency_hold_candidates_key(product: &str) -> String {
+    format!("dependency_hold_candidates.{product}")
+}
+
+fn encode_hold_candidates(candidates: &BTreeMap<String, Vec<String>>) -> String {
+    candidates
+        .iter()
+        .map(|(contract, names)| format!("{contract}={}", names.join("|")))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn decode_hold_candidates(raw: &str) -> BTreeMap<String, Vec<String>> {
+    let mut out = BTreeMap::new();
+    if raw.is_empty() {
+        return out;
+    }
+    for part in raw.split(';') {
+        let Some((contract, names)) = part.split_once('=') else {
+            continue;
+        };
+        if contract.is_empty() {
+            continue;
+        }
+        out.insert(
+            contract.to_string(),
+            names
+                .split('|')
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect(),
+        );
+    }
+    out
 }
 
 /// Active dependency hold for `product`, if the stored properties are complete.
@@ -2800,10 +2846,15 @@ pub fn dependency_hold(
         .get(&dependency_hold_at_key(product))?
         .parse()
         .ok()?;
+    let candidates = properties
+        .get(&dependency_hold_candidates_key(product))
+        .map(|raw| decode_hold_candidates(raw))
+        .unwrap_or_default();
     Some(DependencyHold {
         release_id,
         contracts,
         held_at,
+        candidates,
     })
 }
 
@@ -2813,11 +2864,13 @@ pub(crate) fn record_dependency_hold(
     product: &str,
     release_id: &str,
     contracts: &[(String, String)],
+    candidates: &BTreeMap<String, Vec<String>>,
     now_ms: i64,
 ) -> bool {
     if let Some(existing) = dependency_hold(properties, product)
         && existing.release_id == release_id
         && existing.contracts == contracts
+        && existing.candidates == *candidates
     {
         return false;
     }
@@ -2831,6 +2884,14 @@ pub(crate) fn record_dependency_hold(
             .join(","),
     );
     properties.insert(dependency_hold_at_key(product), now_ms.to_string());
+    if candidates.is_empty() {
+        properties.remove(&dependency_hold_candidates_key(product));
+    } else {
+        properties.insert(
+            dependency_hold_candidates_key(product),
+            encode_hold_candidates(candidates),
+        );
+    }
     true
 }
 
@@ -2846,7 +2907,10 @@ pub(crate) fn clear_dependency_hold(
     let held_at = properties
         .remove(&dependency_hold_at_key(product))
         .is_some();
-    release || contracts || held_at
+    let candidates = properties
+        .remove(&dependency_hold_candidates_key(product))
+        .is_some();
+    release || contracts || held_at || candidates
 }
 
 /// Reload the environment and write only dependency-hold properties.
@@ -2879,6 +2943,7 @@ pub(crate) async fn persist_dependency_holds(
             product,
             &hold.release_id,
             &hold.contracts,
+            &hold.candidates,
             now,
         );
     }
@@ -3396,11 +3461,13 @@ mod tests {
     fn dependency_hold_is_idempotent_for_the_same_contracts() {
         let mut properties = HashMap::new();
         let contracts = vec![("database".into(), "1.2.0".into())];
+        let candidates = BTreeMap::new();
         assert!(record_dependency_hold(
             &mut properties,
             "app",
             "tenkai:release:app@1.0.0",
             &contracts,
+            &candidates,
             10,
         ));
         assert!(!record_dependency_hold(
@@ -3408,6 +3475,7 @@ mod tests {
             "app",
             "tenkai:release:app@1.0.0",
             &contracts,
+            &candidates,
             20,
         ));
         let hold = dependency_hold(&properties, "app").unwrap();
@@ -3419,12 +3487,51 @@ mod tests {
             "app",
             "tenkai:release:app@1.1.0",
             &contracts,
+            &candidates,
             30,
         ));
         assert_eq!(dependency_hold(&properties, "app").unwrap().held_at, 30);
         assert!(clear_dependency_hold(&mut properties, "app"));
         assert_eq!(dependency_hold(&properties, "app"), None);
         assert!(!clear_dependency_hold(&mut properties, "app"));
+    }
+
+    #[test]
+    fn dependency_hold_persists_named_candidates() {
+        let mut properties = HashMap::new();
+        let contracts = vec![("database".into(), "1.0.0".into())];
+        let candidates = BTreeMap::from([("database".into(), vec!["db-a".into(), "db-b".into()])]);
+        assert!(record_dependency_hold(
+            &mut properties,
+            "app",
+            "tenkai:release:app@1.0.0",
+            &contracts,
+            &candidates,
+            10,
+        ));
+        let hold = dependency_hold(&properties, "app").unwrap();
+        assert_eq!(hold.candidates, candidates);
+        assert_eq!(
+            properties
+                .get("dependency_hold_candidates.app")
+                .map(String::as_str),
+            Some("database=db-a|db-b")
+        );
+        let view = hold.to_status_view();
+        assert_eq!(view.contracts[0].candidates, vec!["db-a", "db-b"]);
+        assert!(!record_dependency_hold(
+            &mut properties,
+            "app",
+            "tenkai:release:app@1.0.0",
+            &contracts,
+            &candidates,
+            20,
+        ));
+        assert!(clear_dependency_hold(&mut properties, "app"));
+        assert!(
+            !properties.contains_key("dependency_hold_candidates.app"),
+            "{properties:?}"
+        );
     }
 
     #[test]
@@ -3490,6 +3597,7 @@ mod tests {
                 contracts: vec![UnmetContract {
                     contract: "database".into(),
                     minimum: "1.0.0".into(),
+                    candidates: Vec::new(),
                 }],
                 held_at: 1,
             }),
@@ -3873,6 +3981,7 @@ mod tests {
                 release_digest: "abc".into(),
                 artifact_digest: "abc".into(),
                 deployed_version: None,
+                providers: Default::default(),
             }],
             steps: vec![crate::plan::Step {
                 id: String::new(),
@@ -4110,6 +4219,7 @@ mod tests {
                 release_digest: "abc".into(),
                 artifact_digest: "abc".into(),
                 deployed_version: None,
+                providers: Default::default(),
             }],
             steps: vec![crate::plan::Step {
                 id: String::new(),
@@ -4234,6 +4344,7 @@ mod tests {
                 release_digest: "abc".into(),
                 artifact_digest: "abc".into(),
                 deployed_version: None,
+                providers: Default::default(),
             }],
             steps: vec![crate::plan::Step {
                 id: String::new(),

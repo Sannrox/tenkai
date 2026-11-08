@@ -89,15 +89,26 @@ version is at least the declared minimum, including patch level. `1.3.0`
 satisfies `1.2.0`; `2.0.0` and `1.1.0` are incompatible. Profile version 2 also
 requires the minor to match below 1.0, because a 0.y minor may break the surface:
 `0.1.4` satisfies `0.1.0`, and `0.2.0` is a different minor and is incompatible.
-Version 1 keeps the same-major rule for 0.y contracts. Multiple providers of the
-same required contract are ambiguous and refused even when their versions agree.
+Version 1 keeps the same-major rule for 0.y contracts. One matching provider
+(deployed or a recorded observation) satisfies a requirement with no binding.
+Several matching providers with no binding are unmet: reconcile records a
+durable hold naming the contract, the dependent instance, and the candidate
+instances, and an explicit `plan` refuses with the same names. Tenkai never
+picks a provider by name, order, or version. A binding
+(`tenkaictl env bind <env> <dependent> <contract>=<provider>`) selects exactly
+one candidate, including one deployed provider plus one observation of the
+same contract. Binding to an instance that does not provide a satisfying
+version is refused, naming the dependent, the contract, and the provider.
+Two components of one instance that provide the same contract count as one
+provider.
 
 A required contract is also satisfied by the `provides` of a release whose last
 deployment in the same environment succeeded. That record is durable in the
 operational store and does not expire. Planning, apply, restart, and rollback
 all use it. A contract offered both by a deployed release and by an observation,
-or by several deployed releases, is ambiguous and refused. Hand-recorded
-evidence remains for providers Tenkai does not install.
+or by several deployed releases, is ambiguous until a binding selects one.
+Hand-recorded evidence remains for providers Tenkai does not install. The
+observation is the candidate instance `observed`.
 
 When reconcile (including the environment tick after a channel promotion) would
 deploy a release whose required contract is not satisfied in that environment,
@@ -107,9 +118,11 @@ plan. The hold is re-evaluated when the deployed set changes and on every
 reconcile; once the contract is satisfied, the release continues through the
 normal plan, approval, and gate path. The hold grants no execution authority.
 An explicit `plan` still refuses an unmet required contract
-(`missing_contract` or `incompatible_contract`). Optional requirements never
-hold. Ambiguous contracts, stale or missing evidence, and other compatibility
-failures still fail the tick.
+(`missing_contract`, `incompatible_contract`, or `ambiguous_contract` with
+named candidates). Optional requirements never hold. Stale or missing
+evidence and other compatibility failures still fail the tick. An unbound
+required contract with several matching providers holds on reconcile the
+same way a missing required contract does.
 
 The schema range is inclusive. Migration state is `stable` or `pending` and must
 match exactly. Tenkai checks this declaration; it does not run migrations or
@@ -133,9 +146,12 @@ are checked against deployed `provides` and the observation, so a candidate
 cannot silently break a declared dependent. A plan that would remove, roll
 back, or upgrade a provider so an installed remaining dependent's required
 contract is no longer satisfied is refused, naming the dependent and the
-contract. Losing an optional provider is allowed. A required contract that had
+contract. Unbinding a required contract on an installed dependent is refused
+the same way. Losing an optional provider or unbinding an optional contract
+is allowed and re-renders. A required contract that had
 no matching deployed provider before the plan stays on observation rules. Reused component identities across
-retained products are refused as ambiguous.
+retained products are refused as ambiguous. A binding change re-renders the
+dependent as a same-version remediation and is part of plan content identity.
 
 ```json
 {
@@ -184,14 +200,16 @@ an observation does not change environment configuration or deployed versions.
 ## Dependency document
 
 At apply and same-version restart, a software release that declares
-cross-release requirements receives a version 1 JSON document derived only from
-stored successful deployments (ADR 0043 §6). For each required or optional
-contract the document names the providing product, its release version, and the
-provided contract version, or `state: absent` for an optional contract with no
-provider. Required contracts are never absent. A contract this release already
-provides is omitted. The bytes are identical on every replica and on retry.
-The document carries no endpoints, credentials, or instance names (instance
-names are a later format).
+cross-release requirements receives a version 1 JSON document derived from
+stored successful deployments and, when bound, the dependent's digest-bound
+observation (ADR 0043 §6, ADR 0044 §4). For each required or optional
+contract the document names the providing product, its release version, the
+provided contract version, and the provider instance when it is not the
+product name, or `state: absent` for an optional contract with no
+provider. A binding to `observed` names product `observed`. Required contracts
+are never absent. A contract this release already provides is omitted. The
+bytes are identical on every replica and on retry. The document carries no
+endpoints or credentials.
 
 ```json
 {
@@ -239,14 +257,15 @@ row when present.
 
 `tenkaictl env dependencies <env>` lists subscribed and deployed products in
 contract plan order (providers before dependents). Each required or optional
-contract names a unique providing product and release, `absent` for an optional
-contract with no provider, or `ambiguous` when several deployed releases
-provide it. Holds are listed first. `--format json` is the same view as
+contract names a unique providing product, release, and instance, `absent` for an optional
+contract with no provider, or `ambiguous` when several instances
+provide it. Holds are listed first and name candidate instances when the
+contract is ambiguous. `--format json` is the same view as
 `GET /v1/environments/{environment}/dependencies`. `--format dot` prints the
 provider→dependent edges as Graphviz. Selecting a product in JSON includes
 impact: whether remove, upgrade, or rollback would be refused because a
 remaining installed dependent would be unsatisfied, naming that dependent and
-contract. The payload contains no endpoints, credentials, or instance names.
+contract. The payload contains no endpoints or credentials.
 
 Planning checks the target profile. A plan over several releases installs and
 upgrades providers before dependents, removes dependents before providers, and
