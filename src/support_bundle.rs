@@ -10,7 +10,9 @@
 //! - whether the executor guard is installed;
 //! - the recovery diagnostic (ADR 0027) of each environment's latest plan;
 //! - optionally, recent `tenkai.*` log events from a log file, keeping only
-//!   allowlisted fields.
+//!   allowlisted fields;
+//! - live workload replica, pod, and event facts for in-cluster releases
+//!   (#1017), without log text or event messages.
 //!
 //! Nothing outside an allowlist leaves: no setting value that could hold a
 //! secret, path or host, and no free-text log detail. The bundle is signed
@@ -32,6 +34,10 @@ pub const SUPPORT_BUNDLE_SCHEMA: &str = "tenkai.support-bundle.v1";
 const SIGNING_DOMAIN: &[u8] = b"TENKAI-SUPPORT-BUNDLE-V1\0";
 /// At most this many log events are kept, the most recent ones.
 const MAX_LOG_EVENTS: usize = 500;
+/// At most this many pods per in-cluster workload in a support bundle.
+pub const MAX_SUPPORT_PODS: usize = 20;
+/// At most this many event-reason groups per in-cluster workload.
+pub const MAX_SUPPORT_EVENTS: usize = 20;
 
 /// Settings whose values are safe to carry: numbers, booleans and fixed
 /// words. Any other `TENKAI_*` or `SEKAI_*` setting is reported by name only.
@@ -105,6 +111,55 @@ pub struct SupportStatement {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collection_errors: Vec<String>,
     pub log_events: Vec<String>,
+    /// Live in-cluster workload facts for each environment's latest plan.
+    /// Empty and omitted when the site has none, or the cluster cannot be
+    /// read (that is a collection error instead).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workloads: Vec<SupportWorkload>,
+}
+
+/// One in-cluster workload, allowlisted for a support bundle (#1017).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportWorkload {
+    pub environment: String,
+    pub kind: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pods: Vec<SupportPod>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<SupportEventCount>,
+}
+
+/// One pod of a support-bundle workload: counts and enumerated reasons only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportPod {
+    pub phase: String,
+    pub ready: bool,
+    pub restarts: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exit_code: Option<i32>,
+}
+
+/// One Kubernetes event reason and how often it fired.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportEventCount {
+    pub reason: String,
+    pub count: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +260,30 @@ fn is_plain_field(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ',' | '(' | ')'))
 }
 
+/// Keep a Kubernetes reason, phase, or revision only when it is a short
+/// enumerated token. Free-text messages never pass.
+pub fn allowlisted_reason(value: &str) -> Option<String> {
+    is_plain_field(value).then(|| value.to_string())
+}
+
+/// Serving revision: a DNS-1123 label up to 63 bytes (StatefulSet
+/// ControllerRevision names). Free text never passes.
+pub fn allowlisted_revision(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 63 {
+        return None;
+    }
+    let first = bytes[0];
+    let last = bytes[bytes.len() - 1];
+    if !first.is_ascii_alphanumeric() || !last.is_ascii_alphanumeric() {
+        return None;
+    }
+    bytes
+        .iter()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'.'))
+        .then(|| value.to_string())
+}
+
 /// Collect and sign a support bundle from the embedded store behind `ctx`;
 /// `None` when the store could not be opened, which is reported as such.
 /// `schema_version` is the database's own version, read before opening.
@@ -219,10 +298,11 @@ pub async fn export(
     let log_events = log.map(redacted_log_events).unwrap_or_default();
     let mut recovery = Vec::new();
     let mut collection_errors = Vec::new();
+    let mut workloads = Vec::new();
     let store = match ctx {
         Some(ctx) => StoreStatus {
             schema_version,
-            ..collect_store(ctx, &mut recovery, &mut collection_errors).await
+            ..collect_store(ctx, &mut recovery, &mut collection_errors, &mut workloads).await
         },
         None => {
             collection_errors.push("store: could not be opened".into());
@@ -249,6 +329,7 @@ pub async fn export(
         recovery,
         collection_errors,
         log_events,
+        workloads,
     };
     let key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(seed_path)?);
     let signature = key.sign(&canonical_bytes(&statement)?);
@@ -310,6 +391,7 @@ async fn collect_store(
     ctx: &mut Ctx,
     recovery: &mut Vec<crate::recovery_bundle::RecoveryBundle>,
     collection_errors: &mut Vec<String>,
+    workloads: &mut Vec<SupportWorkload>,
 ) -> StoreStatus {
     // Environment objects, not the summary list: one environment with a bad
     // lease or hold must not hide the others.
@@ -336,7 +418,7 @@ async fn collect_store(
     for name in environments.unwrap_or_default() {
         match crate::environment::inspect_environment(ctx, &name).await {
             Ok(report) => {
-                if let Some(plan) = report.latest_plan {
+                if let Some(plan) = report.latest_plan.as_ref() {
                     match crate::recovery_bundle::export(ctx, &name, &plan.id).await {
                         Ok(diagnostic) => recovery.push(diagnostic),
                         Err(_) => collection_errors.push(format!(
@@ -344,11 +426,64 @@ async fn collect_store(
                         )),
                     }
                 }
+                if plan_has_in_cluster_release(ctx, report.latest_plan.as_ref()).await {
+                    match crate::environment::cluster_config_path(ctx, &name).await {
+                        Ok(Some(path)) if path.is_file() => {
+                            let env = name.clone();
+                            match tokio::task::spawn_blocking(move || {
+                                collect_env_workloads(&env, &path)
+                            })
+                            .await
+                            {
+                                Ok(Ok(found)) => workloads.extend(found),
+                                _ => collection_errors
+                                    .push(format!("environment {name}: cluster unreadable")),
+                            }
+                        }
+                        _ => collection_errors
+                            .push(format!("environment {name}: cluster unreadable")),
+                    }
+                }
             }
             Err(_) => collection_errors.push(format!("environment {name}: unreadable")),
         }
     }
     store
+}
+
+fn collect_env_workloads(environment: &str, cluster_config: &Path) -> Result<Vec<SupportWorkload>> {
+    let executors = crate::software_executor::SoftwareExecutors::from_process();
+    let Some(adapter) = executors.resolve(Some(
+        crate::software_executor::SoftwareExecutorKind::KubernetesInProcess,
+    ))?
+    else {
+        bail!("in-process kubernetes executor is not installed");
+    };
+    adapter.support_workloads(environment, cluster_config)
+}
+
+async fn plan_has_in_cluster_release(
+    ctx: &mut Ctx,
+    plan: Option<&crate::environment::EnvironmentPlanSummary>,
+) -> bool {
+    let Some(plan) = plan else {
+        return false;
+    };
+    for step in &plan.steps {
+        if step.release_id.is_empty() {
+            continue;
+        }
+        let Ok(kind) = crate::plan::stored_release_executor(ctx, &step.release_id).await else {
+            continue;
+        };
+        if matches!(
+            kind,
+            Some(crate::software_executor::SoftwareExecutorKind::KubernetesInProcess)
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Verify a bundle after transfer: schema, a signer trusted at the bundle's
@@ -439,6 +574,69 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
         );
     }
 
+    #[test]
+    fn workload_reasons_drop_free_text_and_old_bundles_still_parse() {
+        assert_eq!(
+            allowlisted_reason("CrashLoopBackOff").as_deref(),
+            Some("CrashLoopBackOff")
+        );
+        assert_eq!(allowlisted_reason("Error").as_deref(), Some("Error"));
+        assert!(allowlisted_reason("host not found in upstream \"api\"").is_none());
+        assert!(allowlisted_reason("back-off 40s restarting failed container=app").is_none());
+        let sts_revision = "nginx-production-cache-statefulset-7d9f8c6b5a";
+        assert!(sts_revision.len() > 40 && sts_revision.len() <= 63);
+        assert_eq!(
+            allowlisted_revision(sts_revision).as_deref(),
+            Some(sts_revision)
+        );
+        assert_eq!(allowlisted_revision("1").as_deref(), Some("1"));
+        assert!(allowlisted_revision("host not found").is_none());
+        assert!(allowlisted_revision(&"a".repeat(64)).is_none());
+
+        let workload = SupportWorkload {
+            environment: "lab".into(),
+            kind: "Deployment".into(),
+            name: "web".into(),
+            desired: Some(1),
+            ready: Some(0),
+            updated: Some(1),
+            revision: Some("1".into()),
+            pods: vec![SupportPod {
+                phase: "Running".into(),
+                ready: false,
+                restarts: 4,
+                waiting_reason: Some("CrashLoopBackOff".into()),
+                last_reason: Some("Error".into()),
+                last_exit_code: Some(1),
+            }],
+            events: vec![SupportEventCount {
+                reason: "BackOff".into(),
+                count: 6,
+            }],
+        };
+        let rendered = serde_json::to_string(&workload).unwrap();
+        assert!(!rendered.contains("host not found"), "{rendered}");
+
+        let old = serde_json::json!({
+            "created_at_ms": 1,
+            "tenkai_version": "0.8.0",
+            "os": "linux",
+            "arch": "x86_64",
+            "config": [],
+            "store": {
+                "supported_schema_version": 1,
+                "health": "ok",
+                "environments": 0,
+                "releases": 0
+            },
+            "executor_guard": "found",
+            "recovery": [],
+            "log_events": []
+        });
+        let statement: SupportStatement = serde_json::from_value(old).unwrap();
+        assert!(statement.workloads.is_empty());
+    }
+
     #[tokio::test]
     async fn the_bundle_verifies_after_transfer_and_refuses_edits() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -512,5 +710,154 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
             .push("tenkai.forged outcome=ok".into());
         assert!(verify(&edited, &roots).is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// In-process plans without a kubeconfig still sign, with a collection
+    /// error and no path. Helm plans skip cluster collection entirely.
+    #[tokio::test]
+    async fn collect_store_records_cluster_errors_only_for_in_process_plans() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-support-cluster-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let seed = dir.join("support.seed");
+        std::fs::write(&seed, [9_u8; 32]).unwrap();
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let public = SigningKey::from_bytes(&[9_u8; 32])
+            .verifying_key()
+            .to_bytes();
+        let roots = TrustRoots {
+            version: crate::release_signing::TRUST_ROOT_VERSION,
+            signers: vec![crate::release_signing::TrustedSigner {
+                key_id: crate::signature_verification::key_id(&public),
+                identity: "support".into(),
+                public_key: STANDARD.encode(public),
+                not_before: None,
+                not_after: None,
+            }],
+        };
+        let mut ctx = Ctx::embedded(dir.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "cluster", "in-process")
+            .await
+            .unwrap();
+        crate::plan::env_add(&mut ctx, "charts", "helm")
+            .await
+            .unwrap();
+        store_release_and_plan(
+            &mut ctx,
+            "cluster",
+            "cluster-app",
+            "1.0.0",
+            "kubernetes-inprocess",
+            100,
+        )
+        .await;
+        store_release_and_plan(&mut ctx, "charts", "chart-app", "1.0.0", "helm", 200).await;
+
+        let mut log: &[u8] = b"tenkai.backup outcome=ok";
+        let bundle = export(Some(&mut ctx), None, Some(&mut log), &seed, 1_000)
+            .await
+            .unwrap();
+        verify(&bundle, &roots).unwrap();
+        assert!(bundle.statement.workloads.is_empty(), "{bundle:?}");
+        assert!(
+            bundle
+                .statement
+                .collection_errors
+                .iter()
+                .any(|error| error == "environment cluster: cluster unreadable"),
+            "{:?}",
+            bundle.statement.collection_errors
+        );
+        assert!(
+            bundle
+                .statement
+                .collection_errors
+                .iter()
+                .all(|error| error != "environment charts: cluster unreadable"),
+            "{:?}",
+            bundle.statement.collection_errors
+        );
+        let rendered = serde_json::to_string(&bundle.statement).unwrap();
+        assert!(!rendered.contains(&dir.display().to_string()), "{rendered}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn store_release_and_plan(
+        ctx: &mut Ctx,
+        environment: &str,
+        product: &str,
+        version: &str,
+        executor: &str,
+        created_at: i64,
+    ) {
+        let release_id = crate::ontology::release_id(product, version);
+        ctx.create_once(crate::pb::sekai::Object {
+            id: release_id.clone(),
+            kind: crate::ontology::KIND_RELEASE.into(),
+            name: format!("{product}@{version}"),
+            namespace: crate::ontology::NS.into(),
+            properties: std::collections::HashMap::from([
+                ("product".into(), product.into()),
+                ("version".into(), version.into()),
+                (
+                    "manifest".into(),
+                    format!(
+                        "[product]\nname = \"{product}\"\nversion = \"{version}\"\n\n[deploy]\nexecutor = \"{executor}\"\n"
+                    ),
+                ),
+            ]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let mut plan = crate::plan::Plan {
+            format_version: crate::plan::PLAN_FORMAT_VERSION,
+            id: String::new(),
+            content_id: String::new(),
+            environment: environment.into(),
+            created_at,
+            inputs: vec![crate::plan::DesiredStateInput {
+                product: product.into(),
+                instance: String::new(),
+                channel: "stable".into(),
+                channel_id: format!("tenkai:channel:{product}/stable"),
+                desired_version: version.into(),
+                release_id: release_id.clone(),
+                release_digest: "abc".into(),
+                artifact_digest: "abc".into(),
+                deployed_version: None,
+                providers: Default::default(),
+            }],
+            steps: vec![crate::plan::Step {
+                id: String::new(),
+                order: 0,
+                product: product.into(),
+                instance: String::new(),
+                action: crate::plan::Action::Install,
+                from: None,
+                to: version.into(),
+                release_id,
+                release_digest: "abc".into(),
+                artifact_digest: "abc".into(),
+                workdir: ".".into(),
+                host: None,
+                sealed: None,
+                restore: None,
+            }],
+            state: crate::plan::PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+            credential_runway: None,
+        };
+        plan.bind_content_identity().unwrap();
+        crate::plan::store(ctx, &plan).await.unwrap();
     }
 }
