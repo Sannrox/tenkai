@@ -131,6 +131,54 @@ pub trait ClusterApplyApi: Send + Sync {
             .observe(cluster_config, namespace, name, kind)?
             .map(|observation| (observation, None)))
     }
+    /// Workloads Tenkai labeled in `namespace` (`tenkai.product`). Bounded.
+    fn list_tenkai_workloads(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let _ = (cluster_config, namespace);
+        Ok(Vec::new())
+    }
+    /// Event reasons and counts for one workload. Messages are not returned.
+    fn workload_event_counts(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        kind: &str,
+        name: &str,
+    ) -> Result<Vec<(String, i32)>> {
+        let _ = (cluster_config, namespace, kind, name);
+        Ok(Vec::new())
+    }
+    /// One kubeconfig, one pass: labeled workloads, their pods, and event
+    /// reasons. Default is none.
+    fn collect_support_workloads(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+    ) -> Result<Vec<tenkai::support_bundle::SupportWorkload>> {
+        let listed = self.list_tenkai_workloads(cluster_config, namespace)?;
+        let mut workloads = Vec::new();
+        for (kind, name) in listed
+            .into_iter()
+            .take(tenkai::support_bundle::MAX_SUPPORT_PODS)
+        {
+            let evidence = self
+                .workload_evidence(cluster_config, namespace, &name, &kind)?
+                .unwrap_or_default();
+            let rollout = self
+                .workload_rollout(cluster_config, namespace, &name, &kind)?
+                .unwrap_or_default();
+            let events = self
+                .workload_event_counts(cluster_config, namespace, &kind, &name)
+                .unwrap_or_default();
+            workloads.push(support_workload(
+                namespace, &kind, &name, &rollout, &evidence, &events,
+            ));
+        }
+        Ok(workloads)
+    }
 }
 
 impl<T: ClusterApplyApi + ?Sized> ClusterApplyApi for &T {
@@ -187,6 +235,32 @@ impl<T: ClusterApplyApi + ?Sized> ClusterApplyApi for &T {
     ) -> Result<Option<(WorkloadObservation, Option<WorkloadRollout>)>> {
         (**self).observe_with_rollout(cluster_config, namespace, name, kind)
     }
+
+    fn list_tenkai_workloads(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+    ) -> Result<Vec<(String, String)>> {
+        (**self).list_tenkai_workloads(cluster_config, namespace)
+    }
+
+    fn workload_event_counts(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        kind: &str,
+        name: &str,
+    ) -> Result<Vec<(String, i32)>> {
+        (**self).workload_event_counts(cluster_config, namespace, kind, name)
+    }
+
+    fn collect_support_workloads(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+    ) -> Result<Vec<tenkai::support_bundle::SupportWorkload>> {
+        (**self).collect_support_workloads(cluster_config, namespace)
+    }
 }
 
 #[cfg(test)]
@@ -194,6 +268,7 @@ impl<T: ClusterApplyApi + ?Sized> ClusterApplyApi for &T {
 pub struct MemoryClusterApi {
     objects: Mutex<BTreeMap<String, StoredObject>>,
     evidence: Mutex<BTreeMap<String, WorkloadEvidence>>,
+    events: Mutex<BTreeMap<String, Vec<(String, i32)>>>,
 }
 
 #[cfg(test)]
@@ -257,6 +332,13 @@ impl MemoryClusterApi {
             .lock()
             .expect("evidence mutex")
             .insert(object_key(namespace, kind, name), evidence);
+    }
+
+    pub fn set_events(&self, namespace: &str, name: &str, kind: &str, events: Vec<(String, i32)>) {
+        self.events
+            .lock()
+            .expect("events mutex")
+            .insert(object_key(namespace, kind, name), events);
     }
 }
 
@@ -398,6 +480,55 @@ impl ClusterApplyApi for MemoryClusterApi {
                 )
             }))
     }
+
+    fn list_tenkai_workloads(
+        &self,
+        _cluster_config: &Path,
+        namespace: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let prefix = format!("{namespace}/");
+        let mut found = Vec::new();
+        for (key, stored) in self.objects.lock().expect("cluster mutex").iter() {
+            let Some(rest) = key.strip_prefix(&prefix) else {
+                continue;
+            };
+            let Some((kind, name)) = rest.split_once('/') else {
+                continue;
+            };
+            if !is_workload(kind) {
+                continue;
+            }
+            if stored
+                .object
+                .pointer("/metadata/labels/tenkai.product")
+                .and_then(Value::as_str)
+                .is_none()
+            {
+                continue;
+            }
+            found.push((kind.to_string(), name.to_string()));
+            if found.len() >= tenkai::support_bundle::MAX_SUPPORT_PODS {
+                break;
+            }
+        }
+        Ok(found)
+    }
+
+    fn workload_event_counts(
+        &self,
+        _cluster_config: &Path,
+        namespace: &str,
+        kind: &str,
+        name: &str,
+    ) -> Result<Vec<(String, i32)>> {
+        Ok(self
+            .events
+            .lock()
+            .expect("events mutex")
+            .get(&object_key(namespace, kind, name))
+            .cloned()
+            .unwrap_or_default())
+    }
 }
 
 /// Live cluster adapter. Builds a client from the environment-scoped file only.
@@ -472,6 +603,42 @@ impl ClusterApplyApi for LiveKubeApi {
             name,
             kind,
         )))
+    }
+
+    fn list_tenkai_workloads(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+    ) -> Result<Vec<(String, String)>> {
+        block_on(bounded(live_list_tenkai_workloads(
+            cluster_config,
+            namespace,
+        )))
+    }
+
+    fn workload_event_counts(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        kind: &str,
+        name: &str,
+    ) -> Result<Vec<(String, i32)>> {
+        block_on(bounded(live_workload_event_counts(
+            cluster_config,
+            namespace,
+            kind,
+            name,
+        )))
+    }
+
+    fn collect_support_workloads(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+    ) -> Result<Vec<tenkai::support_bundle::SupportWorkload>> {
+        // Each inner list is bounded; wrapping the whole pass in one
+        // LIVE_CALL_TIMEOUT would drop every fact on a slow API.
+        block_on(live_collect_support_workloads(cluster_config, namespace))
     }
 }
 
@@ -824,6 +991,21 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
             Ok(SoftwareObserveStatus::Unknown)
         }
     }
+
+    fn support_workloads(
+        &self,
+        environment: &str,
+        cluster_config: &Path,
+    ) -> Result<Vec<tenkai::support_bundle::SupportWorkload>> {
+        validate_cluster_config_path(cluster_config)?;
+        if !cluster_config.is_file() {
+            bail!(
+                "environment {environment} cluster_config_path is not a readable kubeconfig file"
+            );
+        }
+        self.api
+            .collect_support_workloads(cluster_config, environment)
+    }
 }
 
 fn parse_manifest_objects(path: &Path, instance: &str) -> Result<Vec<Value>> {
@@ -914,6 +1096,134 @@ fn stamp_ownership(object: &mut Value, request: &SoftwareApplyRequest) {
 
 fn is_workload(kind: &str) -> bool {
     matches!(kind, "Deployment" | "StatefulSet" | "DaemonSet")
+}
+
+fn support_workload(
+    environment: &str,
+    kind: &str,
+    name: &str,
+    rollout: &WorkloadRollout,
+    evidence: &WorkloadEvidence,
+    events: &[(String, i32)],
+) -> tenkai::support_bundle::SupportWorkload {
+    let revision = rollout
+        .update_revision
+        .as_deref()
+        .or(rollout.current_revision.as_deref())
+        .and_then(tenkai::support_bundle::allowlisted_revision);
+    let pods = evidence
+        .pods
+        .iter()
+        .take(tenkai::support_bundle::MAX_SUPPORT_PODS)
+        .map(support_pod)
+        .collect();
+    let mut counted = Vec::new();
+    for (reason, count) in events
+        .iter()
+        .take(tenkai::support_bundle::MAX_SUPPORT_EVENTS)
+    {
+        let Some(reason) = tenkai::support_bundle::allowlisted_reason(reason) else {
+            continue;
+        };
+        counted.push(tenkai::support_bundle::SupportEventCount {
+            reason,
+            count: *count,
+        });
+    }
+    tenkai::support_bundle::SupportWorkload {
+        environment: environment.into(),
+        kind: kind.into(),
+        name: name.into(),
+        desired: rollout
+            .desired_replicas
+            .or(rollout.desired_number_scheduled),
+        // Status replica counters use omitempty: missing means 0.
+        ready: Some(
+            rollout
+                .ready_replicas
+                .or(rollout.number_available)
+                .unwrap_or(0),
+        ),
+        updated: Some(
+            rollout
+                .updated_replicas
+                .or(rollout.updated_number_scheduled)
+                .unwrap_or(0),
+        ),
+        revision,
+        pods,
+        events: counted,
+    }
+}
+
+fn support_pod(pod: &k8s_openapi::api::core::v1::Pod) -> tenkai::support_bundle::SupportPod {
+    let status = pod.status.as_ref();
+    let phase = status
+        .and_then(|s| s.phase.as_deref())
+        .and_then(tenkai::support_bundle::allowlisted_reason)
+        .unwrap_or_default();
+    let ready = status
+        .and_then(|s| s.conditions.as_ref())
+        .into_iter()
+        .flatten()
+        .any(|condition| condition.type_ == "Ready" && condition.status == "True");
+    let mut restarts = 0_i32;
+    let mut waiting_reason = None;
+    let mut last_reason = None;
+    let mut last_exit_code = None;
+    if let Some(status) = status {
+        let mut waiting_exit: Option<(Option<String>, i32)> = None;
+        let mut any_exit: Option<(Option<String>, i32)> = None;
+        for container in status
+            .init_container_statuses
+            .iter()
+            .flatten()
+            .chain(status.container_statuses.iter().flatten())
+        {
+            restarts = restarts.saturating_add(container.restart_count);
+            let terminated = container
+                .last_state
+                .as_ref()
+                .and_then(|state| state.terminated.as_ref())
+                .map(|terminated| {
+                    (
+                        terminated
+                            .reason
+                            .as_deref()
+                            .and_then(tenkai::support_bundle::allowlisted_reason),
+                        terminated.exit_code,
+                    )
+                });
+            let waiting = container
+                .state
+                .as_ref()
+                .and_then(|state| state.waiting.as_ref())
+                .and_then(|waiting| waiting.reason.as_deref())
+                .and_then(tenkai::support_bundle::allowlisted_reason);
+            if waiting_reason.is_none()
+                && let Some(reason) = waiting
+            {
+                waiting_reason = Some(reason);
+                waiting_exit = terminated.clone();
+            }
+            if any_exit.is_none() {
+                any_exit = terminated;
+            }
+        }
+        let exit = waiting_exit.or(any_exit);
+        if let Some((reason, code)) = exit {
+            last_reason = reason;
+            last_exit_code = Some(code);
+        }
+    }
+    tenkai::support_bundle::SupportPod {
+        phase,
+        ready,
+        restarts,
+        waiting_reason,
+        last_reason,
+        last_exit_code,
+    }
 }
 
 #[cfg(test)]
@@ -1299,6 +1609,227 @@ async fn live_workload_evidence(
     }))
 }
 
+async fn live_list_tenkai_workloads(
+    cluster_config: &Path,
+    namespace: &str,
+) -> Result<Vec<(String, String)>> {
+    let client = live_client(cluster_config).await?;
+    let params = kube::api::ListParams::default()
+        .labels("tenkai.product")
+        .limit(tenkai::support_bundle::MAX_SUPPORT_PODS as u32);
+    let mut found = Vec::new();
+    for kind in ["Deployment", "StatefulSet", "DaemonSet"] {
+        if found.len() >= tenkai::support_bundle::MAX_SUPPORT_PODS {
+            break;
+        }
+        let api = dynamic_api(client.clone(), namespace, kind, builtin_api_version(kind)?)?;
+        let list = api
+            .list(&params)
+            .await
+            .with_context(|| format!("listing {kind} in {namespace}"))?;
+        for object in list.items {
+            let Some(name) = object.metadata.name.clone() else {
+                continue;
+            };
+            found.push((kind.into(), name));
+            if found.len() >= tenkai::support_bundle::MAX_SUPPORT_PODS {
+                break;
+            }
+        }
+    }
+    Ok(found)
+}
+
+async fn live_collect_support_workloads(
+    cluster_config: &Path,
+    namespace: &str,
+) -> Result<Vec<tenkai::support_bundle::SupportWorkload>> {
+    use k8s_openapi::api::core::v1::{Event, Pod};
+    let client = bounded(live_client(cluster_config)).await?;
+    let params = kube::api::ListParams::default()
+        .labels("tenkai.product")
+        .limit(tenkai::support_bundle::MAX_SUPPORT_PODS as u32);
+    let mut objects = Vec::new();
+    let mut listed_any = false;
+    let mut list_failed = false;
+    for kind in ["Deployment", "StatefulSet", "DaemonSet"] {
+        if objects.len() >= tenkai::support_bundle::MAX_SUPPORT_PODS {
+            break;
+        }
+        let api = dynamic_api(client.clone(), namespace, kind, builtin_api_version(kind)?)?;
+        let list = match bounded(async {
+            api.list(&params)
+                .await
+                .with_context(|| format!("listing {kind} in {namespace}"))
+        })
+        .await
+        {
+            Ok(list) => list,
+            Err(_) => {
+                list_failed = true;
+                continue;
+            }
+        };
+        listed_any = true;
+        for object in list.items {
+            let Some(name) = object.metadata.name.clone() else {
+                continue;
+            };
+            let value = serde_json::to_value(&object).context("encoding workload status")?;
+            objects.push((kind.to_string(), name, value));
+            if objects.len() >= tenkai::support_bundle::MAX_SUPPORT_PODS {
+                break;
+            }
+        }
+    }
+    if live_kind_lists_unreadable(objects.len(), listed_any, list_failed) {
+        bail!("listing workloads in {namespace}");
+    }
+    // Events need a wider RBAC grant than apply; omit them rather than
+    // dropping replica and pod facts the rest of the pass already has.
+    let ns_events = match bounded(async {
+        kube::Api::<Event>::namespaced(client.clone(), namespace)
+            .list(&kube::api::ListParams::default().limit(
+                (tenkai::support_bundle::MAX_SUPPORT_EVENTS
+                    * tenkai::support_bundle::MAX_SUPPORT_PODS) as u32,
+            ))
+            .await
+            .with_context(|| format!("listing events in {namespace}"))
+    })
+    .await
+    {
+        Ok(listed) => listed.items,
+        Err(_) => Vec::new(),
+    };
+    let mut workloads = Vec::new();
+    for (kind, name, workload) in objects {
+        let rollout = rollout_from_value(&kind, &workload);
+        let selector = match bounded(current_revision_selector(
+            &client, namespace, &kind, &workload,
+        ))
+        .await
+        {
+            Ok(Some(selector)) => Some(selector),
+            Ok(None) | Err(_) => workload
+                .pointer("/spec/selector")
+                .and_then(label_selector_query),
+        };
+        let pods = match selector {
+            Some(selector) => match bounded(async {
+                kube::Api::<Pod>::namespaced(client.clone(), namespace)
+                    .list(
+                        &kube::api::ListParams::default()
+                            .labels(&selector)
+                            .limit(tenkai::support_bundle::MAX_SUPPORT_PODS as u32),
+                    )
+                    .await
+                    .with_context(|| format!("listing pods of {kind}/{name} in {namespace}"))
+            })
+            .await
+            {
+                Ok(listed) => listed.items,
+                Err(_) => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        let pod_names = pods
+            .iter()
+            .filter_map(|pod| pod.metadata.name.clone())
+            .collect::<Vec<_>>();
+        let events = support_event_counts(&ns_events, &kind, &name, &pod_names);
+        workloads.push(support_workload(
+            namespace,
+            &kind,
+            &name,
+            &rollout,
+            &WorkloadEvidence {
+                workload,
+                pods,
+                pods_unavailable: None,
+            },
+            &events,
+        ));
+    }
+    Ok(workloads)
+}
+
+/// Empty after a kind-list failure is unreadable, not "no workloads".
+fn live_kind_lists_unreadable(collected: usize, listed_any: bool, list_failed: bool) -> bool {
+    !listed_any || (collected == 0 && list_failed)
+}
+
+fn support_event_counts(
+    events: &[k8s_openapi::api::core::v1::Event],
+    kind: &str,
+    name: &str,
+    pod_names: &[String],
+) -> Vec<(String, i32)> {
+    let mut counts = std::collections::BTreeMap::<String, i32>::new();
+    for event in events {
+        let object_kind = event.involved_object.kind.as_deref().unwrap_or("");
+        let object_name = event.involved_object.name.as_deref().unwrap_or("");
+        let matches = (object_kind == kind && object_name == name)
+            || (object_kind == "Pod" && pod_names.iter().any(|pod| pod == object_name));
+        if !matches {
+            continue;
+        }
+        let Some(reason) = event
+            .reason
+            .as_deref()
+            .and_then(tenkai::support_bundle::allowlisted_reason)
+        else {
+            continue;
+        };
+        let n = event.count.unwrap_or(1);
+        counts
+            .entry(reason)
+            .and_modify(|count| *count = count.saturating_add(n))
+            .or_insert(n);
+    }
+    counts
+        .into_iter()
+        .take(tenkai::support_bundle::MAX_SUPPORT_EVENTS)
+        .collect()
+}
+
+async fn live_workload_event_counts(
+    cluster_config: &Path,
+    namespace: &str,
+    kind: &str,
+    name: &str,
+) -> Result<Vec<(String, i32)>> {
+    use k8s_openapi::api::core::v1::Event;
+    let client = live_client(cluster_config).await?;
+    let selector = format!("involvedObject.name={name},involvedObject.kind={kind}");
+    let listed = kube::Api::<Event>::namespaced(client, namespace)
+        .list(
+            &kube::api::ListParams::default()
+                .fields(&selector)
+                .limit(tenkai::support_bundle::MAX_SUPPORT_EVENTS as u32),
+        )
+        .await
+        .with_context(|| format!("listing events of {kind}/{name} in {namespace}"))?;
+    let mut counts = std::collections::BTreeMap::<String, i32>::new();
+    for event in listed.items {
+        let Some(reason) = event
+            .reason
+            .as_deref()
+            .and_then(tenkai::support_bundle::allowlisted_reason)
+        else {
+            continue;
+        };
+        let n = event.count.unwrap_or(1);
+        counts
+            .entry(reason)
+            .and_modify(|count| *count = count.saturating_add(n))
+            .or_insert(n);
+    }
+    Ok(counts
+        .into_iter()
+        .take(tenkai::support_bundle::MAX_SUPPORT_EVENTS)
+        .collect())
+}
+
 /// Label selector for the pods of the workload's current revision: the
 /// Deployment's newest ReplicaSet, or the StatefulSet's update revision.
 /// `None` while the controller has not observed the applied generation or
@@ -1539,7 +2070,12 @@ fn rollout_from_value(kind: &str, object: &Value) -> WorkloadRollout {
         updated_replicas: json_i64(object, "/status/updatedReplicas"),
         ready_replicas: json_i64(object, "/status/readyReplicas"),
         available_replicas: json_i64(object, "/status/availableReplicas"),
-        current_revision: json_str(object, "/status/currentRevision"),
+        current_revision: json_str(object, "/status/currentRevision").or_else(|| {
+            json_str(
+                object,
+                "/metadata/annotations/deployment.kubernetes.io~1revision",
+            )
+        }),
         update_revision: json_str(object, "/status/updateRevision"),
         desired_number_scheduled: json_i64(object, "/status/desiredNumberScheduled"),
         updated_number_scheduled: json_i64(object, "/status/updatedNumberScheduled"),
@@ -1743,6 +2279,197 @@ mod tests {
         assert_eq!(live.version_label.as_deref(), Some("1.0.0"));
         let _ = std::fs::remove_dir_all(root_a);
         let _ = std::fs::remove_dir_all(root_b);
+    }
+
+    #[test]
+    fn support_workloads_keep_crash_loop_counts_and_drop_messages() {
+        use k8s_openapi::api::core::v1::Pod;
+        use serde_json::json;
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-support-wl-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let kubeconfig = root.join("kubeconfig");
+        std::fs::write(&kubeconfig, "apiVersion: v1\nkind: Config\nclusters: []\n").unwrap();
+        let api = MemoryClusterApi::new();
+        api.apply_server_side(
+            Path::new("/unused"),
+            "lab",
+            FIELD_MANAGER,
+            &json!({
+                "kind": "Deployment",
+                "metadata": {
+                    "name": "web",
+                    "labels": {"tenkai.product": "api"}
+                },
+                "spec": {"replicas": 1}
+            }),
+        )
+        .unwrap();
+        api.set_rollout(
+            "lab",
+            "web",
+            "Deployment",
+            WorkloadRollout {
+                desired_replicas: Some(1),
+                ready_replicas: Some(0),
+                updated_replicas: Some(1),
+                current_revision: Some("1".into()),
+                ..WorkloadRollout::default()
+            },
+        );
+        let pod: Pod = serde_json::from_value(json!({
+            "metadata": {"name": "web-1"},
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "False"}],
+                "containerStatuses": [{
+                    "name": "app",
+                    "ready": false,
+                    "restartCount": 4,
+                    "state": {
+                        "waiting": {
+                            "reason": "CrashLoopBackOff",
+                            "message": "back-off 40s restarting failed container=app pod=web-1"
+                        }
+                    },
+                    "lastState": {
+                        "terminated": {
+                            "exitCode": 1,
+                            "reason": "Error",
+                            "message": "host not found in upstream \"api\""
+                        }
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+        api.set_evidence(
+            "lab",
+            "web",
+            "Deployment",
+            WorkloadEvidence {
+                workload: json!({"kind": "Deployment"}),
+                pods: vec![pod],
+                pods_unavailable: None,
+            },
+        );
+        api.set_events(
+            "lab",
+            "web",
+            "Deployment",
+            vec![
+                ("BackOff".into(), 6),
+                ("Unhealthy".into(), 2),
+                ("host not found in upstream".into(), 1),
+            ],
+        );
+        let executor = InProcessKubernetesExecutor::new(&api);
+        let workloads = executor.support_workloads("lab", &kubeconfig).unwrap();
+        assert_eq!(workloads.len(), 1);
+        let workload = &workloads[0];
+        assert_eq!(workload.kind, "Deployment");
+        assert_eq!(workload.name, "web");
+        assert_eq!(workload.desired, Some(1));
+        assert_eq!(workload.ready, Some(0));
+        assert_eq!(workload.pods.len(), 1);
+        assert_eq!(workload.pods[0].restarts, 4);
+        assert_eq!(
+            workload.pods[0].waiting_reason.as_deref(),
+            Some("CrashLoopBackOff")
+        );
+        assert_eq!(workload.pods[0].last_reason.as_deref(), Some("Error"));
+        assert_eq!(workload.pods[0].last_exit_code, Some(1));
+        assert_eq!(
+            workload.events,
+            vec![
+                tenkai::support_bundle::SupportEventCount {
+                    reason: "BackOff".into(),
+                    count: 6,
+                },
+                tenkai::support_bundle::SupportEventCount {
+                    reason: "Unhealthy".into(),
+                    count: 2,
+                },
+            ]
+        );
+        let rendered = serde_json::to_string(workload).unwrap();
+        assert!(
+            !rendered.contains("host not found"),
+            "message leaked: {rendered}"
+        );
+        assert!(!rendered.contains("back-off"), "message leaked: {rendered}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_kind_lists_unreadable_when_empty_after_a_failed_kind() {
+        assert!(live_kind_lists_unreadable(0, false, false));
+        assert!(live_kind_lists_unreadable(0, true, true));
+        assert!(!live_kind_lists_unreadable(0, true, false));
+        assert!(!live_kind_lists_unreadable(2, true, true));
+    }
+
+    #[test]
+    fn support_event_counts_match_workload_and_pods_and_drop_messages() {
+        use k8s_openapi::api::core::v1::{Event, ObjectReference};
+        let event = |kind: &str, name: &str, reason: &str, count: i32| Event {
+            involved_object: ObjectReference {
+                kind: Some(kind.into()),
+                name: Some(name.into()),
+                ..Default::default()
+            },
+            reason: Some(reason.into()),
+            count: Some(count),
+            message: Some("host not found in upstream".into()),
+            ..Default::default()
+        };
+        let counts = support_event_counts(
+            &[
+                event("Deployment", "web", "BackOff", 6),
+                event("Pod", "web-1", "Unhealthy", 2),
+                event("Pod", "other", "BackOff", 9),
+                event("Deployment", "web", "host not found", 1),
+            ],
+            "Deployment",
+            "web",
+            &["web-1".into()],
+        );
+        assert_eq!(counts, vec![("BackOff".into(), 6), ("Unhealthy".into(), 2)]);
+    }
+
+    #[test]
+    fn support_workload_reports_omitted_replica_zeros() {
+        use serde_json::json;
+        let rollout = rollout_from_value(
+            "Deployment",
+            &json!({
+                "kind": "Deployment",
+                "spec": {"replicas": 1},
+                "status": {}
+            }),
+        );
+        let workload = support_workload(
+            "lab",
+            "Deployment",
+            "web",
+            &rollout,
+            &WorkloadEvidence {
+                workload: json!({}),
+                pods: Vec::new(),
+                pods_unavailable: None,
+            },
+            &[],
+        );
+        assert_eq!(workload.desired, Some(1));
+        assert_eq!(workload.ready, Some(0));
+        assert_eq!(workload.updated, Some(0));
+        let rendered = serde_json::to_string(&workload).unwrap();
+        assert!(rendered.contains("\"ready\":0"), "{rendered}");
+        assert!(rendered.contains("\"updated\":0"), "{rendered}");
     }
 
     #[test]

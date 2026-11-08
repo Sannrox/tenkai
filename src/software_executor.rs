@@ -277,6 +277,16 @@ pub trait SoftwareExecutor: Send + Sync {
         let _ = request;
         Ok(None)
     }
+    /// Bounded, allowlisted live workload facts for a support bundle (#1017).
+    /// Default is none: this adapter does not talk to a cluster.
+    fn support_workloads(
+        &self,
+        environment: &str,
+        cluster_config: &Path,
+    ) -> Result<Vec<crate::support_bundle::SupportWorkload>> {
+        let _ = (environment, cluster_config);
+        Ok(Vec::new())
+    }
     /// Apply one generation and return wall time per phase. Default times `apply`.
     fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
         let started = Instant::now();

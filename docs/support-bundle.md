@@ -38,6 +38,16 @@ A `tenkai.support-bundle.v1` file holds:
   each reduced to its leading allowlisted fields (`outcome`, `state`,
   `sequence`, counts and thresholds). Everything from the first other field
   on, such as free-text `detail`, is dropped, as is every other line.
+- **In-cluster workloads:** for each environment's latest plan that applied
+  an in-process Kubernetes release, live replica counts, the serving
+  revision, per-pod phase, readiness, restart count, waiting reason, last
+  termination reason and exit code, and Kubernetes event reasons with
+  counts (pod and workload events). At most 20 workloads, and 20 pods and
+  20 event-reason groups per workload. No log text, event messages, or
+  other free text. A cluster that cannot be read is a collection error; the
+  rest of the bundle is still written. Event reasons are omitted when they
+  cannot be listed. Older bundles omit this field. Helm releases are not
+  collected.
 - **Collection errors:** an environment that could not be read is named,
   without detail, and the rest of the bundle is still written.
 
