@@ -186,10 +186,15 @@ The outbox payload wraps the captured observation; the evidence body submitted
 to Sekai is only that observation. Delivery uses existing authenticated
 submission:
 
-1. `SekaiService.SubmitEvidence` with evidence type `feedback.observation`,
-   schema `feedback.observation@1.0.0`, a target (below), and provenance for
-   the observation identity, package `pkg:feedback.evidence-finding/v1`, and
-   evidence binding.
+1. `SekaiService.SubmitEvidence` with evidence type
+   `tenkai.feedback_observation`, schema
+   `tenkai.feedback_observation.v1@1.0.0` from
+   [`api/tenkai-feedback-observation-v1.schema.json`](../api/tenkai-feedback-observation-v1.schema.json),
+   a target (below), and provenance for the observation identity, package
+   `pkg:feedback.evidence-finding/v1`, and evidence binding. Additive fields
+   stay in 1.x (`1.0.0` → `1.1.0` and a schema update); a breaking change
+   becomes `.v2` and a new major version. `schema_compatibility` is `exact`
+   against the registered 1.x version.
 2. `SekaiService.SubmitActionInstance` for `feedback.observation.record`,
    passing the admitted submission id. Action parameters (`object_id`,
    `problem_signature`, `occurrence_ids`, `classification`, `disposition`,
@@ -237,8 +242,12 @@ schema and are resent with exactly the target they had: kind
 `<tenant>:<observation ID>`. The wrapper is closed, so an older release
 refuses a `.v2` row as a visible, retryable failure instead of resending it
 with a different target under the same idempotency key. The wrapper schema
-is part of the event id. The evidence body (the observation) and its schema
-`feedback.observation@1.0.0` do not change.
+is part of the event id. The evidence body is the captured observation
+(`tenkai.feedback_observation.v1`). Export names evidence type
+`tenkai.feedback_observation` and schema
+`tenkai.feedback_observation.v1@1.0.0`. A plane that still only has
+`feedback.observation@1.0.0` keeps accepting that type from older replicas
+until operators remove it.
 
 Retryable delivery survives restart, duplicate enqueue, and lost
 acknowledgements: the outbox event id is the evidence and Action
@@ -252,7 +261,8 @@ rollback, or standalone operation.
 
 Before enabling export, a Sekai administrator must register, for the
 configured principal and namespace, a producer capability for
-`source_type=feedback`, the `feedback.observation` schema, target kind
+`source_type=feedback`, evidence type `tenkai.feedback_observation`, schema
+`tenkai.feedback_observation.v1@1.0.0`, target kind
 `feedback_observation` (community host) or `tenant_feedback_observation`
 (tenant-mode hub), and the `feedback.observation.record` Action. Tenkai
 fails startup unless `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` exactly attests
@@ -263,7 +273,7 @@ export TENKAI_FEEDBACK_PROVIDER_URL=https://sekai.example.internal
 export TENKAI_FEEDBACK_NAMESPACE=delivery-learning
 export TENKAI_FEEDBACK_PROVIDER_PRINCIPAL=tenkai.feedback
 export TENKAI_FEEDBACK_PROVIDER_TOKEN='inject-from-secret-store'
-export TENKAI_FEEDBACK_PROVIDER_REGISTRATION='producer=tenkai.feedback;source_type=feedback;source_instance=delivery-learning:feedback;namespace=delivery-learning;evidence_type=feedback.observation;schema=feedback.observation@1.0.0;target_kind=feedback_observation;classification=internal;intent=upsert;action=feedback.observation.record'
+export TENKAI_FEEDBACK_PROVIDER_REGISTRATION='producer=tenkai.feedback;source_type=feedback;source_instance=delivery-learning:feedback;namespace=delivery-learning;evidence_type=tenkai.feedback_observation;schema=tenkai.feedback_observation.v1@1.0.0;target_kind=feedback_observation;classification=internal;intent=upsert;action=feedback.observation.record'
 tenkai-server --feedback-provider chisei
 ```
 
@@ -295,6 +305,22 @@ Evidence keyed on a tenant-mode target sees a new key for later observations
 (`tenant_feedback_observation`, encoded tenant). Every host enqueues `.v2`
 rows, and the wrapper schema is part of the event id, so an observation
 enqueued again across the upgrade can be exported once under each id.
+
+#### Upgrading the feedback evidence type
+
+Hosts with `--feedback-provider chisei` change. The Action
+(`feedback.observation.record`) and target kinds do not.
+
+1. In Sekai, register evidence type `tenkai.feedback_observation` and schema
+   `tenkai.feedback_observation.v1@1.0.0` from
+   `api/tenkai-feedback-observation-v1.schema.json` at the release tag. Keep
+   `feedback.observation@1.0.0` so older replicas still deliver.
+2. Upgrade Tenkai with `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` naming
+   `evidence_type=tenkai.feedback_observation` and
+   `schema=tenkai.feedback_observation.v1@1.0.0`. A host whose registration
+   still attests `feedback.observation@1.0.0` refuses to start.
+3. Once no older replica runs, remove `feedback.observation` from the
+   capability.
 
 ## Standalone operation and external adapters
 

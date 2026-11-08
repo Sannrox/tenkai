@@ -1,0 +1,230 @@
+{
+  "$defs": {
+    "Operation": {
+      "description": "Where the outcome was committed.",
+      "oneOf": [
+        {
+          "const": "apply_step",
+          "description": "An apply or rollback step run by the controller.",
+          "type": "string"
+        },
+        {
+          "const": "runtime_completion",
+          "description": "A step a runtime agent completed.",
+          "type": "string"
+        },
+        {
+          "const": "unknown_reconciliation",
+          "description": "An operator resolved an unknown deployment state.",
+          "type": "string"
+        },
+        {
+          "const": "plan_blocked",
+          "description": "A plan was held before or between steps: maintenance or a gate (#803).",
+          "type": "string"
+        },
+        {
+          "const": "plan_failed",
+          "description": "A plan failed outside any step outcome (#803).",
+          "type": "string"
+        },
+        {
+          "const": "orphan_recovery",
+          "description": "A plan left running by a controller that stopped was recovered\nafter a restart (#803).",
+          "type": "string"
+        }
+      ]
+    },
+    "Reason": {
+      "description": "Why the outcome is what it is. Closed: a new reason is a schema change.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "The step succeeded.",
+          "type": "string"
+        },
+        {
+          "const": "product_failed",
+          "description": "The deployed product's command or health failed.",
+          "type": "string"
+        },
+        {
+          "const": "product_failed_restored",
+          "description": "The product failed and the previous release was restored.",
+          "type": "string"
+        },
+        {
+          "const": "tenkai_failed",
+          "description": "Tenkai itself failed: executor, cleanup or bookkeeping.",
+          "type": "string"
+        },
+        {
+          "const": "tenkai_failed_restored",
+          "description": "Tenkai failed and the previous release was restored.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "The deployment command was interrupted or terminated.",
+          "type": "string"
+        },
+        {
+          "const": "blocked",
+          "description": "A policy, gate or drain held the step.",
+          "type": "string"
+        },
+        {
+          "const": "state_unknown",
+          "description": "The step ended with the deployed state unknown.",
+          "type": "string"
+        },
+        {
+          "const": "reconciled",
+          "description": "An operator recorded what is deployed after an unknown state.",
+          "type": "string"
+        },
+        {
+          "const": "degraded",
+          "description": "The observation could not be built from the outcome; only its\nidentity is kept.",
+          "type": "string"
+        },
+        {
+          "const": "maintenance_blocked",
+          "description": "A maintenance window held the plan.",
+          "type": "string"
+        },
+        {
+          "const": "gate_blocked",
+          "description": "A release gate (such as an evaluation suite) held the plan.",
+          "type": "string"
+        },
+        {
+          "const": "plan_failed",
+          "description": "The plan failed before or around its steps.",
+          "type": "string"
+        },
+        {
+          "const": "abandoned",
+          "description": "The controller running the plan stopped; it was failed on recovery.",
+          "type": "string"
+        }
+      ]
+    },
+    "RetryContext": {
+      "additionalProperties": false,
+      "description": "Retry and recovery facts an outcome is attributable to (#803). All\noptional, so records without them are unchanged.",
+      "properties": {
+        "failed_target_retry": {
+          "description": "The step retried a release the environment held as a failed target.",
+          "type": "boolean"
+        },
+        "recovery_reason": {
+          "description": "The audited reason that admitted rollback onto recalled content,\nbounded.",
+          "maxLength": 256,
+          "type": "string"
+        },
+        "runtime_claim_generation": {
+          "description": "The runtime claim generation that completed the steps.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "takeover": {
+          "description": "The environment lease was taken over from an expired holder.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One captured Tenkai feedback observation, exported as evidence type tenkai.feedback_observation.",
+  "properties": {
+    "action": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "context": {
+      "$ref": "#/$defs/RetryContext"
+    },
+    "controller_version": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "duration_ms": {
+      "description": "From execution entry to the committed outcome; absent when the start\nwas not observed by this process.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "environment": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "lease_generation": {
+      "description": "The environment lease generation the outcome committed under, so\nretries and takeovers of one step are told apart.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "observed_at_ms": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "operation": {
+      "$ref": "#/$defs/Operation"
+    },
+    "plan_id": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "product": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "reason": {
+      "$ref": "#/$defs/Reason"
+    },
+    "release_id": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "schema": {
+      "const": "tenkai.feedback_observation.v1",
+      "type": "string"
+    },
+    "status": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "step_id": {
+      "maxLength": 256,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "id",
+    "operation",
+    "environment",
+    "product",
+    "plan_id",
+    "step_id",
+    "action",
+    "release_id",
+    "status",
+    "reason",
+    "controller_version",
+    "lease_generation",
+    "observed_at_ms"
+  ],
+  "title": "tenkai.feedback_observation.v1",
+  "type": "object",
+  "x-tenkai-schema-version": "1.0.0"
+}

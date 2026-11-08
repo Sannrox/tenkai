@@ -16,11 +16,15 @@ use serde::{Deserialize, Serialize};
 use crate::plan::Action;
 
 pub const FEEDBACK_OBSERVATION_SCHEMA: &str = "tenkai.feedback_observation.v1";
+/// Schema version operators register with the evidence type
+/// `tenkai.feedback_observation`. Additive fields bump 1.x; a breaking
+/// change becomes `.v2` and a new major version.
+pub const FEEDBACK_OBSERVATION_SCHEMA_VERSION: &str = "1.0.0";
 /// The longest identifier an observation stores; longer ones are cut.
 const MAX_FIELD_BYTES: usize = 256;
 
 /// Where the outcome was committed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     /// An apply or rollback step run by the controller.
@@ -39,7 +43,7 @@ pub enum Operation {
 }
 
 /// Why the outcome is what it is. Closed: a new reason is a schema change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Reason {
     /// The step succeeded.
@@ -75,7 +79,7 @@ pub enum Reason {
 
 /// Retry and recovery facts an outcome is attributable to (#803). All
 /// optional, so records without them are unchanged.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RetryContext {
     /// The environment lease was taken over from an expired holder.
@@ -83,6 +87,7 @@ pub struct RetryContext {
     pub takeover: bool,
     /// The runtime claim generation that completed the steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub runtime_claim_generation: Option<u64>,
     /// The step retried a release the environment held as a failed target.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -90,6 +95,10 @@ pub struct RetryContext {
     /// The audited reason that admitted rollback onto recalled content,
     /// bounded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        length(max = 256),
+        transform = crate::schema_contract::omitted_when_none
+    )]
     pub recovery_reason: Option<String>,
 }
 
@@ -101,24 +110,35 @@ impl RetryContext {
 
 /// One immutable observation. `id` is the committed outcome's identity, so
 /// an identical replay of the same outcome is idempotent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackObservation {
+    #[schemars(extend("const" = FEEDBACK_OBSERVATION_SCHEMA))]
     pub schema: String,
+    #[schemars(length(min = 1, max = 256))]
     pub id: String,
     pub operation: Operation,
+    #[schemars(length(max = 256))]
     pub environment: String,
+    #[schemars(length(max = 256))]
     pub product: String,
+    #[schemars(length(max = 256))]
     pub plan_id: String,
+    #[schemars(length(max = 256))]
     pub step_id: String,
+    #[schemars(length(max = 256))]
     pub action: String,
+    #[schemars(length(max = 256))]
     pub release_id: String,
+    #[schemars(length(max = 256))]
     pub status: String,
     pub reason: Reason,
     /// From execution entry to the committed outcome; absent when the start
     /// was not observed by this process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub duration_ms: Option<u64>,
+    #[schemars(length(max = 256))]
     pub controller_version: String,
     /// The environment lease generation the outcome committed under, so
     /// retries and takeovers of one step are told apart.
@@ -126,6 +146,25 @@ pub struct FeedbackObservation {
     pub observed_at_ms: i64,
     #[serde(default, skip_serializing_if = "RetryContext::is_empty")]
     pub context: RetryContext,
+}
+
+/// The published JSON Schema of [`FeedbackObservation`] at
+/// [`FEEDBACK_OBSERVATION_SCHEMA_VERSION`], checked in as
+/// `api/tenkai-feedback-observation-v1.schema.json`.
+pub fn feedback_observation_schema() -> serde_json::Value {
+    let mut schema = schemars::generate::SchemaSettings::draft2020_12()
+        .into_generator()
+        .into_root_schema_for::<FeedbackObservation>();
+    schema.insert("title".into(), FEEDBACK_OBSERVATION_SCHEMA.into());
+    schema.insert(
+        "description".into(),
+        "One captured Tenkai feedback observation, exported as evidence type tenkai.feedback_observation.".into(),
+    );
+    schema.insert(
+        "x-tenkai-schema-version".into(),
+        FEEDBACK_OBSERVATION_SCHEMA_VERSION.into(),
+    );
+    schema.to_value()
 }
 
 /// The facts an observation is built from.
@@ -404,5 +443,101 @@ mod tests {
             FeedbackObservation::capture(unread).reason,
             Reason::Degraded
         );
+    }
+
+    #[test]
+    fn published_schema_describes_the_observation_type() {
+        let schema = feedback_observation_schema();
+        assert_eq!(schema["title"], FEEDBACK_OBSERVATION_SCHEMA);
+        assert_eq!(
+            schema["x-tenkai-schema-version"],
+            FEEDBACK_OBSERVATION_SCHEMA_VERSION
+        );
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["schema"]["const"],
+            FEEDBACK_OBSERVATION_SCHEMA
+        );
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert!(required.contains(&"id"));
+        assert!(required.contains(&"operation"));
+        assert!(required.contains(&"reason"));
+        assert!(!required.contains(&"duration_ms"));
+        assert!(!required.contains(&"context"));
+    }
+
+    #[test]
+    fn published_schema_validates_every_captured_variant() {
+        let schema = feedback_observation_schema();
+        let operations = [
+            Operation::ApplyStep,
+            Operation::RuntimeCompletion,
+            Operation::UnknownReconciliation,
+            Operation::PlanBlocked,
+            Operation::PlanFailed,
+            Operation::OrphanRecovery,
+        ];
+        let reasons = [
+            Reason::None,
+            Reason::ProductFailed,
+            Reason::ProductFailedRestored,
+            Reason::TenkaiFailed,
+            Reason::TenkaiFailedRestored,
+            Reason::Cancelled,
+            Reason::Blocked,
+            Reason::StateUnknown,
+            Reason::Reconciled,
+            Reason::Degraded,
+            Reason::MaintenanceBlocked,
+            Reason::GateBlocked,
+            Reason::PlanFailed,
+            Reason::Abandoned,
+        ];
+        for operation in operations {
+            for reason in reasons {
+                let mut facts = capture("failed", reason);
+                facts.operation = operation;
+                let observation = FeedbackObservation::capture(facts);
+                let payload = serde_json::to_value(observation).unwrap();
+                assert_payload_matches_schema(&payload, &schema);
+            }
+        }
+        let mut with_context = capture("failed", Reason::TenkaiFailed);
+        with_context.context = RetryContext {
+            takeover: true,
+            runtime_claim_generation: Some(4),
+            failed_target_retry: true,
+            recovery_reason: Some("recalled".into()),
+        };
+        let payload = serde_json::to_value(FeedbackObservation::capture(with_context)).unwrap();
+        assert_payload_matches_schema(&payload, &schema);
+        let mut unread = capture("reconciled", Reason::Reconciled);
+        unread.action = None;
+        let payload = serde_json::to_value(FeedbackObservation::capture(unread)).unwrap();
+        assert_payload_matches_schema(&payload, &schema);
+    }
+
+    /// Payload keys the published schema requires, plus no undeclared keys
+    /// when `additionalProperties` is false.
+    fn assert_payload_matches_schema(payload: &serde_json::Value, schema: &serde_json::Value) {
+        let object = payload.as_object().expect("observation object");
+        let properties = schema["properties"].as_object().expect("schema properties");
+        for field in schema["required"].as_array().expect("schema required") {
+            let field = field.as_str().expect("required name");
+            assert!(object.contains_key(field), "{field} missing from {payload}");
+        }
+        if schema["additionalProperties"] == false {
+            for key in object.keys() {
+                assert!(
+                    properties.contains_key(key),
+                    "undeclared {key} in {payload}"
+                );
+            }
+        }
     }
 }
