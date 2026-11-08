@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# Fail when api/tenkai-http-v1.schema.json or
-# api/tenkai-terminal-outcome-v2.schema.json no longer matches the code.
+# Fail when api/tenkai-http-v1.schema.json,
+# api/tenkai-terminal-outcome-v2.schema.json, or
+# api/tenkai-feedback-observation-v1.schema.json no longer matches the code.
 cargo test --locked -p tenkai-http --lib contract --quiet
 printf 'http api contract ok\n'

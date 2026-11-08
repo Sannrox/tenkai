@@ -938,4 +938,33 @@ mod tests {
             "api/tenkai-terminal-outcome-v2.schema.json is stale; run `make update`"
         );
     }
+
+    const CHECKED_IN_FEEDBACK_OBSERVATION: &str =
+        include_str!("../../../api/tenkai-feedback-observation-v1.schema.json");
+
+    /// The feedback-observation schema operators register (#1101) lives
+    /// beside the HTTP contract so `make update` and the API-contract
+    /// validator cover it.
+    #[test]
+    fn checked_in_feedback_observation_contract_matches_the_code() {
+        let rendered = format!(
+            "{:#}\n",
+            tenkai::feedback_observation::feedback_observation_schema()
+        );
+        if std::env::var_os("TENKAI_UPDATE_API_CONTRACT").is_some() {
+            std::fs::write(
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../api/tenkai-feedback-observation-v1.schema.json"
+                ),
+                &rendered,
+            )
+            .unwrap();
+            return;
+        }
+        assert!(
+            rendered == CHECKED_IN_FEEDBACK_OBSERVATION,
+            "api/tenkai-feedback-observation-v1.schema.json is stale; run `make update`"
+        );
+    }
 }

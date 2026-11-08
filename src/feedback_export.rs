@@ -2,7 +2,8 @@
 //!
 //! Capture stays local and always-on. When this adapter is enabled, each
 //! stored observation is also enqueued on the provider outbox and delivered
-//! as `feedback.observation` evidence, then recorded with
+//! as `tenkai.feedback_observation` evidence (schema
+//! `tenkai.feedback_observation.v1@1.0.0`), then recorded with
 //! `SubmitActionInstance` (`feedback.observation.record`). Delivery uses the
 //! existing evidence and governed-action RPCs; it never opens a new core
 //! contract. Disabled or unavailable export cannot interrupt deployment.
@@ -15,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tonic::metadata::MetadataValue;
 
-use crate::feedback_observation::{FEEDBACK_OBSERVATION_SCHEMA, FeedbackObservation, Reason};
+use crate::feedback_observation::{
+    FEEDBACK_OBSERVATION_SCHEMA, FEEDBACK_OBSERVATION_SCHEMA_VERSION, FeedbackObservation, Reason,
+};
 use crate::pb::sekai::sekai_service_client::SekaiServiceClient;
 use crate::pb::sekai::{EvidenceEnvelope, SubmitActionInstanceRequest, SubmitEvidenceRequest};
 use crate::provider_event::{
@@ -29,8 +32,8 @@ use crate::storage::ProviderEventRecord;
 
 pub const FEEDBACK_PROVIDER_KIND: &str = "feedback";
 pub const FEEDBACK_PROVIDER_REGISTRATION_ENV: &str = "TENKAI_FEEDBACK_PROVIDER_REGISTRATION";
-pub const FEEDBACK_EVIDENCE_TYPE: &str = "feedback.observation";
-pub const FEEDBACK_EVIDENCE_SCHEMA_VERSION: &str = "1.0.0";
+pub const FEEDBACK_EVIDENCE_TYPE: &str = "tenkai.feedback_observation";
+pub const FEEDBACK_EVIDENCE_SCHEMA_VERSION: &str = FEEDBACK_OBSERVATION_SCHEMA_VERSION;
 /// Evidence target kind of a community-host observation: the target id is the
 /// observation id.
 pub const FEEDBACK_OBJECT_KIND: &str = "feedback_observation";
@@ -114,7 +117,7 @@ pub fn feedback_provider_registration_attestation(
 ) -> String {
     let target_kind = feedback_target_kind(tenant_mode);
     format!(
-        "producer={principal};source_type={FEEDBACK_PROVIDER_KIND};source_instance={namespace}:{FEEDBACK_PROVIDER_KIND};namespace={namespace};evidence_type={FEEDBACK_EVIDENCE_TYPE};schema={FEEDBACK_EVIDENCE_TYPE}@{FEEDBACK_EVIDENCE_SCHEMA_VERSION};target_kind={target_kind};classification=internal;intent=upsert;action={FEEDBACK_ACTION_TYPE}"
+        "producer={principal};source_type={FEEDBACK_PROVIDER_KIND};source_instance={namespace}:{FEEDBACK_PROVIDER_KIND};namespace={namespace};evidence_type={FEEDBACK_EVIDENCE_TYPE};schema={FEEDBACK_OBSERVATION_SCHEMA}@{FEEDBACK_OBSERVATION_SCHEMA_VERSION};target_kind={target_kind};classification=internal;intent=upsert;action={FEEDBACK_ACTION_TYPE}"
     )
 }
 
@@ -634,7 +637,7 @@ impl ChiseiFeedbackProvider {
             target_kind: target_kind.into(),
             evidence_type: FEEDBACK_EVIDENCE_TYPE.into(),
             signal: "other".into(),
-            schema_id: FEEDBACK_EVIDENCE_TYPE.into(),
+            schema_id: FEEDBACK_OBSERVATION_SCHEMA.into(),
             schema_version: FEEDBACK_EVIDENCE_SCHEMA_VERSION.into(),
             schema_compatibility: "exact".into(),
             observed_at_ms: payload.observation.observed_at_ms,
@@ -1041,7 +1044,9 @@ mod tests {
         assert_eq!(envelope.evidence_type, FEEDBACK_EVIDENCE_TYPE);
         assert_eq!(envelope.target_kind, FEEDBACK_OBJECT_KIND);
         assert_eq!(envelope.target_external_id, captured.id);
-        assert_eq!(envelope.schema_id, FEEDBACK_EVIDENCE_TYPE);
+        assert_eq!(envelope.schema_id, FEEDBACK_OBSERVATION_SCHEMA);
+        assert_eq!(envelope.schema_version, FEEDBACK_OBSERVATION_SCHEMA_VERSION);
+        assert_eq!(envelope.schema_compatibility, "exact");
         assert_eq!(envelope.idempotency_key, event.id);
         let content: FeedbackObservation = serde_json::from_slice(&envelope.content_json).unwrap();
         assert_eq!(content, captured);
@@ -1070,6 +1075,8 @@ mod tests {
             "delivery-learning",
             false,
         );
+        assert!(expected.contains("evidence_type=tenkai.feedback_observation;"));
+        assert!(expected.contains("schema=tenkai.feedback_observation.v1@1.0.0;"));
         assert!(expected.contains("target_kind=feedback_observation;"));
         let export = |tenant_mode, attestation: &str| {
             ChiseiFeedbackProvider::new_for_export(
