@@ -7,10 +7,9 @@
 //! the records alone, so a restart, a reboot, or a replayed request reaches
 //! the same answer.
 
-use std::io::Write as _;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use serde::Serialize;
@@ -262,28 +261,8 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 fn write_json(paths: &ApplierPaths, path: &Path, value: &impl Serialize) -> Result<()> {
     let parent = path.parent().context("record path has no parent")?;
     durable_dirs(&paths.state_dir, parent)?;
-    // Random, so a staging file a crash left behind never blocks the next
-    // write, whatever process id the next applier gets.
-    let staged: PathBuf = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("record"),
-        uuid::Uuid::new_v4()
-    ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .open(&staged)
-        .with_context(|| format!("creating {}", staged.display()))?;
-    file.write_all(&serde_json::to_vec_pretty(value)?)?;
-    file.sync_all()?;
-    drop(file);
-    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o644))?;
-    std::fs::rename(&staged, path).with_context(|| format!("replacing {}", path.display()))?;
-    std::fs::File::open(parent)?.sync_all()?;
-    Ok(())
+    tenkai::atomic_state::write_file(path, &serde_json::to_vec_pretty(value)?, Some(0o644))
+        .with_context(|| format!("replacing {}", path.display()))
 }
 
 /// Create `dir` and every missing directory between it and `root`, and sync

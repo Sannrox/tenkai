@@ -220,24 +220,8 @@ pub fn runner_identity(
 /// Replace `path` with `contents`, owner-only, in one rename: a reader sees
 /// the old file or the new one, never a partial one.
 fn replace_file(path: &std::path::Path, contents: &str) -> Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4().simple()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)
-        .with_context(|| format!("creating {}", temporary.display()))?;
-    let written = file
-        .write_all(contents.as_bytes())
-        .and_then(|()| file.sync_all())
-        .and_then(|()| std::fs::rename(&temporary, path));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    written.with_context(|| format!("writing {}", path.display()))?;
-    crate::runtime_self_upgrade::sync_dir(path.parent().unwrap_or(std::path::Path::new(".")))
+    crate::atomic_state::write_file(path, contents.as_bytes(), Some(0o600))
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Write `secret` to `path` readable by the owner only, replacing nothing:

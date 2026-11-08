@@ -4,7 +4,6 @@
 //! canonical binary statement, so JSON field order never affects identity.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write as _;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
@@ -342,36 +341,8 @@ impl BundleEnvelope {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(self)?;
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("offline bundle destination must have a UTF-8 file name")?;
-        let temporary = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
-        let result = (|| -> Result<()> {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
-                .with_context(|| format!("creating temporary bundle {}", temporary.display()))?;
-            file.write_all(&bytes)
-                .with_context(|| format!("writing temporary bundle {}", temporary.display()))?;
-            file.sync_all()
-                .with_context(|| format!("syncing temporary bundle {}", temporary.display()))?;
-            std::fs::rename(&temporary, path).with_context(|| {
-                format!("atomically replacing offline bundle {}", path.display())
-            })?;
-            std::fs::File::open(parent)
-                .with_context(|| format!("opening bundle directory {}", parent.display()))?
-                .sync_all()
-                .with_context(|| format!("syncing bundle directory {}", parent.display()))?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        result
+        crate::atomic_state::write_file(path, &serde_json::to_vec_pretty(self)?, None)
+            .with_context(|| format!("atomically replacing offline bundle {}", path.display()))
     }
 
     pub fn verify(

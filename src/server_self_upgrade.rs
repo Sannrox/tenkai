@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::runtime_self_upgrade::{probe, probe_within, sync_dir};
+use crate::atomic_state::sync_dir;
+use crate::runtime_self_upgrade::{probe, probe_within};
 
 /// The binaries a version holds, as `tenkaictl upgrade install-hosts`
 /// writes them.
@@ -318,13 +319,11 @@ impl Home {
     }
 
     fn write_record(&self, record: &Upgrade) -> Result<()> {
-        let temporary = self
-            .root
-            .join(format!(".{RECORD}.{}", uuid::Uuid::new_v4().simple()));
-        std::fs::write(&temporary, serde_json::to_vec_pretty(record)?)?;
-        std::fs::File::open(&temporary)?.sync_all()?;
-        std::fs::rename(&temporary, self.root.join(RECORD))?;
-        sync_dir(&self.root)
+        crate::atomic_state::write_file(
+            &self.root.join(RECORD),
+            &serde_json::to_vec_pretty(record)?,
+            None,
+        )
     }
 
     /// Back up the store, record the switch, and make `id` current. Refused

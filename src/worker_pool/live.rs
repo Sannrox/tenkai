@@ -1021,6 +1021,9 @@ pub fn run_fixture_worker() -> Result<()> {
         {
             return Ok(());
         }
+        // A status snapshot rewritten every tick, not durable state: a
+        // rename keeps readers off partial bytes, and skipping the syncs of
+        // `atomic_state` keeps this loop off the disk.
         let tmp = format!("{live}.tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(&snapshot)?)?;
         std::fs::rename(&tmp, &live)?;

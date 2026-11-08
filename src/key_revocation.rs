@@ -189,14 +189,7 @@ fn replace_installed(list: &RevocationList, installed: &Path) -> Result<()> {
     if installed.exists() {
         require_supersedes(&RevocationList::load(installed)?, list)?;
     }
-    let staged = installed.with_extension(format!(
-        "{}.{}.tmp",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::write(&staged, serde_json::to_vec_pretty(list)?)
-        .with_context(|| format!("writing key revocations {}", staged.display()))?;
-    std::fs::rename(&staged, installed)
+    crate::atomic_state::write_file(installed, &serde_json::to_vec_pretty(list)?, None)
         .with_context(|| format!("installing key revocations {}", installed.display()))?;
     apply(list);
     Ok(())

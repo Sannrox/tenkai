@@ -32,6 +32,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::atomic_state::sync_dir;
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -769,36 +770,16 @@ fn prune_drills(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Write JSON so it is durable before it is visible: a unique temporary file,
-/// synced, renamed into place, then the directory synced. Unique temporaries
-/// let two processes write side by side without removing each other's file.
 fn write_durable<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     write_durable_bytes(path, &serde_json::to_vec_pretty(value)?)
 }
 
 fn write_durable_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = path
-        .parent()
-        .with_context(|| format!("{} has no parent directory", path.display()))?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let temporary = dir.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("state"),
-        uuid::Uuid::new_v4()
-    ));
-    let written = (|| {
-        let mut file = std::fs::File::create(&temporary)?;
-        std::io::Write::write_all(&mut file, bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&temporary, path)?;
-        sync_dir(dir)
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    written.with_context(|| format!("writing {}", path.display()))
+    crate::atomic_state::write_file(path, bytes, None)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 fn sha256_file(path: &Path) -> Result<(String, u64)> {
@@ -807,12 +788,6 @@ fn sha256_file(path: &Path) -> Result<(String, u64)> {
     let mut hasher = Sha256::new();
     let size = std::io::copy(&mut file, &mut hasher)?;
     Ok((format!("sha256:{:x}", hasher.finalize()), size))
-}
-
-fn sync_dir(dir: &Path) -> Result<()> {
-    std::fs::File::open(dir)
-        .and_then(|handle| handle.sync_all())
-        .with_context(|| format!("syncing backup directory {}", dir.display()))
 }
 
 #[cfg(test)]

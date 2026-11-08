@@ -248,21 +248,7 @@ impl FilesystemArtifactRegistry {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_file_name(format!(
-            ".{}.part",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| anyhow::anyhow!("artifact blob path is not UTF-8"))?
-        ));
-        if let Err(error) = std::fs::write(&tmp, &bytes) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(error.into());
-        }
-        if let Err(error) = std::fs::rename(&tmp, &path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(error.into());
-        }
-        Ok(())
+        crate::atomic_state::write_file(&path, &bytes, None)
     }
 }
 

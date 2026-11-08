@@ -194,32 +194,8 @@ pub fn offered_from_public_key(runtime_id: &str, public_key: &str) -> Result<Off
 }
 
 fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
-    use std::io::Write as _;
-    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4().simple()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&temporary)
-        .with_context(|| format!("creating {}", temporary.display()))?;
-    let written = file
-        .write_all(body)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| std::fs::rename(&temporary, path));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    written.with_context(|| format!("writing {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    crate::atomic_state::write_file(path, body, Some(0o600))
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]
