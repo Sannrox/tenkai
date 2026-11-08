@@ -709,8 +709,7 @@ async fn losing_the_lease_stops_the_unit_and_a_retry_never_runs_it_again() {
             workdir: plan.steps[0].workdir.clone(),
         },
         "edge",
-        "cluster",
-        "cluster",
+        &plan.steps[0],
         false,
     )
     .await
@@ -797,8 +796,7 @@ async fn a_unit_left_running_by_an_earlier_holder_is_stopped_before_the_next_app
             workdir: plan.steps[0].workdir.clone(),
         },
         "edge",
-        "cluster",
-        "cluster",
+        &plan.steps[0],
         false,
     )
     .await

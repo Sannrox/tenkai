@@ -243,7 +243,7 @@ pub(crate) async fn register(
     Ok(())
 }
 
-fn require(remote: &RemoteChange) -> Result<(u64, &str)> {
+pub(crate) fn require(remote: &RemoteChange) -> Result<(u64, &str)> {
     let generation = remote
         .generation
         .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;

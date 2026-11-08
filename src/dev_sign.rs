@@ -721,7 +721,7 @@ inputs = ["manifests"]
                 artifact_digest: "a".into(),
                 workdir: ".".into(),
                 host: None,
-                sealed: None,
+                sealed: Vec::new(),
                 restore: None,
             }],
         )

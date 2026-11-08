@@ -184,7 +184,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: RuntimeCommand,
     },
-    /// Pin and inspect environment recipient keys for sealed secrets.
+    /// Set, list and delete sealed secrets; pin environment recipient keys.
     Secret {
         #[command(subcommand)]
         command: SecretCommand,
@@ -435,6 +435,31 @@ pub(crate) enum SecretCommand {
     Trust { env: String, fingerprint: String },
     /// List recipient keys the server offers for an environment.
     Recipients { env: String },
+    /// Seal a value read from standard input to the environment's pinned
+    /// recipient keys and store it for `<secret>/<key>` of an instance. The
+    /// value is never taken from an argument or an environment variable.
+    Set {
+        env: String,
+        instance: String,
+        /// `<secret>/<key>`: a secret the instance's release declares.
+        secret: String,
+        #[command(flatten)]
+        remote: crate::env_args::RemoteChange,
+    },
+    /// List sealed keys with their digest, setter and recipients. Never values.
+    List { env: String },
+    /// Delete one sealed key.
+    Delete {
+        env: String,
+        instance: String,
+        /// `<secret>/<key>`.
+        secret: String,
+        /// The release finds this key in the target by other means.
+        #[arg(long)]
+        present_in_target: bool,
+        #[command(flatten)]
+        remote: crate::env_args::RemoteChange,
+    },
 }
 
 #[derive(Subcommand)]

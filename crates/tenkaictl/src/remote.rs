@@ -392,6 +392,46 @@ pub(crate) async fn run(
                 let offered = client.list_environment_recipients(&env).await?;
                 crate::secret::show_recipients(cli.server_url.as_deref(), &env, offered.recipients)
             }
+            crate::args::SecretCommand::Set {
+                env,
+                instance,
+                secret,
+                remote,
+            } => {
+                crate::secret::set(
+                    &client,
+                    cli.server_url.as_deref(),
+                    (&env, &instance, &secret),
+                    &remote,
+                )
+                .await
+            }
+            crate::args::SecretCommand::List { env } => {
+                crate::secret::print_list(&client.list_sealed_secrets(&env).await?);
+                Ok(())
+            }
+            crate::args::SecretCommand::Delete {
+                env,
+                instance,
+                secret,
+                present_in_target,
+                remote,
+            } => {
+                let secret = tenkai::sealed_secret::SecretRef::parse(&secret)?;
+                let (generation, reason) = crate::remote_env_config::require(&remote)?;
+                let change =
+                    tenkai::environment_config::EnvironmentConfigChange::DeleteSealedSecret {
+                        instance,
+                        secret: secret.secret,
+                        key: secret.key,
+                        present_in_target,
+                    };
+                let result = client
+                    .configure_environment(&env, change, reason, generation)
+                    .await?;
+                println!("{}", result.message);
+                Ok(())
+            }
         },
         Command::Exposure { command } => match command {
             crate::args::ExposureCommand::Import { .. } => {

@@ -15,7 +15,7 @@ use super::config::ServerConfig;
 use super::environment_config::{
     configure_approval_policy, configure_bindings, configure_constraints, configure_criticality,
     configure_facts, configure_maintenance_window, configure_runner_attestation,
-    configure_webhooks, register_environment,
+    configure_sealed_secrets, configure_webhooks, list_sealed_secrets, register_environment,
 };
 use super::exports::{create_export, download_export, inspect_export, list_exports};
 use super::grant_rules::{create_grant_rule, list_grant_rules, remove_grant_rule};
@@ -239,6 +239,12 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/bindings",
             put(configure_bindings).delete(configure_bindings),
+        )
+        .route(
+            "/v1/environments/{environment}/sealed-secrets",
+            get(list_sealed_secrets)
+                .put(configure_sealed_secrets)
+                .delete(configure_sealed_secrets),
         )
         .route(
             "/v1/environments/{environment}/runner-attestation",

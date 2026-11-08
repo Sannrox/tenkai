@@ -3702,7 +3702,7 @@ install = "true"
                 artifact_digest: artifact_digest.into(),
                 workdir: workdir.into(),
                 host: None,
-                sealed: None,
+                sealed: Vec::new(),
                 restore: None,
             }],
             state: PlanState::Computed,

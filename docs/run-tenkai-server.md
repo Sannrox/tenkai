@@ -436,7 +436,9 @@ tenkai-runtime
   `tenkaictl --target remote secret recipients <env>` lists them;
   `tenkaictl --target remote secret trust <env> sha256:<hex>` pins one.
   On first use a TTY shows fingerprints and asks; a non-TTY client refuses
-  an unpinned key by fingerprint.
+  an unpinned key by fingerprint. `secret set` seals only to pinned keys,
+  and the server refuses a wrap for a key it does not offer
+  ([sealed secrets](manage-environments.md#sealed-secrets)).
 - **Local approval policy (ADR 0045 §4).** Before a runtime opens a sealed
   value it recomputes the plan digest and evaluates the plan's approval
   envelopes against a policy installed on that host

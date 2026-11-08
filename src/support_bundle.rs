@@ -919,7 +919,7 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
                 artifact_digest: "abc".into(),
                 workdir: ".".into(),
                 host: None,
-                sealed: None,
+                sealed: Vec::new(),
                 restore: None,
             }],
             state: crate::plan::PlanState::Computed,

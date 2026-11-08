@@ -528,6 +528,8 @@ async fn software_request(
         overlays,
     );
     request.instance = content.instance.clone();
+    request.config_digest =
+        crate::sealed_secret::config_digest(&request.config_digest, &content.sealed);
     request.artifact_pulls = content.artifact_pulls.clone();
     request.cluster_config_path =
         crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;

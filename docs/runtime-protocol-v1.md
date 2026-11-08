@@ -57,6 +57,10 @@ the envelopes bind different executable content, a sealed step is refused
 with a named reason. Incomplete envelopes keep the claim and retry; they do
 not fail the plan. Other steps are unchanged.
 
+A step's `sealed` is a list: every non-remove step of an instance with
+sealed values names each (`secret`, `key`, `digest`). The field is omitted
+when empty, so plans without sealed values keep their digest.
+
 ### Runner attestation statement
 
 `tenkai.runner-attestation.v2` is signed over the exact bytes the agent

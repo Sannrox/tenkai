@@ -29,7 +29,7 @@ fn plan_with_steps(id: &str, environment: &str, steps: u32) -> Plan {
                 artifact_digest: digest(order + 2000),
                 workdir: format!("/srv/product-{order}"),
                 host: None,
-                sealed: None,
+                sealed: Vec::new(),
                 restore: None,
             })
             .collect(),

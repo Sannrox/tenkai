@@ -223,7 +223,7 @@ impl HostFixture {
                         action: spec.action,
                         expected_generation: spec.expected_generation,
                     }),
-                    sealed: None,
+                    sealed: Vec::new(),
                 }
             })
             .collect();

@@ -27,6 +27,9 @@ pub(super) struct ReleaseContent {
     pub(super) raw_manifest: String,
     /// Root the manifest's immutable inputs are relative to.
     pub(super) content_root: PathBuf,
+    /// Sealed bindings the plan step named; the executed configuration
+    /// digest covers these, not whatever the environment holds by then.
+    pub(super) sealed: Vec<crate::plan::SealedStep>,
 }
 
 impl ReleaseContent {
@@ -73,10 +76,11 @@ pub(super) async fn admit(
     ctx: &mut Ctx,
     pin: &ReleasePin,
     environment: &str,
-    product: &str,
-    instance: &str,
+    step: &Step,
     recalled_recovery: bool,
 ) -> Result<ReleaseContent> {
+    let product = step.product.as_str();
+    let instance = step.instance_name();
     let snapshot = if recalled_recovery {
         crate::catalog::load_recoverable_snapshot(ctx, &pin.release_id, environment).await?
     } else {
@@ -162,5 +166,6 @@ pub(super) async fn admit(
         artifact_pulls: Vec::new(),
         content_root: PathBuf::from(&descriptor.content_path),
         raw_manifest: raw,
+        sealed: step.sealed.clone(),
     })
 }

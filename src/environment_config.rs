@@ -3,8 +3,8 @@
 //! `POST /v1/environments` registers an environment. Generation-fenced
 //! `PUT`/`DELETE` routes under `/v1/environments/{environment}/` change its
 //! facts, constraints, maintenance windows, webhooks, approval policy,
-//! runner attestation policy (#675), declared criticality (#694), and
-//! dependency bindings (ADR 0044). Every
+//! runner attestation policy (#675), declared criticality (#694),
+//! dependency bindings (ADR 0044), and sealed secret values (ADR 0045). Every
 //! change runs the same embedded function, and so the same validation, as the
 //! CLI. Every change also appends an immutable audit event that records the
 //! actor and the reason.
@@ -130,6 +130,23 @@ pub enum EnvironmentConfigChange {
         dependent: String,
         contract: String,
     },
+    /// Store a value the client sealed for one instance's secret key
+    /// (ADR 0045 §2). Never a plain value.
+    SetSealedSecret {
+        instance: String,
+        secret: String,
+        key: String,
+        sealed: crate::sealed_secret::SealedValue,
+    },
+    /// Remove one sealed key. `present_in_target` states that a release
+    /// reading it finds the key in the target by other means.
+    DeleteSealedSecret {
+        instance: String,
+        secret: String,
+        key: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        present_in_target: bool,
+    },
 }
 
 /// The configuration resource a route serves.
@@ -143,6 +160,7 @@ pub enum ConfigResource {
     RunnerAttestation,
     Criticality,
     Bindings,
+    SealedSecrets,
 }
 
 impl ConfigResource {
@@ -156,6 +174,7 @@ impl ConfigResource {
             Self::RunnerAttestation => "runner-attestation",
             Self::Criticality => "criticality",
             Self::Bindings => "bindings",
+            Self::SealedSecrets => "sealed-secrets",
         }
     }
 }
@@ -179,6 +198,9 @@ impl EnvironmentConfigChange {
             }
             Self::SetCriticality { .. } | Self::ClearCriticality => ConfigResource::Criticality,
             Self::Bind { .. } | Self::Unbind { .. } => ConfigResource::Bindings,
+            Self::SetSealedSecret { .. } | Self::DeleteSealedSecret { .. } => {
+                ConfigResource::SealedSecrets
+            }
         }
     }
 
@@ -194,6 +216,7 @@ impl EnvironmentConfigChange {
                 | Self::ClearRunnerAttestation
                 | Self::ClearCriticality
                 | Self::Unbind { .. }
+                | Self::DeleteSealedSecret { .. }
         )
     }
 
@@ -235,6 +258,8 @@ impl EnvironmentConfigChange {
             Self::ClearCriticality => "clear_criticality",
             Self::Bind { .. } => "bind",
             Self::Unbind { .. } => "unbind",
+            Self::SetSealedSecret { .. } => "set_sealed_secret",
+            Self::DeleteSealedSecret { .. } => "delete_sealed_secret",
         }
     }
 }
@@ -355,6 +380,25 @@ pub fn validate(change: &EnvironmentConfigChange) -> Result<()> {
             reason: reason.clone(),
         }
         .validate(),
+        Change::SetSealedSecret {
+            instance,
+            secret,
+            key,
+            sealed,
+        } => {
+            validate_identifier("instance", instance)?;
+            crate::sealed_secret::SecretRef::new(secret, key)?;
+            crate::sealed_secret::check_form(sealed)
+        }
+        Change::DeleteSealedSecret {
+            instance,
+            secret,
+            key,
+            ..
+        } => {
+            validate_identifier("instance", instance)?;
+            crate::sealed_secret::SecretRef::new(secret, key).map(drop)
+        }
     }
 }
 
@@ -457,7 +501,7 @@ pub async fn apply(
         fence(lease.generation.saturating_sub(1))?;
         let action = change.action();
         append_audit(ctx, environment, action, "requested", actor, reason).await?;
-        let result = mutate(ctx, environment, change, &lease).await;
+        let result = mutate(ctx, environment, change, &lease, actor).await;
         let outcome = if result.is_ok() {
             "completed"
         } else {
@@ -483,6 +527,7 @@ async fn mutate(
     environment: &str,
     change: &EnvironmentConfigChange,
     lease: &crate::apply::EnvironmentLease,
+    actor: &str,
 ) -> Result<String> {
     use EnvironmentConfigChange as Change;
     Ok(match change {
@@ -628,6 +673,34 @@ async fn mutate(
         } => {
             crate::environment_bindings::unbind_locked(ctx, environment, dependent, contract, lease)
                 .await?
+        }
+        Change::SetSealedSecret {
+            instance,
+            secret,
+            key,
+            sealed,
+        } => {
+            let target = crate::sealed_secret::SealedTarget::new(
+                environment,
+                instance,
+                crate::sealed_secret::SecretRef::new(secret, key)?,
+            )?;
+            crate::sealed_secret::set_locked(ctx, &target, sealed, actor).await?
+        }
+        Change::DeleteSealedSecret {
+            instance,
+            secret,
+            key,
+            present_in_target,
+        } => {
+            crate::sealed_secret::delete_locked(
+                ctx,
+                environment,
+                instance,
+                &crate::sealed_secret::SecretRef::new(secret, key)?,
+                *present_in_target,
+            )
+            .await?
         }
     })
 }

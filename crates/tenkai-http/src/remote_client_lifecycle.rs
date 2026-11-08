@@ -482,6 +482,18 @@ impl RemoteClient {
         .await
     }
 
+    /// Sealed keys of `environment` (ADR 0045). Never a value.
+    pub async fn list_sealed_secrets(
+        &self,
+        environment: &str,
+    ) -> anyhow::Result<tenkai::sealed_secret::SealedSecretList> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/environments/{environment}/sealed-secrets"),
+        )
+        .await
+    }
+
     /// One runner of the registry (#673).
     pub async fn inspect_runtime_runner(
         &self,

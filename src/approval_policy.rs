@@ -1194,7 +1194,7 @@ mod tests {
                 artifact_digest: "abc".into(),
                 workdir: ".".into(),
                 host: None,
-                sealed: None,
+                sealed: Vec::new(),
                 restore: match action {
                     Action::Rollback => Some(ReleasePin {
                         release_id: "tenkai:release:api@0.9.0".into(),

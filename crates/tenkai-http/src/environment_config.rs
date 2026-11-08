@@ -50,6 +50,44 @@ pub(super) async fn configure_bindings(
     .await
 }
 
+/// Sealed secret values (ADR 0045): `GET` lists them, `PUT` stores one
+/// sealed by the client, `DELETE` removes one.
+pub(super) async fn list_sealed_secrets(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .list_sealed_secrets(&credential, &environment)
+            .await,
+    )
+}
+
+pub(super) async fn configure_sealed_secrets(
+    state: State<Arc<AppState>>,
+    method: Method,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    configure(
+        state,
+        method,
+        environment,
+        None,
+        ConfigResource::SealedSecrets,
+        headers,
+        body,
+    )
+    .await
+}
+
 pub(super) async fn configure_facts(
     state: State<Arc<AppState>>,
     method: Method,

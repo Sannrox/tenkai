@@ -500,6 +500,7 @@ mod tests {
         uninstall: Option<&str>,
     ) -> ReleaseContent {
         ReleaseContent {
+            sealed: Vec::new(),
             manifest_digest: String::new(),
             manifest: Manifest {
                 compatibility: None,
