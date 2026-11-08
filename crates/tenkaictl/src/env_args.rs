@@ -264,7 +264,7 @@ pub(crate) enum WebhooksCommand {
         /// Process environment variable that holds the HMAC secret.
         #[arg(long)]
         secret_env: String,
-        /// Comma-separated events. Default: every apply outcome.
+        /// Comma-separated events. Default: every apply outcome. Mix apply, operational, and `feedback.observation`.
         #[arg(long)]
         events: Option<String>,
         #[command(flatten)]

@@ -1893,6 +1893,13 @@
               },
               "type": "array"
             },
+            "feedback": {
+              "description": "Captured feedback observations the endpoint also receives (#1102).",
+              "items": {
+                "$ref": "#/$defs/FeedbackEvent"
+              },
+              "type": "array"
+            },
             "kind": {
               "const": "set_webhook",
               "type": "string"
@@ -3296,6 +3303,13 @@
         "matches"
       ],
       "type": "object"
+    },
+    "FeedbackEvent": {
+      "description": "Captured-observation webhook events (#1102). They live in their own\nendpoint field, `feedback`, so a version that does not know them ignores\nthe field and keeps the endpoint's apply and operational subscriptions.",
+      "enum": [
+        "feedback.observation"
+      ],
+      "type": "string"
     },
     "FirstAdministrator": {
       "description": "Whether a first administrator is configured: a `[grants]` rule that gives\nfleet management (#631). Without one, only the management token can\nadminister the server. Reported unauthenticated on `/healthz` (#815), so\nit is one coarse status and never names a rule or an identity.",
@@ -6436,6 +6450,13 @@
           "default": [],
           "items": {
             "$ref": "#/$defs/WebhookEvent"
+          },
+          "type": "array"
+        },
+        "feedback": {
+          "description": "Captured feedback observations this endpoint also receives; none\nunless listed (#1102).",
+          "items": {
+            "$ref": "#/$defs/FeedbackEvent"
           },
           "type": "array"
         },

@@ -246,19 +246,11 @@ pub(crate) async fn webhooks(ctx: &mut client::Ctx, command: WebhooksCommand) ->
                 return Ok(());
             }
             for endpoint in endpoints {
-                let events = if endpoint.events.is_empty() {
-                    "apply.succeeded,apply.failed,apply.rolled_back".into()
-                } else {
-                    endpoint
-                        .events
-                        .iter()
-                        .map(|event| event.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                };
                 println!(
                     "{} secret_env={} events={}",
-                    endpoint.url, endpoint.secret_env, events
+                    endpoint.url,
+                    endpoint.secret_env,
+                    format_webhook_subscription(&endpoint)
                 );
             }
         }
@@ -269,7 +261,7 @@ pub(crate) async fn webhooks(ctx: &mut client::Ctx, command: WebhooksCommand) ->
             events,
             ..
         } => {
-            let (events, operational) = parse_webhook_events(events.as_deref())?;
+            let (events, operational, feedback) = parse_webhook_events(events.as_deref())?;
             println!(
                 "{}",
                 tenkai::deploy_webhook::set_environment_webhook(
@@ -280,6 +272,7 @@ pub(crate) async fn webhooks(ctx: &mut client::Ctx, command: WebhooksCommand) ->
                         secret_env,
                         events,
                         operational,
+                        feedback,
                     },
                 )
                 .await?
@@ -296,18 +289,35 @@ pub(crate) async fn webhooks(ctx: &mut client::Ctx, command: WebhooksCommand) ->
     Ok(())
 }
 
-/// `--events` split into apply outcomes and operational events, which an
-/// endpoint stores in separate fields.
+/// Names this endpoint is subscribed to, for `tenkaictl env webhooks list`.
+/// Empty `events` means every apply outcome only when operational and
+/// feedback lists are also empty.
+pub(crate) fn format_webhook_subscription(
+    endpoint: &tenkai::deploy_webhook::WebhookEndpoint,
+) -> String {
+    let mut names: Vec<&str> = endpoint.events.iter().map(|event| event.as_str()).collect();
+    names.extend(endpoint.operational.iter().map(|event| event.as_str()));
+    names.extend(endpoint.feedback.iter().map(|event| event.as_str()));
+    if names.is_empty() {
+        "apply.succeeded,apply.failed,apply.rolled_back".into()
+    } else {
+        names.join(",")
+    }
+}
+
+/// `--events` split into apply outcomes, operational events, and feedback
+/// observations, which an endpoint stores in separate fields.
 pub(crate) fn parse_webhook_events(
     raw: Option<&str>,
 ) -> Result<(
     Vec<tenkai::deploy_webhook::WebhookEvent>,
     Vec<tenkai::deploy_webhook::OperationalEvent>,
+    Vec<tenkai::deploy_webhook::FeedbackEvent>,
 )> {
     let Some(raw) = raw else {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     };
-    let (mut events, mut operational) = (Vec::new(), Vec::new());
+    let (mut events, mut operational, mut feedback) = (Vec::new(), Vec::new(), Vec::new());
     for part in raw.split(',') {
         let part = part.trim();
         if part.is_empty() {
@@ -319,13 +329,18 @@ pub(crate) fn parse_webhook_events(
             "apply.rolled_back" => {
                 events.push(tenkai::deploy_webhook::WebhookEvent::ApplyRolledBack)
             }
-            other => match tenkai::deploy_webhook::OperationalEvent::parse(other) {
-                Some(event) => operational.push(event),
-                None => bail!("unknown webhook event {other:?}"),
-            },
+            other => {
+                if let Some(event) = tenkai::deploy_webhook::OperationalEvent::parse(other) {
+                    operational.push(event);
+                } else if let Some(event) = tenkai::deploy_webhook::FeedbackEvent::parse(other) {
+                    feedback.push(event);
+                } else {
+                    bail!("unknown webhook event {other:?}");
+                }
+            }
         }
     }
-    Ok((events, operational))
+    Ok((events, operational, feedback))
 }
 
 pub(crate) async fn runner_attestation(

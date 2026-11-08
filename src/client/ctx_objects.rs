@@ -1,5 +1,7 @@
 //! Object create, update, delete, and fenced write methods on `Ctx`.
 
+use std::collections::HashMap;
+
 use anyhow::{Context as _, Result, ensure};
 
 use sekai_client::CallOptions;
@@ -27,6 +29,51 @@ impl Ctx {
             observations,
         ));
         events
+    }
+
+    /// Sekai export when enabled, plus opt-in `feedback.observation` webhooks.
+    /// Lookup failures skip the webhook; they never fail the capture write.
+    async fn with_observation_delivery_events(
+        &mut self,
+        events: &[crate::storage::ProviderEventRecord],
+        observations: &[crate::feedback_observation::FeedbackObservation],
+    ) -> Vec<crate::storage::ProviderEventRecord> {
+        let mut events = self.with_feedback_export_events(events, observations);
+        events.extend(self.feedback_webhook_records(observations).await);
+        events
+    }
+
+    async fn feedback_webhook_records(
+        &mut self,
+        observations: &[crate::feedback_observation::FeedbackObservation],
+    ) -> Vec<crate::storage::ProviderEventRecord> {
+        if observations.is_empty() || (self.embedded_arc().is_none() && !self.has_catalog()) {
+            return Vec::new();
+        }
+        let mut endpoints_by_env: HashMap<String, Vec<crate::deploy_webhook::WebhookEndpoint>> =
+            HashMap::new();
+        let mut records = Vec::new();
+        for observation in observations {
+            let environment = observation.environment.as_str();
+            if environment.is_empty() {
+                continue;
+            }
+            if !endpoints_by_env.contains_key(environment) {
+                let endpoints = match self.get(&crate::ontology::env_id(environment)).await {
+                    Ok(Some(object)) => crate::deploy_webhook::configured_endpoints(&object),
+                    _ => Vec::new(),
+                };
+                endpoints_by_env.insert(environment.to_owned(), endpoints);
+            }
+            let Some(endpoints) = endpoints_by_env.get(environment) else {
+                continue;
+            };
+            records.extend(crate::feedback_webhook::records_for_observation(
+                endpoints,
+                observation,
+            ));
+        }
+        records
     }
 
     /// Get an object by id; `None` on not-found.
@@ -61,7 +108,9 @@ impl Ctx {
         events: &[crate::storage::ProviderEventRecord],
         observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Result<Object> {
-        let events = self.with_feedback_export_events(events, observations);
+        let events = self
+            .with_observation_delivery_events(events, observations)
+            .await;
         if let Some((catalog, Some(tenant))) = self.catalog_binding() {
             if events.is_empty() && observations.is_empty() {
                 return self.put(object).await;
@@ -96,7 +145,9 @@ impl Ctx {
         events: &[crate::storage::ProviderEventRecord],
         observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Result<()> {
-        let events = self.with_feedback_export_events(events, observations);
+        let events = self
+            .with_observation_delivery_events(events, observations)
+            .await;
         if let Some((catalog, Some(tenant))) = self.catalog_binding() {
             let objects = objects.to_vec();
             let observations = observations.to_vec();
@@ -342,7 +393,9 @@ impl Ctx {
         events: &[crate::storage::ProviderEventRecord],
         observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Result<()> {
-        let events = self.with_feedback_export_events(events, observations);
+        let events = self
+            .with_observation_delivery_events(events, observations)
+            .await;
         if let Some((catalog, Some(tenant))) = self.catalog_binding() {
             // Observations land in the tenant partition with the objects
             // (#868); export events enqueue on its outbox when enabled (#783).

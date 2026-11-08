@@ -835,6 +835,72 @@ fn parses_env_list_and_inspect() {
             && secret_env == "TENKAI_WEBHOOK_SECRET"
             && events.as_deref() == Some("apply.succeeded,apply.rolled_back")
     ));
+}
+
+#[test]
+fn parse_webhook_events_splits_apply_operational_and_feedback() {
+    let (events, operational, feedback) = crate::embedded_env_config::parse_webhook_events(Some(
+        "apply.succeeded,plan.held,feedback.observation",
+    ))
+    .unwrap();
+    assert_eq!(
+        events,
+        [tenkai::deploy_webhook::WebhookEvent::ApplySucceeded]
+    );
+    assert_eq!(
+        operational,
+        [tenkai::deploy_webhook::OperationalEvent::PlanHeld]
+    );
+    assert_eq!(
+        feedback,
+        [tenkai::deploy_webhook::FeedbackEvent::Observation]
+    );
+    let error = crate::embedded_env_config::parse_webhook_events(Some("not.an.event"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown webhook event"), "{error}");
+}
+
+#[test]
+fn webhook_list_shows_feedback_and_does_not_imply_apply_for_feedback_only() {
+    use tenkai::deploy_webhook::{FeedbackEvent, OperationalEvent, WebhookEndpoint, WebhookEvent};
+    let feedback_only = WebhookEndpoint {
+        url: "https://hooks.example/feedback".into(),
+        secret_env: "HOOK".into(),
+        events: Vec::new(),
+        operational: Vec::new(),
+        feedback: vec![FeedbackEvent::Observation],
+    };
+    assert_eq!(
+        crate::embedded_env_config::format_webhook_subscription(&feedback_only),
+        "feedback.observation"
+    );
+    let mixed = WebhookEndpoint {
+        url: "https://hooks.example/mixed".into(),
+        secret_env: "HOOK".into(),
+        events: vec![WebhookEvent::ApplySucceeded],
+        operational: vec![OperationalEvent::PlanHeld],
+        feedback: vec![FeedbackEvent::Observation],
+    };
+    assert_eq!(
+        crate::embedded_env_config::format_webhook_subscription(&mixed),
+        "apply.succeeded,plan.held,feedback.observation"
+    );
+    let apply_default = WebhookEndpoint {
+        url: "https://hooks.example/apply".into(),
+        secret_env: "HOOK".into(),
+        events: Vec::new(),
+        operational: Vec::new(),
+        feedback: Vec::new(),
+    };
+    assert_eq!(
+        crate::embedded_env_config::format_webhook_subscription(&apply_default),
+        "apply.succeeded,apply.failed,apply.rolled_back"
+    );
+}
+
+#[test]
+fn parses_approval_policy_configuration() {
     let approval_policy = Cli::try_parse_from([
         "tenkaictl",
         "env",

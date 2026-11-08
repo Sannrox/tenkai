@@ -97,6 +97,30 @@ impl OperationalEvent {
     }
 }
 
+/// Captured-observation webhook events (#1102). They live in their own
+/// endpoint field, `feedback`, so a version that does not know them ignores
+/// the field and keeps the endpoint's apply and operational subscriptions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub enum FeedbackEvent {
+    #[serde(rename = "feedback.observation")]
+    Observation,
+}
+
+impl FeedbackEvent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Observation => "feedback.observation",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "feedback.observation" => Some(Self::Observation),
+            _ => None,
+        }
+    }
+}
+
 impl WebhookEvent {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -131,23 +155,27 @@ pub struct WebhookEndpoint {
     /// Operational events this endpoint also receives; none unless listed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operational: Vec<OperationalEvent>,
+    /// Captured feedback observations this endpoint also receives; none
+    /// unless listed (#1102).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback: Vec<FeedbackEvent>,
 }
 
 impl WebhookEndpoint {
     pub fn validate(&self) -> Result<()> {
         validate_webhook_url(&self.url)?;
         validate_secret_env(&self.secret_env)?;
-        if self.events.len() > 8 || self.operational.len() > 8 {
+        if self.events.len() > 8 || self.operational.len() > 8 || self.feedback.len() > 8 {
             bail!("webhook event list is oversized");
         }
         Ok(())
     }
 
     /// No `events` means every apply outcome, unless the endpoint lists
-    /// only operational events: then it receives no apply outcome.
+    /// only operational or feedback events: then it receives no apply outcome.
     fn subscribed(&self, event: WebhookEvent) -> bool {
         if self.events.is_empty() {
-            self.operational.is_empty()
+            self.operational.is_empty() && self.feedback.is_empty()
         } else {
             self.events.contains(&event)
         }
@@ -155,6 +183,10 @@ impl WebhookEndpoint {
 
     pub(crate) fn notifies(&self, event: OperationalEvent) -> bool {
         self.operational.contains(&event)
+    }
+
+    pub(crate) fn notifies_feedback(&self, event: FeedbackEvent) -> bool {
+        self.feedback.contains(&event)
     }
 }
 
@@ -746,11 +778,21 @@ mod tests {
             secret_env: "TENKAI_WEBHOOK_SECRET".into(),
             events: Vec::new(),
             operational: Vec::new(),
+            feedback: Vec::new(),
         };
         endpoint.validate().unwrap();
         assert!(endpoint.subscribed(WebhookEvent::ApplySucceeded));
         assert!(endpoint.subscribed(WebhookEvent::ApplyFailed));
         assert!(endpoint.subscribed(WebhookEvent::ApplyRolledBack));
+        let feedback_only = WebhookEndpoint {
+            url: "https://hooks.example.test/tenkai".into(),
+            secret_env: "TENKAI_WEBHOOK_SECRET".into(),
+            events: Vec::new(),
+            operational: Vec::new(),
+            feedback: vec![FeedbackEvent::Observation],
+        };
+        assert!(!feedback_only.subscribed(WebhookEvent::ApplySucceeded));
+        assert!(feedback_only.notifies_feedback(FeedbackEvent::Observation));
     }
 
     #[tokio::test]
@@ -769,6 +811,7 @@ mod tests {
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplySucceeded],
                 operational: Vec::new(),
+                feedback: Vec::new(),
             },
         )
         .await
@@ -867,6 +910,7 @@ mod tests {
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplySucceeded],
                 operational: Vec::new(),
+                feedback: Vec::new(),
             },
         )
         .await
@@ -923,6 +967,7 @@ mod tests {
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplySucceeded, WebhookEvent::ApplyRolledBack],
                 operational: Vec::new(),
+                feedback: Vec::new(),
             },
         )
         .await
@@ -1000,6 +1045,7 @@ mod tests {
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplySucceeded],
                 operational: Vec::new(),
+                feedback: Vec::new(),
             },
         )
         .await
