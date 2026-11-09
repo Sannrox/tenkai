@@ -333,7 +333,7 @@ pub async fn export(
         log_events,
         workloads,
     };
-    let signer = crate::signer::FileSigner::open(seed_path)?;
+    let signer = crate::signer::open_key(seed_path)?;
     let signature = crate::signer::ContentSigner::sign(&signer, &canonical_bytes(&statement)?)?;
     Ok(SupportBundle {
         schema: SUPPORT_BUNDLE_SCHEMA.into(),

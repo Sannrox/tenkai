@@ -184,6 +184,207 @@ impl fmt::Debug for LabSigner {
     }
 }
 
+/// The key a signing family's setting names (#1135): a token key when the
+/// setting is a `pkcs11:` locator, otherwise a seed file. Every family opens
+/// its key through [`open_key`], so each one accepts both.
+#[derive(Debug)]
+pub enum KeySigner {
+    File(Box<FileSigner>),
+    /// Shared with every other open of the same token key in this process.
+    Pkcs11(std::sync::Arc<Pkcs11Signer>),
+}
+
+impl ContentSigner for KeySigner {
+    fn kind(&self) -> SignerKind {
+        match self {
+            Self::File(signer) => signer.kind(),
+            Self::Pkcs11(signer) => signer.kind(),
+        }
+    }
+
+    fn key_id(&self) -> &str {
+        match self {
+            Self::File(signer) => signer.key_id(),
+            Self::Pkcs11(signer) => signer.key_id(),
+        }
+    }
+
+    fn public_key(&self) -> &[u8; 32] {
+        match self {
+            Self::File(signer) => signer.public_key(),
+            Self::Pkcs11(signer) => signer.public_key(),
+        }
+    }
+
+    fn sign(&self, payload: &[u8]) -> Result<[u8; 64]> {
+        match self {
+            Self::File(signer) => signer.sign(payload),
+            Self::Pkcs11(signer) => signer.sign(payload).inspect_err(|_| {
+                // A failed token signature may mean a lost session; the next
+                // open starts a fresh one once current holders let go.
+                if let Ok(mut open) = open_token_signers().lock() {
+                    open.retain(|_, cached| !std::sync::Arc::ptr_eq(cached, signer));
+                }
+            }),
+        }
+    }
+}
+
+type OpenTokenSigners =
+    std::collections::HashMap<(PathBuf, String, String), std::sync::Arc<Pkcs11Signer>>;
+
+/// Token signers opened through [`open_key`], kept for the process's life.
+fn open_token_signers() -> &'static Mutex<OpenTokenSigners> {
+    static OPEN: std::sync::OnceLock<Mutex<OpenTokenSigners>> = std::sync::OnceLock::new();
+    OPEN.get_or_init(Default::default)
+}
+
+/// The open signer for the token key `locator` names. Every open of the same
+/// key shares one signer, kept open for the process's life, so one family can
+/// sign twice at once and a reopen never races the release of a previous
+/// session. Signing is serialized by the signer's lock.
+fn shared_token_signer(locator: &TokenLocator) -> Result<std::sync::Arc<Pkcs11Signer>> {
+    let module = std::fs::canonicalize(&locator.module).unwrap_or_else(|_| locator.module.clone());
+    let key = (module, locator.token.clone(), locator.object.clone());
+    let mut open = open_token_signers()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("the open token signers lock was poisoned"))?;
+    if let Some(signer) = open.get(&key) {
+        return Ok(signer.clone());
+    }
+    let pin = match &locator.pin_source {
+        Some(path) => secret_source::read_from_path("pin-source", path)?,
+        None => secret_source::require(PIN_ENV)?,
+    };
+    let signer = std::sync::Arc::new(Pkcs11Signer::open(
+        &locator.module,
+        &locator.token,
+        &pin,
+        &locator.object,
+    )?);
+    open.insert(key, signer.clone());
+    Ok(signer)
+}
+
+/// Open the key `setting` names: a `pkcs11:` locator (see [`TokenLocator`])
+/// opens an existing token key, never minting one; anything else is a seed
+/// file read by [`read_seed_file`]. A locator that does not parse or does not
+/// open is an error and never falls back to a file.
+pub fn open_key(setting: &Path) -> Result<KeySigner> {
+    match setting
+        .to_str()
+        .filter(|value| value.starts_with("pkcs11:"))
+    {
+        Some(locator) => {
+            let locator = TokenLocator::parse(locator)?;
+            shared_token_signer(&locator)
+                .map(KeySigner::Pkcs11)
+                .with_context(|| {
+                    format!(
+                        "opening signing key {} in token {}",
+                        locator.object, locator.token
+                    )
+                })
+        }
+        None => FileSigner::open(setting).map(|signer| KeySigner::File(Box::new(signer))),
+    }
+}
+
+/// A token key named in a family's key setting:
+/// `pkcs11:token=<label>;object=<key label>?module-path=<path>&pin-source=<path>`.
+/// `token`, `object` and `module-path` are required; without `pin-source`
+/// the PIN is `TENKAI_SIGNER_PIN`. Values may be percent-encoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenLocator {
+    pub token: String,
+    pub object: String,
+    pub module: PathBuf,
+    pub pin_source: Option<PathBuf>,
+}
+
+impl TokenLocator {
+    pub fn parse(locator: &str) -> Result<Self> {
+        let rest = locator
+            .strip_prefix("pkcs11:")
+            .context("a token locator starts with pkcs11:")?;
+        let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+        let mut token = None;
+        let mut object = None;
+        let mut module = None;
+        let mut pin_source = None;
+        let pairs = path
+            .split(';')
+            .map(|pair| (pair, false))
+            .chain(query.split('&').map(|pair| (pair, true)));
+        for (pair, in_query) in pairs.filter(|(pair, _)| !pair.is_empty()) {
+            let (name, value) = pair
+                .split_once('=')
+                .with_context(|| format!("token locator attribute {pair:?} has no value"))?;
+            let value = percent_decode(value)?;
+            let slot = match (name, in_query) {
+                ("token", false) => &mut token,
+                ("object", false) => &mut object,
+                ("module-path", true) => &mut module,
+                ("pin-source", true) => &mut pin_source,
+                _ => bail!("token locator attribute {name} is not supported"),
+            };
+            if slot.replace(value).is_some() {
+                bail!("token locator names {name} twice");
+            }
+        }
+        let required = |value: Option<String>, name: &str| {
+            value
+                .filter(|value| !value.is_empty())
+                .with_context(|| format!("token locator needs {name}"))
+        };
+        let token = required(token, "token")?;
+        let object = required(object, "object")?;
+        validate_token_field("token label", &token)?;
+        validate_token_field("key label", &object)?;
+        let module = PathBuf::from(required(module, "module-path")?);
+        if !module.is_absolute() {
+            bail!("token locator module-path must be an absolute path");
+        }
+        let pin_source = pin_source
+            .map(|value| {
+                value
+                    .strip_prefix("file:")
+                    .map(str::to_owned)
+                    .unwrap_or(value)
+            })
+            .map(PathBuf::from);
+        Ok(Self {
+            token,
+            object,
+            module,
+            pin_source,
+        })
+    }
+}
+
+fn percent_decode(value: &str) -> Result<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = value
+                .get(i + 1..i + 3)
+                .context("token locator has a truncated percent escape")?;
+            out.push(
+                u8::from_str_radix(hex, 16)
+                    .ok()
+                    .context("token locator has an invalid percent escape")?,
+            );
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).context("token locator is not UTF-8 once decoded")
+}
+
 /// Read a 32-byte Ed25519 seed: a regular, owner-only file, not a symlink.
 /// The one seed reader of every signing family (#1108). Each family keeps its
 /// own key and the setting that names it, and opens it as a [`FileSigner`].
@@ -314,7 +515,7 @@ impl Pkcs11Signer {
     /// Restore a previously provisioned key. Fails if missing or ambiguous.
     pub fn open(module: &Path, token_label: &str, pin: &str, key_label: &str) -> Result<Self> {
         validate_token_field("key label", key_label)?;
-        let (session, claim) = connect(module, token_label, pin)?;
+        let (session, claim) = connect(module, token_label, pin, key_label)?;
         let (private, public) = restore(&session, key_label)?;
         Ok(Self::from_session(
             session,
@@ -329,7 +530,7 @@ impl Pkcs11Signer {
     /// Mint the labeled key if absent, then restore it.
     pub fn provision(module: &Path, token_label: &str, pin: &str, key_label: &str) -> Result<Self> {
         validate_token_field("key label", key_label)?;
-        let (session, claim) = connect(module, token_label, pin)?;
+        let (session, claim) = connect(module, token_label, pin, key_label)?;
         ensure_provisioned(&session, key_label)?;
         let (private, public) = restore(&session, key_label)?;
         Ok(Self::from_session(
@@ -524,9 +725,13 @@ fn connect(
     module: &Path,
     token_label: &str,
     pin: &str,
+    key_label: &str,
 ) -> Result<(Session, crate::pkcs11_provider::TokenClaim)> {
     validate_token_field("token label", token_label)?;
-    let claim = crate::pkcs11_provider::claim_token_for(module, token_label, "signer")
+    // Claimed per key, so families with different keys on one token never
+    // refuse each other.
+    let purpose = format!("signer:{key_label}");
+    let claim = crate::pkcs11_provider::claim_token_for(module, token_label, &purpose)
         .map_err(|_| anyhow::anyhow!("PKCS#11 token {token_label} is already in use"))?;
     let pkcs11 = crate::pkcs11_provider::load_pkcs11(module)
         .map_err(|_| anyhow::anyhow!("loading PKCS#11 module {}", module.display()))?;
@@ -751,6 +956,52 @@ fn parse_ed25519_point(point: &[u8]) -> Result<[u8; 32]> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_token_locator_parses_only_complete_and_known_attributes() {
+        let locator = TokenLocator::parse(
+            "pkcs11:token=ops;object=revocation%20authority?module-path=/usr/lib/p11.so&pin-source=file:/etc/tenkai/pin",
+        )
+        .unwrap();
+        assert_eq!(
+            locator,
+            TokenLocator {
+                token: "ops".into(),
+                object: "revocation authority".into(),
+                module: PathBuf::from("/usr/lib/p11.so"),
+                pin_source: Some(PathBuf::from("/etc/tenkai/pin")),
+            }
+        );
+        for (refused, why) in [
+            ("pkcs11:object=k?module-path=/m.so", "needs token"),
+            ("pkcs11:token=t?module-path=/m.so", "needs object"),
+            ("pkcs11:token=t;object=k", "needs module-path"),
+            ("pkcs11:token=t;object=k?module-path=m.so", "absolute"),
+            (
+                "pkcs11:token=t;object=k;slot=1?module-path=/m.so",
+                "not supported",
+            ),
+            ("pkcs11:token=t;token=u;object=k?module-path=/m.so", "twice"),
+            ("pkcs11:token=t;object=k%2?module-path=/m.so", "percent"),
+        ] {
+            let error = format!("{:#}", TokenLocator::parse(refused).unwrap_err());
+            assert!(error.contains(why), "{refused}: {error}");
+        }
+    }
+
+    /// A locator never falls back to a seed file: a malformed one, or one
+    /// naming a token that is not there, is an error even when a seed file of
+    /// that name exists.
+    #[test]
+    fn a_token_locator_never_falls_back_to_a_file() {
+        let malformed = Path::new("pkcs11:token=t;object=k");
+        assert!(open_key(malformed).is_err());
+        let missing = Path::new(
+            "pkcs11:token=absent;object=k?module-path=/nonexistent/p11.so&pin-source=/nonexistent/pin",
+        );
+        let error = format!("{:#}", open_key(missing).unwrap_err());
+        assert!(!error.contains("signer key"), "{error}");
+    }
 
     /// The checks every signing family's key file passes, in one place.
     #[test]
@@ -1096,5 +1347,52 @@ mod tests {
         sign_all(signer.as_ref());
         drop(signer);
         drop(provider);
+    }
+
+    #[test]
+    fn family_keys_on_one_token_sign_side_by_side() {
+        let Some((module, token)) = next_software_token() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-family-keys-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let pin = dir.join("pin");
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&pin)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, TEST_USER_PIN.as_bytes()))
+            .unwrap();
+        let locator = |object: &str| {
+            PathBuf::from(format!(
+                "pkcs11:token={token};object={object}?module-path={}&pin-source={}",
+                module.display(),
+                pin.display()
+            ))
+        };
+        for object in ["backup", "audit"] {
+            Pkcs11Signer::provision(&module, &token, TEST_USER_PIN, object).unwrap();
+        }
+        // Two families, and the same family twice, all held at once.
+        let backup = open_key(&locator("backup")).unwrap();
+        let audit = open_key(&locator("audit")).unwrap();
+        let backup_again = open_key(&locator("backup")).unwrap();
+        assert_ne!(backup.public_key(), audit.public_key());
+        assert_eq!(backup.public_key(), backup_again.public_key());
+        for signer in [&backup, &audit, &backup_again] {
+            let signature = signer.sign(b"payload").unwrap();
+            ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, signer.public_key())
+                .verify(b"payload", &signature)
+                .unwrap();
+        }
+        drop((backup, audit, backup_again));
+        // A released key opens again.
+        open_key(&locator("backup")).unwrap();
+        fs::remove_dir_all(dir).unwrap();
     }
 }

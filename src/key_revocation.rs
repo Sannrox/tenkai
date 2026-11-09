@@ -447,6 +447,57 @@ mod tests {
         .unwrap()
     }
 
+    /// The revocation authority's key may live in a token (#1135): its
+    /// setting is a `pkcs11:` locator, the list it signs verifies against the
+    /// family's trust roots, and the private key never leaves the token. Runs
+    /// against SoftHSM in CI.
+    #[test]
+    fn a_revocation_list_signed_with_a_token_key_verifies() {
+        let Some((module, token)) = crate::pkcs11_provider::next_software_token() else {
+            return;
+        };
+        let pin = temp_dir().join("pin");
+        std::fs::write(&pin, crate::pkcs11_provider::TEST_USER_PIN).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&pin, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let minted = crate::signer::Pkcs11Signer::provision(
+            &module,
+            &token,
+            crate::pkcs11_provider::TEST_USER_PIN,
+            "revocation-authority",
+        )
+        .unwrap();
+        let public = *crate::signer::ContentSigner::public_key(&minted);
+        drop(minted);
+        let setting = PathBuf::from(format!(
+            "pkcs11:token={token};object=revocation-authority?module-path={}&pin-source={}",
+            module.display(),
+            pin.display()
+        ));
+        let signer = crate::signer::open_key(&setting).unwrap();
+        assert_eq!(
+            crate::signer::ContentSigner::kind(&signer),
+            crate::signer::SignerKind::Pkcs11
+        );
+        let list = sign(
+            RevocationStatement {
+                sequence: 1,
+                issued_at: 1,
+                revoked: Vec::new(),
+            },
+            &signer,
+        )
+        .unwrap();
+        let authority = TrustedSigner::new(
+            crate::signature_verification::key_id(&public),
+            "revocation-authority",
+            STANDARD.encode(public),
+        );
+        list.verify(&roots(vec![authority])).unwrap();
+    }
+
     /// Offline rollover without downtime: overlap old and new exporter keys,
     /// move signing to the new key, revoke the old one. Trust roots that still
     /// list the old key keep loading; only its artifacts are refused.

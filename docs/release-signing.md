@@ -179,3 +179,41 @@ secret setting; see [environment variables](environment-variables.md#secret-file
 
 `tenkaictl dev` signing remains laptop dogfood. It writes owner-only seed
 files and is not a production signer.
+
+## Keys of the other signed artifacts
+
+Every other signed artifact has its own key, named by its own setting, and
+its verifiers trust only that key. Each setting takes one of two forms:
+
+- **A seed file:** a 32-byte Ed25519 seed, a regular file, mode 0600, not a
+  symlink.
+- **A token key:** a PKCS#11 locator naming an existing key in a token. The
+  private key never leaves the token, and nothing is minted on use:
+
+  ```text
+  pkcs11:token=<token label>;object=<key label>?module-path=<module>&pin-source=<pin file>
+  ```
+
+  `token`, `object` and an absolute `module-path` are required. The PIN is
+  read from `pin-source`, an owner-only file. Without it, the PIN comes from
+  `TENKAI_SIGNER_PIN`. Values may be percent-encoded. A locator that does
+  not parse, or names a token or key that is not there, is an error. It
+  never falls back to a seed file.
+
+| Artifact | Setting that names its key |
+| --- | --- |
+| Backup manifests | `TENKAI_BACKUP_SIGNING_KEY` |
+| Scheduled audit exports | `TENKAI_AUDIT_SIGNING_KEY` |
+| Support bundles and audit exports over HTTP | `TENKAI_EXPORT_SIGNING_KEY` |
+| Support bundles and audit exports from the CLI | `tenkaictl support-bundle export` and `audit export --signing-key` |
+| Automatic plan approvals | the approval policy's `auto_signer_key` |
+| Key revocation lists | `tenkaictl revocations sign --signing-key` |
+| Recall notices | `tenkaictl remediate propose --signing-key` |
+| Host preflight evidence | `tenkaictl preflight --signing-key` |
+| Spoke promotion and drill evidence | `tenkaictl spoke-standby promote` and `drill --signing-key` |
+| Topology drill evidence | `tenkaictl topology drill --signing-key` |
+| Key ceremony evidence | `tenkaictl keys ceremony --signing-key` |
+| Offline bundles | `tenkaictl bundle build --signing-key` |
+
+Drill and lab material (`tenkaictl dev`, the offline fleet drill, and the HA
+qualification drill) keeps its own fixed or generated keys.

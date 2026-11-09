@@ -526,10 +526,10 @@ pub fn exporter_identity(
     Ok(roots.resolve(&key_id)?.identity)
 }
 
-/// Open the exporter's key from its 32-byte seed file. Refused when the file
-/// is not owner-only.
-pub fn load_exporter_key(path: &Path) -> Result<crate::signer::FileSigner> {
-    crate::signer::FileSigner::open(path)
+/// Open the exporter's key: a seed file, refused unless it is owner-only, or a
+/// `pkcs11:` token locator ([`crate::signer::open_key`]).
+pub fn load_exporter_key(path: &Path) -> Result<crate::signer::KeySigner> {
+    crate::signer::open_key(path)
 }
 
 struct AssembledRelease {

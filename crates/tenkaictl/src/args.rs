@@ -153,7 +153,7 @@ pub(crate) enum Command {
         /// registry, and identity-provider checks.
         #[arg(long)]
         config: PathBuf,
-        /// 32-byte Ed25519 seed (mode 0600) of a trust root scoped to the
+        /// Key file (32-byte Ed25519 seed, mode 0600) or `pkcs11:` token locator of a trust root scoped to the
         /// `preflight` provider for this environment.
         #[arg(long)]
         signing_key: PathBuf,
@@ -533,7 +533,7 @@ pub(crate) enum RemediateCommand {
         /// Durable wave name. Defaults to `recall-<advisory-id>`.
         #[arg(long)]
         wave_name: Option<String>,
-        /// 32-byte Ed25519 seed (mode 0600) that signs the recall notice.
+        /// Key file (32-byte Ed25519 seed, mode 0600) or `pkcs11:` token locator that signs the recall notice.
         #[arg(long)]
         signing_key: PathBuf,
         /// Where to write the signed recall notice.
@@ -669,7 +669,7 @@ pub(crate) enum SpokeStandbyCommand {
         /// Restored spoke state directory (`spoke-standby.json`).
         #[arg(long)]
         state: PathBuf,
-        /// 32-byte Ed25519 seed (mode 0600) for the promotion statement.
+        /// Key file (32-byte Ed25519 seed, mode 0600) or `pkcs11:` token locator for the promotion statement.
         #[arg(long)]
         signing_key: PathBuf,
     },
@@ -677,7 +677,7 @@ pub(crate) enum SpokeStandbyCommand {
     Drill {
         #[arg(long)]
         profile: PathBuf,
-        /// 32-byte Ed25519 seed (mode 0600) for the drill evidence.
+        /// Key file (32-byte Ed25519 seed, mode 0600) or `pkcs11:` token locator for the drill evidence.
         #[arg(long)]
         signing_key: PathBuf,
         /// Where to write the signed evidence JSON.
@@ -693,7 +693,7 @@ pub(crate) enum KeysCommand {
         /// Version 1 deploy profile TOML (`class` plus `[key_provider].kind`).
         #[arg(long)]
         profile: PathBuf,
-        /// 32-byte Ed25519 seed (mode 0600) that signs the ceremony evidence.
+        /// Key file (32-byte Ed25519 seed, mode 0600) or `pkcs11:` token locator that signs the ceremony evidence.
         #[arg(long)]
         signing_key: PathBuf,
         /// Named custodian present at the ceremony. Repeatable.
@@ -715,7 +715,7 @@ pub(crate) enum KeysCommand {
 pub(crate) enum RevocationsCommand {
     /// Sign a revocation list with a revocation authority seed.
     Sign {
-        /// 32-byte Ed25519 seed (mode 0600) of a revocation authority.
+        /// Key file (32-byte Ed25519 seed, mode 0600) or `pkcs11:` token locator of a revocation authority.
         #[arg(long)]
         signing_key: PathBuf,
         /// Higher than every list installed anywhere it will be imported.
