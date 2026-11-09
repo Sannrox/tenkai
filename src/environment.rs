@@ -1566,6 +1566,11 @@ pub struct EnvironmentInspectReport {
     /// Latest failed or rolled back attempt per instance (#1054).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub latest_failures: Vec<crate::deployment_history::DeploymentAttemptView>,
+    /// Why sealed values would be lost with every runtime (ADR 0045 §7):
+    /// no recovery key, or values without a wrap for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub sealed_recovery_warning: Option<String>,
 }
 
 /// Inspect copy of declared/derived criticality. Lives here so this module
@@ -2068,6 +2073,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             delivery_hold,
             criticality,
             latest_failures: Vec::new(),
+            sealed_recovery_warning: None,
         });
     }
     Ok(fleet_status_from_inspects(reports))
@@ -2136,6 +2142,8 @@ async fn inspect_environment_base(
     let maintenance = maintenance_inspect(crate::maintenance::list(ctx, env).await, now);
     let criticality = criticality_from_properties(&env_obj.properties, crate::now_millis());
     let latest_failures = crate::deployment_history::latest_failures(ctx, env).await?;
+    let sealed_recovery_warning =
+        crate::sealed_secret::list_from_object(&env_obj, false)?.recovery_warning();
     Ok(EnvironmentInspectReport {
         name: env_obj.name,
         id: env_obj.id,
@@ -2165,6 +2173,7 @@ async fn inspect_environment_base(
         delivery_hold,
         criticality,
         latest_failures,
+        sealed_recovery_warning,
     })
 }
 

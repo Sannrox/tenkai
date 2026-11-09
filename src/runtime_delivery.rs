@@ -1121,6 +1121,11 @@ impl RuntimeDeliveryOperations {
         if held {
             return Ok(idle_work(environment));
         }
+        // Recovered wraps open only for the runtime whose key the step names
+        // (ADR 0045 §7); another runtime would fail the plan, so it waits.
+        if !self.may_run_recovery(&plan, &identity, environment)? {
+            return Ok(idle_work(environment));
+        }
         // A drifted clock must not touch leases: it could expire or take
         // over another runtime's claim. Only a durable completion this owner
         // already holds may replay, which reads and grants nothing.
@@ -1444,16 +1449,21 @@ impl RuntimeDeliveryOperations {
                 },
             )?;
         // A re-wrap step names its recipient by fingerprint; the runtime
-        // needs the public key, which only an unrevoked recipient still has.
+        // needs the public key, which only an unrevoked recipient or the
+        // current recovery key (ADR 0045 §7) still has.
         if let Some(rewrap) = &step.rewrap {
+            let recovery = crate::sealed_secret::stored_recovery_key(&mut ctx, environment)
+                .await
+                .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
             let recipient = self
                 .environment_recipient_keys(environment)?
                 .into_iter()
-                .find_map(|record| {
-                    let key =
-                        crate::sealing_key::SealingPublicKey::from_wire(&record.public_key).ok()?;
-                    (key.fingerprint() == rewrap.fingerprint).then(|| key.to_wire())
+                .filter_map(|record| {
+                    crate::sealing_key::SealingPublicKey::from_wire(&record.public_key).ok()
                 })
+                .chain(recovery)
+                .find(|key| key.fingerprint() == rewrap.fingerprint)
+                .map(|key| key.to_wire())
                 .ok_or_else(|| {
                     RuntimeDeliveryError::ReleaseRefused(format!(
                         "{} is no longer an unrevoked recipient key of {environment}",
@@ -1730,6 +1740,31 @@ impl RuntimeDeliveryOperations {
     }
 
     /// Unrevoked runtimes of `environment` that advertised a sealing key.
+    /// Whether `identity` may claim `plan` ([`recovery_claimable`]).
+    fn may_run_recovery(
+        &self,
+        plan: &crate::plan::Plan,
+        identity: &RuntimeIdentity,
+        environment: &str,
+    ) -> Result<bool, RuntimeDeliveryError> {
+        if !plan.steps.iter().any(|step| {
+            step.rewrap
+                .as_ref()
+                .is_some_and(|rewrap| !rewrap.recovered.is_empty())
+        }) {
+            return Ok(true);
+        }
+        let own = self
+            .environment_recipient_keys(environment)?
+            .into_iter()
+            .find(|record| record.runner_id == identity.runner_id)
+            .and_then(|record| {
+                crate::sealing_key::SealingPublicKey::from_wire(&record.public_key).ok()
+            })
+            .map(|key| key.fingerprint());
+        Ok(recovery_claimable(plan, own.as_deref()))
+    }
+
     pub fn environment_recipient_keys(
         &self,
         environment: &str,
@@ -1738,6 +1773,18 @@ impl RuntimeDeliveryOperations {
             .runtime_sealing_keys(environment)
             .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))
     }
+}
+
+/// A plan whose re-wrap steps carry recovered wraps (ADR 0045 §7) may be
+/// claimed only by the runtime with sealing key `own`, their recipient:
+/// another runtime cannot open them and would fail the plan. Any other plan
+/// may be claimed by any runtime.
+fn recovery_claimable(plan: &crate::plan::Plan, own: Option<&str>) -> bool {
+    plan.steps
+        .iter()
+        .filter_map(|step| step.rewrap.as_ref())
+        .filter(|rewrap| !rewrap.recovered.is_empty())
+        .all(|rewrap| Some(rewrap.fingerprint.as_str()) == own)
 }
 
 fn parse_sealing_key(
@@ -2248,6 +2295,7 @@ mod tests {
                 }],
                 rewrap: Some(crate::plan::RewrapStep {
                     fingerprint: new.clone(),
+                    recovered: Vec::new(),
                 }),
             }],
             state: PlanState::Computed,
@@ -2316,7 +2364,9 @@ mod tests {
         .await
         .unwrap();
 
-        let listed = crate::sealed_secret::list(&mut ctx, "prod").await.unwrap();
+        let listed = crate::sealed_secret::list(&mut ctx, "prod", false)
+            .await
+            .unwrap();
         assert_eq!(listed.secrets[0].recipients, [old, new]);
         assert_eq!(listed.secrets[0].digest, "sha256:value");
         let after = crate::environment::environment(&mut ctx, "prod")
@@ -2342,6 +2392,68 @@ mod tests {
             PlanState::Succeeded
         );
         let _ = std::fs::remove_file(database);
+    }
+
+    /// Only the recipient runtime may claim a plan carrying recovered
+    /// wraps; any runtime may claim a plain re-wrap.
+    #[test]
+    fn a_recovery_plan_goes_only_to_its_recipient_runtime() {
+        let (recipient, other) = (
+            format!("sha256:{}", "b".repeat(64)),
+            format!("sha256:{}", "c".repeat(64)),
+        );
+        let step = |recovered: Vec<crate::sealed_secret::RecipientWrap>| crate::plan::Step {
+            id: "step".into(),
+            order: 0,
+            product: "api".into(),
+            instance: String::new(),
+            action: crate::plan::Action::Restart,
+            from: Some("1.0.0".into()),
+            to: "1.0.0".into(),
+            release_id: crate::ontology::release_id("api", "1.0.0"),
+            release_digest: "manifest".into(),
+            artifact_digest: "artifact".into(),
+            workdir: String::new(),
+            restore: None,
+            host: None,
+            sealed: Vec::new(),
+            rewrap: Some(crate::plan::RewrapStep {
+                fingerprint: recipient.clone(),
+                recovered,
+            }),
+        };
+        let plan = |step| Plan {
+            format_version: crate::plan::PLAN_FORMAT_VERSION,
+            id: "plan".into(),
+            content_id: "content".into(),
+            environment: "prod".into(),
+            created_at: 0,
+            inputs: Vec::new(),
+            steps: vec![step],
+            state: PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+            credential_runway: None,
+        };
+        let recovered = plan(step(vec![crate::sealed_secret::RecipientWrap {
+            secret: "db".into(),
+            key: "password".into(),
+            digest: "sha256:value".into(),
+            wrap: crate::sealed_secret::SealedWrap {
+                fingerprint: recipient.clone(),
+                encapsulated_key: "AA==".into(),
+                wrapped_key: "AA==".into(),
+            },
+        }]));
+        assert!(recovery_claimable(&recovered, Some(&recipient)));
+        assert!(!recovery_claimable(&recovered, Some(&other)));
+        assert!(!recovery_claimable(&recovered, None));
+        let plain = plan(step(Vec::new()));
+        assert!(recovery_claimable(&plain, Some(&other)));
+        assert!(recovery_claimable(&plain, None));
     }
 
     /// A recipient revoked after the runtime fetched its key gets no wraps
@@ -2405,6 +2517,7 @@ mod tests {
             sealed: vec![sealed.clone()],
             rewrap: Some(crate::plan::RewrapStep {
                 fingerprint: recipient.clone(),
+                recovered: Vec::new(),
             }),
         };
         let wrap = |fingerprint: &str, digest: &str| crate::sealed_secret::RecipientWrap {

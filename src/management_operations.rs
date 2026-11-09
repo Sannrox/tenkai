@@ -1808,7 +1808,7 @@ impl ManagementOperations {
             sealed, ..
         } = &request.change
         {
-            let recipients = self.environment_recipient_fingerprints(environment)?;
+            let recipients = self.sealed_recipient_fingerprints(environment).await?;
             crate::sealed_secret::require_recipients(environment, sealed, &recipients)
                 .map_err(|error| ManagementError::BadRequest(error.to_string()))?;
         }
@@ -2625,16 +2625,23 @@ impl ManagementOperations {
             .environment_recipient_fingerprints(environment)?
             .contains(&recipient)
         {
-            return Err(ManagementError::BadRequest(format!(
-                "{recipient} is not an unrevoked recipient key of {environment}"
-            )));
+            // The recovery key is a recipient too (ADR 0045 §7): re-wrapping
+            // for it covers values sealed before it was set. Recovered wraps
+            // are for a runtime, never for the recovery key itself.
+            let recovery = self.sealed_recovery_fingerprint(environment).await?;
+            if recovery.as_deref() != Some(recipient.as_str()) || !request.recovered.is_empty() {
+                return Err(ManagementError::BadRequest(format!(
+                    "{recipient} is not an unrevoked runtime recipient key of {environment}"
+                )));
+            }
         }
         let actor = &context.audit_principal();
         self.audit(actor, "plan.rewrap.requested")?;
         let mut ctx = self.catalog_ctx(&context)?;
-        let (steps, undeployed) = crate::plan::rewrap_steps(&mut ctx, environment, &recipient)
-            .await
-            .map_err(map_plan_lifecycle_error)?;
+        let (steps, undeployed) =
+            crate::plan::rewrap_steps(&mut ctx, environment, &recipient, &request.recovered)
+                .await
+                .map_err(map_plan_lifecycle_error)?;
         if steps.is_empty() {
             return Err(ManagementError::BadRequest(if undeployed.is_empty() {
                 format!("{environment} has no sealed values to re-wrap")
@@ -2671,6 +2678,31 @@ impl ManagementOperations {
             Some(stored.id),
         )
         .with_digest(digest))
+    }
+
+    /// Every recipient a sealed value of `environment` may be wrapped for:
+    /// its unrevoked runtime keys and its recovery key (ADR 0045 §7).
+    async fn sealed_recipient_fingerprints(
+        &self,
+        environment: &str,
+    ) -> Result<std::collections::BTreeSet<String>, ManagementError> {
+        let mut recipients = self.environment_recipient_fingerprints(environment)?;
+        recipients.extend(self.sealed_recovery_fingerprint(environment).await?);
+        Ok(recipients)
+    }
+
+    /// Fingerprint of `environment`'s recovery key, if one is set.
+    async fn sealed_recovery_fingerprint(
+        &self,
+        environment: &str,
+    ) -> Result<Option<String>, ManagementError> {
+        let mut ctx = self.application_ctx()?;
+        Ok(
+            crate::sealed_secret::stored_recovery_key(&mut ctx, environment)
+                .await
+                .map_err(internal)?
+                .map(|key| key.fingerprint()),
+        )
     }
 
     /// Refuse `expected` unless it is the environment's current execution
@@ -3193,6 +3225,7 @@ mod tests {
                     delivery_hold: None,
                     criticality: None,
                     latest_failures: Vec::new(),
+                    sealed_recovery_warning: None,
                 })
             })
         }

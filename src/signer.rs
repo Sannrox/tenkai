@@ -266,15 +266,52 @@ fn shared_token_signer(locator: &TokenLocator) -> Result<std::sync::Arc<Pkcs11Si
     Ok(signer)
 }
 
-/// Open the key `setting` names: a `pkcs11:` locator (see [`TokenLocator`])
-/// opens an existing token key, never minting one; anything else is a seed
-/// file read by [`read_seed_file`]. A locator that does not parse or does not
-/// open is an error and never falls back to a file.
-pub fn open_key(setting: &Path) -> Result<KeySigner> {
-    match setting
+/// The deploy profile this process runs under (#1136), bound once at
+/// startup by `tenkai-server --deploy-profile` or `tenkaictl
+/// --deploy-profile`. Unbound, every family accepts both key forms.
+static DEPLOY_PROFILE: std::sync::OnceLock<DeployProfile> = std::sync::OnceLock::new();
+
+/// Bind the process's deploy profile after validating it. Binding the same
+/// profile again is a no-op; a different one is refused.
+pub fn bind_deploy_profile(profile: DeployProfile) -> Result<()> {
+    profile.validate()?;
+    let bound = DEPLOY_PROFILE.get_or_init(|| profile.clone());
+    if *bound != profile {
+        bail!("this process already runs under a different deploy profile");
+    }
+    Ok(())
+}
+
+/// Open the key `setting` names, for the family whose setting is `family`
+/// (for example `TENKAI_BACKUP_SIGNING_KEY`): a `pkcs11:` locator (see
+/// [`TokenLocator`]) opens an existing token key, never minting one;
+/// anything else is a seed file read by [`read_seed_file`]. A locator that
+/// does not parse or does not open is an error and never falls back to a
+/// file. Under a bound production profile a seed file is refused before it
+/// is read, naming `family`.
+pub fn open_key(family: &str, setting: &Path) -> Result<KeySigner> {
+    open_key_under(DEPLOY_PROFILE.get(), family, setting)
+}
+
+/// [`open_key`] under an explicit `profile`.
+fn open_key_under(
+    profile: Option<&DeployProfile>,
+    family: &str,
+    setting: &Path,
+) -> Result<KeySigner> {
+    let locator = setting
         .to_str()
-        .filter(|value| value.starts_with("pkcs11:"))
-    {
+        .filter(|value| value.starts_with("pkcs11:"));
+    let kind = match locator {
+        Some(_) => SignerKind::Pkcs11,
+        None => SignerKind::File,
+    };
+    if let Some(profile) = profile {
+        admit(profile, kind).with_context(|| {
+            format!("{family} names a seed file; set it to a pkcs11: token key locator")
+        })?;
+    }
+    match locator {
         Some(locator) => {
             let locator = TokenLocator::parse(locator)?;
             shared_token_signer(&locator)
@@ -995,12 +1032,58 @@ mod tests {
     #[test]
     fn a_token_locator_never_falls_back_to_a_file() {
         let malformed = Path::new("pkcs11:token=t;object=k");
-        assert!(open_key(malformed).is_err());
+        assert!(open_key("test key", malformed).is_err());
         let missing = Path::new(
             "pkcs11:token=absent;object=k?module-path=/nonexistent/p11.so&pin-source=/nonexistent/pin",
         );
-        let error = format!("{:#}", open_key(missing).unwrap_err());
+        let error = format!("{:#}", open_key("test key", missing).unwrap_err());
         assert!(!error.contains("signer key"), "{error}");
+    }
+
+    #[test]
+    fn a_production_profile_refuses_seed_files_and_admits_token_keys() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-profile-keys-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let seed = dir.join("family.ed25519");
+        fs::write(&seed, [7u8; 32]).unwrap();
+        fs::set_permissions(&seed, fs::Permissions::from_mode(0o600)).unwrap();
+        let production = production(SignerKind::Pkcs11);
+
+        // Refused before the file is read, naming the setting to change.
+        let refused = format!(
+            "{:#}",
+            open_key_under(Some(&production), "TENKAI_BACKUP_SIGNING_KEY", &seed).unwrap_err()
+        );
+        assert!(refused.contains("TENKAI_BACKUP_SIGNING_KEY"), "{refused}");
+        assert!(refused.contains("pkcs11:"), "{refused}");
+        let unread = format!(
+            "{:#}",
+            open_key_under(Some(&production), "family", &dir.join("absent")).unwrap_err()
+        );
+        assert!(unread.contains("names a seed file"), "{unread}");
+
+        // A token key passes the profile; this one fails only to open.
+        let token = Path::new(
+            "pkcs11:token=absent;object=k?module-path=/nonexistent/p11.so&pin-source=/nonexistent/pin",
+        );
+        let unopened = format!(
+            "{:#}",
+            open_key_under(Some(&production), "family", token).unwrap_err()
+        );
+        assert!(!unopened.contains("names a seed file"), "{unopened}");
+
+        // A lab profile, or none, keeps accepting seed files.
+        let file = KeySigner::File(Box::new(FileSigner::open(&seed).unwrap()));
+        for profile in [Some(&lab(SignerKind::File)), None] {
+            let opened = open_key_under(profile, "family", &seed).unwrap();
+            assert_eq!(opened.public_key(), file.public_key());
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// The checks every signing family's key file passes, in one place.
@@ -1379,9 +1462,15 @@ mod tests {
             Pkcs11Signer::provision(&module, &token, TEST_USER_PIN, object).unwrap();
         }
         // Two families, and the same family twice, all held at once.
-        let backup = open_key(&locator("backup")).unwrap();
-        let audit = open_key(&locator("audit")).unwrap();
-        let backup_again = open_key(&locator("backup")).unwrap();
+        // A production profile admits token keys.
+        let backup = open_key_under(
+            Some(&production(SignerKind::Pkcs11)),
+            "TENKAI_BACKUP_SIGNING_KEY",
+            &locator("backup"),
+        )
+        .unwrap();
+        let audit = open_key("test key", &locator("audit")).unwrap();
+        let backup_again = open_key("test key", &locator("backup")).unwrap();
         assert_ne!(backup.public_key(), audit.public_key());
         assert_eq!(backup.public_key(), backup_again.public_key());
         for signer in [&backup, &audit, &backup_again] {
@@ -1392,7 +1481,7 @@ mod tests {
         }
         drop((backup, audit, backup_again));
         // A released key opens again.
-        open_key(&locator("backup")).unwrap();
+        open_key("test key", &locator("backup")).unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -482,14 +482,15 @@ impl RemoteClient {
         .await
     }
 
-    /// Sealed keys of `environment` (ADR 0045). Never a value.
     /// Ask for a plan that re-wraps `environment`'s sealed values for the
-    /// recipient key `recipient` (ADR 0045 §5).
+    /// recipient key `recipient` (ADR 0045 §5). `recovered` carries wraps
+    /// for `recipient` the recovery key made, per instance (ADR 0045 §7).
     pub async fn rewrap_sealed_secrets(
         &self,
         environment: &str,
         recipient: &str,
         expected_generation: u64,
+        recovered: std::collections::BTreeMap<String, Vec<tenkai::sealed_secret::RecipientWrap>>,
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
@@ -502,18 +503,23 @@ impl RemoteClient {
                 environment: environment.to_string(),
                 expected_generation,
                 recipient: recipient.to_string(),
+                recovered,
             }),
         )
         .await
     }
 
+    /// Sealed keys of `environment`. `with_sealed` also returns each
+    /// value's ciphertext and wraps, which `secret recover` opens offline.
     pub async fn list_sealed_secrets(
         &self,
         environment: &str,
+        with_sealed: bool,
     ) -> anyhow::Result<tenkai::sealed_secret::SealedSecretList> {
+        let query = if with_sealed { "?sealed=true" } else { "" };
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/environments/{environment}/sealed-secrets"),
+            &format!("/v1/environments/{environment}/sealed-secrets{query}"),
         )
         .await
     }

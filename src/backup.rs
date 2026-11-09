@@ -180,7 +180,8 @@ impl Backups {
         }
         if let Some(seed) = &policy.signing_key {
             // Fail at startup, not at the first scheduled backup.
-            crate::signer::open_key(seed).context("loading the backup signing key")?;
+            crate::signer::open_key("TENKAI_BACKUP_SIGNING_KEY", seed)
+                .context("loading the backup signing key")?;
         }
         Self::open(Some(store), policy)
     }
@@ -323,7 +324,8 @@ impl Backups {
                     &signature_path(&target),
                     &sign_manifest(
                         &manifest_bytes,
-                        &crate::signer::open_key(seed).context("loading the backup signing key")?,
+                        &crate::signer::open_key("TENKAI_BACKUP_SIGNING_KEY", seed)
+                            .context("loading the backup signing key")?,
                     )?,
                 )?;
             }

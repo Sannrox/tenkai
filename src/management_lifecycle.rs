@@ -501,6 +501,14 @@ pub struct SealedRewrapRequest {
     /// `sha256:<hex>` fingerprint of an unrevoked recipient key of the
     /// environment.
     pub recipient: String,
+    /// Wraps for `recipient` that `secret recover` made offline with the
+    /// recovery key (ADR 0045 §7), by instance. The plan's steps carry
+    /// them; they take effect only once the recipient's runtime runs the
+    /// approved step and opens each value with them. Omitted when empty,
+    /// so a plain re-wrap request is unchanged; a server that predates the
+    /// field refuses it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub recovered: std::collections::BTreeMap<String, Vec<crate::sealed_secret::RecipientWrap>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -909,7 +917,19 @@ pub fn admit_sealed_rewrap(
     granted_environment: Option<&str>,
 ) -> Result<AdmittedManagementLifecycle> {
     require_path_environment("re-wrap", &request.environment, path_environment)?;
-    crate::sealing_key::normalize_fingerprint(&request.recipient)?;
+    let recipient = crate::sealing_key::normalize_fingerprint(&request.recipient)?;
+    for (instance, wraps) in &request.recovered {
+        crate::ontology::validate_identifier("instance", instance)?;
+        for wrap in wraps {
+            crate::sealed_secret::SecretRef::new(&wrap.secret, &wrap.key)?;
+            crate::sealed_secret::check_wrap(&wrap.wrap)?;
+            anyhow::ensure!(
+                wrap.wrap.fingerprint == recipient,
+                "a recovered wrap is for {}, not the re-wrap recipient {recipient}",
+                wrap.wrap.fingerprint
+            );
+        }
+    }
     admit_environment_operation(
         request.version,
         &request.operation,

@@ -44,6 +44,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_AUDIT_EXPORT_INTERVAL_SECS` | `86400` | Seconds between scheduled audit exports |
 | `TENKAI_AUDIT_TRUST_ROOTS` | unset | Trust roots for exports in the chain signed before an audit key rotation |
 | `TENKAI_EXPORT_DIR` | unset | `tenkai-server` only: directory of exports created and downloaded over HTTP ([exports over HTTP](run-tenkai-server.md#exports-over-http)). Set with `TENKAI_EXPORT_SIGNING_KEY`. Refused in tenant mode |
+| `TENKAI_DEPLOY_PROFILE` | unset | Deploy profile file (`tenkai-server --deploy-profile`, `tenkaictl --deploy-profile`). A production profile refuses seed-file signing keys ([production profile](release-signing.md#production-profile)) |
 | `TENKAI_EXPORT_SIGNING_KEY` | unset | Ed25519 seed file that signs support bundles and audit exports made over HTTP; or a `pkcs11:` token locator ([keys of signed artifacts](release-signing.md#keys-of-the-other-signed-artifacts)) |
 | `TENKAI_EXPORT_TRUST_ROOTS` | unset | Trust roots for audit exports made over HTTP and signed before an export key rotation |
 | `TENKAI_EXPORT_RETENTION_DAYS` | unset | Days an export made over HTTP stays downloadable; unset keeps exports for good ([exports over HTTP](run-tenkai-server.md#exports-over-http)) |

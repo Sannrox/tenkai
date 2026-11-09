@@ -267,6 +267,7 @@ mod tests {
         plan.steps[0].from = Some("1.0.0".into());
         plan.steps[0].rewrap = Some(crate::plan::RewrapStep {
             fingerprint: format!("sha256:{}", "b".repeat(64)),
+            recovered: Vec::new(),
         });
         let policy = Some(&fixture.trust.policy);
         require_step(None, &plan, &plan.steps[0], &[], now).unwrap_err();
@@ -278,6 +279,7 @@ mod tests {
         let mut redirected = plan.clone();
         redirected.steps[0].rewrap = Some(crate::plan::RewrapStep {
             fingerprint: format!("sha256:{}", "c".repeat(64)),
+            recovered: Vec::new(),
         });
         require_step(policy, &redirected, &redirected.steps[0], &both, now).unwrap_err();
     }

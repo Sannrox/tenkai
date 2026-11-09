@@ -524,7 +524,11 @@ pub(crate) fn signer_key_id(policy: &ApprovalPolicy) -> Result<Option<String>> {
         return Ok(None);
     };
     Ok(Some(
-        crate::signer::ContentSigner::key_id(&crate::signer::open_key(path)?).to_string(),
+        crate::signer::ContentSigner::key_id(&crate::signer::open_key(
+            "the approval policy's auto_signer_key",
+            path,
+        )?)
+        .to_string(),
     ))
 }
 
@@ -938,10 +942,9 @@ pub fn explain_plan_approval(
 }
 
 fn auto_signer_present(policy: &ApprovalPolicy) -> bool {
-    policy
-        .auto_signer_key
-        .as_deref()
-        .is_some_and(|path| crate::signer::open_key(path).is_ok())
+    policy.auto_signer_key.as_deref().is_some_and(|path| {
+        crate::signer::open_key("the approval policy's auto_signer_key", path).is_ok()
+    })
 }
 
 fn auto_signer_trusted(policy: &ApprovalPolicy, plan: &Plan, roots_path: &Path) -> bool {
@@ -979,7 +982,7 @@ fn sign_auto_approval(
         .auto_signer_key
         .as_deref()
         .context("auto plan approval policy requires auto_signer_key")?;
-    let signer = crate::signer::open_key(key_path)?;
+    let signer = crate::signer::open_key("the approval policy's auto_signer_key", key_path)?;
     let expires_at = now
         .checked_add(policy.ttl_ms)
         .ok_or_else(|| anyhow::anyhow!("plan approval policy ttl_ms overflowed expiry"))?;

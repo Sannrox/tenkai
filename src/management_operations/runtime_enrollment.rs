@@ -92,13 +92,18 @@ pub struct RuntimeRunner {
     pub sealing_fingerprint: Option<String>,
 }
 
-/// One unrevoked runtime recipient key an operator or client may pin.
+/// One recipient key an operator or client may pin: an unrevoked
+/// runtime's, or the environment's offline recovery key (ADR 0045 §7),
+/// which has no runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnvironmentRecipient {
     pub runtime_id: String,
     pub fingerprint: String,
     pub public_key: String,
     pub capability: String,
+    /// The environment's offline recovery key, not a runtime's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recovery: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -495,26 +500,36 @@ impl ManagementOperations {
     }
 
     /// Sealed keys of `environment` with their digests and recipients
-    /// (ADR 0045 §2). Never a value.
+    /// (ADR 0045 §2). Never a value. `with_sealed` adds the stored
+    /// ciphertext and wraps for `secret recover` (§7), and needs the
+    /// management capability that setting a value does.
     pub async fn list_sealed_secrets(
         &self,
         credential: &CredentialMaterial,
         environment: &str,
+        with_sealed: bool,
     ) -> Result<crate::sealed_secret::SealedSecretList, ManagementError> {
         let context = self.authenticate(credential)?;
         self.require_host_runtime_credentials()?;
-        Self::require_capability(&context, DeliveryCapability::Read)?;
+        Self::require_capability(
+            &context,
+            if with_sealed {
+                DeliveryCapability::Management
+            } else {
+                DeliveryCapability::Read
+            },
+        )?;
         self.require_environment_grant(credential, &context, Some(environment), "sealed secrets")?;
         self.require_environment_visible(&context, environment)
             .await?;
         let mut ctx = self.application_ctx()?;
-        crate::sealed_secret::list(&mut ctx, environment)
+        crate::sealed_secret::list(&mut ctx, environment, with_sealed)
             .await
             .map_err(map_config_error)
     }
 
-    /// Unrevoked runtime sealing keys of `environment` (ADR 0045). Retired
-    /// and revoked runtimes are omitted.
+    /// Unrevoked runtime sealing keys of `environment` (ADR 0045), then its
+    /// recovery key if one is set. Retired and revoked runtimes are omitted.
     pub async fn list_environment_recipients(
         &self,
         credential: &CredentialMaterial,
@@ -524,7 +539,7 @@ impl ManagementOperations {
         self.require_host_runtime_credentials()?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
         self.require_environment_grant(credential, &context, Some(environment), "recipient keys")?;
-        let recipients = self
+        let mut recipients: Vec<_> = self
             .store
             .runtime_sealing_keys(environment)
             .map_err(|error| ManagementError::Unavailable(error.to_string()))?
@@ -537,9 +552,21 @@ impl ManagementOperations {
                     fingerprint: key.fingerprint(),
                     public_key: key.to_wire(),
                     capability: crate::sealing_key::SEALED_SECRETS_CAPABILITY.into(),
+                    recovery: false,
                 })
             })
             .collect();
+        let mut ctx = self.application_ctx()?;
+        let recovery = crate::sealed_secret::stored_recovery_key(&mut ctx, environment)
+            .await
+            .map_err(internal)?;
+        recipients.extend(recovery.map(|key| EnvironmentRecipient {
+            runtime_id: String::new(),
+            fingerprint: key.fingerprint(),
+            public_key: key.to_wire(),
+            capability: crate::sealing_key::SEALED_SECRETS_CAPABILITY.into(),
+            recovery: true,
+        }));
         Ok(EnvironmentRecipients {
             environment: environment.into(),
             recipients,

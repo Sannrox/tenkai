@@ -969,11 +969,27 @@ impl BuiltinConfig {
                         crate::sealed_secret::MAX_WRAPS
                     );
                 }
+                // A runtime that lost its wrap opens through the recovered
+                // one the approved step carries (ADR 0045 §7). Opening
+                // authenticates it, so a wrap for another value fails here.
+                let mut value = std::borrow::Cow::Borrowed(&value.sealed);
+                let recovered = rewrap.recovered.iter().find(|wrap| {
+                    wrap.secret == sealed.secret
+                        && wrap.key == sealed.key
+                        && wrap.digest == sealed.digest
+                        && wrap.wrap.fingerprint == rewrap.fingerprint
+                });
+                if let Some(recovered) = recovered
+                    && opener.fingerprint() == rewrap.fingerprint
+                    && !value.wraps.iter().any(|wrap| wrap.fingerprint == rewrap.fingerprint)
+                {
+                    value.to_mut().wraps.push(recovered.wrap.clone());
+                }
                 Ok(crate::sealed_secret::RecipientWrap {
                     secret: sealed.secret.clone(),
                     key: sealed.key.clone(),
                     digest: sealed.digest.clone(),
-                    wrap: opener.rewrap(&target, &value.sealed, &recipient)?,
+                    wrap: opener.rewrap(&target, &value, &recipient)?,
                 })
             })
             .collect()
@@ -1461,6 +1477,7 @@ mod tests {
         let newcomer = crate::sealing_key::SealingKey::open_or_generate(&newcomer_dir).unwrap();
         let rewrap = RewrapStep {
             fingerprint: newcomer.fingerprint(),
+            recovered: Vec::new(),
         };
         let mut release = case.release.clone();
         release.rewrap_recipient = Some(newcomer.to_wire());
@@ -1527,6 +1544,70 @@ mod tests {
             .collect();
         full.sealed[0].sealed.wraps[0] = filler;
         assert!(refusal(&full).contains("already has"));
+    }
+
+    /// A runtime that lost its wrap re-wraps for itself only through the
+    /// recovered wrap the approved step carries (ADR 0045 §7): without it,
+    /// or with one for another value, the step fails and wraps nothing.
+    #[test]
+    fn a_runtime_recovers_a_value_only_through_the_approved_recovered_wrap() {
+        let mut case = sealed_case("api", b"hunter2");
+        let runtime_dir = case.config.sealing_dir.clone().unwrap();
+        let runtime = crate::sealing_key::SealingKey::open_or_generate(&runtime_dir).unwrap();
+        let recovery_path = case.root.join("recovery.pem");
+        let recovery_key = crate::sealing_key::generate_recovery_key(&recovery_path).unwrap();
+        let recovery = SealedOpener::from_pem_file(&recovery_path).unwrap();
+        let target = SealedTarget::new(
+            ENVIRONMENT,
+            "api",
+            SecretRef::new("db", "password").unwrap(),
+        )
+        .unwrap();
+        // Sealed before this runtime existed: only the recovery key opens it.
+        let sealed =
+            crate::sealed_secret::seal(&target, b"hunter2", std::slice::from_ref(&recovery_key))
+                .unwrap();
+        let digest = crate::sealed_secret::digest(&target, &sealed).unwrap();
+        case.step.sealed[0].digest = digest.clone();
+        case.release.sealed[0].sealed = sealed.clone();
+        case.release.rewrap_recipient = Some(runtime.to_wire());
+        let recovered =
+            |sealed: &crate::sealed_secret::SealedValue| crate::sealed_secret::RecipientWrap {
+                secret: "db".into(),
+                key: "password".into(),
+                digest: digest.clone(),
+                wrap: recovery.rewrap(&target, sealed, runtime.public()).unwrap(),
+            };
+        let step = |recovered: Vec<_>| RewrapStep {
+            fingerprint: runtime.fingerprint(),
+            recovered,
+        };
+        let run = |rewrap: &RewrapStep| {
+            case.config
+                .rewrap_sealed(&case.release, ENVIRONMENT, &case.step, rewrap)
+        };
+
+        let error = format!("{:#}", run(&step(Vec::new())).unwrap_err());
+        assert!(error.contains("has no wrap"), "{error}");
+        let other = crate::sealed_secret::seal(&target, b"forged", &[recovery_key]).unwrap();
+        let error = format!("{:#}", run(&step(vec![recovered(&other)])).unwrap_err());
+        assert!(
+            !error.contains("hunter2") && !error.contains("forged"),
+            "{error}"
+        );
+
+        let wraps = run(&step(vec![recovered(&sealed)])).unwrap();
+        let [wrap] = wraps.as_slice() else {
+            panic!("one wrap per value");
+        };
+        assert_eq!(wrap.digest, digest);
+        let mut stored = sealed;
+        stored.wraps.push(wrap.wrap.clone());
+        let opened = SealedOpener::load(&runtime_dir)
+            .unwrap()
+            .open(&target, &stored)
+            .unwrap();
+        assert_eq!(opened.as_slice(), b"hunter2");
     }
 
     #[test]

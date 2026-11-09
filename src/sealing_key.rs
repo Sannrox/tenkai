@@ -155,6 +155,21 @@ fn public_from_key_pair(key: &rcgen::KeyPair) -> Result<SealingPublicKey> {
     SealingPublicKey::from_point(parsed.subject_public_key.data.to_vec())
 }
 
+/// Generate an offline recovery key (ADR 0045 §7): a P-256 PKCS#8 private
+/// key written owner-only to `path`, which must not exist yet. Returns the
+/// public half to record with `secret recovery-key set`.
+pub fn generate_recovery_key(path: &Path) -> Result<SealingPublicKey> {
+    if path.exists() {
+        anyhow::bail!(
+            "{} exists; a recovery key is never overwritten",
+            path.display()
+        );
+    }
+    let key = rcgen::KeyPair::generate()?;
+    write_owner_only(path, &key.serialize_pem())?;
+    public_from_key_pair(&key)
+}
+
 /// Parse a sealing public key offered at enrollment or renewal. Empty is
 /// absent (an older runtime).
 pub fn parse_offered(value: Option<&str>) -> Result<Option<SealingPublicKey>> {

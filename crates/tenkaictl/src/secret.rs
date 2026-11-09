@@ -45,7 +45,12 @@ pub(crate) fn show_recipients(
         return Ok(());
     }
     for recipient in &offered {
-        println!("{} {} {}", recipient.fingerprint, recipient.runtime_id, env);
+        let holder = if recipient.runtime_id.is_empty() {
+            "recovery"
+        } else {
+            &recipient.runtime_id
+        };
+        println!("{} {} {}", recipient.fingerprint, holder, env);
     }
     let check = store.check(&server, env, &offered)?;
     match check {
@@ -149,24 +154,149 @@ fn read_value(
     Ok(value)
 }
 
-/// `secret list`: one line per sealed key. Never a value.
+/// `secret list`: one line per sealed key, then a warning when losing every
+/// runtime would lose any of them (ADR 0045 §7). Never a value.
 pub(crate) fn print_list(list: &tenkai::sealed_secret::SealedSecretList) {
     if list.secrets.is_empty() {
         println!("{} has no sealed secrets", list.environment);
         return;
     }
     for entry in &list.secrets {
+        let recoverable = list
+            .recovery_key
+            .as_ref()
+            .is_some_and(|fingerprint| entry.recipients.contains(fingerprint));
         println!(
-            "{} {}/{} {} set_by={} set_at={} recipients={}",
+            "{} {}/{} {} set_by={} set_at={} recipients={} recovery={}",
             entry.instance,
             entry.secret,
             entry.key,
             entry.digest,
             entry.set_by,
             entry.set_at,
-            entry.recipients.len()
+            entry.recipients.len(),
+            if recoverable { "yes" } else { "no" }
         );
     }
+    if let Some(warning) = list.recovery_warning() {
+        eprintln!("warning: {warning}");
+    }
+}
+
+/// The plan a re-wrap or recovery request created.
+pub(crate) fn print_plan(result: &tenkai::management_lifecycle::ManagementLifecycleResult) {
+    println!("{}", result.message);
+    if let Some(plan_id) = &result.resource {
+        println!("plan id: {plan_id}");
+    }
+    if let Some(digest) = &result.digest {
+        println!("plan digest: {digest}");
+    }
+}
+
+/// `secret recovery-key generate`: write the private key owner-only to
+/// `path`, never over an existing file, and print the public half.
+pub(crate) fn generate_recovery_key(path: &std::path::Path) -> Result<()> {
+    let public = tenkai::sealing_key::generate_recovery_key(path)?;
+    println!("public key: {}", public.to_wire());
+    println!("fingerprint: {}", public.fingerprint());
+    eprintln!(
+        "keep {} offline; record the public key with tenkaictl secret recovery-key set",
+        path.display()
+    );
+    Ok(())
+}
+
+/// `secret recover`: open each value's recovery wrap with the private key
+/// at `key_path`, wrap its data key for the pinned runtime key `recipient`,
+/// and ask for the re-wrap plan that carries those wraps (ADR 0045 §7).
+/// Values only leave this process sealed. A value with neither a recovery
+/// wrap nor a wrap for `recipient` refuses the whole request: the re-wrap
+/// step could not open it.
+pub(crate) async fn recover(
+    client: &tenkai_http::RemoteClient,
+    server_url: Option<&str>,
+    env: &str,
+    key_path: &std::path::Path,
+    recipient: &str,
+    generation: u64,
+) -> Result<()> {
+    let recipient = normalize_fingerprint(recipient)?;
+    let opener = tenkai::sealed_secret::SealedOpener::from_pem_file(key_path)?;
+    let offered = client.list_environment_recipients(env).await?.recipients;
+    let keys = pinned_recipients(server_url, env, &offered)?;
+    let runtime = offered
+        .iter()
+        .zip(keys)
+        .find(|(offered, _)| !offered.recovery && offered.fingerprint == recipient)
+        .map(|(_, key)| key)
+        .with_context(|| format!("{recipient} is not a runtime recipient key {env} offers"))?;
+    let list = client.list_sealed_secrets(env, true).await?;
+    if list.recovery_key.as_deref() != Some(opener.fingerprint()) {
+        bail!("{} is not the recovery key of {env}", opener.fingerprint());
+    }
+    let recovered = recovered_wraps(&list, &opener, &runtime)?;
+    if recovered.is_empty() {
+        println!("every sealed value of {env} already opens with {recipient}");
+        return Ok(());
+    }
+    let result = client
+        .rewrap_sealed_secrets(env, &recipient, generation, recovered)
+        .await?;
+    print_plan(&result);
+    Ok(())
+}
+
+/// Wraps for `runtime` of every value it cannot open yet, by instance,
+/// made through `opener`'s recovery wrap. Opening authenticates the value
+/// under its target, so a value moved to another slot is refused.
+fn recovered_wraps(
+    list: &tenkai::sealed_secret::SealedSecretList,
+    opener: &tenkai::sealed_secret::SealedOpener,
+    runtime: &tenkai::sealing_key::SealingPublicKey,
+) -> Result<std::collections::BTreeMap<String, Vec<tenkai::sealed_secret::RecipientWrap>>> {
+    use tenkai::sealed_secret::{SealedTarget, SecretRef};
+    let mut recovered: std::collections::BTreeMap<String, Vec<_>> = Default::default();
+    let mut lost = Vec::new();
+    for entry in &list.secrets {
+        let sealed = entry
+            .sealed
+            .as_ref()
+            .context("the server returned a sealed key without its sealed value")?;
+        let has = |fingerprint: &str| {
+            sealed
+                .wraps
+                .iter()
+                .any(|wrap| wrap.fingerprint == fingerprint)
+        };
+        if has(&runtime.fingerprint()) {
+            continue;
+        }
+        if !has(opener.fingerprint()) {
+            lost.push(format!("{} {}/{}", entry.instance, entry.secret, entry.key));
+            continue;
+        }
+        let target = SealedTarget::new(
+            &list.environment,
+            &entry.instance,
+            SecretRef::new(&entry.secret, &entry.key)?,
+        )?;
+        recovered.entry(entry.instance.clone()).or_default().push(
+            tenkai::sealed_secret::RecipientWrap {
+                secret: entry.secret.clone(),
+                key: entry.key.clone(),
+                digest: tenkai::sealed_secret::digest(&target, sealed)?,
+                wrap: opener.rewrap(&target, sealed, runtime)?,
+            },
+        );
+    }
+    if !lost.is_empty() {
+        bail!(
+            "these sealed values have no recovery wrap and cannot be recovered; set them again with tenkaictl secret set first:\n  {}",
+            lost.join("\n  ")
+        );
+    }
+    Ok(recovered)
 }
 
 pub(crate) fn require_fingerprint(value: &str) -> Result<String> {
@@ -192,5 +322,88 @@ mod tests {
         assert!(read_value(&b""[..], false).is_err());
         let oversized = vec![b'x'; tenkai::sealed_secret::MAX_VALUE_BYTES + 1];
         assert!(read_value(oversized.as_slice(), false).is_err());
+    }
+
+    /// Recovery opens only values sealed with a recovery wrap; one sealed
+    /// before the key was set refuses the request by name, and every wrap
+    /// made opens the value for the new runtime.
+    #[test]
+    fn recovery_wraps_open_for_the_new_runtime_and_older_values_are_named() {
+        use tenkai::sealed_secret::{
+            SealedOpener, SealedSecretEntry, SealedSecretList, SealedTarget, SecretRef,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "tenkaictl-recover-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let recovery_path = root.join("recovery.pem");
+        let recovery_key = tenkai::sealing_key::generate_recovery_key(&recovery_path).unwrap();
+        assert!(tenkai::sealing_key::generate_recovery_key(&recovery_path).is_err());
+        let recovery = SealedOpener::from_pem_file(&recovery_path).unwrap();
+        let lost_runtime = tenkai::sealing_key::SealingKey::open_or_generate(&root.join("old"))
+            .unwrap()
+            .public()
+            .clone();
+        let new_dir = root.join("new");
+        let new_runtime = tenkai::sealing_key::SealingKey::open_or_generate(&new_dir)
+            .unwrap()
+            .public()
+            .clone();
+        let entry = |key: &str, recipients: &[tenkai::sealing_key::SealingPublicKey]| {
+            let target =
+                SealedTarget::new("prod", "api", SecretRef::new("db", key).unwrap()).unwrap();
+            let sealed = tenkai::sealed_secret::seal(&target, key.as_bytes(), recipients).unwrap();
+            SealedSecretEntry {
+                instance: "api".into(),
+                secret: "db".into(),
+                key: key.into(),
+                digest: tenkai::sealed_secret::digest(&target, &sealed).unwrap(),
+                set_by: "operator".into(),
+                set_at: 1,
+                recipients: sealed
+                    .wraps
+                    .iter()
+                    .map(|wrap| wrap.fingerprint.clone())
+                    .collect(),
+                sealed: Some(sealed),
+            }
+        };
+        let mut list = SealedSecretList {
+            environment: "prod".into(),
+            secrets: vec![
+                entry("password", &[lost_runtime.clone(), recovery_key.clone()]),
+                entry("older", std::slice::from_ref(&lost_runtime)),
+            ],
+            recovery_key: Some(recovery_key.fingerprint()),
+        };
+        assert_eq!(list.without_recovery(), ["api db/older"]);
+        let warning = list.recovery_warning().unwrap();
+        assert!(warning.contains("1 sealed value"), "{warning}");
+
+        let error = format!(
+            "{:#}",
+            recovered_wraps(&list, &recovery, &new_runtime).unwrap_err()
+        );
+        assert!(error.contains("api db/older"), "{error}");
+        assert!(!error.contains("password"), "{error}");
+
+        list.secrets.pop();
+        let recovered = recovered_wraps(&list, &recovery, &new_runtime).unwrap();
+        let [wrap] = recovered["api"].as_slice() else {
+            panic!("one wrap for the one value");
+        };
+        assert_eq!(wrap.digest, list.secrets[0].digest);
+        let target =
+            SealedTarget::new("prod", "api", SecretRef::new("db", "password").unwrap()).unwrap();
+        let mut sealed = list.secrets[0].sealed.clone().unwrap();
+        sealed.wraps.push(wrap.wrap.clone());
+        let opened = SealedOpener::load(&new_dir)
+            .unwrap()
+            .open(&target, &sealed)
+            .unwrap();
+        assert_eq!(opened.as_slice(), b"password");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

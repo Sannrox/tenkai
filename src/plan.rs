@@ -132,6 +132,13 @@ pub struct Step {
 pub struct RewrapStep {
     /// `sha256:<hex>` fingerprint of the recipient's sealing public key.
     pub fingerprint: String,
+    /// Wraps for this recipient that the offline recovery key made
+    /// (ADR 0045 §7). The recipient's own runtime opens each value with
+    /// its wrap, so a wrap that does not open the approved value is never
+    /// stored. Omitted when empty, so other re-wrap steps keep their
+    /// digest; a binary that predates the field fails approval closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovered: Vec<crate::sealed_secret::RecipientWrap>,
 }
 
 impl Step {
@@ -670,12 +677,17 @@ pub async fn rollback_step_with_recovery(
 
 /// Re-wrap steps for `fingerprint` (ADR 0045 §5), and the instances with
 /// sealed values that have nothing deployed yet.
+/// Re-wrap steps for `fingerprint`, one per deployed instance with sealed
+/// values, and the instances skipped because nothing is deployed.
+/// `recovered` wraps (ADR 0045 §7) ride on the step of their instance,
+/// only for a value still at the wrap's digest.
 pub async fn rewrap_steps(
     ctx: &mut Ctx,
     env: &str,
     fingerprint: &str,
+    recovered: &std::collections::BTreeMap<String, Vec<crate::sealed_secret::RecipientWrap>>,
 ) -> Result<(Vec<Step>, Vec<String>)> {
-    convergence::rewrap_steps(ctx, env, fingerprint).await
+    convergence::rewrap_steps(ctx, env, fingerprint, recovered).await
 }
 
 pub async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method};
 use axum::response::Response;
 use tenkai::environment_config::ConfigResource;
@@ -50,11 +50,21 @@ pub(super) async fn configure_bindings(
     .await
 }
 
+/// `GET .../sealed-secrets?sealed=true` adds each value's stored
+/// ciphertext and wraps, for `secret recover` (ADR 0045 §7).
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SealedListQuery {
+    #[serde(default)]
+    sealed: bool,
+}
+
 /// Sealed secret values (ADR 0045): `GET` lists them, `PUT` stores one
-/// sealed by the client, `DELETE` removes one.
+/// sealed by the client or the recovery key, `DELETE` removes one.
 pub(super) async fn list_sealed_secrets(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,
+    Query(query): Query<SealedListQuery>,
     headers: HeaderMap,
 ) -> Response {
     let credential = match require_management(&headers) {
@@ -64,7 +74,7 @@ pub(super) async fn list_sealed_secrets(
     manage_result(
         state
             .management
-            .list_sealed_secrets(&credential, &environment)
+            .list_sealed_secrets(&credential, &environment, query.sealed)
             .await,
     )
 }

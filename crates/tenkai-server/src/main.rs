@@ -110,6 +110,10 @@ struct Cli {
     /// authoritative surface (ADR 0010). Needs `--tenant-mode`.
     #[arg(long, default_value_t = false)]
     require_enterprise_profile: bool,
+    /// Deploy profile (the file `tenkaictl keys ceremony --profile` reads).
+    /// A production profile refuses seed-file signing keys for every family.
+    #[arg(long, env = "TENKAI_DEPLOY_PROFILE")]
+    deploy_profile: Option<PathBuf>,
     /// Minimum operational store migration level required at startup.
     #[arg(long, default_value_t = 1)]
     min_migration_level: u32,
@@ -534,6 +538,9 @@ async fn main() -> Result<()> {
     }
     require_hub_tenant_mode(cli.tenant_mode)
         .context("hub host refuses to start as the community SQLite host")?;
+    if let Some(path) = &cli.deploy_profile {
+        tenkai::signer::bind_deploy_profile(tenkai::key_provider::DeployProfile::load(path)?)?;
+    }
     if cli.require_enterprise_profile {
         anyhow::ensure!(
             cli.tenant_mode,

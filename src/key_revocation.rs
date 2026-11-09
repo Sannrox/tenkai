@@ -476,7 +476,7 @@ mod tests {
             module.display(),
             pin.display()
         ));
-        let signer = crate::signer::open_key(&setting).unwrap();
+        let signer = crate::signer::open_key("revocations sign --signing-key", &setting).unwrap();
         assert_eq!(
             crate::signer::ContentSigner::kind(&signer),
             crate::signer::SignerKind::Pkcs11

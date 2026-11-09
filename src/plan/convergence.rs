@@ -2153,6 +2153,7 @@ pub(super) async fn rewrap_steps(
     ctx: &mut Ctx,
     env: &str,
     fingerprint: &str,
+    recovered: &std::collections::BTreeMap<String, Vec<crate::sealed_secret::RecipientWrap>>,
 ) -> Result<(Vec<Step>, Vec<String>)> {
     let fingerprint = crate::sealing_key::normalize_fingerprint(fingerprint)?;
     let env_obj = crate::environment::environment(ctx, env).await?;
@@ -2178,6 +2179,19 @@ pub(super) async fn rewrap_steps(
             undeployed.push(instance);
             continue;
         };
+        let recovered: Vec<_> = recovered
+            .get(&instance)
+            .into_iter()
+            .flatten()
+            .filter(|wrap| {
+                sealed.iter().any(|binding| {
+                    binding.secret == wrap.secret
+                        && binding.key == wrap.key
+                        && binding.digest == wrap.digest
+                })
+            })
+            .cloned()
+            .collect();
         let product = product_for_instance(&env_obj.properties, &instance);
         let target = pin_release_for_recovery(
             ctx,
@@ -2206,6 +2220,7 @@ pub(super) async fn rewrap_steps(
             to: current,
             rewrap: Some(crate::plan::RewrapStep {
                 fingerprint: fingerprint.clone(),
+                recovered,
             }),
         });
     }

@@ -529,7 +529,7 @@ pub fn exporter_identity(
 /// Open the exporter's key: a seed file, refused unless it is owner-only, or a
 /// `pkcs11:` token locator ([`crate::signer::open_key`]).
 pub fn load_exporter_key(path: &Path) -> Result<crate::signer::KeySigner> {
-    crate::signer::open_key(path)
+    crate::signer::open_key("bundle build --signing-key", path)
 }
 
 struct AssembledRelease {
