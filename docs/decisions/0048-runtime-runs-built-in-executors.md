@@ -10,6 +10,8 @@
   [#1125](https://github.com/Sannrox/tenkai/issues/1125))
 - Amended: 2026-11-09 by [#1122](https://github.com/Sannrox/tenkai/issues/1122)
   (§1 host releases run, §2 the runtime reports the applier's records)
+- Amended: 2026-11-09 by [#1125](https://github.com/Sannrox/tenkai/issues/1125)
+  (§4 Host: the request file sits in the spool, the target base directory)
 - Issue: [#1119](https://github.com/Sannrox/tenkai/issues/1119)
 - Owner: Tenkai maintainers
 - Amends: [ADR 0045](0045-sealed-secrets.md) §4 (who writes the target, host
@@ -142,11 +144,16 @@ of the step's release, in-process.
   have no values to carry a name. A sealed step for such a release is refused
   with a named reason until a descriptor substitution exists.
 - **Host:** the applier runs as a separately started unit, so the value
-  cannot stay in one process's memory. The runtime places it in the applier's
-  request, in a 0600 file on a memory-backed run directory, and refuses the
-  step if that directory is on persistent storage. It removes the file once
-  the result is recorded, and at startup and before every retry it removes
-  any request file it left behind.
+  cannot stay in one process's memory. The runtime places it, with the
+  ciphertext it was opened from, in a 0600 file next to the applier's
+  request in the spool, and refuses the step if the spool is on persistent
+  storage; the applier refuses such a file too. The runtime removes the file
+  with the spool once the result is recorded. Whenever it claims a plan,
+  under its claim and after stopping units an earlier holder left, it
+  removes its environment's files whose unit is not running; it never
+  touches a file at startup, before it holds a claim, or another
+  environment's. The applier creates each instance directory already
+  marked as Tenkai's, through a staging directory it renames into place.
 
   The applier verifies the request as in ADR 0041 §2. It also checks that the
   approved step names this instance, secret and key, and that the request's
@@ -156,11 +163,15 @@ of the step's release, in-process.
   approved step names.
 
   The target path is never taken from the request. The applier derives it
-  from a fixed root-owned base directory and the environment, instance,
-  secret and key, each validated as a Tenkai identifier (no separators, no
-  `..`), and the release's command receives that directory through the
-  applier's own allowlisted environment. The applier writes the file through
-  a temporary path and rename, then removes its own copy of the request.
+  as `<state_dir>/secrets/<environment>/<instance>/<secret>/<key>`, each
+  segment validated as a Tenkai identifier (no separators, no `..`), and the
+  release's command receives the instance directory as `TENKAI_SECRETS_DIR`
+  through the applier's own allowlisted environment. Every step that runs
+  the instance writes its values before its command, through a temporary
+  path and rename, and a write that fails fails the step. The applier never
+  copies the values to disk on the way: it reads them into memory, writes
+  them, and drops them. It writes only inside an instance directory it
+  created and marked, so a file Tenkai does not own is never replaced.
 
   The target file is mode 0600 and owned by root. A service that runs as
   another user receives it through its service manager's credential hand-off,

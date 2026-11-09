@@ -3160,6 +3160,7 @@ name = "tenkai-host-applier"
 version = "0.7.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "rustix",
  "serde",
  "serde_json",
@@ -3167,6 +3168,7 @@ dependencies = [
  "tokio",
  "toml",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

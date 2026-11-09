@@ -323,3 +323,124 @@ fn readiness_needs_a_private_spool_directory() {
     );
     assert!(missing.check_ready().is_err());
 }
+
+/// Sealed values are spooled only to memory-backed storage, owner-only, and
+/// cleanup under the fence removes only a stopped instance of its own
+/// environment.
+#[tokio::test]
+async fn sealed_values_are_spooled_only_to_memory_and_cleaned_up_per_environment() {
+    use crate::host_apply::sealed::{HostSealedValue, HostSealedValues, SEALED_FILE};
+
+    /// One running instance; nothing else is started or stopped here.
+    struct Running(String);
+    impl HostUnits for Running {
+        fn start<'a>(&'a self, _instance: &'a str) -> UnitFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+        fn stop(&self, _instance: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn running(&self) -> UnitFuture<'_, Vec<String>> {
+            let running = vec![self.0.clone()];
+            Box::pin(async move { Ok(running) })
+        }
+    }
+
+    let values = HostSealedValues::new(vec![HostSealedValue {
+        secret: "db".into(),
+        key: "password".into(),
+        ciphertext: "Y2lwaGVy".into(),
+        value: zeroize::Zeroizing::new("dmFsdWU=".into()),
+    }]);
+    let [stopped, live, foreign] = ["a", "b", "c"].map(|c| c.repeat(64));
+    let executor_in = |base: &std::path::Path| {
+        let root = base.join(format!(
+            "tenkai-sealed-spool-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        for instance in [&stopped, &live, &foreign] {
+            std::fs::create_dir_all(root.join("spool").join(instance)).unwrap();
+        }
+        let executor = HostExecutor::new(
+            root.join("spool"),
+            root.join("state"),
+            Arc::new(Running(live.clone())),
+        );
+        (root, executor)
+    };
+
+    // A spool on persistent storage is refused before anything is written.
+    let disk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+    if crate::host_apply::sealed::require_memory_backed(&disk).is_err() {
+        let (root, executor) = executor_in(&disk);
+        let error = format!(
+            "{:#}",
+            executor.write_sealed(&stopped, &values).unwrap_err()
+        );
+        assert!(error.contains("persistent storage"), "{error}");
+        assert!(!root.join("spool").join(&stopped).join(SEALED_FILE).exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    let shm = std::path::Path::new("/dev/shm");
+    if crate::host_apply::sealed::require_memory_backed(shm).is_err() {
+        return;
+    }
+    let (root, executor) = executor_in(shm);
+    for (instance, environment) in [(&stopped, "edge"), (&live, "edge"), (&foreign, "other")] {
+        executor.write_sealed(instance, &values).unwrap();
+        let mut started = sample_started(instance);
+        started.environment = environment.into();
+        let dir = instance_dir(&root.join("state"), instance);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(STARTED_FILE),
+            serde_json::to_vec(&started).unwrap(),
+        )
+        .unwrap();
+    }
+    let file = |instance: &str| root.join("spool").join(instance).join(SEALED_FILE);
+    assert_eq!(
+        std::fs::metadata(file(&stopped))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    executor.discard_sealed("edge").await.unwrap();
+
+    assert!(
+        !file(&stopped).exists(),
+        "a stopped instance's values are removed"
+    );
+    assert!(file(&live).exists(), "a running step keeps its values");
+    assert!(
+        file(&foreign).exists(),
+        "another environment's values are kept"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A started record of `instance` in `edge`.
+fn sample_started(instance: &str) -> crate::host_apply::state::HostApplyStarted {
+    crate::host_apply::state::HostApplyStarted {
+        schema: crate::host_apply::state::STARTED_SCHEMA.into(),
+        instance: instance.into(),
+        plan_id: "plan".into(),
+        plan_digest: format!("sha256:{}", "d".repeat(64)),
+        step_id: "plan:step:0".into(),
+        environment: "edge".into(),
+        product: "api".into(),
+        action: HostAction::Install,
+        release: crate::host_apply::HostRelease {
+            version: "1.0.0".into(),
+            manifest_digest: "e".repeat(64),
+        },
+        generation: 1,
+        started_at: 1,
+        cgroup: None,
+    }
+}

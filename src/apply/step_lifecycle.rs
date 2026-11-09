@@ -395,11 +395,14 @@ async fn execute_host(
         .map_err(|error| format!("{error:#}")),
         Err(error) => Err(format!("{error:#}")),
     };
+    let sealed = product_execution::sealed_refusal(content);
     let ended = match request {
         _ if resubscribed => HostStepEnd::NotRun(format!(
             "{environment} subscribes to {} again",
             step.product
         )),
+        // Only a runtime opens sealed values, so only a runtime spools them.
+        _ if sealed.is_some() => HostStepEnd::NotRun(sealed.unwrap_or_default()),
         Ok(request) => match host_dependency_document(ctx, content).await {
             Ok(dependency_document) => {
                 let inputs = content.manifest.immutable_inputs();
@@ -415,6 +418,7 @@ async fn execute_host(
                         inputs: &inputs,
                         artifact_digest: &content.artifact_digest,
                         dependency_document: dependency_document.as_deref(),
+                        sealed: None,
                     },
                 )
                 .await?

@@ -55,6 +55,9 @@ pub(crate) struct SpooledRelease<'a> {
     pub artifact_digest: &'a str,
     /// The canonical dependency document the release reads, when it has one.
     pub dependency_document: Option<&'a str>,
+    /// The opened sealed values the step writes, when it writes any. Only a
+    /// runtime can open them.
+    pub sealed: Option<&'a crate::host_apply::sealed::HostSealedValues>,
 }
 
 /// Run `request` and return how it ended. Outer errors are fence and
@@ -94,6 +97,12 @@ pub(crate) async fn run(
             crate::dependency_document::HOST_FILE,
             json.as_bytes(),
         )
+    {
+        host.discard_spool(&instance);
+        return Ok(HostStepEnd::NotRun(format!("{error:#}")));
+    }
+    if let Some(values) = release.sealed
+        && let Err(error) = host.write_sealed(&instance, values)
     {
         host.discard_spool(&instance);
         return Ok(HostStepEnd::NotRun(format!("{error:#}")));

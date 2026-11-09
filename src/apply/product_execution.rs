@@ -24,7 +24,7 @@ async fn prepare_fenced_mutation(
 /// an unsafe or indeterminate execution for an ordinary target failure.
 /// The server cannot open sealed values, so it never applies a release
 /// that reads them: the environment runtime does (ADR 0045 §4).
-fn sealed_refusal(content: &ReleaseContent) -> Option<String> {
+pub(super) fn sealed_refusal(content: &ReleaseContent) -> Option<String> {
     (!content.sealed.is_empty()).then(|| {
         format!(
             "{} writes sealed secrets; only an environment runtime in built-in mode opens them",

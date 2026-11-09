@@ -205,6 +205,8 @@ struct Prepared {
     artifact_digest: String,
     /// See [`VerifiedRelease::replaced_executor`].
     replaced_executor: Option<Option<SoftwareExecutorKind>>,
+    /// See [`VerifiedRelease::sealed`].
+    sealed: Vec<RuntimeSealedValue>,
     /// `None` is the shell `deploy.install` path.
     executor: Option<Arc<dyn SoftwareExecutor>>,
 }
@@ -286,6 +288,7 @@ impl Run<'_> {
             request,
             artifact_digest,
             replaced_executor,
+            sealed,
         } = match verified {
             Ok(verified) => verified,
             Err(error) => return refused(error),
@@ -306,6 +309,7 @@ impl Run<'_> {
             request,
             artifact_digest,
             replaced_executor,
+            sealed,
             executor,
         }))
     }
@@ -385,6 +389,28 @@ impl Run<'_> {
         let environment = self.client.environment();
         let inputs = target.manifest.immutable_inputs();
         let dependency_document = &target.request.dependency_document;
+        // The opened values go to the applier with the ciphertexts they were
+        // opened from, which it binds to the approved step.
+        let sealed = (!target.request.opened_secrets.is_empty()).then(|| {
+            crate::host_apply::sealed::HostSealedValues::new(
+                target
+                    .request
+                    .opened_secrets
+                    .iter()
+                    .zip(&target.sealed)
+                    .map(
+                        |(opened, delivered)| crate::host_apply::sealed::HostSealedValue {
+                            secret: opened.secret.clone(),
+                            key: opened.key.clone(),
+                            ciphertext: delivered.sealed.ciphertext.clone(),
+                            value: zeroize::Zeroizing::new(
+                                base64::engine::general_purpose::STANDARD.encode(&*opened.value),
+                            ),
+                        },
+                    )
+                    .collect(),
+            )
+        });
         let ended = crate::host_executor::step::run(
             &mut fence,
             applier,
@@ -398,6 +424,7 @@ impl Run<'_> {
                 artifact_digest: &target.artifact_digest,
                 dependency_document: (!dependency_document.is_empty())
                     .then_some(dependency_document.as_str()),
+                sealed: sealed.as_ref(),
             },
         )
         .await?;
@@ -522,8 +549,10 @@ impl Run<'_> {
 
 /// Stop every host unit an earlier holder of this environment's claim left
 /// running, before any step of the plan claimed at `generation` runs, as the
-/// server does when it claims the environment lease. Nothing to do without
-/// a host applier. `Err` means the claim was fenced or a unit would not stop.
+/// server does when it claims the environment lease, then remove the sealed
+/// values an earlier attempt spooled for this environment. Nothing to do
+/// without a host applier.
+/// `Err` means the claim was fenced or a unit would not stop.
 pub(crate) async fn fence_host_units(
     client: &RuntimeClient,
     config: &BuiltinConfig,
@@ -542,7 +571,8 @@ pub(crate) async fn fence_host_units(
         host,
         client.environment(),
     )
-    .await
+    .await?;
+    host.discard_sealed(client.environment()).await
 }
 
 /// A host step's receipt from how it ended: only a recorded success
@@ -688,6 +718,10 @@ pub struct VerifiedRelease {
     /// The declared executor of the release the step replaces, when the
     /// server sent it: `Some(None)` declares none.
     pub replaced_executor: Option<Option<SoftwareExecutorKind>>,
+    /// The sealed values as delivered, which `request.opened_secrets` was
+    /// opened from and matches slot for slot. A host step passes their
+    /// ciphertexts to the applier.
+    pub sealed: Vec<RuntimeSealedValue>,
 }
 
 impl BuiltinConfig {
@@ -767,6 +801,7 @@ impl BuiltinConfig {
             manifest,
             raw_manifest: release.manifest,
             signature: release.signature,
+            sealed: release.sealed,
             request,
             artifact_digest: expected.artifact_digest.to_owned(),
             replaced_executor,
@@ -818,7 +853,8 @@ impl BuiltinConfig {
     }
 
     /// Refuse a release this runtime must not run with a built-in executor,
-    /// naming why. Only Helm writes sealed values (ADR 0048 §4). A host
+    /// naming why. Only Helm and the host applier write sealed values
+    /// (ADR 0048 §4). A host
     /// release runs only as a `host_step`, through this host's applier, and
     /// is never restored: anything else would run its commands outside the
     /// applier's approval and generation checks. `Ok` means
@@ -836,9 +872,6 @@ impl BuiltinConfig {
             });
         }
         match kind {
-            Some(SoftwareExecutorKind::Host) if sealed => {
-                bail!("host releases do not write sealed secrets on an environment runtime yet")
-            }
             Some(SoftwareExecutorKind::Host) => self.executors.host().map(|_| ()).context(
                 "this runtime runs host releases only with a host applier (TENKAI_HOST_SPOOL_DIR)",
             ),
@@ -852,7 +885,7 @@ impl BuiltinConfig {
             ),
             Some(SoftwareExecutorKind::Helm) => Ok(()),
             _ if sealed => bail!(
-                "the step writes sealed secrets, and only the helm executor writes them; this release runs with {}",
+                "the step writes sealed secrets, and only the helm executor and the host applier write them; this release runs with {}",
                 kind.map_or("shell", SoftwareExecutorKind::as_str)
             ),
             _ => Ok(()),
@@ -1227,12 +1260,8 @@ mod tests {
                 Arc::new(crate::host_executor::Systemctl),
             )));
         case.config.admit_executor(&host, false, true).unwrap();
-        // Host sealed files are not written yet.
-        let refused = format!(
-            "{:#}",
-            case.config.admit_executor(&host, true, true).unwrap_err()
-        );
-        assert!(refused.contains("sealed"), "{refused}");
+        // The host applier writes sealed values to their target files.
+        case.config.admit_executor(&host, true, true).unwrap();
         // A host release never runs outside a host step, as a plain step or
         // a restore, and a host step runs nothing but a host release.
         let refused = format!(

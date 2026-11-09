@@ -39,9 +39,13 @@ pub struct CommandEnd {
 }
 
 /// The command's whole environment: the fixed allowlist plus values from
-/// the verified step.
-pub fn command_environment(step: &VerifiedHostStep) -> Vec<(&'static str, String)> {
-    vec![
+/// the verified step, and the directory of its sealed values when it writes
+/// any.
+pub fn command_environment(
+    step: &VerifiedHostStep,
+    secrets_dir: Option<&Path>,
+) -> Vec<(&'static str, String)> {
+    let mut environment = vec![
         ("PATH", PATH.into()),
         ("LANG", "C.UTF-8".into()),
         ("HOME", "/root".into()),
@@ -62,7 +66,11 @@ pub fn command_environment(step: &VerifiedHostStep) -> Vec<(&'static str, String
         ),
         ("TENKAI_HOST_ACTION", step.action.as_str().into()),
         ("TENKAI_PLAN_ID", step.plan_id.clone()),
-    ]
+    ];
+    if let Some(dir) = secrets_dir {
+        environment.push(("TENKAI_SECRETS_DIR", dir.display().to_string()));
+    }
+    environment
 }
 
 /// How long stopping what the command left behind may take before the
@@ -87,6 +95,7 @@ pub fn adopt_descendants() -> Result<()> {
 pub async fn run_command(
     step: &VerifiedHostStep,
     workdir: &Path,
+    secrets_dir: Option<&Path>,
     timeout: Duration,
     stop: impl Future<Output = ()>,
 ) -> Result<CommandEnd> {
@@ -96,7 +105,7 @@ pub async fn run_command(
         .arg(&step.command)
         .current_dir(workdir)
         .env_clear()
-        .envs(command_environment(step))
+        .envs(command_environment(step, secrets_dir))
         .stdin(Stdio::null())
         .kill_on_drop(true)
         .process_group(0);

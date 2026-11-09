@@ -15,6 +15,7 @@
 
 mod policy;
 mod request;
+pub mod sealed;
 pub mod state;
 mod verify;
 
