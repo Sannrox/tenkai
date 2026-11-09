@@ -759,6 +759,7 @@ mod tests {
                 artifact_digest: "sha256:dddd".into(),
                 workdir: "/tmp".into(),
             }),
+            rewrap: None,
         }
     }
 

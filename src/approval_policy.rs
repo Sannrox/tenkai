@@ -1204,6 +1204,7 @@ mod tests {
                     }),
                     _ => None,
                 },
+                rewrap: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,

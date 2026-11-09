@@ -723,6 +723,7 @@ inputs = ["manifests"]
                 host: None,
                 sealed: Vec::new(),
                 restore: None,
+                rewrap: None,
             }],
         )
         .await

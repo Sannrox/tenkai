@@ -448,6 +448,19 @@ pub(crate) enum SecretCommand {
     },
     /// List sealed keys with their digest, setter and recipients. Never values.
     List { env: String },
+    /// Plan re-wrapping every sealed value of an environment for one more
+    /// recipient key (ADR 0045 §5), such as a newly enrolled runtime's. The
+    /// plan needs signed approval; a runtime that can open the values runs
+    /// it and never sends a value.
+    Rewrap {
+        env: String,
+        /// Recipient key fingerprint (`sha256:<hex>`), from `secret recipients`.
+        #[arg(long)]
+        recipient: String,
+        /// Current fencing generation.
+        #[arg(long)]
+        generation: u64,
+    },
     /// Delete one sealed key.
     Delete {
         env: String,

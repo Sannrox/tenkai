@@ -233,6 +233,7 @@ pub(super) async fn create_pin_plan(
         host: None,
         sealed: Vec::new(),
         restore,
+        rewrap: None,
     };
     plan::create_from_steps(ctx, &record.environment, vec![step]).await
 }

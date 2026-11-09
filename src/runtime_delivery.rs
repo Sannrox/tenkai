@@ -45,6 +45,11 @@ pub struct RuntimeStepReceipt {
     pub step_id: String,
     pub succeeded: bool,
     pub detail: String,
+    /// The wraps a re-wrap step made for its recipient (ADR 0045 §5). The
+    /// server keeps only those the claimed, approved step names. Omitted
+    /// otherwise, so older servers read every other receipt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wraps: Vec<crate::sealed_secret::RecipientWrap>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,7 +233,7 @@ async fn require_runtime_placement(
     environment: &str,
     plan: &crate::plan::Plan,
 ) -> Result<(), RuntimeDeliveryError> {
-    for step in &plan.steps {
+    for step in plan.steps.iter().filter(|step| step.rewrap.is_none()) {
         crate::topology::require_placement(ctx, environment, &step.release_id)
             .await
             .map_err(
@@ -294,6 +299,28 @@ pub(crate) async fn complete_runtime_work(
                 .collect()
         })
         .unwrap_or_default();
+    // A re-wrap step deploys nothing: it never touches the deployment record
+    // or the failed targets, and it exports no delivery outcome.
+    let deploying: Vec<crate::plan::Step> = stored
+        .steps
+        .iter()
+        .filter(|step| step.rewrap.is_none())
+        .cloned()
+        .collect();
+    // A plan of re-wrap steps only, as `secret rewrap` builds, changes no
+    // environment state: its wraps were stored under the environment lease
+    // before this ran. Rewriting the environment here could restore wraps a
+    // revocation dropped meanwhile, so only the plan moves on.
+    if deploying.is_empty() && stored.steps.iter().all(|step| step.rewrap.is_some()) {
+        crate::plan::transition(
+            ctx,
+            &mut stored,
+            crate::plan::Transition::new(terminal, completion.detail.clone()),
+            crate::plan::Persistence::Standard,
+        )
+        .await?;
+        return Ok(());
+    }
     if completion.succeeded {
         let mut object = ctx
             .get(&crate::ontology::env_id(environment))
@@ -301,13 +328,8 @@ pub(crate) async fn complete_runtime_work(
             .ok_or_else(|| {
                 anyhow::anyhow!("environment {environment} disappeared during outcome enqueue")
             })?;
-        crate::plan::update_runtime_deployments_object(
-            ctx,
-            &mut object,
-            &stored.steps,
-            observed_at,
-        )
-        .await?;
+        crate::plan::update_runtime_deployments_object(ctx, &mut object, &deploying, observed_at)
+            .await?;
         environment_object = Some(object);
     }
     if environment_object.is_none() {
@@ -323,8 +345,7 @@ pub(crate) async fn complete_runtime_work(
         .as_mut()
         .expect("completion loads the environment");
     if !completion.succeeded {
-        let succeeded_steps = stored
-            .steps
+        let succeeded_steps = deploying
             .iter()
             .filter(|step| {
                 completion
@@ -345,6 +366,11 @@ pub(crate) async fn complete_runtime_work(
         else {
             continue;
         };
+        // Its wraps were stored before, under the environment lease
+        // (`sealed_secret::store_completion_wraps`).
+        if step.rewrap.is_some() {
+            continue;
+        }
         let key = format!("failed_target.{}", step.product);
         if crate::terminal_outcome::classify(
             step.action,
@@ -395,8 +421,7 @@ pub(crate) async fn complete_runtime_work(
         let environment_object = environment_object
             .as_ref()
             .expect("outcome export always loads the environment");
-        stored
-            .steps
+        deploying
             .iter()
             .filter_map(|step| {
                 completion
@@ -552,6 +577,14 @@ pub(crate) async fn validate_runtime_completion(
         !completion.succeeded || completion.receipts.iter().all(|receipt| receipt.succeeded),
         "a successful runtime completion cannot contain a failed step receipt"
     );
+    for receipt in &completion.receipts {
+        let step = stored
+            .steps
+            .iter()
+            .find(|step| step.id == receipt.step_id)
+            .expect("receipts cover the plan's steps");
+        require_approved_wraps(step, receipt)?;
+    }
     let terminal = if completion.succeeded {
         PlanState::Succeeded
     } else {
@@ -568,6 +601,87 @@ pub(crate) async fn validate_runtime_completion(
         matches!(stored.state, PlanState::Computed | PlanState::Running),
         "runtime plan is not executable"
     );
+    Ok(())
+}
+
+/// The wraps of a completion's succeeded re-wrap steps, by instance.
+fn completion_wraps(
+    plan: &crate::plan::Plan,
+    completion: &RuntimeCompletion,
+) -> Vec<(String, Vec<crate::sealed_secret::RecipientWrap>)> {
+    completion
+        .receipts
+        .iter()
+        .filter(|receipt| receipt.succeeded && !receipt.wraps.is_empty())
+        .filter_map(|receipt| {
+            let step = plan
+                .steps
+                .iter()
+                .find(|step| step.id == receipt.step_id && step.rewrap.is_some())?;
+            Some((step.instance_name().to_owned(), receipt.wraps.clone()))
+        })
+        .collect()
+}
+
+/// The recipients a completion carries wraps for.
+fn wrapped_recipients(completion: &RuntimeCompletion) -> std::collections::BTreeSet<String> {
+    completion
+        .receipts
+        .iter()
+        .flat_map(|receipt| &receipt.wraps)
+        .map(|wrap| wrap.wrap.fingerprint.clone())
+        .collect()
+}
+
+/// Keep only wraps for `current` recipients: a recipient revoked after the
+/// runtime fetched its key gets none back.
+fn retain_recipient_wraps(
+    completion: &mut RuntimeCompletion,
+    current: &std::collections::BTreeSet<String>,
+) {
+    for receipt in &mut completion.receipts {
+        receipt
+            .wraps
+            .retain(|wrap| current.contains(&wrap.wrap.fingerprint));
+    }
+}
+
+/// Refuse wraps the approved plan does not name (ADR 0045 §5): only a
+/// succeeded re-wrap step carries them, each for the step's recipient and
+/// for a value of the step's bindings at its approved digest. A server can
+/// therefore not attach a wrap a runtime did not make for an approved step.
+fn require_approved_wraps(
+    step: &crate::plan::Step,
+    receipt: &RuntimeStepReceipt,
+) -> anyhow::Result<()> {
+    if receipt.wraps.is_empty() {
+        return Ok(());
+    }
+    let Some(rewrap) = step.rewrap.as_ref().filter(|_| receipt.succeeded) else {
+        anyhow::bail!(
+            "step {} carries wraps but is not a succeeded re-wrap step",
+            step.id
+        );
+    };
+    for wrap in &receipt.wraps {
+        crate::sealed_secret::check_wrap(&wrap.wrap)?;
+        anyhow::ensure!(
+            wrap.wrap.fingerprint == rewrap.fingerprint,
+            "step {} wraps for {}, not its recipient {}",
+            step.id,
+            wrap.wrap.fingerprint,
+            rewrap.fingerprint
+        );
+        anyhow::ensure!(
+            step.sealed.iter().any(|sealed| sealed.secret == wrap.secret
+                && sealed.key == wrap.key
+                && sealed.digest == wrap.digest),
+            "step {} has no sealed {}/{} at that digest",
+            step.id,
+            wrap.secret,
+            wrap.key
+        );
+    }
     Ok(())
 }
 
@@ -673,6 +787,11 @@ pub struct RuntimeRelease {
     /// runtime opens the one wrapped for its own key (ADR 0045 §4).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sealed: Vec<RuntimeSealedValue>,
+    /// For a re-wrap step, the public key of the recipient it names. The
+    /// runtime checks its fingerprint against the approved step before it
+    /// wraps anything for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrap_recipient: Option<String>,
 }
 
 /// One sealed value a step writes. The plan step names its digest.
@@ -948,7 +1067,8 @@ impl RuntimeDeliveryOperations {
                 "software compatibility preflight unavailable".into(),
             ));
         };
-        for step in &plan.steps {
+        // A re-wrap step deploys nothing, so it needs no deployment preflight.
+        for step in plan.steps.iter().filter(|step| step.rewrap.is_none()) {
             crate::software_compatibility::require_release(
                 &mut ctx,
                 environment,
@@ -1039,10 +1159,7 @@ impl RuntimeDeliveryOperations {
                 if let Some(completion_json) = lapsed {
                     let completion: RuntimeCompletion = serde_json::from_str(&completion_json)
                         .map_err(|error| RuntimeDeliveryError::Internal(error.to_string()))?;
-                    self.reconciler
-                        .complete_work(environment.to_string(), completion)
-                        .await
-                        .map_err(|error| RuntimeDeliveryError::Internal(format!("{error:#}")))?;
+                    self.apply_completion(environment, completion).await?;
                 }
                 Ok(idle_work(environment))
             }
@@ -1072,10 +1189,62 @@ impl RuntimeDeliveryOperations {
                 &completion_json,
             )
             .map_err(|error| RuntimeDeliveryError::Conflict(error.to_string()))?;
+        self.apply_completion(environment, completion).await
+    }
+
+    /// Apply a completion, keeping only wraps for recipients that are still
+    /// unrevoked (ADR 0045 §5). Revocation records itself before it drops a
+    /// key's wraps, so a recipient revoked while this runs is caught by the
+    /// check after it, and its wraps are dropped again: whichever finishes
+    /// last leaves none. A replayed completion runs the same checks.
+    async fn apply_completion(
+        &self,
+        environment: &str,
+        mut completion: RuntimeCompletion,
+    ) -> Result<(), RuntimeDeliveryError> {
+        if !wrapped_recipients(&completion).is_empty() {
+            let Some(mut ctx) = self.reconciler.application_ctx() else {
+                return Err(RuntimeDeliveryError::Unavailable(
+                    "sealed values unavailable".into(),
+                ));
+            };
+            let plan = crate::plan::load(&mut ctx, &completion.plan_id)
+                .await
+                .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+            let wraps = completion_wraps(&plan, &completion);
+            crate::sealed_secret::store_completion_wraps(&mut ctx, environment, &wraps, || {
+                self.recipient_fingerprints(environment)
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            })
+            .await
+            .map_err(|error| {
+                RuntimeDeliveryError::Unavailable(format!(
+                    "storing the re-wrapped sealed values: {error:#}"
+                ))
+            })?;
+            // Stored; the plan's completion carries nothing more to apply.
+            retain_recipient_wraps(&mut completion, &Default::default());
+        }
         self.reconciler
             .complete_work(environment.to_string(), completion)
             .await
             .map_err(|error| RuntimeDeliveryError::Internal(format!("{error:#}")))
+    }
+
+    /// Fingerprints of `environment`'s unrevoked recipient keys.
+    fn recipient_fingerprints(
+        &self,
+        environment: &str,
+    ) -> Result<std::collections::BTreeSet<String>, RuntimeDeliveryError> {
+        Ok(self
+            .environment_recipient_keys(environment)?
+            .into_iter()
+            .filter_map(|record| {
+                crate::sealing_key::SealingPublicKey::from_wire(&record.public_key)
+                    .ok()
+                    .map(|key| key.fingerprint())
+            })
+            .collect())
     }
 
     pub async fn renew(
@@ -1103,7 +1272,8 @@ impl RuntimeDeliveryOperations {
         if plan.environment != environment {
             return Err(RuntimeDeliveryError::ForeignEnvironment);
         }
-        for step in &plan.steps {
+        // A re-wrap step deploys nothing, so it needs no deployment preflight.
+        for step in plan.steps.iter().filter(|step| step.rewrap.is_none()) {
             crate::software_compatibility::require_release(
                 &mut ctx,
                 environment,
@@ -1234,7 +1404,7 @@ impl RuntimeDeliveryOperations {
                 "the plan has no step with that id".into(),
             ));
         };
-        crate::apply::runtime_release(&mut ctx, &plan, step, request.restore)
+        let mut release = crate::apply::runtime_release(&mut ctx, &plan, step, request.restore)
             .await
             .map_err(
                 |error| match error.downcast_ref::<crate::apply::ReleaseRefused>() {
@@ -1245,7 +1415,27 @@ impl RuntimeDeliveryOperations {
                         RuntimeDeliveryError::Unavailable("release package unavailable".into())
                     }
                 },
-            )
+            )?;
+        // A re-wrap step names its recipient by fingerprint; the runtime
+        // needs the public key, which only an unrevoked recipient still has.
+        if let Some(rewrap) = &step.rewrap {
+            let recipient = self
+                .environment_recipient_keys(environment)?
+                .into_iter()
+                .find_map(|record| {
+                    let key =
+                        crate::sealing_key::SealingPublicKey::from_wire(&record.public_key).ok()?;
+                    (key.fingerprint() == rewrap.fingerprint).then(|| key.to_wire())
+                })
+                .ok_or_else(|| {
+                    RuntimeDeliveryError::ReleaseRefused(format!(
+                        "{} is no longer an unrevoked recipient key of {environment}",
+                        rewrap.fingerprint
+                    ))
+                })?;
+            release.rewrap_recipient = Some(recipient);
+        }
+        Ok(release)
     }
 
     /// Admit the host applier's applied-state records a runtime reports for
@@ -1947,6 +2137,311 @@ fn runtime_assignment(assignments: &HashMap<String, String>, token: &str) -> Opt
 
 #[cfg(test)]
 mod tests {
+
+    /// Completing a re-wrap plan stores the new wraps on the values it named
+    /// and leaves the deployment record, rollback history and failed targets
+    /// alone: a re-wrap deploys nothing (ADR 0045 §5).
+    #[tokio::test]
+    async fn a_completed_rewrap_stores_wraps_and_deploys_nothing() {
+        use crate::sealed_secret::{RecipientWrap, SealedRecord, SealedWrap};
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-rewrap-complete-{}-{}.db",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "prod", "rewrap")
+            .await
+            .unwrap();
+        let wrap = |fingerprint: &str| SealedWrap {
+            fingerprint: fingerprint.into(),
+            encapsulated_key: "AA==".into(),
+            wrapped_key: "AA==".into(),
+        };
+        let (old, new) = (
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "b".repeat(64)),
+        );
+        let record = SealedRecord {
+            sealed: crate::sealed_secret::SealedValue {
+                format_version: 1,
+                ciphertext: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    [0_u8; 40],
+                ),
+                wraps: vec![wrap(&old)],
+            },
+            digest: "sha256:value".into(),
+            set_by: "operator".into(),
+            set_at: 1,
+        };
+        let mut env_obj = crate::environment::environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+        for (key, value) in [
+            ("deployed.api", "1.0.0".to_string()),
+            ("deployed_prev.api", "0.9.0".to_string()),
+            (
+                "sealed.api",
+                serde_json::to_string(&BTreeMap::from([("db/password", record)])).unwrap(),
+            ),
+        ] {
+            env_obj.properties.insert(key.into(), value);
+        }
+        ctx.put(env_obj).await.unwrap();
+
+        let now = crate::now_millis();
+        let id = format!("tenkai:plan:prod:{now}");
+        let mut plan = Plan {
+            format_version: crate::plan::PLAN_FORMAT_VERSION,
+            id: id.clone(),
+            content_id: format!("content-{now}"),
+            environment: "prod".into(),
+            created_at: now,
+            inputs: Vec::new(),
+            steps: vec![crate::plan::Step {
+                id: format!("{id}:step:0"),
+                order: 0,
+                product: "api".into(),
+                instance: String::new(),
+                action: crate::plan::Action::Restart,
+                from: Some("1.0.0".into()),
+                to: "1.0.0".into(),
+                release_id: crate::ontology::release_id("api", "1.0.0"),
+                release_digest: "manifest".into(),
+                artifact_digest: "artifact".into(),
+                workdir: String::new(),
+                restore: None,
+                host: None,
+                sealed: vec![crate::plan::SealedStep {
+                    secret: "db".into(),
+                    key: "password".into(),
+                    digest: "sha256:value".into(),
+                }],
+                rewrap: Some(crate::plan::RewrapStep {
+                    fingerprint: new.clone(),
+                }),
+            }],
+            state: PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+            credential_runway: None,
+        };
+        plan.bind_content_identity().unwrap();
+        let (id, step_id) = (plan.id.clone(), plan.steps[0].id.clone());
+        ctx.put(plan.to_object().unwrap()).await.unwrap();
+        let before = crate::environment::environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+
+        // As the runtime's completion does: wraps under the environment
+        // lease first, then the plan.
+        crate::sealed_secret::store_completion_wraps(
+            &mut ctx,
+            "prod",
+            &[(
+                "api".to_string(),
+                vec![
+                    RecipientWrap {
+                        secret: "db".into(),
+                        key: "password".into(),
+                        digest: "sha256:value".into(),
+                        wrap: wrap(&new),
+                    },
+                    // Revoked after the runtime fetched its key: not kept.
+                    RecipientWrap {
+                        secret: "db".into(),
+                        key: "password".into(),
+                        digest: "sha256:value".into(),
+                        wrap: wrap(&format!("sha256:{}", "c".repeat(64))),
+                    },
+                ],
+            )],
+            || Ok([old.clone(), new.clone()].into()),
+        )
+        .await
+        .unwrap();
+        complete_runtime_work(
+            &mut ctx,
+            "prod",
+            &RuntimeCompletion {
+                plan_id: id.clone(),
+                generation: 1,
+                succeeded: true,
+                detail: "done".into(),
+                receipts: vec![RuntimeStepReceipt {
+                    step_id,
+                    succeeded: true,
+                    detail: "re-wrapped".into(),
+                    wraps: vec![RecipientWrap {
+                        secret: "db".into(),
+                        key: "password".into(),
+                        digest: "sha256:value".into(),
+                        wrap: wrap(&new),
+                    }],
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let listed = crate::sealed_secret::list(&mut ctx, "prod").await.unwrap();
+        assert_eq!(listed.secrets[0].recipients, [old, new]);
+        assert_eq!(listed.secrets[0].digest, "sha256:value");
+        let after = crate::environment::environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+        for key in ["deployed.api", "deployed_prev.api"] {
+            assert_eq!(
+                after.properties.get(key),
+                before.properties.get(key),
+                "{key}"
+            );
+        }
+        assert!(
+            !after
+                .properties
+                .keys()
+                .any(|key| key.starts_with("failed_target")),
+            "{:?}",
+            after.properties
+        );
+        assert_eq!(
+            crate::plan::load(&mut ctx, &id).await.unwrap().state,
+            PlanState::Succeeded
+        );
+        let _ = std::fs::remove_file(database);
+    }
+
+    /// A recipient revoked after the runtime fetched its key gets no wraps
+    /// back from the completion.
+    #[test]
+    fn wraps_of_a_revoked_recipient_are_not_kept() {
+        let wrap = |fingerprint: &str| crate::sealed_secret::RecipientWrap {
+            secret: "db".into(),
+            key: "password".into(),
+            digest: "sha256:value".into(),
+            wrap: crate::sealed_secret::SealedWrap {
+                fingerprint: fingerprint.into(),
+                encapsulated_key: "AA==".into(),
+                wrapped_key: "AA==".into(),
+            },
+        };
+        let mut completion = RuntimeCompletion {
+            plan_id: "plan".into(),
+            generation: 1,
+            succeeded: true,
+            detail: String::new(),
+            receipts: vec![RuntimeStepReceipt {
+                step_id: "plan:step:0".into(),
+                succeeded: true,
+                detail: String::new(),
+                wraps: vec![wrap("sha256:kept"), wrap("sha256:revoked")],
+            }],
+        };
+        assert_eq!(
+            wrapped_recipients(&completion),
+            ["sha256:kept".to_string(), "sha256:revoked".to_string()].into()
+        );
+        retain_recipient_wraps(&mut completion, &["sha256:kept".to_string()].into());
+        assert_eq!(completion.receipts[0].wraps, [wrap("sha256:kept")]);
+    }
+
+    /// Only a succeeded re-wrap step carries wraps, each for the step's
+    /// recipient and for a value it names at its approved digest.
+    #[test]
+    fn wraps_are_accepted_only_as_the_approved_rewrap_step_names_them() {
+        let sealed = crate::plan::SealedStep {
+            secret: "db".into(),
+            key: "password".into(),
+            digest: "sha256:approved".into(),
+        };
+        let recipient = format!("sha256:{}", "b".repeat(64));
+        let step = crate::plan::Step {
+            id: "plan:step:0".into(),
+            order: 0,
+            product: "api".into(),
+            instance: String::new(),
+            action: crate::plan::Action::Restart,
+            from: Some("1.0.0".into()),
+            to: "1.0.0".into(),
+            release_id: crate::ontology::release_id("api", "1.0.0"),
+            release_digest: "manifest".into(),
+            artifact_digest: "artifact".into(),
+            workdir: String::new(),
+            restore: None,
+            host: None,
+            sealed: vec![sealed.clone()],
+            rewrap: Some(crate::plan::RewrapStep {
+                fingerprint: recipient.clone(),
+            }),
+        };
+        let wrap = |fingerprint: &str, digest: &str| crate::sealed_secret::RecipientWrap {
+            secret: "db".into(),
+            key: "password".into(),
+            digest: digest.into(),
+            wrap: crate::sealed_secret::SealedWrap {
+                fingerprint: fingerprint.into(),
+                encapsulated_key: "AA==".into(),
+                wrapped_key: "AA==".into(),
+            },
+        };
+        let receipt = |succeeded: bool, wraps| RuntimeStepReceipt {
+            step_id: step.id.clone(),
+            succeeded,
+            detail: String::new(),
+            wraps,
+        };
+        require_approved_wraps(
+            &step,
+            &receipt(true, vec![wrap(&recipient, "sha256:approved")]),
+        )
+        .unwrap();
+        for (refused, receipt) in [
+            (
+                "another recipient",
+                receipt(
+                    true,
+                    vec![wrap(
+                        &format!("sha256:{}", "c".repeat(64)),
+                        "sha256:approved",
+                    )],
+                ),
+            ),
+            (
+                "another digest",
+                receipt(true, vec![wrap(&recipient, "sha256:changed")]),
+            ),
+            (
+                "a failed step",
+                receipt(false, vec![wrap(&recipient, "sha256:approved")]),
+            ),
+            ("a malformed wrap", {
+                let mut malformed = wrap(&recipient, "sha256:approved");
+                malformed.wrap.encapsulated_key = "not base64!".into();
+                receipt(true, vec![malformed])
+            }),
+        ] {
+            assert!(
+                require_approved_wraps(&step, &receipt).is_err(),
+                "{refused}"
+            );
+        }
+        let mut deploy = step.clone();
+        deploy.rewrap = None;
+        assert!(
+            require_approved_wraps(
+                &deploy,
+                &receipt(true, vec![wrap(&recipient, "sha256:approved")])
+            )
+            .is_err(),
+            "a step that is not a re-wrap step"
+        );
+    }
     use std::sync::Mutex;
 
     use super::*;

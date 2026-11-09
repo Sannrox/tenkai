@@ -488,6 +488,21 @@ pub struct RollbackRequest {
     pub recovery_reason: Option<String>,
 }
 
+/// Ask for a plan that re-wraps every sealed value of the environment for
+/// one more recipient key (ADR 0045 §5). The operation is `plan`: the
+/// result is a plan that needs signed approval like any other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SealedRewrapRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    /// `sha256:<hex>` fingerprint of an unrevoked recipient key of the
+    /// environment.
+    pub recipient: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeliveryHoldRequest {
@@ -882,6 +897,25 @@ pub fn admit_rollback(
         &request.environment,
         request.expected_generation,
         ManagementLifecycleOperation::Rollback,
+        kind,
+        granted_environment,
+    )
+}
+
+pub fn admit_sealed_rewrap(
+    request: &SealedRewrapRequest,
+    path_environment: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_path_environment("re-wrap", &request.environment, path_environment)?;
+    crate::sealing_key::normalize_fingerprint(&request.recipient)?;
+    admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        ManagementLifecycleOperation::Plan,
         kind,
         granted_environment,
     )

@@ -31,6 +31,7 @@ fn plan_with_steps(id: &str, environment: &str, steps: u32) -> Plan {
                 host: None,
                 sealed: Vec::new(),
                 restore: None,
+                rewrap: None,
             })
             .collect(),
         state: PlanState::Computed,

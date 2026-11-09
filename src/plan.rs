@@ -117,6 +117,21 @@ pub struct Step {
     /// different digest, and fails approval closed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sealed: Vec<SealedStep>,
+    /// Set only on a re-wrap step (ADR 0045 §5): the runtime opens the
+    /// instance's sealed values, as named by `sealed`, and wraps each data
+    /// key for this recipient. It deploys nothing. Omitted when absent, so
+    /// plan digests of every other step are unchanged; a binary that
+    /// predates it fails approval closed, as for `host`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrap: Option<RewrapStep>,
+}
+
+/// The recipient a re-wrap step adds (ADR 0045 §5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RewrapStep {
+    /// `sha256:<hex>` fingerprint of the recipient's sealing public key.
+    pub fingerprint: String,
 }
 
 impl Step {
@@ -653,6 +668,16 @@ pub async fn rollback_step_with_recovery(
     }
 }
 
+/// Re-wrap steps for `fingerprint` (ADR 0045 §5), and the instances with
+/// sealed values that have nothing deployed yet.
+pub async fn rewrap_steps(
+    ctx: &mut Ctx,
+    env: &str,
+    fingerprint: &str,
+) -> Result<(Vec<Step>, Vec<String>)> {
+    convergence::rewrap_steps(ctx, env, fingerprint).await
+}
+
 pub async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
     convergence::restart_step(ctx, env, product).await
 }
@@ -751,6 +776,7 @@ mod tests {
                     artifact_digest: "restore-artifact-digest".into(),
                     workdir: "/srv/api".into(),
                 }),
+                rewrap: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,

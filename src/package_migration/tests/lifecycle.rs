@@ -48,6 +48,7 @@ async fn compatible_migration_approves_executes_resumes_and_rolls_back() {
             host: None,
             sealed: Vec::new(),
             restore: None,
+            rewrap: None,
         }],
     )
     .await

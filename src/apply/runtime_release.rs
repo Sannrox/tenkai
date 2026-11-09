@@ -48,6 +48,15 @@ pub(crate) async fn runtime_release(
             step.id
         )));
     }
+    if step.rewrap.is_some() {
+        if restore {
+            return Err(refused(anyhow!(
+                "step {} re-wraps sealed values and has no restore pin",
+                step.id
+            )));
+        }
+        return rewrap_package(ctx, plan, step).await;
+    }
     let recovery = plan
         .recalled_recovery_reason
         .as_deref()
@@ -146,6 +155,43 @@ pub(crate) async fn runtime_release(
         entries,
         replaces,
         sealed,
+        rewrap_recipient: None,
+    })
+}
+
+/// The package of a re-wrap step (ADR 0045 §5): the sealed values it names,
+/// in its order, and nothing a deployment needs. No release content is
+/// admitted, no artifact pulled and no input packaged, so an unreachable
+/// registry or a missing input never blocks re-wrapping. The runtime uses
+/// only the sealed values and the recipient key the caller adds.
+async fn rewrap_package(ctx: &mut Ctx, plan: &Plan, step: &Step) -> Result<RuntimeRelease> {
+    let environment = crate::environment::environment(ctx, &plan.environment).await?;
+    let sealed =
+        crate::sealed_secret::step_values(&environment, step.instance_name(), &step.sealed)
+            .map_err(refused)?
+            .into_iter()
+            .map(|(binding, sealed)| RuntimeSealedValue {
+                secret: binding.secret,
+                key: binding.key,
+                sealed,
+            })
+            .collect();
+    let mut request = crate::software_executor::request_from_parts(
+        &step.product,
+        &step.to,
+        &plan.environment,
+        Path::new(""),
+        &step.release_id,
+    );
+    request.instance = step.instance.clone();
+    Ok(RuntimeRelease {
+        manifest: String::new(),
+        signature: crate::catalog::signature_envelope(ctx, &step.release_id).await?,
+        request,
+        entries: Vec::new(),
+        replaces: None,
+        sealed,
+        rewrap_recipient: None,
     })
 }
 

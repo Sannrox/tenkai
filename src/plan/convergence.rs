@@ -225,6 +225,12 @@ async fn bind_host_steps(
     // Read once the first host step needs them.
     let mut records = None;
     for mut step in steps {
+        // A re-wrap step runs no applier: it only re-wraps sealed values
+        // (ADR 0045 §5), whatever executor deployed the instance.
+        if step.rewrap.is_some() {
+            bound.push(step);
+            continue;
+        }
         // A release that is missing or unreadable is left to apply
         // admission, which refuses it.
         let Some(manifest) = readable_manifest(ctx, &step.release_id).await? else {
@@ -1090,6 +1096,7 @@ async fn compute_snapshot_with_policy(
                 artifact_digest: entry.release.artifact_digest,
                 workdir: entry.release.workdir,
                 restore: entry.restore,
+                rewrap: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1942,8 +1949,33 @@ async fn create_with_content(
         plan.credential_runway =
             crate::trust_posture::environment_runway(ctx, inspect.maintenance.as_ref());
     }
+    plan.prior_warnings
+        .extend(unopenable_sealed_warnings(ctx, env, &plan.steps).await?);
     store(ctx, &plan).await?;
     Ok(plan)
+}
+
+/// A warning for every sealed value a step writes that no recipient can
+/// open any more (ADR 0045 §5): its step fails until it is set again.
+async fn unopenable_sealed_warnings(
+    ctx: &mut Ctx,
+    env: &str,
+    steps: &[Step],
+) -> Result<Vec<String>> {
+    if steps.iter().all(|step| step.sealed.is_empty()) {
+        return Ok(Vec::new());
+    }
+    let env_obj = crate::environment::environment(ctx, env).await?;
+    let mut warnings = Vec::new();
+    for step in steps.iter().filter(|step| !step.sealed.is_empty()) {
+        let instance = step.instance_name();
+        for name in crate::sealed_secret::unopenable(&env_obj, instance)? {
+            warnings.push(format!(
+                "sealed {instance} {name} has no recipient key that can open it; set it again"
+            ));
+        }
+    }
+    Ok(warnings)
 }
 
 /// A rollback step to the previously deployed version of one product.
@@ -2062,6 +2094,7 @@ pub(super) async fn rollback_step_with_recovery(
         action: Action::Rollback,
         from: current,
         to: prev,
+        rewrap: None,
     })
 }
 
@@ -2105,7 +2138,78 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
         action: Action::Restart,
         from: Some(current.clone()),
         to: current,
+        rewrap: None,
     })
+}
+
+/// One re-wrap step per instance of `env` with sealed values (ADR 0045 §5):
+/// the runtime that claims it opens the instance's values, as the step's
+/// bindings name them, and wraps each data key for `fingerprint`. The step
+/// pins the deployed release, as a restart does, but deploys nothing, so a
+/// recalled release does not block it. Instances with sealed values and no
+/// deployed release are returned by name instead: their values are
+/// re-wrapped once one is installed.
+pub(super) async fn rewrap_steps(
+    ctx: &mut Ctx,
+    env: &str,
+    fingerprint: &str,
+) -> Result<(Vec<Step>, Vec<String>)> {
+    let fingerprint = crate::sealing_key::normalize_fingerprint(fingerprint)?;
+    let env_obj = crate::environment::environment(ctx, env).await?;
+    let mut instances: Vec<String> = env_obj
+        .properties
+        .keys()
+        .filter_map(|key| key.strip_prefix("sealed.").map(str::to_owned))
+        .collect();
+    instances.sort_unstable();
+    let mut steps = Vec::new();
+    let mut undeployed = Vec::new();
+    for instance in instances {
+        let sealed = crate::sealed_secret::step_bindings(&env_obj, &instance)?;
+        if sealed.is_empty() {
+            continue;
+        }
+        let Some(current) = env_obj
+            .properties
+            .get(&format!("deployed.{instance}"))
+            .cloned()
+            .filter(|value| !value.is_empty())
+        else {
+            undeployed.push(instance);
+            continue;
+        };
+        let product = product_for_instance(&env_obj.properties, &instance);
+        let target = pin_release_for_recovery(
+            ctx,
+            &deployed_release_id(&env_obj.properties, &instance, &current),
+            env,
+        )
+        .await?;
+        steps.push(Step {
+            id: format!("{}:rewrap:{instance}", env_id(env)),
+            order: steps.len() as u32,
+            release_id: target.release_id,
+            release_digest: target.digest,
+            artifact_digest: target.artifact_digest,
+            workdir: target.workdir,
+            host: None,
+            sealed,
+            restore: None,
+            instance: if instance == product {
+                String::new()
+            } else {
+                instance.clone()
+            },
+            product,
+            action: Action::Restart,
+            from: Some(current.clone()),
+            to: current,
+            rewrap: Some(crate::plan::RewrapStep {
+                fingerprint: fingerprint.clone(),
+            }),
+        });
+    }
+    Ok((steps, undeployed))
 }
 
 #[cfg(test)]

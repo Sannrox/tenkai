@@ -258,6 +258,7 @@ install = "true"
                 step_id: plan.steps[0].id.clone(),
                 succeeded: true,
                 detail: "profile runtime completion".into(),
+                wraps: Vec::new(),
             }],
         };
         admit_runtime_completion(&mut ctx, "prod", &success)

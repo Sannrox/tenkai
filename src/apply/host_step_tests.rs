@@ -1402,3 +1402,65 @@ async fn a_step_whose_applier_died_resolves_interrupted_and_never_runs_again() {
     assert_eq!(host.record().generation, 1);
     assert!(matches!(host.record().state, AppliedState::Dirty { .. }));
 }
+
+/// A host instance's sealed values can be re-wrapped (ADR 0045 §5): the
+/// re-wrap step is not a restart for the applier, so host binding leaves it
+/// alone.
+#[tokio::test]
+async fn a_host_instance_with_sealed_values_gets_a_rewrap_plan() {
+    let mut host = Host::new("rewrap").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    host.apply(&plan).await.unwrap();
+    let mut env_obj = crate::environment::environment(&mut host.ctx, "edge")
+        .await
+        .unwrap();
+    env_obj.properties.insert(
+        "sealed.cluster".into(),
+        serde_json::json!({
+            "db/password": {
+                "sealed": {"format_version": 1, "ciphertext": "AA==", "wraps": []},
+                "digest": "sha256:value",
+                "set_by": "operator",
+                "set_at": 1,
+            }
+        })
+        .to_string(),
+    );
+    host.ctx.put(env_obj).await.unwrap();
+
+    let recipient = format!("sha256:{}", "b".repeat(64));
+    let (steps, undeployed) = crate::plan::rewrap_steps(&mut host.ctx, "edge", &recipient)
+        .await
+        .unwrap();
+    assert!(undeployed.is_empty());
+    let rewrap = crate::plan::create_from_steps(&mut host.ctx, "edge", steps)
+        .await
+        .unwrap();
+    let [step] = rewrap.steps.as_slice() else {
+        panic!("one re-wrap step");
+    };
+    assert_eq!(step.host, None);
+    assert_eq!(
+        step.rewrap
+            .as_ref()
+            .map(|rewrap| rewrap.fingerprint.as_str()),
+        Some(recipient.as_str())
+    );
+    assert_eq!(step.sealed.len(), 1);
+
+    // Its package needs nothing a deployment needs: with the release's
+    // content gone from disk it still carries the sealed values.
+    let _ = std::fs::remove_dir_all(&step.workdir);
+    let package = super::runtime_release(&mut host.ctx, &rewrap, step, false)
+        .await
+        .unwrap();
+    assert_eq!(package.sealed.len(), 1);
+    assert!(package.entries.is_empty() && package.manifest.is_empty());
+    assert!(
+        super::runtime_release(&mut host.ctx, &rewrap, step, true)
+            .await
+            .is_err(),
+        "a re-wrap step has no restore pin"
+    );
+}

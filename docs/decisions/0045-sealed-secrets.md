@@ -7,6 +7,8 @@
 - Amends: [ADR 0016](0016-same-version-remediation.md) (no secret storage)
 - Amended by: [ADR 0048](0048-runtime-runs-built-in-executors.md) (§4 writer,
   host file owner and host hand-off)
+- Amended: 2026-11-09 by [#1051](https://github.com/Sannrox/tenkai/issues/1051)
+  (§5 how a recipient step is requested, carried, run, and accepted)
 - Related: [ADR 0037](0037-multi-party-plan-approval.md),
   [ADR 0041](0041-per-release-executor-and-privileged-host-releases.md),
   [ADR 0044](0044-product-instances-and-dependency-bindings.md),
@@ -190,6 +192,51 @@ enrolling a new runtime and retiring the old one.
 If no recipient that can open a value is left, the value is lost to Tenkai
 unless a recovery key is set (section 7). The operator sets it again, and the
 plan says which keys need that.
+
+How it is delivered (#1051):
+
+- **Requested by the operator.** `secret rewrap <env> --recipient <fp>`
+  builds the plan; the planner does not detect missing wraps, because the
+  recipient set lives with runtime credentials, outside the state it reads.
+  The fingerprint must be an unrevoked recipient of the environment.
+- **A step extension, not a new plan kind.** Each instance with sealed values
+  gets one step that pins its deployed release and names its sealed keys and
+  digests, like a restart, with `rewrap` naming the recipient. A stepless
+  plan is a no-op, so a plan-level field would not run. `rewrap` is omitted
+  when absent, so no other step's digest changes; an older binary computes a
+  different digest and fails approval closed. The step deploys nothing: no
+  executor runs, and the deployment record, rollback history and failed
+  targets are untouched. The server never runs it itself.
+- **Run by a runtime that can open the values.** The claiming runtime checks
+  the step against its local approval policy, the server-supplied recipient
+  key against the step's fingerprint, and each value against the step's
+  digest, then wraps the data key once its own wrap has decrypted the
+  ciphertext. A runtime that cannot open a value fails the step and names
+  why; there is no routing between runtimes.
+- **Returned on the completion.** The wraps ride on the step's receipt,
+  which is stored durably with the completion, so a crash replays them. The
+  server keeps a wrap only for a succeeded re-wrap step, for its recipient,
+  and for a value at the step's digest. A value changed since is skipped:
+  a new value is sealed to the recipients of its time. The wraps are stored
+  under the environment lease, with the unrevoked recipients read inside
+  it, before the plan is marked complete; a replay stores the same wraps
+  again. A value at the wrap limit gets no more, and the step fails, since
+  one more wrap would leave it opening for no one. Completing a plan of
+  re-wrap steps then moves only the plan: it rewrites no environment state,
+  so it cannot restore wraps a revocation dropped meanwhile. A re-wrap step
+  of a host instance is not bound to the host applier, which it never runs.
+- **Revocation drops wraps eagerly.** Revoking a runtime records it, then
+  removes its wraps from every value under the same environment lease, and
+  names the values left with none. A completion storing wraps therefore
+  either sees the revocation and keeps none for it, or commits first and
+  has them dropped. Revoking is idempotent, so a drop that met a held lease
+  is retried by revoking again. Every plan that writes such a value warns
+  about it. Known residual: an ordinary deployment completion still
+  rewrites the environment without the lease, so one completing in the
+  same instant can restore a revoked key's wraps at rest until the next
+  revocation or re-wrap of that key. The store's revocation stays
+  authoritative: no re-wrap is ever made for a revoked key. #1139 closes
+  this for every environment change.
 
 ### 6. Hand-made secrets keep working
 

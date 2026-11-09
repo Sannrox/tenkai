@@ -221,6 +221,30 @@ pub(super) async fn rollback_environment(
     )
 }
 
+/// A plan that re-wraps an environment's sealed values for one more
+/// recipient key (ADR 0045 §5).
+pub(super) async fn rewrap_sealed_secrets(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .rewrap_sealed_secrets(&credential, &environment, request)
+            .await,
+    )
+}
+
 pub(super) async fn record_software_compatibility_evidence(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,
