@@ -869,6 +869,14 @@ pub async fn drop_recipient(
     fingerprint: &str,
 ) -> Result<Vec<String>> {
     validate_identifier("environment", environment)?;
+    // An environment the store does not register holds no sealed values.
+    if ctx
+        .get(&crate::ontology::env_id(environment))
+        .await?
+        .is_none()
+    {
+        return Ok(Vec::new());
+    }
     let owner = format!("sealed-recipient-drop:{}", crate::now_millis());
     let lease = crate::apply::claim_environment(ctx, environment, &owner).await?;
     let dropped = async {
