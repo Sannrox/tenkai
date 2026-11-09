@@ -231,12 +231,9 @@ How it is delivered (#1051):
   either sees the revocation and keeps none for it, or commits first and
   has them dropped. Revoking is idempotent, so a drop that met a held lease
   is retried by revoking again. Every plan that writes such a value warns
-  about it. Known residual: an ordinary deployment completion still
-  rewrites the environment without the lease, so one completing in the
-  same instant can restore a revoked key's wraps at rest until the next
-  revocation or re-wrap of that key. The store's revocation stays
-  authoritative: no re-wrap is ever made for a revoked key. #1139 closes
-  this for every environment change.
+  about it. A deployment completion also holds the environment lease from
+  its read of the environment to its fenced write (#1139), so it cannot
+  restore wraps a revocation dropped.
 
 ### 6. Hand-made secrets keep working
 

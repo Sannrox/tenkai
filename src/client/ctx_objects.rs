@@ -139,41 +139,6 @@ impl Ctx {
         .await
     }
 
-    pub(crate) async fn put_objects_with_provider_events(
-        &mut self,
-        objects: &[Object],
-        events: &[crate::storage::ProviderEventRecord],
-        observations: &[crate::feedback_observation::FeedbackObservation],
-    ) -> Result<()> {
-        let events = self
-            .with_observation_delivery_events(events, observations)
-            .await;
-        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
-            let objects = objects.to_vec();
-            let observations = observations.to_vec();
-            return super::block_catalog(catalog, move |catalog| {
-                catalog.put_objects_with_provider_events(
-                    Some(&tenant),
-                    &objects,
-                    &events,
-                    &observations,
-                )
-            })
-            .await;
-        }
-        let Some(store) = self.embedded_arc() else {
-            anyhow::bail!(
-                "remote application state cannot atomically update objects and enqueue Tenkai provider events"
-            );
-        };
-        let objects = objects.to_vec();
-        let observations = observations.to_vec();
-        block_embedded(store, move |store| {
-            store.put_objects_with_provider_events(&objects, &events, &observations)
-        })
-        .await
-    }
-
     pub(crate) async fn guarded_create(
         &mut self,
         object: Object,

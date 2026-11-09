@@ -275,30 +275,6 @@ pub(crate) async fn complete_runtime_work(
         )
         .await?;
     }
-    let observed_at = crate::now_millis();
-    let mut environment_object = None;
-    if crate::apply::environment_lease_status(ctx, environment)
-        .await?
-        .is_some()
-    {
-        anyhow::bail!("environment {environment} has an apply in progress");
-    }
-    // The releases held as failed before this completion changes them, so
-    // each step's observation can say whether it retried one (#803).
-    let held_before: std::collections::HashMap<String, String> = ctx
-        .get(&crate::ontology::env_id(environment))
-        .await?
-        .map(|object| {
-            object
-                .properties
-                .into_iter()
-                .filter_map(|(key, value)| {
-                    key.strip_prefix("failed_target.")
-                        .map(|product| (product.to_string(), value))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     // A re-wrap step deploys nothing: it never touches the deployment record
     // or the failed targets, and it exports no delivery outcome.
     let deploying: Vec<crate::plan::Step> = stored
@@ -321,230 +297,281 @@ pub(crate) async fn complete_runtime_work(
         .await?;
         return Ok(());
     }
-    if completion.succeeded {
-        let mut object = ctx
+    // The completion holds the environment lease from its first read of the
+    // environment to its fenced write, so it never overwrites a change made
+    // under the lease meanwhile: a secret, a binding, or a revocation's
+    // dropped wraps (#1139). A held lease fails the completion, which is
+    // retried, and a durable one is replayed, until it applies.
+    let lease =
+        crate::apply::claim_environment_for_completion(ctx, environment, &stored.id).await?;
+    let applied = async {
+        let observed_at = crate::now_millis();
+        let mut environment_object = None;
+        // The releases held as failed before this completion changes them, so
+        // each step's observation can say whether it retried one (#803).
+        let held_before: std::collections::HashMap<String, String> = ctx
             .get(&crate::ontology::env_id(environment))
             .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!("environment {environment} disappeared during outcome enqueue")
-            })?;
-        crate::plan::update_runtime_deployments_object(ctx, &mut object, &deploying, observed_at)
-            .await?;
-        environment_object = Some(object);
-    }
-    if environment_object.is_none() {
-        environment_object = Some(
-            ctx.get(&crate::ontology::env_id(environment))
+            .map(|object| {
+                object
+                    .properties
+                    .into_iter()
+                    .filter_map(|(key, value)| {
+                        key.strip_prefix("failed_target.")
+                            .map(|product| (product.to_string(), value))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if completion.succeeded {
+            let mut object = ctx
+                .get(&crate::ontology::env_id(environment))
                 .await?
                 .ok_or_else(|| {
-                    anyhow::anyhow!("environment {environment} disappeared during completion")
-                })?,
-        );
-    }
-    let object = environment_object
-        .as_mut()
-        .expect("completion loads the environment");
-    if !completion.succeeded {
-        let succeeded_steps = deploying
-            .iter()
-            .filter(|step| {
-                completion
-                    .receipts
-                    .iter()
-                    .any(|receipt| receipt.step_id == step.id && receipt.succeeded)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        crate::plan::update_runtime_deployments_object(ctx, object, &succeeded_steps, observed_at)
+                    anyhow::anyhow!("environment {environment} disappeared during outcome enqueue")
+                })?;
+            crate::plan::update_runtime_deployments_object(
+                ctx,
+                &mut object,
+                &deploying,
+                observed_at,
+            )
             .await?;
-    }
-    for step in &stored.steps {
-        let Some(receipt) = completion
-            .receipts
-            .iter()
-            .find(|receipt| receipt.step_id == step.id)
-        else {
-            continue;
-        };
-        // Its wraps were stored before, under the environment lease
-        // (`sealed_secret::store_completion_wraps`).
-        if step.rewrap.is_some() {
-            continue;
+            environment_object = Some(object);
         }
-        let key = format!("failed_target.{}", step.product);
-        if crate::terminal_outcome::classify(
-            step.action,
-            crate::terminal_outcome::Observation::Runtime {
-                succeeded: receipt.succeeded,
-                detail: &receipt.detail,
-            },
-        )
-        .is_none()
-        {
-            continue;
-        }
-        if !receipt.succeeded && step.action != crate::plan::Action::Rollback {
-            object.properties.insert(key, step.release_id.clone());
-            object.properties.insert(
-                format!("failed_target_plan.{}", step.product),
-                stored.id.clone(),
-            );
-            object.properties.insert(
-                format!("failed_target_at.{}", step.product),
-                observed_at.to_string(),
-            );
-            crate::environment::record_failed_target_error(
-                &mut object.properties,
-                &step.product,
-                &step.release_id,
-                &receipt.detail,
-            );
-        } else if receipt.succeeded && object.properties.get(&key) == Some(&step.release_id) {
-            object.properties.remove(&key);
-            object
-                .properties
-                .remove(&format!("failed_target_plan.{}", step.product));
-        }
-    }
-    let provider_events = if ctx.outcome_export_enabled() {
         if environment_object.is_none() {
             environment_object = Some(
                 ctx.get(&crate::ontology::env_id(environment))
                     .await?
                     .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "environment {environment} disappeared during outcome enqueue"
-                        )
+                        anyhow::anyhow!("environment {environment} disappeared during completion")
                     })?,
             );
         }
-        let environment_object = environment_object
-            .as_ref()
-            .expect("outcome export always loads the environment");
-        deploying
+        let object = environment_object
+            .as_mut()
+            .expect("completion loads the environment");
+        if !completion.succeeded {
+            let succeeded_steps = deploying
+                .iter()
+                .filter(|step| {
+                    completion
+                        .receipts
+                        .iter()
+                        .any(|receipt| receipt.step_id == step.id && receipt.succeeded)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            crate::plan::update_runtime_deployments_object(
+                ctx,
+                object,
+                &succeeded_steps,
+                observed_at,
+            )
+            .await?;
+        }
+        for step in &stored.steps {
+            let Some(receipt) = completion
+                .receipts
+                .iter()
+                .find(|receipt| receipt.step_id == step.id)
+            else {
+                continue;
+            };
+            // Its wraps were stored before, under the environment lease
+            // (`sealed_secret::store_completion_wraps`).
+            if step.rewrap.is_some() {
+                continue;
+            }
+            let key = format!("failed_target.{}", step.product);
+            if crate::terminal_outcome::classify(
+                step.action,
+                crate::terminal_outcome::Observation::Runtime {
+                    succeeded: receipt.succeeded,
+                    detail: &receipt.detail,
+                },
+            )
+            .is_none()
+            {
+                continue;
+            }
+            if !receipt.succeeded && step.action != crate::plan::Action::Rollback {
+                object.properties.insert(key, step.release_id.clone());
+                object.properties.insert(
+                    format!("failed_target_plan.{}", step.product),
+                    stored.id.clone(),
+                );
+                object.properties.insert(
+                    format!("failed_target_at.{}", step.product),
+                    observed_at.to_string(),
+                );
+                crate::environment::record_failed_target_error(
+                    &mut object.properties,
+                    &step.product,
+                    &step.release_id,
+                    &receipt.detail,
+                );
+            } else if receipt.succeeded && object.properties.get(&key) == Some(&step.release_id) {
+                object.properties.remove(&key);
+                object
+                    .properties
+                    .remove(&format!("failed_target_plan.{}", step.product));
+            }
+        }
+        let provider_events = if ctx.outcome_export_enabled() {
+            if environment_object.is_none() {
+                environment_object = Some(
+                    ctx.get(&crate::ontology::env_id(environment))
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "environment {environment} disappeared during outcome enqueue"
+                            )
+                        })?,
+                );
+            }
+            let environment_object = environment_object
+                .as_ref()
+                .expect("outcome export always loads the environment");
+            deploying
+                .iter()
+                .filter_map(|step| {
+                    completion
+                        .receipts
+                        .iter()
+                        .find(|receipt| receipt.step_id == step.id)
+                        .map(|receipt| (step, receipt))
+                })
+                .filter_map(|(step, receipt)| {
+                    crate::terminal_outcome::classify(
+                        step.action,
+                        crate::terminal_outcome::Observation::Runtime {
+                            succeeded: receipt.succeeded,
+                            detail: &receipt.detail,
+                        },
+                    )
+                    .map(|terminal_state| (step, terminal_state))
+                })
+                .map(|(step, terminal_state)| {
+                    crate::providers::terminal_outcome_record(
+                        &stored,
+                        step,
+                        &format!(
+                            "tenkai:runtime-deployment:{}:{}:{}",
+                            stored.id, completion.generation, step.id
+                        ),
+                        terminal_state,
+                        environment_object,
+                        observed_at,
+                    )
+                    .map_err(anyhow::Error::from)
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
+        // One observation per step the runtime reports a terminal result for,
+        // committed with the completion (#802). The runtime's start time is not
+        // observed here, so no duration is recorded.
+        let observations = stored
+            .steps
             .iter()
             .filter_map(|step| {
-                completion
+                let receipt = completion
                     .receipts
                     .iter()
-                    .find(|receipt| receipt.step_id == step.id)
-                    .map(|receipt| (step, receipt))
-            })
-            .filter_map(|(step, receipt)| {
+                    .find(|receipt| receipt.step_id == step.id)?;
                 crate::terminal_outcome::classify(
                     step.action,
                     crate::terminal_outcome::Observation::Runtime {
                         succeeded: receipt.succeeded,
                         detail: &receipt.detail,
                     },
-                )
-                .map(|terminal_state| (step, terminal_state))
+                )?;
+                Some(crate::feedback_observation::FeedbackObservation::capture(
+                    crate::feedback_observation::Capture {
+                        id: &format!(
+                            "tenkai:runtime-deployment:{}:{}:{}",
+                            stored.id, completion.generation, step.id
+                        ),
+                        operation: crate::feedback_observation::Operation::RuntimeCompletion,
+                        environment,
+                        product: &step.product,
+                        plan_id: &stored.id,
+                        step_id: &step.id,
+                        action: Some(step.action),
+                        release_id: &step.release_id,
+                        status: if receipt.succeeded {
+                            "succeeded"
+                        } else {
+                            "failed"
+                        },
+                        reason: crate::feedback_observation::runtime_reason(receipt.succeeded),
+                        started_at_ms: None,
+                        lease_generation: completion.generation,
+                        observed_at_ms: observed_at,
+                        context: crate::feedback_observation::RetryContext {
+                            runtime_claim_generation: Some(completion.generation),
+                            failed_target_retry: held_before.get(&step.product)
+                                == Some(&step.release_id),
+                            recovery_reason: stored.recalled_recovery_reason.clone(),
+                            ..Default::default()
+                        },
+                    },
+                ))
             })
-            .map(|(step, terminal_state)| {
-                crate::providers::terminal_outcome_record(
-                    &stored,
-                    step,
-                    &format!(
-                        "tenkai:runtime-deployment:{}:{}:{}",
-                        stored.id, completion.generation, step.id
-                    ),
-                    terminal_state,
-                    environment_object,
-                    observed_at,
-                )
-                .map_err(anyhow::Error::from)
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?
-    } else {
-        Vec::new()
-    };
-    // One observation per step the runtime reports a terminal result for,
-    // committed with the completion (#802). The runtime's start time is not
-    // observed here, so no duration is recorded.
-    let observations = stored
-        .steps
-        .iter()
-        .filter_map(|step| {
-            let receipt = completion
-                .receipts
-                .iter()
-                .find(|receipt| receipt.step_id == step.id)?;
-            crate::terminal_outcome::classify(
-                step.action,
-                crate::terminal_outcome::Observation::Runtime {
-                    succeeded: receipt.succeeded,
-                    detail: &receipt.detail,
-                },
-            )?;
-            Some(crate::feedback_observation::FeedbackObservation::capture(
-                crate::feedback_observation::Capture {
-                    id: &format!(
-                        "tenkai:runtime-deployment:{}:{}:{}",
-                        stored.id, completion.generation, step.id
-                    ),
-                    operation: crate::feedback_observation::Operation::RuntimeCompletion,
+            .collect::<Vec<_>>();
+        if let Some(environment) = environment_object {
+            if !ctx.is_embedded() {
+                ctx.guarded_update(
                     environment,
-                    product: &step.product,
-                    plan_id: &stored.id,
-                    step_id: &step.id,
-                    action: Some(step.action),
-                    release_id: &step.release_id,
-                    status: if receipt.succeeded {
-                        "succeeded"
-                    } else {
-                        "failed"
-                    },
-                    reason: crate::feedback_observation::runtime_reason(receipt.succeeded),
-                    started_at_ms: None,
-                    lease_generation: completion.generation,
-                    observed_at_ms: observed_at,
-                    context: crate::feedback_observation::RetryContext {
-                        runtime_claim_generation: Some(completion.generation),
-                        failed_target_retry: held_before.get(&step.product)
-                            == Some(&step.release_id),
-                        recovery_reason: stored.recalled_recovery_reason.clone(),
-                        ..Default::default()
-                    },
-                },
-            ))
-        })
-        .collect::<Vec<_>>();
-    if let Some(environment) = environment_object {
-        if !ctx.is_embedded() {
-            ctx.put(environment).await?;
+                    crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+                    &lease.environment,
+                    &lease.fencing_token,
+                )
+                .await?;
+                crate::plan::transition(
+                    ctx,
+                    &mut stored,
+                    crate::plan::Transition::new(terminal, completion.detail.clone()),
+                    crate::plan::Persistence::Standard,
+                )
+                .await?;
+                return Ok(());
+            }
             crate::plan::transition(
                 ctx,
                 &mut stored,
                 crate::plan::Transition::new(terminal, completion.detail.clone()),
-                crate::plan::Persistence::Standard,
+                crate::plan::Persistence::WithFencedEnvironment {
+                    environment,
+                    fencing_token: &lease.fencing_token,
+                    provider_events: &provider_events,
+                    observations: &observations,
+                },
             )
             .await?;
-            return Ok(());
+        } else {
+            crate::plan::transition(
+                ctx,
+                &mut stored,
+                crate::plan::Transition::new(terminal, completion.detail.clone()),
+                crate::plan::Persistence::WithProviderEvents {
+                    provider_events: &provider_events,
+                    observations: &observations,
+                },
+            )
+            .await?;
         }
-        crate::plan::transition(
-            ctx,
-            &mut stored,
-            crate::plan::Transition::new(terminal, completion.detail.clone()),
-            crate::plan::Persistence::WithEnvironmentAndProviderEvents {
-                environment,
-                provider_events: &provider_events,
-                observations: &observations,
-            },
-        )
-        .await?;
-    } else {
-        crate::plan::transition(
-            ctx,
-            &mut stored,
-            crate::plan::Transition::new(terminal, completion.detail.clone()),
-            crate::plan::Persistence::WithProviderEvents {
-                provider_events: &provider_events,
-                observations: &observations,
-            },
-        )
-        .await?;
+        anyhow::Ok(())
     }
-    Ok(())
+    .await;
+    let released = crate::apply::release_environment(ctx, &lease).await;
+    match (applied, released) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error.context("releasing the environment lease")),
+    }
 }
 
 pub(crate) async fn validate_runtime_completion(
