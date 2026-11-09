@@ -484,9 +484,10 @@ fn map_held_lease_error(ctx: &Ctx, error: anyhow::Error) -> anyhow::Error {
     .into()
 }
 
-struct ApplyMutationFence<'a> {
-    ctx: &'a mut Ctx,
-    lease: &'a EnvironmentLease,
+/// The environment lease as the fence of a mutation: refreshing renews it.
+pub(super) struct ApplyMutationFence<'a> {
+    pub(super) ctx: &'a mut Ctx,
+    pub(super) lease: &'a EnvironmentLease,
 }
 
 impl crate::fenced_mutation::MutationFence for ApplyMutationFence<'_> {

@@ -577,5 +577,6 @@ fn copy_input(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) mod step;
 #[cfg(test)]
 mod tests;

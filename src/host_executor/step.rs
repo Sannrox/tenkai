@@ -1,21 +1,28 @@
-//! One host plan step through the root-side applier (ADR 0041 §2), under the
-//! environment fence.
+//! One host plan step through the root-side applier (ADR 0041 §2), under a
+//! fence: the server's environment lease, or an environment runtime's claim
+//! (ADR 0048 §2).
 //!
 //! The fence works as it does for the shell executor: refreshed before the
 //! unit starts, every few seconds while it runs, and again before the result
 //! is recorded. Losing it stops the unit and returns the fence error;
-//! SIGINT or SIGTERM to the server, or dropping this future, stops it too.
+//! SIGINT or SIGTERM to the process, or dropping this future, stops it too.
 //! The applier runs each instance at most once, so a retry of the same step
 //! (same plan digest, step, and action) addresses the same instance and gets
 //! its recorded result instead of a second run.
 
+use std::path::Path;
 use std::time::Duration;
 
+use anyhow::{Result, bail};
+
+use crate::fenced_mutation::MutationFence;
 use crate::host_apply::HostApplyRequest;
 use crate::host_apply::state::HostApplyResult;
 use crate::host_executor::{ExpectedResult, HostExecutor};
 
-use super::*;
+/// Why a failed host step is left failed (ADR 0041 section 2).
+pub(crate) const HOST_NOT_RESTORED: &str =
+    "host releases are never restored or re-applied automatically; run an approved rollback plan";
 
 /// How often the fence is refreshed while the unit runs.
 const REFRESH_EVERY: Duration = Duration::from_secs(10);
@@ -25,7 +32,7 @@ const STOP_GRACE: Duration = Duration::from_secs(120);
 
 /// How a host step ended, short of a fence or control-plane failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum HostStepEnd {
+pub(crate) enum HostStepEnd {
     /// The applier recorded how the instance ended.
     Recorded(HostApplyResult),
     /// Nothing ran: the step could not be spooled, or the applier refused it
@@ -35,23 +42,37 @@ pub(super) enum HostStepEnd {
     Unknown(String),
 }
 
+/// The release a host step spools next to its request, already admitted
+/// by the caller.
+pub(crate) struct SpooledRelease<'a> {
+    pub environment: &'a str,
+    pub product: &'a str,
+    /// Bare sha256 hex of the signed manifest.
+    pub release_digest: &'a str,
+    /// Where the release's deploy inputs are placed.
+    pub root: &'a Path,
+    pub inputs: &'a [String],
+    pub artifact_digest: &'a str,
+    /// The canonical dependency document the release reads, when it has one.
+    pub dependency_document: Option<&'a str>,
+}
+
 /// Run `request` and return how it ended. Outer errors are fence and
 /// control-plane failures.
-pub(super) async fn run(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
+pub(crate) async fn run(
+    fence: &mut dyn MutationFence,
     host: &HostExecutor,
     request: &HostApplyRequest,
-    content: &ReleaseContent,
+    release: &SpooledRelease<'_>,
 ) -> Result<HostStepEnd> {
-    refresh_environment_lease(ctx, lease).await?;
+    fence.refresh().await?;
     let instance = request.instance()?;
     let expected = ExpectedResult {
         instance: &instance,
-        environment: &content.environment,
-        product: &content.product,
+        environment: release.environment,
+        product: release.product,
         action: request.action,
-        release_digest: &content.manifest_digest,
+        release_digest: release.release_digest,
     };
     // A retry of a step that already ended runs nothing.
     match host.result(&expected) {
@@ -61,40 +82,26 @@ pub(super) async fn run(
     }
     if let Err(error) = host.spool(
         request,
-        &content.content_root,
-        &content.manifest.immutable_inputs(),
-        &content.artifact_digest,
+        release.root,
+        release.inputs,
+        release.artifact_digest,
     ) {
         return Ok(HostStepEnd::NotRun(format!("{error:#}")));
     }
-    if let Some(profile) = &content.manifest.compatibility {
-        let env = crate::environment::environment(ctx, &content.environment).await?;
-        match crate::dependency_document::json_for_release(
-            ctx,
-            &env,
-            content.instance_name(),
-            profile,
-            &content.manifest_digest,
+    if let Some(json) = release.dependency_document
+        && let Err(error) = host.write_spool_file(
+            &instance,
+            crate::dependency_document::HOST_FILE,
+            json.as_bytes(),
         )
-        .await
-        {
-            Ok(Some(json)) => {
-                if let Err(error) = host.write_spool_file(
-                    &instance,
-                    crate::dependency_document::HOST_FILE,
-                    json.as_bytes(),
-                ) {
-                    return Ok(HostStepEnd::NotRun(format!("{error:#}")));
-                }
-            }
-            Ok(None) => {}
-            Err(error) => return Ok(HostStepEnd::NotRun(format!("{error:#}"))),
-        }
+    {
+        host.discard_spool(&instance);
+        return Ok(HostStepEnd::NotRun(format!("{error:#}")));
     }
-    let ended = start_and_wait(ctx, lease, host, &instance).await;
+    let ended = start_and_wait(fence, host, &instance).await;
     host.discard_spool(&instance);
     let started = ended?;
-    refresh_environment_lease(ctx, lease).await?;
+    fence.refresh().await?;
     Ok(match host.result(&expected) {
         Ok(Some(result)) => HostStepEnd::Recorded(result),
         Err(error) => HostStepEnd::Unknown(format!("{error:#}")),
@@ -102,15 +109,19 @@ pub(super) async fn run(
     })
 }
 
-/// Stop every host unit an earlier holder of `lease` left running, and wait
-/// until they are gone while keeping the lease fresh. Fails closed when one
-/// is still running after [`STOP_GRACE`] or the lease is lost.
-pub(super) async fn fence_environment(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
+/// Stop every host unit an earlier holder of `environment`'s fence left
+/// running, and wait until they are gone while keeping `fence` fresh. Fails
+/// closed when one is still running after [`STOP_GRACE`] or the fence is
+/// lost.
+pub(crate) async fn fence_environment(
+    fence: &mut dyn MutationFence,
     host: &HostExecutor,
+    environment: &str,
 ) -> Result<()> {
-    let stale = host.stop_environment_units(&lease.environment).await?;
+    // Only a current holder may stop units: a holder that lost its fence
+    // would otherwise stop its replacement's step.
+    fence.refresh().await?;
+    let stale = host.stop_environment_units(environment).await?;
     if stale.is_empty() {
         return Ok(());
     }
@@ -128,8 +139,8 @@ pub(super) async fn fence_environment(
         }
         if tokio::time::Instant::now() >= deadline {
             bail!(
-                "host units of {} from an earlier lease holder are still running: {}",
-                lease.environment,
+                "host units of {} from an earlier fence holder are still running: {}",
+                environment,
                 left.iter()
                     .map(|instance| crate::host_executor::unit_name(instance))
                     .collect::<Vec<_>>()
@@ -138,7 +149,7 @@ pub(super) async fn fence_environment(
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
-            _ = refresh.tick() => refresh_environment_lease(ctx, lease).await?,
+            _ = refresh.tick() => fence.refresh().await?,
         }
     }
 }
@@ -150,21 +161,20 @@ struct Started {
     interrupted: Option<&'static str>,
 }
 
-/// Why the server stops a unit it started.
+/// Why a unit this process started is stopped.
 enum Stop {
     Interrupted(&'static str),
     FenceLost(anyhow::Error),
 }
 
 /// Start the unit and wait until it ended, keeping the fence fresh. Losing
-/// the lease or a SIGINT/SIGTERM stops the unit.
+/// the fence or a SIGINT/SIGTERM stops the unit.
 async fn start_and_wait(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
+    fence: &mut dyn MutationFence,
     host: &HostExecutor,
     instance: &str,
 ) -> Result<Started> {
-    refresh_environment_lease(ctx, lease).await?;
+    fence.refresh().await?;
     let since_ms = crate::now_millis();
     let mut stop_on_drop = StopOnDrop {
         host,
@@ -185,15 +195,15 @@ async fn start_and_wait(
                 break;
             }
             _ = interrupt.recv() => {
-                stop = Some(Stop::Interrupted("the server was interrupted"));
+                stop = Some(Stop::Interrupted("the process was interrupted"));
                 break;
             }
             _ = terminate.recv() => {
-                stop = Some(Stop::Interrupted("the server was terminated"));
+                stop = Some(Stop::Interrupted("the process was terminated"));
                 break;
             }
             _ = refresh.tick() => {
-                if let Err(error) = refresh_environment_lease(ctx, lease).await {
+                if let Err(error) = fence.refresh().await {
                     stop = Some(Stop::FenceLost(error));
                     break;
                 }
@@ -204,7 +214,7 @@ async fn start_and_wait(
     // applier is still stopping. Wait until the unit is gone as well, so the
     // applier has recorded how the step ended before it is read. After a
     // stop, stop the unit again whenever it is seen running, since its start
-    // job may reach it after the stop. A lease still held stays fresh.
+    // job may reach it after the stop. A fence still held stays fresh.
     let mut stopped = match stop {
         Some(_) => host.units().stop(instance),
         None => Ok(()),
@@ -231,7 +241,7 @@ async fn start_and_wait(
                 }
             }
             _ = refresh.tick(), if !matches!(stop, Some(Stop::FenceLost(_))) => {
-                if let Err(error) = refresh_environment_lease(ctx, lease).await {
+                if let Err(error) = fence.refresh().await {
                     stop = Some(Stop::FenceLost(error));
                     stopped = host.units().stop(instance);
                 }
@@ -290,5 +300,104 @@ impl Drop for StopOnDrop<'_> {
         if self.armed {
             let _ = self.host.units().stop(self.instance);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::host_executor::{HostUnits, UnitFuture};
+
+    /// Units that report one running instance and count every stop.
+    #[derive(Default)]
+    struct CountingUnits {
+        stops: AtomicUsize,
+    }
+
+    impl HostUnits for CountingUnits {
+        fn start<'a>(&'a self, _instance: &'a str) -> UnitFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn stop(&self, _instance: &str) -> Result<()> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn running(&self) -> UnitFuture<'_, Vec<String>> {
+            Box::pin(async { Ok(vec!["a".repeat(64)]) })
+        }
+    }
+
+    /// A fence its holder has lost.
+    struct LostFence;
+
+    impl MutationFence for LostFence {
+        fn generation(&self) -> u64 {
+            1
+        }
+
+        fn refresh(
+            &mut self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+            Box::pin(async { bail!("claim was fenced") })
+        }
+    }
+
+    /// A holder that lost its fence (a runtime whose claim expired while it
+    /// prepared a release) must not stop the units of its replacement.
+    #[tokio::test]
+    async fn a_holder_that_lost_its_fence_stops_nothing() {
+        let units = Arc::new(CountingUnits::default());
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-host-fence-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let host = HostExecutor::new(root.join("spool"), root.join("state"), units.clone());
+        // The running unit is the replacement's step in `edge`.
+        let instance = "a".repeat(64);
+        let dir = crate::host_apply::state::instance_dir(&root.join("state"), &instance);
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = crate::host_apply::state::HostApplyStarted {
+            schema: crate::host_apply::state::STARTED_SCHEMA.into(),
+            instance: instance.clone(),
+            plan_id: "plan".into(),
+            plan_digest: format!("sha256:{}", "c".repeat(64)),
+            step_id: "plan:step:0".into(),
+            environment: "edge".into(),
+            product: "cluster".into(),
+            action: crate::host_apply::HostAction::Install,
+            release: crate::host_apply::HostRelease {
+                version: "1.0.0".into(),
+                manifest_digest: "d".repeat(64),
+            },
+            generation: 1,
+            started_at: 1,
+            cgroup: None,
+        };
+        std::fs::write(
+            dir.join(crate::host_apply::state::STARTED_FILE),
+            serde_json::to_vec(&started).unwrap(),
+        )
+        .unwrap();
+        // A current holder would stop it.
+        let stale = host.stop_environment_units("edge").await.unwrap();
+        assert_eq!(stale, [instance]);
+        units.stops.store(0, Ordering::SeqCst);
+
+        let error = fence_environment(&mut LostFence, &host, "edge")
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("claim was fenced"),
+            "{error:#}"
+        );
+        assert_eq!(units.stops.load(Ordering::SeqCst), 0);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

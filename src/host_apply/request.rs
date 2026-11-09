@@ -41,6 +41,41 @@ pub struct HostApplyRequest {
 }
 
 impl HostApplyRequest {
+    /// The request for step `step_id` of `plan`: the signed release
+    /// (`manifest` and its `signature`) and the plan's approval envelopes.
+    /// The server's own automatic approvals never authorize a host step, so
+    /// they are left out, and a request without any other is refused.
+    pub fn new(
+        plan: &Plan,
+        step_id: &str,
+        action: HostAction,
+        manifest: &str,
+        signature: SignatureEnvelope,
+        approvals: &[ApprovalEnvelope],
+    ) -> Result<Self> {
+        let approvals: Vec<_> = approvals
+            .iter()
+            .filter(|envelope| {
+                envelope.statement.policy_provider != crate::approval_policy::POLICY_PROVIDER
+            })
+            .cloned()
+            .collect();
+        if approvals.is_empty() {
+            bail!(
+                "host steps need human or external plan approvals; the server's own approvals never authorize them"
+            );
+        }
+        Ok(Self {
+            schema: REQUEST_SCHEMA.into(),
+            plan: plan.clone(),
+            step_id: step_id.into(),
+            action,
+            manifest: manifest.into(),
+            signature,
+            approvals,
+        })
+    }
+
     /// Parse a request document, refusing other schemas and unknown fields.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let request: Self = serde_json::from_slice(bytes)

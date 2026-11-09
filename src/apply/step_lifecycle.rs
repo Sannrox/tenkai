@@ -1,6 +1,7 @@
 //! Target, recovery, observation, and compensation for one Plan Step.
 
 use super::*;
+use crate::host_executor::step::HostStepEnd;
 
 #[derive(Clone)]
 struct StepContext<'a> {
@@ -395,15 +396,35 @@ async fn execute_host(
         Err(error) => Err(format!("{error:#}")),
     };
     let ended = match request {
-        _ if resubscribed => host_step::HostStepEnd::NotRun(format!(
+        _ if resubscribed => HostStepEnd::NotRun(format!(
             "{environment} subscribes to {} again",
             step.product
         )),
-        Ok(request) => host_step::run(ctx, lease, executor, &request, content).await?,
-        Err(detail) => host_step::HostStepEnd::NotRun(detail),
+        Ok(request) => match host_dependency_document(ctx, content).await {
+            Ok(dependency_document) => {
+                let inputs = content.manifest.immutable_inputs();
+                crate::host_executor::step::run(
+                    &mut super::execution_lease::ApplyMutationFence { ctx, lease },
+                    executor,
+                    &request,
+                    &crate::host_executor::step::SpooledRelease {
+                        environment: &content.environment,
+                        product: &content.product,
+                        release_digest: &content.manifest_digest,
+                        root: &content.content_root,
+                        inputs: &inputs,
+                        artifact_digest: &content.artifact_digest,
+                        dependency_document: dependency_document.as_deref(),
+                    },
+                )
+                .await?
+            }
+            Err(error) => HostStepEnd::NotRun(format!("{error:#}")),
+        },
+        Err(detail) => HostStepEnd::NotRun(detail),
     };
     let (outcome, transition) = match ended {
-        host_step::HostStepEnd::Recorded(result) if result.outcome.succeeded() => (
+        HostStepEnd::Recorded(result) if result.outcome.succeeded() => (
             Outcome::new(
                 step.clone(),
                 StepOutcomeStatus::Succeeded,
@@ -432,14 +453,14 @@ async fn execute_host(
                 }
             }),
         ),
-        host_step::HostStepEnd::Recorded(result) => host_step_failed(
+        HostStepEnd::Recorded(result) => host_step_failed(
             step,
             format!(
                 "host {} of {} {} ended {:?}: {}",
                 host.action, step.product, step.to, result.outcome, result.detail
             ),
         ),
-        host_step::HostStepEnd::Unknown(detail) => host_step_failed(
+        HostStepEnd::Unknown(detail) => host_step_failed(
             step,
             format!(
                 "host {} of {} {} failed: {detail}",
@@ -447,7 +468,7 @@ async fn execute_host(
             ),
         ),
         // Nothing ran, so what is deployed did not change.
-        host_step::HostStepEnd::NotRun(detail) => (
+        HostStepEnd::NotRun(detail) => (
             Outcome::new(
                 step.clone(),
                 StepOutcomeStatus::Failed,
@@ -479,8 +500,7 @@ async fn execute_host(
 }
 
 /// The request for `step`: the stored plan, the signed release with its
-/// `signature`, and the plan's approval envelopes. The server's own automatic approvals never
-/// authorize a host step, so they are left out.
+/// `signature`, and the plan's approval envelopes.
 pub(super) fn host_request(
     plan: &Plan,
     step: &Step,
@@ -489,32 +509,37 @@ pub(super) fn host_request(
     signature: crate::release_signing::SignatureEnvelope,
     approvals: &[crate::plan_approval::ApprovalEnvelope],
 ) -> Result<crate::host_apply::HostApplyRequest> {
-    let approvals: Vec<_> = approvals
-        .iter()
-        .filter(|envelope| {
-            envelope.statement.policy_provider != crate::approval_policy::POLICY_PROVIDER
-        })
-        .cloned()
-        .collect();
-    if approvals.is_empty() {
-        bail!(
-            "host steps need human or external plan approvals; the server's own approvals never authorize them"
-        );
-    }
-    Ok(crate::host_apply::HostApplyRequest {
-        schema: crate::host_apply::REQUEST_SCHEMA.into(),
-        plan: plan.clone(),
-        step_id: step.id.clone(),
-        action: host.action,
-        manifest: content.raw_manifest.clone(),
+    crate::host_apply::HostApplyRequest::new(
+        plan,
+        &step.id,
+        host.action,
+        &content.raw_manifest,
         signature,
         approvals,
-    })
+    )
 }
 
-/// Why a failed host step is left failed (ADR 0041 section 2).
-const HOST_NOT_RESTORED: &str =
-    "host releases are never restored or re-applied automatically; run an approved rollback plan";
+/// The dependency document a host release reads from its spool, when its
+/// manifest declares a compatibility profile.
+async fn host_dependency_document(
+    ctx: &mut Ctx,
+    content: &ReleaseContent,
+) -> Result<Option<String>> {
+    let Some(profile) = &content.manifest.compatibility else {
+        return Ok(None);
+    };
+    let env = crate::environment::environment(ctx, &content.environment).await?;
+    crate::dependency_document::json_for_release(
+        ctx,
+        &env,
+        content.instance_name(),
+        profile,
+        &content.manifest_digest,
+    )
+    .await
+}
+
+use crate::host_executor::step::HOST_NOT_RESTORED;
 
 /// Whether a failure of `content` may trigger unapproved cleanup, restore, or
 /// re-apply. A host step authorizes one release and one action, once.

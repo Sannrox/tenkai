@@ -10,6 +10,7 @@ There is no served gRPC `RuntimeService`.
 | `POST /v1/runtime/environments/{environment}/complete` | JSON `RuntimeCompletion` (`plan_id`, `generation`, `succeeded`, `detail`, `receipts`) | `204` |
 | `POST /v1/runtime/environments/{environment}/heartbeat` | JSON `RuntimeHeartbeat` (`plan_id`, `generation`) | JSON claim |
 | `POST /v1/runtime/environments/{environment}/release` | JSON `RuntimeReleaseRequest` (`plan_id`, `generation`, `step_id`, optional `restore`). Renews the claim. | JSON `RuntimeRelease` (`manifest`, `signature`, `request`, `entries`) for a built-in runtime ([below](#release-package)); `412` naming why the step has none |
+| `POST /v1/runtime/environments/{environment}/host-records` | JSON `RuntimeHostRecordsReport` (`records`: the host applier's applied-state records for the environment) | JSON `RuntimeHostRecordsResponse` (`stored`: products whose record was new) ([below](#host-records)) |
 | `POST /v1/runtime/environments/{environment}/inventory` | JSON `RuntimeInventoryReport` (`facts`, `source`) | JSON `RuntimeInventoryResponse` |
 | `POST /v1/runtime/environments/{environment}/enroll` | No bearer. JSON `RuntimeEnrollRequest` (`token`: a single-use enrollment token; optional `csr`; optional `attestation`; optional `sealing_public_key`) | `201`, JSON `RuntimeEnrolled` (`environment`, `credential`, `credential_id`); `403` for an unknown, spent, expired or foreign token |
 | `POST /v1/runtime/environments/{environment}/certificate` | Runner certificate (or, once it expired, the enrolled bearer) and `x-tenkai-runtime-instance`. JSON `RuntimeCertificateRequest` (`csr`; optional `attestation`; optional `sealing_public_key`) | JSON `RuntimeCertificate` (`certificate`, `ca`) ([runner certificates](run-tenkai-server.md#runner-certificates)) |
@@ -166,10 +167,30 @@ the pulls against the manifest's artifacts, the rebuilt inputs against
 the signed artifact digest, and each sealed value against the step's digest
 before it opens the one wrapped for its own key. The runtime then runs the step as the server
 would, including its recovery: a failed restart re-applies the current pin,
-and a failed activation is cleaned up and the restore pin applied. Host
-steps and removals have no package (`412`); built-in
-mode refuses them. An older server answers `404`, and the runtime fails the
+and a failed activation is cleaned up and the restore pin applied. An older
+server answers `404`, and the runtime fails the
 step naming the server upgrade.
+
+A host step's package is its release: the runtime builds the applier's
+request from the claimed plan, this release, and the plan's approval
+envelopes, which work delivery carries for every plan with a host step.
+Its restore pin has no package (`412`): host releases are never restored
+automatically. Removals have no package (`412`).
+
+### Host records
+
+A built-in runtime with a host applier (`TENKAI_HOST_SPOOL_DIR`) posts every
+applied-state record the applier keeps for its environment, each poll and
+after each plan. The server stores each as an immutable, read-only fact of
+the environment and plans host steps from the most advanced stored record of
+each product (by generation, then by its latest start and that start's
+result), so a delayed or concurrent report never moves a product back; a
+product without one is planned from an empty record. Records of another
+environment, or two of one product, refuse the report (`400`). Once an environment has reported, its host steps are planned only
+from reported records; before that, only a server that runs an applier
+itself plans them. A stale record makes the step refused by the applier's
+generation check, never run. An older server answers `404`; the runtime
+logs it and continues.
 
 ## Typed proto contract
 

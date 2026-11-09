@@ -549,6 +549,7 @@ impl RuntimeClient {
         if let Err(error) = self.report_inventory().await {
             eprintln!("runtime inventory report failed (continuing): {error:#}");
         }
+        self.report_host_records_or_warn().await;
         if self.report_switch().await? {
             return Ok(true);
         }
@@ -615,6 +616,12 @@ impl RuntimeClient {
             }
         }
 
+        // A unit an earlier holder left running stops before anything of
+        // this plan runs.
+        if let StepExecutor::Builtin(config) = &self.executor {
+            crate::runtime_builtin::fence_host_units(self, config, &plan.id, claim.generation)
+                .await?;
+        }
         let mut receipts = Vec::with_capacity(plan.steps.len());
         let mut succeeded = true;
         for (index, step) in plan.steps.iter().enumerate() {
@@ -632,7 +639,8 @@ impl RuntimeClient {
                     None => return Ok(true),
                 }
             } else {
-                self.execute_step(&plan.id, claim.generation, step).await?
+                self.execute_step(&plan, claim.generation, step, &approvals)
+                    .await?
             };
             if !receipt.succeeded {
                 eprintln!(
@@ -665,6 +673,8 @@ impl RuntimeClient {
             receipts,
         })
         .await?;
+        // The next plan is made from what this one left on the host.
+        self.report_host_records_or_warn().await;
         Ok(true)
     }
 
@@ -928,6 +938,52 @@ impl RuntimeClient {
         Ok(())
     }
 
+    /// [`Self::report_host_records`], whose failure leaves the server
+    /// planning from the records it last stored: visible, and retried next
+    /// poll.
+    async fn report_host_records_or_warn(&self) {
+        if let Err(error) = self.report_host_records().await {
+            eprintln!("host applied-state report failed (continuing): {error:#}");
+        }
+    }
+
+    /// Report every applied-state record this host's applier keeps for the
+    /// environment, so the server plans host steps from them (ADR 0048 §2).
+    /// Only a built-in runtime with a host applier reports.
+    pub async fn report_host_records(&self) -> Result<()> {
+        let StepExecutor::Builtin(config) = &self.executor else {
+            return Ok(());
+        };
+        let Ok(host) = config.executors.host() else {
+            return Ok(());
+        };
+        let report = crate::runtime_delivery::RuntimeHostRecordsReport {
+            records: host.applied_states(&self.environment)?,
+        };
+        let response = self
+            .client()?
+            .post(format!(
+                "{}/v1/runtime/environments/{}/host-records",
+                self.base_url, self.environment
+            ))
+            .bearer_auth(&self.token)
+            .header("x-tenkai-runtime-instance", &self.instance_id)
+            .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
+            .json(&report)
+            .send()
+            .await?;
+        let status = response.status();
+        if matches!(
+            status,
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+        ) {
+            bail!("the server does not accept host applied-state records; upgrade the server");
+        }
+        let _: crate::runtime_delivery::RuntimeHostRecordsResponse =
+            decode_response(response, "reporting host applied-state records").await?;
+        Ok(())
+    }
+
     /// Run `work` while renewing the plan's claim every 30 seconds; stop it
     /// once the claim is fenced (#685).
     async fn while_claimed<T>(
@@ -1133,17 +1189,21 @@ impl RuntimeClient {
 
     async fn execute_step(
         &self,
-        plan_id: &str,
+        plan: &Plan,
         generation: u64,
         step: &Step,
+        approvals: &[crate::plan_approval::ApprovalEnvelope],
     ) -> Result<RuntimeStepReceipt> {
         match &self.executor {
             StepExecutor::Program(program) => {
-                self.execute_program_step(program, plan_id, generation, step)
+                self.execute_program_step(program, &plan.id, generation, step)
                     .await
             }
             StepExecutor::Builtin(config) => {
-                crate::runtime_builtin::execute_step(self, config, plan_id, generation, step).await
+                crate::runtime_builtin::execute_step(
+                    self, config, plan, generation, step, approvals,
+                )
+                .await
             }
         }
     }

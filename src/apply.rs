@@ -20,7 +20,6 @@ use anyhow::{Context as _, Result, bail};
 mod execution_admission;
 mod execution_attempt;
 mod execution_lease;
-mod host_step;
 #[cfg(test)]
 mod host_step_tests;
 mod outcome;

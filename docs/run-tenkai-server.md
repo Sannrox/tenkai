@@ -426,8 +426,18 @@ tenkai-runtime
   leaving its Secrets behind. Other executors,
   operator programs and the server's own apply refuse sealed steps, as does
   a hardware-backed sealing key for now.
-- **Not yet:** `host` releases (#1122) and their sealed files (#1125), and
-  observed-runtime reports for what the runtime applied.
+- **Host releases:** set `TENKAI_HOST_SPOOL_DIR` (and `TENKAI_HOST_STATE_DIR`
+  when it is not the default) on the runtime, and install the host applier
+  on the runtime's host as for a server ([run host releases](#run-host-releases)).
+  Each poll the runtime reports the applier's applied-state records for its
+  environment; the server plans host steps from them, and refuses to plan
+  them before the first report unless it runs an applier itself. The
+  runtime hands each host step to its own applier, which verifies the
+  request against its own trust and approval policy. A failed host step is
+  never restored automatically, as on the server.
+- **Not yet:** sealed files for host releases (#1125), removals on a
+  built-in runtime (#1128), and observed-runtime reports for what the
+  runtime applied.
 
 Upgrade the servers before switching a runtime to built-in mode: an older
 server has no release endpoint, and each step fails naming the upgrade.

@@ -19,6 +19,8 @@ pub const KIND_PRODUCT_MAINTENANCE_CONFIG: &str = "tenkai.product_maintenance_co
 pub const KIND_PLAN: &str = "tenkai.plan";
 pub const KIND_PLAN_APPROVAL_VERIFICATION: &str = "tenkai.plan_approval_verification";
 pub const KIND_PLAN_APPROVAL_ENVELOPE: &str = "tenkai.plan_approval_envelope";
+/// A host applier record an environment runtime reported (ADR 0048 §2).
+pub const KIND_HOST_RECORD: &str = "tenkai.host_record";
 pub const KIND_ENVIRONMENT_EXECUTION: &str = "tenkai.environment_execution";
 pub const KIND_DEPLOYMENT: &str = "tenkai.deployment";
 pub const KIND_INSTANCE: &str = "tenkai.instance";

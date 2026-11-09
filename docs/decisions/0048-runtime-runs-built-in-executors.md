@@ -8,6 +8,8 @@
 - Amended: 2026-11-09 by [#1050](https://github.com/Sannrox/tenkai/issues/1050)
   (§4 Secret name digest and cleanup timing; host sealed files follow in
   [#1125](https://github.com/Sannrox/tenkai/issues/1125))
+- Amended: 2026-11-09 by [#1122](https://github.com/Sannrox/tenkai/issues/1122)
+  (§1 host releases run, §2 the runtime reports the applier's records)
 - Issue: [#1119](https://github.com/Sannrox/tenkai/issues/1119)
 - Owner: Tenkai maintainers
 - Amends: [ADR 0045](0045-sealed-secrets.md) §4 (who writes the target, host
@@ -61,9 +63,9 @@ fencing, heartbeats, and completion ordering wrap the executor as they wrap
 the guard. Each built-in executor keeps its existing idempotency, so a retry
 after a crash re-applies the same release.
 
-Built-in mode refuses `host` releases until the runtime drives the host
-applier (#1122). The rest of this decision describes the host path that
-change delivers.
+A `host` release runs through the runtime's own host applier, configured
+as on a server (`TENKAI_HOST_SPOOL_DIR`); without one, the step fails and
+names it.
 
 ### 2. Target access is the runtime host's own configuration
 
@@ -77,6 +79,21 @@ configured for fails closed and names the executor.
 A runtime that runs `host` releases is installed like a server host under
 ADR 0041 §2: the runtime's user may start only the applier template, and the
 applier verifies every request itself.
+
+The server plans a host step from the applier's applied-state record
+(ADR 0041 §2), which lives on the runtime's host. The runtime reports every
+record its applier keeps for the environment, each poll and after each
+plan, and the server stores each as an immutable, read-only fact of the
+environment. Planning uses the most advanced record of each product, so a
+delayed report never moves a product back and reports need no lock. Once an environment reported,
+its host steps are planned only from reported records; without a report, a
+server plans them only from an applier of its own. A stale record cannot
+cause a second run: the applier still requires the step's expected
+generation and source release. The runtime builds the applier's request
+from the claimed plan, the verified release, and the plan's approval
+envelopes, which work delivery carries for every plan with a host step, and
+runs the step under its claim as the server runs it under its lease. A
+failed host step is never restored automatically.
 
 ### 3. The runtime verifies the release before it applies
 
