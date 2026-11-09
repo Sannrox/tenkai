@@ -39,7 +39,6 @@ use sha2::{Digest as _, Sha256};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::{Signer as _, SigningKey};
 
 use crate::release_signing::TrustRoots;
 use crate::storage::SqliteStore;
@@ -181,8 +180,7 @@ impl Backups {
         }
         if let Some(seed) = &policy.signing_key {
             // Fail at startup, not at the first scheduled backup.
-            crate::approval_policy::load_signer_seed(seed)
-                .context("loading the backup signing key")?;
+            crate::signer::FileSigner::open(seed).context("loading the backup signing key")?;
         }
         Self::open(Some(store), policy)
     }
@@ -323,7 +321,11 @@ impl Backups {
             if let Some(seed) = &self.policy.signing_key {
                 write_durable(
                     &signature_path(&target),
-                    &sign_manifest(&manifest_bytes, seed)?,
+                    &sign_manifest(
+                        &manifest_bytes,
+                        &crate::signer::FileSigner::open(seed)
+                            .context("loading the backup signing key")?,
+                    )?,
                 )?;
             }
             // A hard link publishes without ever replacing an existing backup.
@@ -612,18 +614,16 @@ fn signed_bytes(manifest_bytes: &[u8]) -> Vec<u8> {
     bytes
 }
 
-/// Sign a manifest's exact bytes with the Ed25519 seed at `seed` (32 bytes,
-/// mode 0600). The seed is read on every backup, so a rotated key applies
-/// without a restart.
-fn sign_manifest(manifest_bytes: &[u8], seed: &Path) -> Result<BackupSignature> {
-    let key = SigningKey::from_bytes(
-        &crate::approval_policy::load_signer_seed(seed)
-            .context("loading the backup signing key")?,
-    );
+/// Sign a manifest's exact bytes with `signer`. The caller opens the key on
+/// every backup, so a rotated key applies without a restart.
+fn sign_manifest(
+    manifest_bytes: &[u8],
+    signer: &dyn crate::signer::ContentSigner,
+) -> Result<BackupSignature> {
     Ok(BackupSignature {
         schema: SIGNATURE_SCHEMA.into(),
-        key_id: crate::signature_verification::key_id(&key.verifying_key().to_bytes()),
-        signature: STANDARD.encode(key.sign(&signed_bytes(manifest_bytes)).to_bytes()),
+        key_id: signer.key_id().to_string(),
+        signature: STANDARD.encode(signer.sign(&signed_bytes(manifest_bytes))?),
     })
 }
 
@@ -794,6 +794,7 @@ fn sha256_file(path: &Path) -> Result<(String, u64)> {
 mod tests {
     use super::*;
     use crate::storage::OperationalStore as _;
+    use ed25519_dalek::SigningKey;
 
     fn temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

@@ -351,7 +351,7 @@ mod tests {
                     reason: "compromised".into(),
                 }],
             },
-            &seed,
+            &crate::signer::FileSigner::open(&seed).unwrap(),
         )
         .unwrap();
         let installed = dir.join("key-revocations.json");

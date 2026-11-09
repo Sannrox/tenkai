@@ -177,7 +177,7 @@ fn revoked_release_signer_is_refused() {
                 reason: "compromised".into(),
             }],
         },
-        &seed,
+        &crate::signer::FileSigner::open(&seed).unwrap(),
     )
     .unwrap();
     let installed = dir.join("key-revocations.json");

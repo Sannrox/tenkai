@@ -36,7 +36,6 @@ use std::path::Path;
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -381,13 +380,13 @@ pub fn export(
         previous_digest,
         entries,
     };
-    let key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(seed_path)?);
-    let signature = key.sign(&canonical_bytes(&statement)?);
+    let signer = crate::signer::FileSigner::open(seed_path)?;
+    let signature = crate::signer::ContentSigner::sign(&signer, &canonical_bytes(&statement)?)?;
     Ok(AuditExport {
         schema: AUDIT_EXPORT_SCHEMA.into(),
-        key_id: crate::signature_verification::key_id(&key.verifying_key().to_bytes()),
+        key_id: crate::signer::ContentSigner::key_id(&signer).to_string(),
         statement,
-        signature: STANDARD.encode(signature.to_bytes()),
+        signature: STANDARD.encode(signature),
     })
 }
 
@@ -552,8 +551,8 @@ fn publish_new(path: &Path, bytes: &[u8]) -> Result<()> {
 /// The roots a chain signed with `seed_path` verifies against: its key, plus
 /// `extra_roots` for exports made before a key rotation.
 pub fn exporter_roots(seed_path: &Path, extra_roots: Option<&TrustRoots>) -> Result<TrustRoots> {
-    let key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(seed_path)?);
-    let public = key.verifying_key().to_bytes();
+    let public =
+        *crate::signer::ContentSigner::public_key(&crate::signer::FileSigner::open(seed_path)?);
     let mut roots = extra_roots.cloned().unwrap_or(TrustRoots {
         version: crate::release_signing::TRUST_ROOT_VERSION,
         signers: Vec::new(),
@@ -684,6 +683,7 @@ pub fn verify_chain(
 mod tests {
     use super::*;
     use crate::storage::{AuditRecord, SqliteStore};
+    use ed25519_dalek::SigningKey;
 
     fn seed(dir: &Path) -> (std::path::PathBuf, TrustRoots) {
         use std::os::unix::fs::PermissionsExt as _;

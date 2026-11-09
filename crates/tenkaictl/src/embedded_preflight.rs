@@ -10,7 +10,12 @@ pub(crate) async fn run(ctx: &mut Ctx, env: &str, config: &Path, signing_key: &P
     let config = PreflightConfig::load(config)?;
     let now = tenkai::now_millis();
     let checks = host_preflight::run_checks(&config, now);
-    let evidence = host_preflight::sign(env, checks, now, signing_key)?;
+    let evidence = host_preflight::sign(
+        env,
+        checks,
+        now,
+        &tenkai::signer::FileSigner::open(signing_key)?,
+    )?;
     host_preflight::record(ctx, &evidence).await?;
     for check in &evidence.statement.checks {
         let verdict = if check.passed { "pass" } else { "FAIL" };

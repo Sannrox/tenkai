@@ -21,7 +21,6 @@ use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
-use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -58,7 +57,7 @@ pub struct BundleBuildRequest<'a> {
     pub environment_id: String,
     /// Archive destination; companion chunks are written beside it.
     pub archive: &'a Path,
-    pub signing_key: &'a SigningKey,
+    pub signing_key: &'a dyn crate::signer::ContentSigner,
     pub exporter_identity: String,
     /// Public trust-root TOML copied into the archive. Never a seed.
     pub trust_roots: &'a [u8],
@@ -405,7 +404,7 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
     }
     insert_checksum_manifest(&mut payloads, &chunk_dir)?;
 
-    let envelope = BundleEnvelope::create(
+    let envelope = BundleEnvelope::create_with(
         BundleStatement {
             tenant_id: request.tenant_id.clone(),
             environment_id: request.environment_id.clone(),
@@ -519,16 +518,18 @@ pub fn default_expires_at(issued_at_unix_ms: i64) -> i64 {
 }
 
 /// Resolve the exporter identity for `signing_key` from public trust roots.
-pub fn exporter_identity(roots: &TrustRoots, signing_key: &SigningKey) -> Result<String> {
-    let key_id = crate::release_signing::key_id(&signing_key.verifying_key().to_bytes());
+pub fn exporter_identity(
+    roots: &TrustRoots,
+    signing_key: &dyn crate::signer::ContentSigner,
+) -> Result<String> {
+    let key_id = crate::release_signing::key_id(signing_key.public_key());
     Ok(roots.resolve(&key_id)?.identity)
 }
 
-/// Load a 32-byte exporter seed. Refused when the file is not owner-only.
-pub fn load_exporter_key(path: &Path) -> Result<SigningKey> {
-    Ok(SigningKey::from_bytes(
-        &crate::approval_policy::load_signer_seed(path)?,
-    ))
+/// Open the exporter's key from its 32-byte seed file. Refused when the file
+/// is not owner-only.
+pub fn load_exporter_key(path: &Path) -> Result<crate::signer::FileSigner> {
+    crate::signer::FileSigner::open(path)
 }
 
 struct AssembledRelease {
@@ -2016,7 +2017,7 @@ inputs = ["schemas"]
 
     struct Fixture {
         root: std::path::PathBuf,
-        signing: SigningKey,
+        signing: crate::signer::LabSigner,
         trust_toml: Vec<u8>,
         registry: MemoryArtifactRegistry,
         image: OciArtifactRef,
@@ -2037,9 +2038,9 @@ inputs = ["schemas"]
             std::fs::create_dir_all(&root).unwrap();
             let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
             crate::ontology::register(&mut ctx).await.unwrap();
-            let signing = SigningKey::from_bytes(&[7; 32]);
+            let signing = crate::signer::LabSigner::from_seed([7; 32]);
             let public = base64::engine::general_purpose::STANDARD
-                .encode(signing.verifying_key().to_bytes());
+                .encode(crate::signer::ContentSigner::public_key(&signing));
             let trust_toml = format!(
                 r#"version = {TRUST_ROOT_VERSION}
 
@@ -2048,7 +2049,7 @@ key_id = "{}"
 identity = "exporter"
 public_key = "{public}"
 "#,
-                key_id(&signing.verifying_key().to_bytes())
+                key_id(crate::signer::ContentSigner::public_key(&signing))
             )
             .into_bytes();
 

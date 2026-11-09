@@ -393,7 +393,7 @@ mod tests {
                 tenant_id: tenkai::ontology::NS.into(),
                 environment_id: "site-c".into(),
                 archive: &archive,
-                signing_key: &signing,
+                signing_key: &tenkai::signer::LabSigner::from_seed(signing.to_bytes()),
                 exporter_identity: "exporter".into(),
                 trust_roots: trust_toml.as_bytes(),
                 hosts,

@@ -4,12 +4,10 @@
 //! the store writes and envelope signatures.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::{Signer as _, SigningKey};
 
 use crate::client::{Ctx, LeaseError};
 use crate::criticality::{
@@ -238,46 +236,19 @@ fn write_derived(
     object.updated = imported_at;
 }
 
-fn load_seed(path: &Path) -> Result<[u8; 32]> {
-    let meta = std::fs::symlink_metadata(path)
-        .with_context(|| format!("reading derived criticality seed {}", path.display()))?;
-    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
-        bail!(
-            "derived criticality seed {} must be a regular file",
-            path.display()
-        );
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if meta.permissions().mode() & 0o077 != 0 {
-            bail!(
-                "derived criticality seed {} must be owner-only",
-                path.display()
-            );
-        }
-    }
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading derived criticality seed {}", path.display()))?;
-    bytes.as_slice().try_into().map_err(|_| {
-        anyhow::anyhow!(
-            "derived criticality seed {} must be 32 bytes",
-            path.display()
-        )
-    })
-}
-
-/// Sign a derived-criticality statement with the 32-byte Ed25519 seed at
-/// `seed_path`: serialize it once and sign those bytes.
-pub fn sign(statement: &DerivedStatement, seed_path: &Path) -> Result<DerivedEnvelope> {
+/// Sign a derived-criticality statement with `signer`: serialize it once
+/// and sign those bytes.
+pub fn sign(
+    statement: &DerivedStatement,
+    signer: &dyn crate::signer::ContentSigner,
+) -> Result<DerivedEnvelope> {
     statement.validate()?;
-    let signing_key = SigningKey::from_bytes(&load_seed(seed_path)?);
     let signed = crate::signed_bytes::sign(SIGNING_DOMAIN, statement, |message| {
-        Ok(signing_key.sign(message).to_bytes().to_vec())
+        Ok(signer.sign(message)?.to_vec())
     })?;
     Ok(DerivedEnvelope {
         schema: DERIVED_SCHEMA.into(),
-        key_id: crate::signature_verification::key_id(&signing_key.verifying_key().to_bytes()),
+        key_id: signer.key_id().to_string(),
         statement: signed.statement,
         signature: STANDARD.encode(signed.signature),
     })
@@ -657,6 +628,9 @@ mod tests {
     use crate::criticality::{CriticalityLevel, CriticalityTargetKind, DerivedAssignment};
     use crate::ontology::{KIND_ENVIRONMENT, NS};
     use crate::release_signing::TrustedSigner;
+    use ed25519_dalek::Signer as _;
+    use ed25519_dalek::SigningKey;
+    use std::path::Path;
 
     const AUTHORITY: [u8; 32] = [211; 32];
 
@@ -779,7 +753,11 @@ mod tests {
     async fn derived_import_refuses_a_bad_signature_without_writes() {
         let root = temp_dir("bad-sig");
         let seed = seed_file(&root, &AUTHORITY);
-        let mut envelope = sign(&statement(CriticalityLevel::Critical), &seed).unwrap();
+        let mut envelope = sign(
+            &statement(CriticalityLevel::Critical),
+            &crate::signer::FileSigner::open(&seed).unwrap(),
+        )
+        .unwrap();
         envelope.signature = STANDARD.encode([0u8; 64]);
         let mut ctx = seeded_env(&root, "prod").await;
         set_environment(
@@ -815,7 +793,7 @@ mod tests {
         let root = temp_dir("good-sig");
         let seed = seed_file(&root, &AUTHORITY);
         let first = statement(CriticalityLevel::Critical);
-        let envelope = sign(&first, &seed).unwrap();
+        let envelope = sign(&first, &crate::signer::FileSigner::open(&seed).unwrap()).unwrap();
         let mut ctx = seeded_env(&root, "prod").await;
         let authorities = roots(vec![signer(&AUTHORITY, "governance")]);
         import_envelope(
@@ -831,7 +809,7 @@ mod tests {
         assert_eq!(view.derived.as_ref().unwrap().source, "governance-catalog");
         let mut older = statement(CriticalityLevel::Low);
         older.generated_at = first.generated_at - 1;
-        let older = sign(&older, &seed).unwrap();
+        let older = sign(&older, &crate::signer::FileSigner::open(&seed).unwrap()).unwrap();
         import_envelope(&mut ctx, &current(older), &authorities, crate::now_millis())
             .await
             .unwrap();
@@ -943,7 +921,7 @@ mod tests {
         let now = crate::now_millis();
         let mut future = statement(CriticalityLevel::Low);
         future.generated_at = now + 86_400_000;
-        let envelope = sign(&future, &seed).unwrap();
+        let envelope = sign(&future, &crate::signer::FileSigner::open(&seed).unwrap()).unwrap();
         let mut ctx = seeded_env(&root, "prod").await;
         let authorities = roots(vec![signer(&AUTHORITY, "governance")]);
         let error = import_envelope(&mut ctx, &current(envelope), &authorities, now)

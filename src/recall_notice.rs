@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -225,17 +224,19 @@ fn notice_object(notice: &RecallNotice, verified: &VerifiedNotice) -> Result<Obj
     })
 }
 
-/// Sign a notice with the 32-byte Ed25519 seed at `seed_path` (mode 0600):
-/// serialize the statement once and sign those bytes.
-pub fn sign(statement: &RecallNoticeStatement, seed_path: &Path) -> Result<NoticeEnvelope> {
+/// Sign a notice with `signer`, the recall authority's key: serialize the
+/// statement once and sign those bytes.
+pub fn sign(
+    statement: &RecallNoticeStatement,
+    signer: &dyn crate::signer::ContentSigner,
+) -> Result<NoticeEnvelope> {
     statement.validate()?;
-    let signing_key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(seed_path)?);
     let signed = crate::signed_bytes::sign(SIGNING_DOMAIN, statement, |message| {
-        Ok(signing_key.sign(message).to_bytes().to_vec())
+        Ok(signer.sign(message)?.to_vec())
     })?;
     Ok(NoticeEnvelope {
         schema: NOTICE_SCHEMA.into(),
-        key_id: crate::signature_verification::key_id(&signing_key.verifying_key().to_bytes()),
+        key_id: signer.key_id().to_string(),
         statement: signed.statement,
         signature: STANDARD.encode(signed.signature),
     })
@@ -762,7 +763,10 @@ pub async fn propose(
         reason,
         recalled: recalled_entries.clone(),
     };
-    let notice = sign(&statement, &request.signing_key)?;
+    let notice = sign(
+        &statement,
+        &crate::signer::FileSigner::open(&request.signing_key)?,
+    )?;
     if crate::key_revocation::is_revoked(&notice.key_id) {
         bail!("recall notice signer {} is revoked", notice.key_id);
     }
@@ -826,6 +830,8 @@ mod tests {
     use crate::plan;
     use crate::release_signing::TrustedSigner;
     use crate::wave::{WaveAuthorization, WaveEnvironmentStatus, WaveStatus};
+    use ed25519_dalek::Signer as _;
+    use ed25519_dalek::SigningKey;
 
     const NOTICE: [u8; 32] = [211; 32];
     const AUTHORITY: [u8; 32] = [213; 32];
@@ -995,7 +1001,7 @@ document = "suite.json"
                         digest: digest.into(),
                     }],
                 },
-                &seed_file(dir, &NOTICE),
+                &crate::signer::FileSigner::open(&seed_file(dir, &NOTICE)).unwrap(),
             )
             .unwrap(),
         )
@@ -1234,7 +1240,7 @@ document = "suite.json"
                     digest: digest.clone(),
                 }],
             },
-            &seed_file(&keys, &revoked_seed),
+            &crate::signer::FileSigner::open(&seed_file(&keys, &revoked_seed)).unwrap(),
         )
         .unwrap();
         seed_file(&keys, &AUTHORITY);
@@ -1248,7 +1254,8 @@ document = "suite.json"
                     reason: "compromised".into(),
                 }],
             },
-            &keys.join(format!("{}.ed25519", AUTHORITY[0])),
+            &crate::signer::FileSigner::open(&keys.join(format!("{}.ed25519", AUTHORITY[0])))
+                .unwrap(),
         )
         .unwrap();
         key_revocation::install(
@@ -1638,7 +1645,8 @@ document = "suite.json"
                     reason: "compromised".into(),
                 }],
             },
-            &keys.join(format!("{}.ed25519", AUTHORITY[0])),
+            &crate::signer::FileSigner::open(&keys.join(format!("{}.ed25519", AUTHORITY[0])))
+                .unwrap(),
         )
         .unwrap();
         key_revocation::install(

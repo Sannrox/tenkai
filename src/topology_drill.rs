@@ -17,7 +17,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
@@ -601,13 +601,13 @@ async fn observe_remaining(
 /// Serialize the statement once and sign those bytes with the Ed25519 seed
 /// at `seed_path`.
 fn sign(statement: &DrillStatement, seed_path: &Path) -> Result<DrillEvidence> {
-    let signing_key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(seed_path)?);
+    let signer = crate::signer::FileSigner::open(seed_path)?;
     let signed = crate::signed_bytes::sign(SIGNING_DOMAIN, statement, |message| {
-        Ok(signing_key.sign(message).to_bytes().to_vec())
+        Ok(crate::signer::ContentSigner::sign(&signer, message)?.to_vec())
     })?;
     Ok(DrillEvidence {
         schema: DRILL_SCHEMA.into(),
-        key_id: crate::signature_verification::key_id(&signing_key.verifying_key().to_bytes()),
+        key_id: crate::signer::ContentSigner::key_id(&signer).to_string(),
         statement: signed.statement,
         signature: STANDARD.encode(signed.signature),
     })
@@ -701,6 +701,8 @@ mod tests {
     use super::*;
     use crate::client::Ctx;
     use crate::plan;
+    use ed25519_dalek::Signer as _;
+    use ed25519_dalek::SigningKey;
     use std::os::unix::fs::PermissionsExt as _;
 
     fn temp_root(name: &str) -> std::path::PathBuf {

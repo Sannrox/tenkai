@@ -184,6 +184,53 @@ impl fmt::Debug for LabSigner {
     }
 }
 
+/// Read a 32-byte Ed25519 seed: a regular, owner-only file, not a symlink.
+/// The one seed reader of every signing family (#1108). Each family keeps its
+/// own key and the setting that names it, and opens it as a [`FileSigner`].
+///
+/// Exempt, because they sign drill or lab material with fixed or generated
+/// keys rather than an operator's: `dev_sign`, `offline_fleet_drill`, and the
+/// HA qualification drill (`hub_ha_qualification`).
+pub(crate) fn read_seed_file(path: &Path) -> Result<[u8; 32]> {
+    let meta = std::fs::symlink_metadata(path).with_context(|| {
+        if path.exists() {
+            format!("inspecting signer key {}", path.display())
+        } else {
+            format!("signer key {} is missing", path.display())
+        }
+    })?;
+    if meta.file_type().is_symlink() {
+        bail!("signer key {} must not be a symlink", path.display());
+    }
+    if !meta.file_type().is_file() {
+        bail!("signer key {} must be a regular file", path.display());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            bail!(
+                "signer key {} must be mode 0600 (or owner-only); found {:o}",
+                path.display(),
+                mode
+            );
+        }
+    }
+    if meta.len() != 32 {
+        bail!(
+            "signer key {} must be exactly 32 bytes (got {})",
+            path.display(),
+            meta.len()
+        );
+    }
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading signer key {}", path.display()))?;
+    let mut seed = [0_u8; 32];
+    seed.copy_from_slice(&bytes);
+    Ok(seed)
+}
+
 /// Seed-file signer. Production profiles refuse it.
 pub struct FileSigner {
     inner: LabSigner,
@@ -192,7 +239,7 @@ pub struct FileSigner {
 
 impl FileSigner {
     pub fn open(path: &Path) -> Result<Self> {
-        let seed = crate::approval_policy::load_signer_seed(path)?;
+        let seed = read_seed_file(path)?;
         Ok(Self {
             inner: LabSigner::from_seed(seed),
             path: path.to_path_buf(),
@@ -704,6 +751,38 @@ fn parse_ed25519_point(point: &[u8]) -> Result<[u8; 32]> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The checks every signing family's key file passes, in one place.
+    #[test]
+    fn a_file_signer_reads_only_an_owner_only_32_byte_seed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-file-signer-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, bytes: &[u8], mode: u32| {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let good = write("good", &[7; 32], 0o600);
+        let signer = FileSigner::open(&good).unwrap();
+        assert_eq!(signer.key_id(), LabSigner::from_seed([7; 32]).key_id());
+        assert!(!format!("{signer:?}").contains("0707"));
+
+        let refused = |path: &Path| format!("{:#}", FileSigner::open(path).unwrap_err());
+        assert!(refused(&write("open", &[7; 32], 0o644)).contains("0600"));
+        assert!(refused(&write("short", &[7; 31], 0o600)).contains("32 bytes"));
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+        assert!(refused(&link).contains("symlink"));
+        assert!(refused(&dir.join("missing")).contains("missing"));
+        assert!(refused(&dir).contains("regular file"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
     use super::*;
     use crate::key_provider::{KeyProviderKind, KeyProviderSection, SignerSection};
     use crate::pkcs11_provider::{Pkcs11KeyProvider, TEST_USER_PIN, next_software_token};

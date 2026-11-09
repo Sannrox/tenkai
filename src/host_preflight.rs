@@ -16,7 +16,6 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
@@ -476,27 +475,26 @@ fn der_time_ms(tag: u8, time: &[u8]) -> Option<i64> {
     Some(at.and_utc().timestamp_millis())
 }
 
-/// Sign the results with the Ed25519 seed at `seed_path` (32 bytes, mode 0600).
+/// Sign the results with `signer`, the preflight key.
 pub fn sign(
     environment: &str,
     checks: Vec<CheckResult>,
     now_ms: i64,
-    seed_path: &Path,
+    signer: &dyn crate::signer::ContentSigner,
 ) -> Result<PreflightEvidence> {
     crate::ontology::validate_identifier("environment", environment)?;
-    let signing_key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(seed_path)?);
     let statement = PreflightStatement {
         environment: environment.into(),
         checked_at: now_ms,
         passed: checks.iter().all(|check| check.passed),
         checks,
     };
-    let signature = signing_key.sign(&canonical_bytes(&statement)?);
+    let signature = signer.sign(&canonical_bytes(&statement)?)?;
     Ok(PreflightEvidence {
         schema: PREFLIGHT_SCHEMA.into(),
-        key_id: crate::signature_verification::key_id(&signing_key.verifying_key().to_bytes()),
+        key_id: signer.key_id().to_string(),
         statement,
-        signature: STANDARD.encode(signature.to_bytes()),
+        signature: STANDARD.encode(signature),
     })
 }
 

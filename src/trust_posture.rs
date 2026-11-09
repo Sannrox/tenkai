@@ -870,7 +870,7 @@ mod tests {
                 issued_at: 1_700_000_000_000,
                 revoked: Vec::new(),
             },
-            &seed_path,
+            &crate::signer::FileSigner::open(&seed_path).unwrap(),
         )
         .unwrap();
         let installed = dir.join("revocations.json");

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::{Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Verifier as _, VerifyingKey};
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -258,9 +258,7 @@ fn run_software_ceremony(request: CeremonyRequest<'_>) -> Result<CeremonyEvidenc
     for tenant in &tenants {
         crate::ontology::validate_identifier("tenant", tenant)?;
     }
-    let signing_key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(
-        request.signing_key,
-    )?);
+    let signer = crate::signer::FileSigner::open(request.signing_key)?;
 
     let provider_dir = request.provider_dir;
     if provider_dir.exists() {
@@ -336,21 +334,20 @@ fn run_software_ceremony(request: CeremonyRequest<'_>) -> Result<CeremonyEvidenc
         data_keys,
         custodians,
     };
-    sign_statement(statement, &signing_key)
+    sign_statement(statement, &signer)
 }
 
 fn sign_statement(
     statement: CeremonyStatement,
-    signing_key: &SigningKey,
+    signer: &dyn crate::signer::ContentSigner,
 ) -> Result<CeremonyEvidence> {
-    let public = signing_key.verifying_key().to_bytes();
-    let signature = signing_key.sign(&canonical_bytes(&statement)?);
+    let signature = signer.sign(&canonical_bytes(&statement)?)?;
     Ok(CeremonyEvidence {
         schema: CEREMONY_SCHEMA.into(),
-        key_id: crate::signature_verification::key_id(&public),
-        public_key: STANDARD.encode(public),
+        key_id: signer.key_id().to_string(),
+        public_key: STANDARD.encode(signer.public_key()),
         statement,
-        signature: STANDARD.encode(signature.to_bytes()),
+        signature: STANDARD.encode(signature),
     })
 }
 
