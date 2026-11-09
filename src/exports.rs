@@ -190,7 +190,7 @@ impl Exports {
             .create(&dir)
             .with_context(|| format!("creating export directory {}", dir.display()))?;
         // Fail at startup, not on the first request.
-        crate::approval_policy::load_signer_seed(&seed)?;
+        crate::signer::FileSigner::open(&seed)?;
         Ok(Self {
             dir,
             seed,

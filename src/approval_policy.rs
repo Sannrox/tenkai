@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -518,9 +517,9 @@ pub(crate) fn signer_key_id(policy: &ApprovalPolicy) -> Result<Option<String>> {
     let Some(path) = &policy.auto_signer_key else {
         return Ok(None);
     };
-    let seed = load_signer_seed(path)?;
-    let public = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
-    Ok(Some(crate::signature_verification::key_id(&public)))
+    Ok(Some(
+        crate::signer::ContentSigner::key_id(&crate::signer::FileSigner::open(path)?).to_string(),
+    ))
 }
 
 /// Operator-facing policy: automatic signer key ids, human rules, and TTL.
@@ -936,7 +935,7 @@ fn auto_signer_present(policy: &ApprovalPolicy) -> bool {
     policy
         .auto_signer_key
         .as_deref()
-        .is_some_and(|path| load_signer_seed(path).is_ok())
+        .is_some_and(|path| crate::signer::FileSigner::open(path).is_ok())
 }
 
 fn auto_signer_trusted(policy: &ApprovalPolicy, plan: &Plan, roots_path: &Path) -> bool {
@@ -974,8 +973,7 @@ fn sign_auto_approval(
         .auto_signer_key
         .as_deref()
         .context("auto plan approval policy requires auto_signer_key")?;
-    let seed = load_signer_seed(key_path)?;
-    let signing_key = SigningKey::from_bytes(&seed);
+    let signer = crate::signer::FileSigner::open(key_path)?;
     let expires_at = now
         .checked_add(policy.ttl_ms)
         .ok_or_else(|| anyhow::anyhow!("plan approval policy ttl_ms overflowed expiry"))?;
@@ -991,56 +989,15 @@ fn sign_auto_approval(
         policy_digest: policy.digest()?,
     };
     let bytes = canonical_bytes(&statement)?;
-    let signature = signing_key.sign(&bytes);
-    let public = signing_key.verifying_key().to_bytes();
+    let signature = crate::signer::ContentSigner::sign(&signer, &bytes)?;
     let envelope = ApprovalEnvelope {
         schema: APPROVAL_SCHEMA.into(),
-        key_id: crate::signature_verification::key_id(&public),
+        key_id: crate::signer::ContentSigner::key_id(&signer).to_string(),
         statement,
-        signature: STANDARD.encode(signature.to_bytes()),
+        signature: STANDARD.encode(signature),
     };
     write_text_owner_only(approval_out, &serde_json::to_string_pretty(&envelope)?)?;
     Ok(())
-}
-
-/// Read a 32-byte Ed25519 seed: a regular, owner-only file, not a symlink.
-pub(crate) fn load_signer_seed(path: &Path) -> Result<[u8; 32]> {
-    let meta = fs::symlink_metadata(path).with_context(|| {
-        if path.exists() {
-            format!("inspecting signer key {}", path.display())
-        } else {
-            format!("signer key {} is missing", path.display())
-        }
-    })?;
-    if meta.file_type().is_symlink() {
-        bail!("signer key {} must not be a symlink", path.display());
-    }
-    if !meta.file_type().is_file() {
-        bail!("signer key {} must be a regular file", path.display());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = meta.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            bail!(
-                "signer key {} must be mode 0600 (or owner-only); found {:o}",
-                path.display(),
-                mode
-            );
-        }
-    }
-    if meta.len() != 32 {
-        bail!(
-            "signer key {} must be exactly 32 bytes (got {})",
-            path.display(),
-            meta.len()
-        );
-    }
-    let bytes = fs::read(path).with_context(|| format!("reading signer key {}", path.display()))?;
-    let mut seed = [0_u8; 32];
-    seed.copy_from_slice(&bytes);
-    Ok(seed)
 }
 
 fn write_text_owner_only(path: &Path, contents: &str) -> Result<()> {
@@ -1156,6 +1113,8 @@ mod tests {
     use super::*;
     use crate::plan::{DesiredStateInput, PLAN_FORMAT_VERSION, PlanState, ReleasePin, Step};
     use crate::plan_approval::verify;
+    use ed25519_dalek::Signer as _;
+    use ed25519_dalek::SigningKey;
 
     fn sample_plan(action: Action, product: &str) -> Plan {
         let created_at = 1_700_000_000_000;
@@ -2980,8 +2939,15 @@ n = 2
             passed,
             reason: "fixture".into(),
         };
-        let record =
-            |checks, at, seed: &Path| crate::host_preflight::sign("lab", checks, at, seed).unwrap();
+        let record = |checks, at, seed: &Path| {
+            crate::host_preflight::sign(
+                "lab",
+                checks,
+                at,
+                &crate::signer::FileSigner::open(seed).unwrap(),
+            )
+            .unwrap()
+        };
 
         let missing = execute(&mut ctx, &plan, &envelope, &roots, now)
             .await

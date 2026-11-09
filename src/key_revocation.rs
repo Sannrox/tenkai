@@ -20,7 +20,6 @@ use std::sync::RwLock;
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 
 use crate::release_signing::TrustRoots;
@@ -77,13 +76,15 @@ pub fn is_revoked(key_id: &str) -> bool {
         .contains(key_id)
 }
 
-/// Sign a list with the 32-byte Ed25519 seed at `seed_path` (mode 0600).
-pub fn sign(statement: RevocationStatement, seed_path: &Path) -> Result<RevocationList> {
-    let signing_key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(seed_path)?);
+/// Sign a list with `signer`, the revocation authority's key.
+pub fn sign(
+    statement: RevocationStatement,
+    signer: &dyn crate::signer::ContentSigner,
+) -> Result<RevocationList> {
     let list = RevocationList {
         schema: REVOCATIONS_SCHEMA.into(),
-        key_id: crate::signature_verification::key_id(&signing_key.verifying_key().to_bytes()),
-        signature: STANDARD.encode(signing_key.sign(&canonical_bytes(&statement)?).to_bytes()),
+        key_id: signer.key_id().to_string(),
+        signature: STANDARD.encode(signer.sign(&canonical_bytes(&statement)?)?),
         statement,
     };
     list.validate_shape()?;
@@ -338,6 +339,7 @@ mod tests {
     use super::*;
     use crate::offline_bundle::{BundleEnvelope, BundleStatement};
     use crate::release_signing::TrustedSigner;
+    use ed25519_dalek::SigningKey;
     use sha2::{Digest as _, Sha256};
     use std::collections::BTreeMap;
 
@@ -439,7 +441,8 @@ mod tests {
                     })
                     .collect(),
             },
-            &dir.join(format!("{}.ed25519", AUTHORITY[0])),
+            &crate::signer::FileSigner::open(&dir.join(format!("{}.ed25519", AUTHORITY[0])))
+                .unwrap(),
         )
         .unwrap()
     }
@@ -496,7 +499,8 @@ mod tests {
                     issued_at,
                     revoked: Vec::new(),
                 },
-                &dir.join(format!("{}.ed25519", AUTHORITY[0])),
+                &crate::signer::FileSigner::open(&dir.join(format!("{}.ed25519", AUTHORITY[0])))
+                    .unwrap(),
             )
             .unwrap()
         };
@@ -537,7 +541,8 @@ mod tests {
                     reason: "oops".into(),
                 }],
             },
-            &dir.join(format!("{}.ed25519", AUTHORITY[0])),
+            &crate::signer::FileSigner::open(&dir.join(format!("{}.ed25519", AUTHORITY[0])))
+                .unwrap(),
         );
         assert!(self_revoking.is_err());
         let _ = std::fs::remove_dir_all(&dir);

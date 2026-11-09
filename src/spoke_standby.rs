@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use fencing_lease::{
     Fence, FencingToken, HolderId, Lease, LeaseName, LeaseStore, MemoryStore, refuse_older,
     require_auto_promote,
@@ -381,13 +381,14 @@ fn canonical(domain: &[u8], value: &impl Serialize) -> Result<Vec<u8>> {
 }
 
 fn sign_promotion(statement: PromotionStatement, seed_path: &Path) -> Result<PromotionEvidence> {
-    let signing_key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(seed_path)?);
-    let signature = signing_key.sign(&canonical(PROMOTION_DOMAIN, &statement)?);
+    let signer = crate::signer::FileSigner::open(seed_path)?;
+    let signature =
+        crate::signer::ContentSigner::sign(&signer, &canonical(PROMOTION_DOMAIN, &statement)?)?;
     Ok(PromotionEvidence {
         schema: PROMOTION_SCHEMA.into(),
-        key_id: crate::signature_verification::key_id(&signing_key.verifying_key().to_bytes()),
+        key_id: crate::signer::ContentSigner::key_id(&signer).to_string(),
         statement,
-        signature: STANDARD.encode(signature.to_bytes()),
+        signature: STANDARD.encode(signature),
     })
 }
 
@@ -430,13 +431,14 @@ impl DrillEvidence {
 }
 
 fn sign_drill(statement: DrillStatement, seed_path: &Path) -> Result<DrillEvidence> {
-    let signing_key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(seed_path)?);
-    let signature = signing_key.sign(&canonical(DRILL_DOMAIN, &statement)?);
+    let signer = crate::signer::FileSigner::open(seed_path)?;
+    let signature =
+        crate::signer::ContentSigner::sign(&signer, &canonical(DRILL_DOMAIN, &statement)?)?;
     Ok(DrillEvidence {
         schema: DRILL_SCHEMA.into(),
-        key_id: crate::signature_verification::key_id(&signing_key.verifying_key().to_bytes()),
+        key_id: crate::signer::ContentSigner::key_id(&signer).to_string(),
         statement,
-        signature: STANDARD.encode(signature.to_bytes()),
+        signature: STANDARD.encode(signature),
     })
 }
 
@@ -610,6 +612,7 @@ pub fn write_evidence(path: &Path, evidence: &DrillEvidence) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
 

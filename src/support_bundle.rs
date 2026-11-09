@@ -24,7 +24,6 @@ use std::path::Path;
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
@@ -334,13 +333,13 @@ pub async fn export(
         log_events,
         workloads,
     };
-    let key = SigningKey::from_bytes(&crate::approval_policy::load_signer_seed(seed_path)?);
-    let signature = key.sign(&canonical_bytes(&statement)?);
+    let signer = crate::signer::FileSigner::open(seed_path)?;
+    let signature = crate::signer::ContentSigner::sign(&signer, &canonical_bytes(&statement)?)?;
     Ok(SupportBundle {
         schema: SUPPORT_BUNDLE_SCHEMA.into(),
-        key_id: crate::signature_verification::key_id(&key.verifying_key().to_bytes()),
+        key_id: crate::signer::ContentSigner::key_id(&signer).to_string(),
         statement,
-        signature: STANDARD.encode(signature.to_bytes()),
+        signature: STANDARD.encode(signature),
     })
 }
 
@@ -549,6 +548,7 @@ pub fn verify(bundle: &SupportBundle, roots: &TrustRoots) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
 
     #[test]
     fn redaction_keeps_only_allowlisted_values_and_fields() {
