@@ -2387,6 +2387,7 @@ mod tests {
             apply_attempt: String::new(),
             dependency_document: String::new(),
             opened_secrets: Vec::new(),
+            remove_owned_secrets: false,
         }
     }
 

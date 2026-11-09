@@ -421,9 +421,9 @@ tenkai-runtime
   fails the step, as do an instance or secret name that is not a DNS label
   (lowercase letters, digits and `-`, at most 63). After a successful apply,
   Tenkai's older Secrets of that instance are deleted except the previous
-  one of each secret name. Removing an instance does not run on a
-  built-in runtime yet; until it does, that removal step fails rather than
-  leaving its Secrets behind. Other executors,
+  one of each secret name. Whenever the runtime removes a Helm release (a
+  failed install's cleanup, a rollback's outgoing release), it deletes every
+  Tenkai-owned Secret of that instance, found by its labels. Other executors,
   operator programs and the server's own apply refuse sealed steps, as does
   a hardware-backed sealing key for now.
 - **Host releases:** set `TENKAI_HOST_SPOOL_DIR` (and `TENKAI_HOST_STATE_DIR`
@@ -437,9 +437,10 @@ tenkai-runtime
   never restored automatically, as on the server. Host steps that write
   sealed values need the spool on tmpfs and swap off or encrypted
   ([host releases](host-releases.md#the-command)); the applier writes each
-  value to a root-owned 0600 file under `TENKAI_SECRETS_DIR`.
-- **Not yet:** removals on a built-in runtime (#1128), and observed-runtime
-  reports for what the runtime applied.
+  value to a root-owned 0600 file under `TENKAI_SECRETS_DIR`. Unsubscribing
+  a host release plans an approved `uninstall` step, which the runtime runs
+  through its applier like any other host step.
+- **Not yet:** observed-runtime reports for what the runtime applied.
 
 Upgrade the servers before switching a runtime to built-in mode: an older
 server has no release endpoint, and each step fails naming the upgrade.

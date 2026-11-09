@@ -175,7 +175,11 @@ A host step's package is its release: the runtime builds the applier's
 request from the claimed plan, this release, and the plan's approval
 envelopes, which work delivery carries for every plan with a host step.
 Its restore pin has no package (`412`): host releases are never restored
-automatically. Removals have no package (`412`).
+automatically. A removal's package is the installed release, admitted as
+the server admits a removal: a recalled release can still be removed, and
+neither compatibility nor placement is checked. Only host releases are
+removed by a plan, so a removal of any other release has no package
+(`412`).
 
 ### Host records
 

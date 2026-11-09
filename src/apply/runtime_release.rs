@@ -40,17 +40,20 @@ pub(crate) async fn runtime_release(
             step.id
         )));
     }
-    if step.action == Action::Remove {
+    // Only host releases are removed by a plan; the runtime's applier
+    // uninstalls them.
+    if step.action == Action::Remove && step.host.is_none() {
         return Err(refused(anyhow!(
-            "step {} removes a release; removals do not run through a runtime's built-in executors",
+            "step {} removes a release that is not a host release; only host releases are removed by a plan",
             step.id
         )));
     }
-    let recalled = plan
+    let recovery = plan
         .recalled_recovery_reason
         .as_deref()
-        .is_some_and(|reason| !reason.trim().is_empty())
-        && step.action == Action::Rollback;
+        .is_some_and(|reason| !reason.trim().is_empty());
+    // Removing a recalled release deploys nothing, as on the server.
+    let recalled = (recovery && step.action == Action::Rollback) || step.action == Action::Remove;
     let pin = if restore {
         step.restore
             .clone()
@@ -76,7 +79,9 @@ pub(crate) async fn runtime_release(
     }
     // The same checks the server runs before it applies a release itself.
     // A restore pin was compatible when it was installed; it is only placed.
-    if !restore {
+    // A removal deploys nothing, so it is neither checked nor placed.
+    let removal = step.action == Action::Remove;
+    if !restore && !removal {
         crate::software_compatibility::require_manifest(
             ctx,
             &plan.environment,
@@ -87,9 +92,11 @@ pub(crate) async fn runtime_release(
         .await
         .map_err(refused)?;
     }
-    crate::topology::require_manifest_placement(ctx, &plan.environment, &content.manifest)
-        .await
-        .map_err(refused)?;
+    if !removal {
+        crate::topology::require_manifest_placement(ctx, &plan.environment, &content.manifest)
+            .await
+            .map_err(refused)?;
+    }
     let environment = crate::environment::environment(ctx, &plan.environment).await?;
     let registry = crate::oci_artifact::selected_registry()?;
     content.artifact_pulls = crate::oci_artifact::verify_environment_pull(
