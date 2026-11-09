@@ -229,10 +229,16 @@ pub(crate) fn print_history_page(page: &tenkai::deployment_history::DeploymentHi
         return;
     }
     println!(
-        "{:<24} {:<16} {:<8} {:<8} {:<10} {:<12} {:<28} detail",
+        "{:<24} {:<16} {:<8} {:<8} {:<10} {:<12} {:<28} summary",
         "time", "instance", "from", "to", "action", "status", "plan"
     );
     for item in &page.items {
+        let summary = item
+            .cause
+            .as_ref()
+            .map(|cause| cause.summary.as_str())
+            .filter(|summary| !summary.is_empty())
+            .unwrap_or(item.detail.as_str());
         println!(
             "{:<24} {:<16} {:<8} {:<8} {:<10} {:<12} {:<28} {}",
             format_attempt_time(item.created_at),
@@ -242,7 +248,7 @@ pub(crate) fn print_history_page(page: &tenkai::deployment_history::DeploymentHi
             item.action.as_deref().unwrap_or("-"),
             item.status,
             item.plan_id.as_deref().unwrap_or("-"),
-            item.detail
+            summary
         );
     }
     if let Some(cursor) = &page.next_cursor {

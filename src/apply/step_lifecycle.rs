@@ -236,6 +236,7 @@ pub(super) async fn execute(
                         step_context,
                         step,
                         decision.evidence.summary(),
+                        decision.evidence.cause(),
                     )
                     .await;
                 }
@@ -526,11 +527,18 @@ fn host_step_failed(
     step: &Step,
     detail: String,
 ) -> (Outcome, Option<crate::environment::DeploymentTransition>) {
+    let original = DeploymentCause::classify(&detail);
     (
-        Outcome::new(
+        Outcome::recorded(
             step.clone(),
             StepOutcomeStatus::Failed,
             format!("{detail}; {HOST_NOT_RESTORED}"),
+            Some(original),
+            Some(DeploymentCause::new(
+                DeploymentCausePhase::Restore,
+                DeploymentCauseKind::HostNotRestored,
+                HOST_NOT_RESTORED,
+            )),
         ),
         Some(crate::environment::DeploymentTransition::Unknown),
     )
@@ -588,6 +596,7 @@ async fn recover_activation(
     if !restores_automatically(content) {
         return Ok(host_step_failed(step, detail));
     }
+    let original = DeploymentCause::classify(&detail);
     let (cleaned, detail) = product_execution::cleanup_failed_activation(
         ctx,
         step_context.lease,
@@ -598,7 +607,13 @@ async fn recover_activation(
     .await?;
     let Some(previous) = step.from.as_deref() else {
         return Ok((
-            Outcome::new(step.clone(), StepOutcomeStatus::Failed, detail),
+            Outcome::recorded(
+                step.clone(),
+                StepOutcomeStatus::Failed,
+                detail,
+                Some(original),
+                None,
+            ),
             Some(if cleaned {
                 crate::environment::DeploymentTransition::Unchanged
             } else {
@@ -607,10 +622,16 @@ async fn recover_activation(
         ));
     };
     let Some(previous_content) = restore_content else {
-        let outcome = Outcome::new(
+        let outcome = Outcome::recorded(
             step.clone(),
             StepOutcomeStatus::Failed,
             format!("{detail}; step {} has no pinned restore release", step.id),
+            Some(original.clone()),
+            Some(DeploymentCause::new(
+                DeploymentCausePhase::Restore,
+                DeploymentCauseKind::RestoreFailed,
+                format!("step {} has no pinned restore release", step.id),
+            )),
         );
         record(
             ctx,
@@ -624,7 +645,7 @@ async fn recover_activation(
         .await?;
         return Ok((outcome, None));
     };
-    let (restored, detail) = restore_previous(
+    let (restored, detail, restore) = restore_previous(
         ctx,
         step_context.lease,
         previous_content,
@@ -635,7 +656,7 @@ async fn recover_activation(
     .await?;
     let recovered = cleaned && restored;
     Ok((
-        Outcome::new(
+        Outcome::recorded(
             step.clone(),
             if recovered {
                 StepOutcomeStatus::RolledBack
@@ -643,6 +664,8 @@ async fn recover_activation(
                 StepOutcomeStatus::Failed
             },
             detail,
+            Some(original),
+            Some(restore),
         ),
         Some(if recovered {
             crate::environment::DeploymentTransition::Unchanged
@@ -659,7 +682,7 @@ async fn restore_previous(
     version: &str,
     failure: String,
     adapters: TargetAdapters<'_>,
-) -> Result<(bool, String)> {
+) -> Result<(bool, String, DeploymentCause)> {
     let channel_note = crate::software_executor::rollback_channel_note(&content.product, version);
     let restore_result = match product_execution::activate(ctx, lease, content, adapters).await {
         Ok(Ok(())) => Ok(Ok(())),
@@ -677,26 +700,45 @@ async fn restore_previous(
         Ok(Ok(())) => (
             true,
             format!("{failure}; restored {version}; {channel_note}"),
+            DeploymentCause::new(
+                DeploymentCausePhase::Restore,
+                DeploymentCauseKind::Restored,
+                format!("restored {version}"),
+            ),
         ),
         Ok(Err(restore)) => (
             false,
             format!(
                 "{failure}; restore or health check of {version} also failed: {restore}; {channel_note}"
             ),
+            DeploymentCause::new(
+                DeploymentCausePhase::Restore,
+                DeploymentCauseKind::RestoreFailed,
+                format!("restore or health check of {version} also failed"),
+            )
+            .with_raw(restore),
         ),
-        Err(error) => (
-            false,
-            format!(
-                "{failure}; restore executor failed for {version}: {}; {channel_note}",
-                crate::software_executor::format_software_phase_error(
-                    crate::software_executor::SoftwareDeployPhase::Restore,
-                    &content.product,
-                    version,
-                    &content.environment,
-                    &error.to_string(),
+        Err(error) => {
+            let wrapped = crate::software_executor::format_software_phase_error(
+                crate::software_executor::SoftwareDeployPhase::Restore,
+                &content.product,
+                version,
+                &content.environment,
+                &error.to_string(),
+            );
+            (
+                false,
+                format!(
+                    "{failure}; restore executor failed for {version}: {wrapped}; {channel_note}"
+                ),
+                DeploymentCause::new(
+                    DeploymentCausePhase::Restore,
+                    DeploymentCauseKind::RestoreFailed,
+                    format!("restore executor failed for {version}"),
                 )
-            ),
-        ),
+                .with_raw(wrapped),
+            )
+        }
     })
 }
 
@@ -796,6 +838,7 @@ async fn restore_after_health_gate(
     step_context: StepContext<'_>,
     step: &Step,
     detail: String,
+    original: DeploymentCause,
 ) -> Result<Outcome> {
     let StepContext {
         lease,
@@ -812,7 +855,9 @@ async fn restore_after_health_gate(
             environment,
             plan_id,
             step,
-            format!("{detail}; automatic rollback refused: no restore pin"),
+            detail,
+            original,
+            "automatic rollback refused: no restore pin".into(),
         )
         .await;
     };
@@ -839,7 +884,9 @@ async fn restore_after_health_gate(
                 environment,
                 plan_id,
                 step,
-                format!("{detail}; automatic rollback blocked: {error}"),
+                detail.clone(),
+                original.clone(),
+                format!("automatic rollback blocked: {error}"),
             )
             .await;
         }
@@ -852,7 +899,9 @@ async fn restore_after_health_gate(
             environment,
             plan_id,
             step,
-            format!("{detail}; {HOST_NOT_RESTORED}"),
+            detail.clone(),
+            original.clone(),
+            HOST_NOT_RESTORED.into(),
         )
         .await;
     }
@@ -866,7 +915,9 @@ async fn restore_after_health_gate(
                 environment,
                 plan_id,
                 step,
-                format!("{detail}; automatic rollback blocked: {error}"),
+                detail.clone(),
+                original.clone(),
+                format!("automatic rollback blocked: {error}"),
             )
             .await;
         }
@@ -881,7 +932,9 @@ async fn restore_after_health_gate(
             environment,
             plan_id,
             step,
-            format!("{detail}; automatic rollback blocked: {error}"),
+            detail.clone(),
+            original.clone(),
+            format!("automatic rollback blocked: {error}"),
         )
         .await;
     }
@@ -895,7 +948,9 @@ async fn restore_after_health_gate(
             environment,
             plan_id,
             step,
-            format!("{detail}; automatic rollback blocked: {error}"),
+            detail.clone(),
+            original.clone(),
+            format!("automatic rollback blocked: {error}"),
         )
         .await;
     }
@@ -915,7 +970,9 @@ async fn restore_after_health_gate(
             environment,
             plan_id,
             step,
-            format!("{detail}; automatic rollback blocked: {error}"),
+            detail.clone(),
+            original.clone(),
+            format!("automatic rollback blocked: {error}"),
         )
         .await;
     }
@@ -931,7 +988,9 @@ async fn restore_after_health_gate(
             environment,
             plan_id,
             step,
-            format!("{detail}; automatic rollback blocked: {error}"),
+            detail.clone(),
+            original.clone(),
+            format!("automatic rollback blocked: {error}"),
         )
         .await;
     }
@@ -951,11 +1010,20 @@ async fn restore_after_health_gate(
         match product_execution::deactivate(ctx, lease, &current, adapters.clone()).await {
             Ok(Ok(())) => {}
             Ok(Err(cleanup)) => {
-                let outcome = Outcome::new(
+                let outcome = Outcome::recorded(
                     step.clone(),
                     StepOutcomeStatus::Failed,
                     format!(
                         "{detail}; automatic rollback blocked: outgoing release cleanup failed: {cleanup}"
+                    ),
+                    Some(original.clone()),
+                    Some(
+                        DeploymentCause::new(
+                            DeploymentCausePhase::Cleanup,
+                            DeploymentCauseKind::CleanupFailed,
+                            "outgoing release cleanup failed",
+                        )
+                        .with_raw(cleanup),
                     ),
                 );
                 record(
@@ -972,11 +1040,20 @@ async fn restore_after_health_gate(
             }
             Err(error) if is_execution_fence_lost(&error) => return Err(error),
             Err(error) => {
-                let outcome = Outcome::new(
+                let outcome = Outcome::recorded(
                     step.clone(),
                     StepOutcomeStatus::Failed,
                     format!(
                         "{detail}; automatic rollback blocked: outgoing release cleanup failed: {error}"
+                    ),
+                    Some(original.clone()),
+                    Some(
+                        DeploymentCause::new(
+                            DeploymentCausePhase::Cleanup,
+                            DeploymentCauseKind::CleanupFailed,
+                            "outgoing release cleanup failed",
+                        )
+                        .with_raw(error.to_string()),
                     ),
                 );
                 record(
@@ -997,9 +1074,9 @@ async fn restore_after_health_gate(
         .from
         .as_deref()
         .unwrap_or(&previous.manifest.product.version);
-    let (restored, detail) =
+    let (restored, detail, restore) =
         restore_previous(ctx, lease, &previous, version, detail, adapters).await?;
-    let outcome = Outcome::new(
+    let outcome = Outcome::recorded(
         step.clone(),
         if restored {
             StepOutcomeStatus::RolledBack
@@ -1007,6 +1084,8 @@ async fn restore_after_health_gate(
             StepOutcomeStatus::Failed
         },
         detail,
+        Some(original),
+        Some(restore),
     );
     record(
         ctx,
@@ -1028,6 +1107,7 @@ async fn restore_after_health_gate(
     Ok(outcome)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn record_live_restore_failure(
     ctx: &mut Ctx,
     started_at_ms: i64,
@@ -1036,8 +1116,28 @@ async fn record_live_restore_failure(
     plan_id: &str,
     step: &Step,
     detail: String,
+    original: DeploymentCause,
+    restore_reason: String,
 ) -> Result<Outcome> {
-    let outcome = Outcome::new(step.clone(), StepOutcomeStatus::Failed, detail);
+    let restore_kind = if restore_reason.contains(HOST_NOT_RESTORED) {
+        DeploymentCauseKind::HostNotRestored
+    } else {
+        DeploymentCauseKind::RestoreFailed
+    };
+    let outcome = Outcome::recorded(
+        step.clone(),
+        StepOutcomeStatus::Failed,
+        format!("{detail}; {restore_reason}"),
+        Some(original),
+        Some(
+            DeploymentCause::new(
+                DeploymentCausePhase::Restore,
+                restore_kind,
+                restore_reason.clone(),
+            )
+            .with_raw(restore_reason),
+        ),
+    );
     record(
         ctx,
         started_at_ms,
@@ -1089,6 +1189,8 @@ async fn record(
             detail: &outcome.detail,
             transition,
             started_at_ms: Some(started_at_ms),
+            cause: outcome.cause.as_ref(),
+            restore: outcome.restore.as_ref(),
         },
     )
     .await

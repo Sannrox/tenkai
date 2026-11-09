@@ -230,6 +230,12 @@ async fn a_failed_upgrade_restores_through_the_previous_release_executor() {
         outcomes[0].detail.contains("restored 1.0.0"),
         "{outcomes:?}"
     );
+    let cause = outcomes[0].cause.as_ref().expect("original cause");
+    assert_eq!(cause.phase, super::DeploymentCausePhase::Activate);
+    assert_eq!(cause.kind, super::DeploymentCauseKind::CommandExited);
+    let restore = outcomes[0].restore.as_ref().expect("restore result");
+    assert_eq!(restore.phase, super::DeploymentCausePhase::Restore);
+    assert_eq!(restore.kind, super::DeploymentCauseKind::Restored);
     assert_eq!(
         in_process.calls(),
         [

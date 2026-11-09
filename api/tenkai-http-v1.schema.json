@@ -1506,6 +1506,9 @@
         "action": {
           "type": "string"
         },
+        "cause": {
+          "$ref": "#/$defs/DeploymentCause"
+        },
         "created_at": {
           "format": "int64",
           "type": "integer"
@@ -1535,6 +1538,9 @@
         "product": {
           "type": "string"
         },
+        "restore": {
+          "$ref": "#/$defs/DeploymentCause"
+        },
         "status": {
           "type": "string"
         },
@@ -1551,6 +1557,76 @@
         "status"
       ],
       "type": "object"
+    },
+    "DeploymentCause": {
+      "description": "Bounded, redacted structured cause of one failed or rolled-back attempt.",
+      "properties": {
+        "gate": {
+          "type": "string"
+        },
+        "gate_value": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/DeploymentCauseKind"
+        },
+        "phase": {
+          "$ref": "#/$defs/DeploymentCausePhase"
+        },
+        "raw": {
+          "type": "string"
+        },
+        "resources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "phase",
+        "kind",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "DeploymentCauseKind": {
+      "description": "Closed deploy-failure kind the executor already distinguishes (#1055).",
+      "enum": [
+        "probe_failed",
+        "gate_breached",
+        "command_exited",
+        "not_ready",
+        "target_unavailable",
+        "compatibility_blocked",
+        "placement_refused",
+        "cleanup_failed",
+        "restore_failed",
+        "restored",
+        "executor_failed",
+        "host_not_restored",
+        "drain_wait"
+      ],
+      "type": "string"
+    },
+    "DeploymentCausePhase": {
+      "description": "Closed deploy-failure phase recorded on an attempt (#1055).",
+      "enum": [
+        "admission",
+        "pull",
+        "activate",
+        "health_probe",
+        "slo_gate",
+        "cleanup",
+        "restore"
+      ],
+      "type": "string"
     },
     "DeploymentHistoryPage": {
       "description": "One page of [`DeploymentAttemptView`] values.",

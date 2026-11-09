@@ -89,8 +89,10 @@ the same terminal step is idempotent. The worker POSTs only the public body,
 signed with HMAC-SHA256, and binds `observed_at` from the outbox collection
 timestamp on first delivery. Payloads contain environment, product, versions,
 release id/digest, optional source revision, artifact digests, plan id, step id,
-outcome, and that timestamp. They contain no secrets, command output, workdir
-paths, or the per-call deployment attempt id. A rollback body sets `alert` and
+outcome, and that timestamp. Failed and rolled-back bodies also include the
+first observation's `attempt_id` and a one-line redacted cause `summary`. They
+contain no secrets, captured command output, or workdir paths. A replay of the
+same outbox id keeps the first `attempt_id`. A rollback body sets `alert` and
 includes both versions.
 Delivery retries use the durable outbox; apply does not wait.
 

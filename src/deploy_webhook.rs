@@ -212,10 +212,16 @@ pub struct DeployWebhookPayload {
     /// observations keep a stable enqueue payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<i64>,
-    /// Durable plan-step identity. This is not the per-call deployment attempt
-    /// id: that value is minted from the clock on every observation and would
-    /// duplicate notifications if it were part of the payload or outbox key.
+    /// Durable plan-step identity. The clock-minted deployment attempt id is
+    /// payload-only (`attempt_id`) and is not part of the outbox key.
     pub step_id: String,
+    /// Clock-minted attempt id of the first observation that enqueued this
+    /// event. Payload only; a replay of the same plan step keeps the first id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    /// One-line redacted cause summary. Never includes captured command output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,6 +369,7 @@ pub async fn source_revision(ctx: &mut Ctx, release_id: &str) -> String {
 /// Build durable outbox records for one terminal observation. Invalid or
 /// unsubscribed endpoints are skipped so apply cannot fail closed on delivery
 /// configuration.
+#[allow(clippy::too_many_arguments)]
 pub fn records_for_observation(
     endpoints: &[WebhookEndpoint],
     plan: &Plan,
@@ -370,6 +377,8 @@ pub fn records_for_observation(
     status: &str,
     observed_at: i64,
     source_revision: &str,
+    attempt_id: Option<&str>,
+    summary: Option<&str>,
 ) -> Vec<crate::storage::ProviderEventRecord> {
     let Some(event) = WebhookEvent::from_status(status) else {
         return Vec::new();
@@ -402,6 +411,8 @@ pub fn records_for_observation(
             observed_at,
             source_revision,
             &artifact_digests,
+            attempt_id,
+            summary.filter(|_| event != WebhookEvent::ApplySucceeded),
         ) else {
             continue;
         };
@@ -420,6 +431,8 @@ fn webhook_record(
     observed_at: i64,
     source_revision: &str,
     artifact_digests: &[String],
+    attempt_id: Option<&str>,
+    summary: Option<&str>,
 ) -> Result<crate::storage::ProviderEventRecord, ProviderError> {
     if step.id.trim().is_empty() || observed_at <= 0 {
         return Err(ProviderError::InvalidEvidence(
@@ -446,6 +459,15 @@ fn webhook_record(
         },
         observed_at: None,
         step_id: step.id.clone(),
+        attempt_id: attempt_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        summary: summary
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(crate::software_executor::sanitize_diagnostic_text)
+            .filter(|value| !value.is_empty()),
     };
     if body.environment.trim().is_empty()
         || body.product.trim().is_empty()
@@ -994,6 +1016,35 @@ mod tests {
             "{outcomes:?}"
         );
 
+        let records = listed(&ctx);
+        let rolled_record = records
+            .iter()
+            .find(|record| record.payload_json.contains("apply.rolled_back"))
+            .expect("rolled_back outbox row");
+        let mut event: ProviderEvent = serde_json::from_str(&rolled_record.payload_json).unwrap();
+        let mut envelope: DeployWebhookEnvelope =
+            serde_json::from_str(&event.payload_json).unwrap();
+        let first_attempt = envelope.body.attempt_id.clone();
+        envelope.body.attempt_id = Some("tenkai:deployment:local:hook-demo:1".into());
+        event.payload_json = serde_json::to_string(&envelope).unwrap();
+        let mut replay = rolled_record.clone();
+        replay.payload_json = serde_json::to_string(&event).unwrap();
+        ctx.embedded_arc()
+            .unwrap()
+            .enqueue_provider_event(&replay)
+            .expect("replay keeps the first deploy webhook");
+        let kept: ProviderEvent = serde_json::from_str(
+            &listed(&ctx)
+                .iter()
+                .find(|record| record.payload_json.contains("apply.rolled_back"))
+                .expect("kept row")
+                .payload_json,
+        )
+        .unwrap();
+        let kept_envelope: DeployWebhookEnvelope =
+            serde_json::from_str(&kept.payload_json).unwrap();
+        assert_eq!(kept_envelope.body.attempt_id, first_attempt);
+
         let secrets = MapSecrets(HashMap::from([(
             "TENKAI_WEBHOOK_SECRET".into(),
             "test-secret".into(),
@@ -1021,6 +1072,24 @@ mod tests {
         assert_eq!(rolled.version, "1.1.0");
         assert_eq!(rolled.previous_version.as_deref(), Some("1.0.0"));
         assert_eq!(rolled.outcome, "rolled_back");
+        assert!(
+            rolled
+                .attempt_id
+                .as_deref()
+                .is_some_and(|id| id.contains("deployment")),
+            "{rolled:?}"
+        );
+        let summary = rolled.summary.as_deref().expect("summary");
+        assert!(
+            summary.contains("health/SLO gate") || summary.contains("error_rate"),
+            "{summary}"
+        );
+        let raw_json = received
+            .iter()
+            .find(|(_, body)| body.contains("apply.rolled_back"))
+            .map(|(_, body)| body.as_str())
+            .expect("rolled body");
+        assert!(!raw_json.contains("\"raw\""), "{raw_json}");
         let _ = std::fs::remove_dir_all(&fixture.root);
     }
 

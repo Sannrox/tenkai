@@ -32,6 +32,12 @@ pub struct DeploymentAttemptView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = omitted_when_none)]
     pub lease_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = omitted_when_none)]
+    pub cause: Option<crate::apply::DeploymentCause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = omitted_when_none)]
+    pub restore: Option<crate::apply::DeploymentCause>,
 }
 
 /// One page of [`DeploymentAttemptView`] values.
@@ -196,6 +202,14 @@ fn view_from_object(object: &Object) -> DeploymentAttemptView {
             .filter(|value| !value.is_empty()),
         detail: object.properties.get("detail").cloned().unwrap_or_default(),
         lease_generation: object.properties.get("lease_generation").cloned(),
+        cause: object
+            .properties
+            .get("cause")
+            .and_then(|raw| crate::apply::DeploymentCause::from_property(raw)),
+        restore: object
+            .properties
+            .get("restore")
+            .and_then(|raw| crate::apply::DeploymentCause::from_property(raw)),
     }
 }
 
@@ -528,11 +542,69 @@ mod tests {
             .unwrap();
         assert_eq!(report.latest_failures.len(), 1);
         assert_eq!(report.latest_failures[0].detail, "probe failed: not ready");
+        assert_eq!(report.latest_failures[0].cause, None);
         let missing =
             list_deployment_history(&mut ctx, "absent", &DeploymentHistoryQuery::default())
                 .await
                 .unwrap_err();
         assert!(missing.to_string().contains("not registered"), "{missing}");
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn history_reads_cause_and_restore_when_present() {
+        let database = db_path("cause");
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::environment::env_add(&mut ctx, "prod", "prod")
+            .await
+            .unwrap();
+        let mut object = attempt(
+            "prod",
+            "api",
+            "api",
+            1_000,
+            "failed",
+            "probe failed: not ready; restore or health check of 1.0.0 also failed",
+            "tenkai:plan:prod:1",
+        );
+        let cause = crate::apply::DeploymentCause::classify("probe failed: not ready");
+        let restore = crate::apply::DeploymentCause::classify(
+            "software deploy phase=restore product=api@1.0.0 environment/namespace=prod: boom",
+        )
+        .at_phase(crate::apply::DeploymentCausePhase::Restore)
+        .with_kind(crate::apply::DeploymentCauseKind::RestoreFailed);
+        object
+            .properties
+            .insert("cause".into(), cause.to_property().unwrap());
+        object
+            .properties
+            .insert("restore".into(), restore.to_property().unwrap());
+        ctx.put(object).await.unwrap();
+        let page = list_deployment_history(&mut ctx, "prod", &DeploymentHistoryQuery::default())
+            .await
+            .unwrap();
+        let item = &page.items[0];
+        assert!(item.detail.contains("restore or health"));
+        let stored = item.cause.as_ref().expect("cause");
+        assert_eq!(
+            stored.phase,
+            crate::apply::DeploymentCausePhase::HealthProbe
+        );
+        assert_eq!(stored.kind, crate::apply::DeploymentCauseKind::NotReady);
+        let stored_restore = item.restore.as_ref().expect("restore");
+        assert_eq!(
+            stored_restore.phase,
+            crate::apply::DeploymentCausePhase::Restore
+        );
+        assert_eq!(
+            stored_restore.kind,
+            crate::apply::DeploymentCauseKind::RestoreFailed
+        );
+        let json = serde_json::to_value(item).unwrap();
+        assert!(json.get("cause").is_some());
+        assert!(json.get("restore").is_some());
         let _ = std::fs::remove_file(&database);
     }
 }
