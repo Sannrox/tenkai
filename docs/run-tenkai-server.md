@@ -381,6 +381,42 @@ export TENKAI_RUNTIME_EXECUTOR=/opt/tenkai/bin/environment-executor
 tenkai-runtime
 ```
 
+### Built-in executors on the runtime
+
+With `TENKAI_RUNTIME_EXECUTOR=builtin` the runtime applies releases itself
+with the same executors the server uses, instead of an operator program
+(ADR 0048). It resolves each release's executor as the server does: the
+declared `deploy.executor`, else `TENKAI_SOFTWARE_EXECUTOR`, else `shell`.
+Everything it needs comes from the runtime host, never from the server:
+
+```sh
+export TENKAI_RUNTIME_EXECUTOR=builtin
+export TENKAI_RUNTIME_RELEASE_TRUST_ROOTS=/etc/tenkai-runtime/release-trust.toml
+export TENKAI_RUNTIME_WORK_DIR=/var/lib/tenkai-runtime/releases
+# Only for helm, kubernetes and kubernetes-inprocess releases:
+export TENKAI_RUNTIME_CLUSTER_CONFIG=/etc/tenkai-runtime/kubeconfig
+tenkai-runtime
+```
+
+- **Release trust.** The runtime verifies every release's signature against
+  its own trust roots (release trust-root TOML, owner-only, like the approval
+  policy), including key revocation. A release no trusted signer released
+  fails its step before anything is written.
+- **Work directory.** Verified deploy inputs are rebuilt under
+  `<work dir>/<environment>/<product>/<artifact digest>` and checked against
+  the signed digest. A retry reuses a matching directory.
+- **Cluster access.** Kubernetes releases run only against
+  `TENKAI_RUNTIME_CLUSTER_CONFIG`; without it they fail naming it. Every
+  `helm` call receives it as `--kubeconfig`. The environment's
+  `cluster_config_path` is ignored on the runtime.
+- **Shell releases** run under `tenkai-executor-guard`, installed next to
+  `tenkai-runtime`, fenced by the runtime's claim.
+- **Not yet:** `host` releases (#1122), and observed-runtime reports for
+  what the runtime applied.
+
+Upgrade the servers before switching a runtime to built-in mode: an older
+server has no release endpoint, and each step fails naming the upgrade.
+
 ### Enrolling a runtime
 
 Instead of a long-lived token in `TENKAI_RUNTIME_TOKENS`, a runtime can enroll

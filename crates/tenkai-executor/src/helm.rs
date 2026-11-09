@@ -30,6 +30,17 @@ impl Default for HelmSoftwareExecutor {
 }
 
 impl HelmSoftwareExecutor {
+    /// A `helm` command for `request`, pointed at its cluster configuration
+    /// when the request names one. Every call uses this, so a request never
+    /// reaches a different cluster than its other calls.
+    fn helm(&self, request: &SoftwareApplyRequest) -> Command {
+        let mut command = Command::new(&self.helm_binary);
+        if let Some(path) = &request.cluster_config_path {
+            command.arg("--kubeconfig").arg(path);
+        }
+        command
+    }
+
     fn helm_upgrade(
         &self,
         request: &SoftwareApplyRequest,
@@ -44,7 +55,7 @@ impl HelmSoftwareExecutor {
                 request.workdir.display()
             );
         }
-        let mut command = Command::new(&self.helm_binary);
+        let mut command = self.helm(request);
         command
             .arg("upgrade")
             .arg("--install")
@@ -85,7 +96,7 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
 
     fn remove(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
-        let mut command = Command::new(&self.helm_binary);
+        let mut command = self.helm(request);
         command
             .arg("uninstall")
             .arg(request.instance_name())
@@ -105,7 +116,8 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
 
     fn observe(&self, request: &SoftwareApplyRequest) -> Result<SoftwareObserveStatus> {
         validate_request(request)?;
-        let output = Command::new(&self.helm_binary)
+        let output = self
+            .helm(request)
             .arg("status")
             .arg(request.instance_name())
             .arg("--namespace")
@@ -115,7 +127,8 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
         if !output.status.success() {
             return Ok(SoftwareObserveStatus::Absent);
         }
-        let values = Command::new(&self.helm_binary)
+        let values = self
+            .helm(request)
             .arg("get")
             .arg("values")
             .arg(request.instance_name())
@@ -275,6 +288,37 @@ mod tests {
         assert!(err.contains("helm"), "{err}");
         assert!(!err.contains("super-secret-token"), "{err}");
         assert!(err.contains("[redacted]"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn every_helm_call_targets_the_requested_cluster_config() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("tenkai-helm-kube-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let log = root.join("argv");
+        let script = root.join("fake-helm");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut request = sample_request(&root.join("chart"));
+        request.cluster_config_path = Some(root.join("cluster.yaml"));
+        let executor = HelmSoftwareExecutor {
+            helm_binary: script,
+        };
+        executor.apply(&request).unwrap();
+        executor.remove(&request).unwrap();
+        let _ = executor.observe(&request).unwrap();
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let expected = format!("--kubeconfig {}", root.join("cluster.yaml").display());
+        assert_eq!(calls.lines().count(), 4, "{calls}");
+        assert!(
+            calls.lines().all(|call| call.starts_with(&expected)),
+            "{calls}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

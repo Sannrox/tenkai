@@ -253,13 +253,28 @@ fn write_owner_only(path: &std::path::Path, secret: &str) -> Result<()> {
         .with_context(|| format!("syncing {}", directory.display()))
 }
 
+/// How a runtime applies a claimed step.
+#[derive(Clone)]
+pub enum StepExecutor {
+    /// An operator program, run through `tenkai-runtime-guard`.
+    Program(PathBuf),
+    /// Tenkai's own executors (ADR 0048).
+    Builtin(std::sync::Arc<crate::runtime_builtin::BuiltinConfig>),
+}
+
+impl From<PathBuf> for StepExecutor {
+    fn from(program: PathBuf) -> Self {
+        Self::Program(program)
+    }
+}
+
 #[derive(Clone)]
 pub struct RuntimeClient {
     base_url: String,
     environment: String,
     instance_id: String,
     token: String,
-    executor: PathBuf,
+    executor: StepExecutor,
     http: reqwest::Client,
     /// Where the runner certificate lives, when the agent has one (#674).
     certificate_dir: Option<PathBuf>,
@@ -287,7 +302,7 @@ impl RuntimeClient {
         base_url: impl Into<String>,
         environment: impl Into<String>,
         token: impl Into<String>,
-        executor: PathBuf,
+        executor: impl Into<StepExecutor>,
     ) -> Result<Self> {
         Self::new_with_options(base_url, environment, token, executor, true)
     }
@@ -296,18 +311,21 @@ impl RuntimeClient {
         base_url: impl Into<String>,
         environment: impl Into<String>,
         token: impl Into<String>,
-        executor: PathBuf,
+        executor: impl Into<StepExecutor>,
         inventory_report: bool,
     ) -> Result<Self> {
+        let executor = executor.into();
         let base_url = protected_base_url(base_url.into())?;
         let environment = environment.into();
         let token = token.into();
         anyhow::ensure!(!environment.is_empty(), "runtime environment is required");
         anyhow::ensure!(!token.is_empty(), "runtime token is required");
-        anyhow::ensure!(
-            executor.is_absolute(),
-            "runtime executor path must be absolute"
-        );
+        if let StepExecutor::Program(program) = &executor {
+            anyhow::ensure!(
+                program.is_absolute(),
+                "runtime executor path must be absolute"
+            );
+        }
         Ok(Self {
             base_url,
             environment,
@@ -610,6 +628,12 @@ impl RuntimeClient {
             } else {
                 self.execute_step(&plan.id, claim.generation, step).await?
             };
+            if !receipt.succeeded {
+                eprintln!(
+                    "runtime step {} failed: {}",
+                    receipt.step_id, receipt.detail
+                );
+            }
             succeeded &= receipt.succeeded;
             receipts.push(receipt);
             if !succeeded {
@@ -1015,7 +1039,65 @@ impl RuntimeClient {
         Ok(true)
     }
 
-    async fn heartbeat(&self, plan_id: &str, generation: u64) -> Result<bool> {
+    pub(crate) fn environment(&self) -> &str {
+        &self.environment
+    }
+
+    /// The release package for `step`, or with `restore` its restore pin,
+    /// for built-in mode (ADR 0048 §3). The inner `Err` is the server's
+    /// refusal, worded for the step's receipt.
+    pub(crate) async fn fetch_release(
+        &self,
+        plan_id: &str,
+        generation: u64,
+        step: &Step,
+        restore: bool,
+    ) -> Result<Result<crate::runtime_delivery::RuntimeRelease, String>> {
+        let response = self
+            .client()?
+            .post(format!(
+                "{}/v1/runtime/environments/{}/release",
+                self.base_url, self.environment
+            ))
+            .timeout(Duration::from_secs(300))
+            .bearer_auth(&self.token)
+            .header("x-tenkai-runtime-instance", &self.instance_id)
+            .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
+            .json(&crate::runtime_delivery::RuntimeReleaseRequest {
+                plan_id: plan_id.into(),
+                generation,
+                step_id: step.id.clone(),
+                restore,
+            })
+            .send()
+            .await?;
+        let status = response.status();
+        if matches!(
+            status,
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+        ) {
+            return Ok(Err(
+                "the server does not hand releases to a runtime in built-in mode; upgrade the server"
+                    .into(),
+            ));
+        }
+        if status == StatusCode::CONFLICT {
+            bail!("runtime claim was fenced before step {}", step.id);
+        }
+        // Only a refusal of this step fails it. Credential, attestation and
+        // availability errors leave the claim to be retried.
+        if status == StatusCode::PRECONDITION_FAILED {
+            let detail = response.text().await.unwrap_or_default();
+            return Ok(Err(crate::software_executor::sanitize_diagnostic_text(
+                &format!("the server refused the release: {detail}"),
+            )));
+        }
+        decode_response(response, "fetching the release")
+            .await
+            .map(Ok)
+    }
+
+    pub(crate) async fn heartbeat(&self, plan_id: &str, generation: u64) -> Result<bool> {
         // A long plan outlives a certificate's renewal window: renew here too.
         if let Err(error) = self.renew_certificate_if_due().await {
             eprintln!("runner certificate renewal failed (retrying): {error:#}");
@@ -1049,6 +1131,24 @@ impl RuntimeClient {
         generation: u64,
         step: &Step,
     ) -> Result<RuntimeStepReceipt> {
+        match &self.executor {
+            StepExecutor::Program(program) => {
+                self.execute_program_step(program, plan_id, generation, step)
+                    .await
+            }
+            StepExecutor::Builtin(config) => {
+                crate::runtime_builtin::execute_step(self, config, plan_id, generation, step).await
+            }
+        }
+    }
+
+    async fn execute_program_step(
+        &self,
+        program: &std::path::Path,
+        plan_id: &str,
+        generation: u64,
+        step: &Step,
+    ) -> Result<RuntimeStepReceipt> {
         let guard = std::env::current_exe().ok().and_then(|path| {
             path.parent()
                 .map(|parent| parent.join("tenkai-runtime-guard"))
@@ -1063,7 +1163,7 @@ impl RuntimeClient {
         let mut command = Command::new(guard);
         command
             .arg("--executor")
-            .arg(&self.executor)
+            .arg(program)
             .arg("--action")
             .arg(step.action.to_string())
             .arg("--product")

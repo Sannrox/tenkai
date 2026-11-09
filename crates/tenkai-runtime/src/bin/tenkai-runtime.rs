@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use clap::Parser;
-use tenkai::runtime_agent::RuntimeClient;
+use tenkai::runtime_agent::{RuntimeClient, StepExecutor};
 
 #[derive(Parser)]
 #[command(name = "tenkai-runtime", version, about = "Tenkai environment runtime")]
@@ -16,8 +16,25 @@ struct Cli {
     server_url: Option<String>,
     #[arg(long, env = "TENKAI_RUNTIME_ENVIRONMENT")]
     environment: Option<String>,
+    /// How claimed steps are applied: the absolute path of an operator
+    /// program, or `builtin` for Tenkai's own executors (ADR 0048).
     #[arg(long, env = "TENKAI_RUNTIME_EXECUTOR")]
-    executor: Option<PathBuf>,
+    executor: Option<String>,
+    /// Release signers a `builtin` runtime trusts (release trust-root TOML),
+    /// installed on this host and owner-only. Required in built-in mode.
+    #[arg(long, env = "TENKAI_RUNTIME_RELEASE_TRUST_ROOTS")]
+    release_trust_roots: Option<PathBuf>,
+    /// Where a `builtin` runtime places verified releases. Required in
+    /// built-in mode.
+    #[arg(long, env = "TENKAI_RUNTIME_WORK_DIR")]
+    work_dir: Option<PathBuf>,
+    /// Cluster configuration file for the Kubernetes executors in built-in
+    /// mode. Without it, Kubernetes releases are refused.
+    #[arg(long, env = "TENKAI_RUNTIME_CLUSTER_CONFIG")]
+    cluster_config: Option<PathBuf>,
+    /// Directory of Docker env files for the Docker executor in built-in mode.
+    #[arg(long, env = "TENKAI_RUNTIME_SECRET_DIR")]
+    secret_dir: Option<PathBuf>,
     /// Where the agent keeps its own versions, so Tenkai can upgrade and
     /// roll it back as a release of `tenkai-runtime` (#685). The supervisor
     /// runs `<home>/current/tenkai-runtime`.
@@ -111,6 +128,26 @@ async fn main() -> Result<()> {
     let executor = cli
         .executor
         .context("--executor or TENKAI_RUNTIME_EXECUTOR is required")?;
+    tenkai::key_revocation::load_configured()?;
+    let executor = if executor == tenkai::runtime_builtin::BUILTIN {
+        tenkai_executor::install();
+        let roots = cli.release_trust_roots.context(
+            "built-in mode needs --release-trust-roots or TENKAI_RUNTIME_RELEASE_TRUST_ROOTS",
+        )?;
+        StepExecutor::Builtin(std::sync::Arc::new(
+            tenkai::runtime_builtin::BuiltinConfig {
+                executors: tenkai::software_executor::SoftwareExecutors::try_from_process()?,
+                release_roots: tenkai::runtime_builtin::load_release_roots(&roots)?,
+                cluster_config: cli.cluster_config,
+                secret_dir: cli.secret_dir,
+                work_root: cli
+                    .work_dir
+                    .context("built-in mode needs --work-dir or TENKAI_RUNTIME_WORK_DIR")?,
+            },
+        ))
+    } else {
+        StepExecutor::Program(PathBuf::from(executor))
+    };
     let token = match &cli.credential_file {
         Some(file) => {
             tenkai::runtime_agent::enrolled_credential(
@@ -143,7 +180,6 @@ async fn main() -> Result<()> {
     if let Some(path) = cli.preflight_config {
         client = client.with_preflight(path);
     }
-    tenkai::key_revocation::load_configured()?;
     if let Some(path) = cli.approval_policy {
         client = client.with_local_policy(tenkai::runtime_local_approval::load(&path)?);
     }

@@ -112,6 +112,30 @@ pub(super) async fn runtime_self_release(
     }
 }
 
+/// The signed release of a step of the claimed plan, for a runtime that
+/// applies it with a built-in executor (ADR 0048 §3).
+pub(super) async fn runtime_release(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
+    Json(request): Json<tenkai::runtime_delivery::RuntimeReleaseRequest>,
+) -> Response {
+    match state
+        .runtime_delivery
+        .release(
+            bearer(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
+            &environment,
+            &request,
+        )
+        .await
+    {
+        Ok(release) => Json(release).into_response(),
+        Err(error) => runtime_delivery_error(error),
+    }
+}
+
 /// Renew a runner certificate (#674): admitted by the current one, or by
 /// the enrolled bearer once it has expired.
 pub(super) async fn runtime_certificate(
@@ -208,6 +232,9 @@ fn runtime_delivery_error(error: RuntimeDeliveryError) -> Response {
             StatusCode::BAD_REQUEST
         }
         RuntimeDeliveryError::Conflict(_) => StatusCode::CONFLICT,
+        // Distinct from 400 and 422, which a request-shape mismatch between
+        // versions also yields: only this fails the runtime's step.
+        RuntimeDeliveryError::ReleaseRefused(_) => StatusCode::PRECONDITION_FAILED,
         RuntimeDeliveryError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         RuntimeDeliveryError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         // 428 advertises the runner attestation policy (#675): the agent

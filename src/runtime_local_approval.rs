@@ -30,10 +30,16 @@ pub enum StepDecision {
     Refuse(String),
 }
 
-/// Load a runtime-local approval policy. The file and its parent directory
-/// must be owned by this process's user and not writable by group or others,
-/// so a compromised server cannot replace the file between stat and read.
+/// Load a runtime-local approval policy from an owner-only file.
 pub fn load(path: &Path) -> Result<HostApprovalPolicy> {
+    HostApprovalPolicy::parse(&read_owner_only(path)?)
+        .with_context(|| format!("loading runtime approval policy {}", path.display()))
+}
+
+/// Read a runtime-local trust file. The file and its parent directory must be
+/// owned by this process's user and not writable by group or others, so a
+/// compromised server cannot replace the file between stat and read.
+pub fn read_owner_only(path: &Path) -> Result<String> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -51,8 +57,7 @@ pub fn load(path: &Path) -> Result<HostApprovalPolicy> {
     let mut raw = String::new();
     file.read_to_string(&mut raw)
         .with_context(|| format!("reading {}", path.display()))?;
-    HostApprovalPolicy::parse(&raw)
-        .with_context(|| format!("loading runtime approval policy {}", path.display()))
+    Ok(raw)
 }
 
 /// Before `step` runs: if it writes a sealed secret, recompute the plan

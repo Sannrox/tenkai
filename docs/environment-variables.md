@@ -149,7 +149,11 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_RUNTIME_CREDENTIAL_FILE` | unset | Where an enrolled runtime keeps its own credential, owner-only; replaces `TENKAI_RUNTIME_TOKEN` ([enrolling a runtime](run-tenkai-server.md#enrolling-a-runtime)) |
 | `TENKAI_RUNTIME_ENROLLMENT_TOKEN` | unset | Single-use token exchanged for that credential on first start; unused once the file exists |
 | `TENKAI_RUNTIME_HOME` | unset | Where the runtime agent keeps its own versions, so Tenkai can upgrade and roll it back ([upgrading the runtime agent](run-tenkai-server.md#upgrading-the-runtime-agent)) |
-| `TENKAI_RUNTIME_EXECUTOR` | unset | Absolute path to the environment executor implementing the idempotency contract |
+| `TENKAI_RUNTIME_EXECUTOR` | unset | Required. Absolute path to the environment executor implementing the idempotency contract, or `builtin` to apply releases with Tenkai's own executors ([built-in executors on the runtime](run-tenkai-server.md#built-in-executors-on-the-runtime)) |
+| `TENKAI_RUNTIME_RELEASE_TRUST_ROOTS` | unset | Built-in mode, required: release trust-root TOML the runtime verifies every release against. Owner-only, like `TENKAI_RUNTIME_APPROVAL_POLICY` |
+| `TENKAI_RUNTIME_WORK_DIR` | unset | Built-in mode, required: where verified releases are placed |
+| `TENKAI_RUNTIME_CLUSTER_CONFIG` | unset | Built-in mode: cluster configuration for `helm`, `kubernetes` and `kubernetes-inprocess` releases; without it they are refused |
+| `TENKAI_RUNTIME_SECRET_DIR` | unset | Built-in mode: directory of Docker env files for `docker` releases |
 | `TENKAI_RUNTIME_INVENTORY` | enabled | Set `0`/`false`/`off`/`no` to disable runtime inventory reports |
 
 ## Software executors

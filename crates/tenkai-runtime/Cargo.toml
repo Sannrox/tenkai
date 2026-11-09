@@ -24,6 +24,7 @@ path = "src/bin/tenkai-worker-lifecycle-fixture.rs"
 
 [dependencies]
 tenkai = { path = "../..", version = "0.7.1" }
+tenkai-executor = { path = "../tenkai-executor", version = "0.7.1" }
 anyhow = "1"
 clap = { version = "4", default-features = false, features = ["derive", "env", "error-context", "help", "std", "usage"] }
 tokio = { version = "1", default-features = false, features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "signal"] }
