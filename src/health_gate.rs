@@ -212,6 +212,27 @@ impl HealthGateEvidence {
             self.on_fail.as_str()
         )
     }
+
+    pub fn cause(&self) -> crate::apply::DeploymentCause {
+        let failed = self
+            .gates
+            .iter()
+            .find(|gate| gate.verdict == GateVerdict::Fail)
+            .or_else(|| {
+                self.gates
+                    .iter()
+                    .find(|gate| gate.verdict == GateVerdict::Unavailable)
+            });
+        let mut cause = crate::apply::DeploymentCause::new(
+            crate::apply::DeploymentCausePhase::SloGate,
+            crate::apply::DeploymentCauseKind::GateBreached,
+            self.summary(),
+        );
+        if let Some(gate) = failed {
+            cause = cause.with_gate(gate.name.clone(), gate.value.map(|value| value.to_string()));
+        }
+        cause
+    }
 }
 
 /// Merge release-manifest gates with an optional channel overlay.
@@ -704,6 +725,7 @@ impl HealthGateDecision {
             StepOutcomeStatus::Failed,
             self.evidence.summary(),
         )
+        .with_cause(self.evidence.cause())
     }
 }
 

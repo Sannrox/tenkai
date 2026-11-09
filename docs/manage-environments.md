@@ -15,12 +15,13 @@ tenkaictl env retire prod --reason "service ended"
 `env list` shows active environments with subscription and lease summary.
 `tenkaictl env history <env> [--product <instance>] [--limit N]` lists recorded
 deployment attempts newest first: time, instance, from, to, action, status,
-plan id, and the stored `detail`. `--output json-v1` prints that page as JSON.
-`env inspect` includes `latest_failures` (the latest failed or rolled back
-attempt per instance) and points at `env history` for the rest. `status` still
-cuts the held-target cause to 1,000 characters; history shows the stored
-`detail` without that inspect-side cut. Remote mode reads
-`GET /v1/environments/{environment}/history`.
+plan id, and a one-line cause `summary` (or the stored `detail` on older
+records). `--output json-v1` prints that page as JSON, including the full
+structured `cause` and `restore` fields when present. `env inspect` includes
+`latest_failures` (the latest failed or rolled back attempt per instance) and
+points at `env history` for the rest. `status` shows the cause summary when
+one was recorded and still cuts the held-target `detail` to 1,000 characters.
+Remote mode reads `GET /v1/environments/{environment}/history`.
 Retired environments leave the list and fleet status while `env inspect <name>`
 continues to show their history and retirement reason, actor, and timestamp.
 Retirement refuses an active apply lease; first verify the apply has stopped and

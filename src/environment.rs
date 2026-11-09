@@ -42,6 +42,8 @@ pub(crate) struct DeploymentObservation<'a> {
     /// When the step's execution began in this process, for the feedback
     /// observation's duration (#802).
     pub started_at_ms: Option<i64>,
+    pub cause: Option<&'a crate::apply::DeploymentCause>,
+    pub restore: Option<&'a crate::apply::DeploymentCause>,
 }
 
 /// Durable evidence explaining why an environment is no longer operational.
@@ -582,6 +584,24 @@ pub(crate) async fn record_deployment_observation(
     deployment
         .properties
         .insert("detail".into(), observation.detail.into());
+    let classified = observation.cause.cloned().or_else(|| {
+        if matches!(observation.status, "failed" | "rolled_back") && !observation.detail.is_empty()
+        {
+            Some(crate::apply::DeploymentCause::classify(observation.detail))
+        } else {
+            None
+        }
+    });
+    if let Some(cause) = classified.as_ref()
+        && let Some(encoded) = cause.to_property()
+    {
+        deployment.properties.insert("cause".into(), encoded);
+    }
+    if let Some(restore) = observation.restore
+        && let Some(encoded) = restore.to_property()
+    {
+        deployment.properties.insert("restore".into(), encoded);
+    }
     deployment.updated = crate::now_millis();
     let mut environment = if ctx.outcome_export_enabled()
         || observation.transition != DeploymentTransition::Unchanged
@@ -629,6 +649,14 @@ pub(crate) async fn record_deployment_observation(
                 &observation.step.release_id,
                 observation.detail,
             );
+            if let Some(summary) = classified.as_ref().map(|cause| cause.summary.as_str()) {
+                record_failed_target_summary(
+                    &mut environment.properties,
+                    instance,
+                    &observation.step.release_id,
+                    summary,
+                );
+            }
         } else if observation.status == "succeeded"
             && environment.properties.get(&failed_target_key) == Some(&observation.step.release_id)
             && matches!(
@@ -642,6 +670,9 @@ pub(crate) async fn record_deployment_observation(
             environment
                 .properties
                 .remove(&format!("failed_target_plan.{instance}"));
+            environment
+                .properties
+                .remove(&format!("failed_target_summary.{instance}"));
         }
         if observation.transition == DeploymentTransition::Unknown {
             environment.properties.insert(
@@ -721,6 +752,9 @@ pub(crate) async fn record_deployment_observation(
     if !webhook_endpoints.is_empty() {
         let source_revision =
             crate::deploy_webhook::source_revision(ctx, &observation.step.release_id).await;
+        let summary = classified.as_ref().and_then(|cause| {
+            matches!(observation.status, "failed" | "rolled_back").then_some(cause.summary.as_str())
+        });
         provider_events.extend(crate::deploy_webhook::records_for_observation(
             &webhook_endpoints,
             plan.as_ref().expect("webhooks load Plan"),
@@ -728,6 +762,8 @@ pub(crate) async fn record_deployment_observation(
             observation.status,
             deployment.updated,
             &source_revision,
+            Some(attempt_id.as_str()),
+            summary,
         ));
     }
     let environment_changed = observation.transition != DeploymentTransition::Unchanged
@@ -1842,7 +1878,8 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
                     .get(&format!("deployment_health.{instance}"))
                     .is_none_or(|health| health != "unknown")
             {
-                let cause = held_failed_target_error(&env_obj.properties, &instance)
+                let cause = held_failed_target_summary(&env_obj.properties, &instance)
+                    .or_else(|| held_failed_target_error(&env_obj.properties, &instance))
                     .map(|detail| format!(": {detail}"))
                     .unwrap_or_default();
                 Some(format!("target failed{cause}; automatic retry held; create and approve an explicit plan to retry"))
@@ -2763,15 +2800,43 @@ pub(crate) fn record_failed_target_error(
     );
 }
 
+fn record_failed_target_summary(
+    properties: &mut HashMap<String, String>,
+    product: &str,
+    release_id: &str,
+    summary: &str,
+) {
+    let summary: String = summary.chars().take(FAILED_TARGET_ERROR_CHARS).collect();
+    properties.insert(
+        format!("failed_target_summary.{product}"),
+        format!("{release_id}\n{summary}"),
+    );
+}
+
 /// Why the held failed target of `product` failed, when it was recorded for
 /// that release.
 fn held_failed_target_error<'a>(
     properties: &'a HashMap<String, String>,
     product: &str,
 ) -> Option<&'a str> {
+    held_failed_target_text(properties, product, "failed_target_error")
+}
+
+fn held_failed_target_summary<'a>(
+    properties: &'a HashMap<String, String>,
+    product: &str,
+) -> Option<&'a str> {
+    held_failed_target_text(properties, product, "failed_target_summary")
+}
+
+fn held_failed_target_text<'a>(
+    properties: &'a HashMap<String, String>,
+    product: &str,
+    prefix: &str,
+) -> Option<&'a str> {
     let held = held_failed_target_release(properties, product)?;
     let (release, detail) = properties
-        .get(&format!("failed_target_error.{product}"))?
+        .get(&format!("{prefix}.{product}"))?
         .split_once('\n')?;
     (release == held && !detail.is_empty()).then_some(detail)
 }
@@ -3848,6 +3913,16 @@ mod tests {
         // A newer failed target recorded without a cause hides the old one.
         properties.insert(failed_target_key("web"), "tenkai:release:web@3.0.0".into());
         assert_eq!(held_failed_target_error(&properties, "web"), None);
+        properties.insert(failed_target_key("web"), "tenkai:release:web@4.0.0".into());
+        let long = "x".repeat(2_000);
+        record_failed_target_error(&mut properties, "web", "tenkai:release:web@4.0.0", &long);
+        assert_eq!(
+            held_failed_target_error(&properties, "web")
+                .unwrap()
+                .chars()
+                .count(),
+            FAILED_TARGET_ERROR_CHARS
+        );
     }
 
     #[test]

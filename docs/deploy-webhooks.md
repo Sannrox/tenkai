@@ -43,16 +43,17 @@ tenkaictl env webhooks clear lab
 Posted JSON (`tenkai.deploy_webhook.v1`) includes environment, product, version,
 previous version when known, release id and digest, source revision from signed
 release provenance when present, artifact digests, plan id, step id, outcome,
-and the first-delivery timestamp. It does not include secrets, command output,
-workdir paths, or the per-call deployment attempt id (that identity is minted
-from the clock and would duplicate notifications on replay). A rollback event
-carries both the rejected version and the restored previous version.
+and the first-delivery timestamp. Failed and rolled-back events also include
+the clock-minted `attempt_id` of the first observation that enqueued the row
+and a one-line redacted cause `summary`. The body does not include secrets,
+captured command output (`raw`), or workdir paths. A rollback event carries
+both the rejected version and the restored previous version.
 
 The outbox identity is a digest of the destination URL, plan id, step id, and
-event name. Replaying the same terminal step reuses that row; HTTP retries
-reuse `X-Tenkai-Idempotency-Key`. The posted `observed_at` is bound on first
-delivery from the outbox collection timestamp so a replay does not mint a
-second notification.
+event name. Replaying the same terminal step reuses that row and keeps the
+first `attempt_id`; HTTP retries reuse `X-Tenkai-Idempotency-Key`. The posted
+`observed_at` is bound on first delivery from the outbox collection timestamp
+so a replay does not mint a second notification.
 
 ## Signature
 

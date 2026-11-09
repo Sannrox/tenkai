@@ -647,6 +647,8 @@ pub fn known_object_types() -> Vec<ObjectType> {
                 prop("to_version", true, "Applied version"),
                 prop("status", true, "succeeded|failed|rolled_back"),
                 prop("detail", false, "Failure or rollback detail"),
+                prop("cause", false, "Structured failure cause JSON"),
+                prop("restore", false, "Structured restore-result JSON"),
                 prop("lease_generation", false, "Mutation fencing generation"),
                 prop("action", false, "Plan step action"),
                 prop("plan_id", false, "Plan this attempt executed"),

@@ -42,7 +42,9 @@ pub use execution_lease::{EnvironmentLeaseInspect, inspect_environment_lease, un
 use execution_lease::{
     claim_execution_environment, run_guarded_mutation, run_mutation_command, run_with_lease_renewal,
 };
-pub use outcome::{Outcome, StepOutcomeStatus};
+pub use outcome::{
+    DeploymentCause, DeploymentCauseKind, DeploymentCausePhase, Outcome, StepOutcomeStatus,
+};
 use release_content::{ReleaseContent, admit as admit_release, verify_integrity};
 
 #[derive(Clone)]

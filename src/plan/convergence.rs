@@ -3918,6 +3918,8 @@ install = "true"
                     detail,
                     transition: crate::environment::DeploymentTransition::Unchanged,
                     started_at_ms: Some(crate::now_millis() - 25),
+                    cause: None,
+                    restore: None,
                 },
             )
             .await
@@ -3995,6 +3997,8 @@ install = "true"
                 detail: "health failed; previous release restored",
                 transition: crate::environment::DeploymentTransition::Unchanged,
                 started_at_ms: None,
+                cause: None,
+                restore: None,
             },
         )
         .await
@@ -4074,6 +4078,8 @@ install = "true"
                     previous: Some("1.0.0".into()),
                 },
                 started_at_ms: None,
+                cause: None,
+                restore: None,
             },
         )
         .await
