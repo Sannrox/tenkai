@@ -2,6 +2,9 @@
 
 - Status: Accepted
 - Date: 2026-11-09
+- Amended: 2026-11-09 by [#1121](https://github.com/Sannrox/tenkai/issues/1121)
+  (§1 mode switch, §3 release package, §5 no work-pull header; host releases
+  on the runtime follow in [#1122](https://github.com/Sannrox/tenkai/issues/1122))
 - Issue: [#1119](https://github.com/Sannrox/tenkai/issues/1119)
 - Owner: Tenkai maintainers
 - Amends: [ADR 0045](0045-sealed-secrets.md) §4 (who writes the target, host
@@ -39,27 +42,25 @@ Tenkai runtime that agent.
 
 ### 1. The runtime runs the built-in executors
 
-`tenkai-runtime` links the built-in executors of ADR 0041 §1 (`shell`,
-`host`, `helm`, `kubernetes`, `kubernetes-inprocess`, `docker`) and can run a
-step in-process. Runtime configuration enables the ones this runtime may run.
-The runtime's claim fencing, heartbeats, and completion ordering wrap the
-executor as they wrap the guard today. Each built-in executor keeps its
-existing idempotency, so a retry after a crash re-applies the same release.
+`tenkai-runtime` links the built-in executors of ADR 0041 §1 and can run a
+step in-process. `TENKAI_RUNTIME_EXECUTOR` selects one of two modes:
 
-A runtime with no built-in executor enabled behaves exactly as today: every
-step runs through its operator program. Once any is enabled, a release that
-declares `deploy.executor` runs with that executor if it is enabled, and fails
-closed naming it if not. A release without a declared executor uses the
-runtime's default, which is exactly one of:
+- **Program mode:** an absolute path. Every step runs through that operator
+  program and `tenkai-runtime-guard`, as before this decision.
+- **Built-in mode:** the value `builtin`. The runtime resolves each release's
+  executor exactly as the server does: the declared `deploy.executor`, else
+  `TENKAI_SOFTWARE_EXECUTOR`, else `shell`. A declared executor this runtime
+  cannot run fails the step and names it.
 
-- an operator executor program (`TENKAI_RUNTIME_EXECUTOR`), run through
-  `tenkai-runtime-guard` as today, or
-- a built-in executor named by runtime configuration, as
-  `TENKAI_SOFTWARE_EXECUTOR` does for the server.
+The variable stays required, so a runtime never picks a mode by default, and
+a step never falls back from one mode to the other. The runtime's claim
+fencing, heartbeats, and completion ordering wrap the executor as they wrap
+the guard. Each built-in executor keeps its existing idempotency, so a retry
+after a crash re-applies the same release.
 
-A runtime configured with both refuses to start and names both. Once any
-built-in executor is enabled, a release that declares an executor, `shell`
-included, never runs through the program.
+Built-in mode refuses `host` releases until the runtime drives the host
+applier (#1122). The rest of this decision describes the host path that
+change delivers.
 
 ### 2. Target access is the runtime host's own configuration
 
@@ -85,6 +86,13 @@ policy trusts (ADR 0045 §4); the runtime needs both, as the host applier does
 artifacts only from the environment mirror and checks each one against its
 signed digest. A server cannot make the runtime apply content no trusted
 signer released.
+
+The server hands the runtime a release package for each claimed step: the
+signed manifest, its signature, the deploy inputs, and the executor request it
+computed. The runtime checks the manifest against the plan step's digests and
+names, rebuilds the deploy inputs under a work directory addressed by the
+signed artifact digest, and checks them against that digest before any
+executor runs.
 
 ### 4. Sealed values are written by the executor that applies the release
 
@@ -143,26 +151,16 @@ of the step's release, in-process.
 
 ### 5. Rolling compatibility
 
-Work pull carries no capabilities today. A runtime with built-in executors
-enabled sends them on work pull in an additive header, the way it already
-sends its version: the enabled executors and its default (`program` or one
-of them). A server resolves each step's executor for that runtime, the
-declared one or else the default, and reads the header as follows:
+Work pull is unchanged and carries no executor capabilities. A server offers
+a built-in runtime every step, as it offers a program-mode runtime. A step
+whose executor the runtime cannot run fails visibly on the runtime instead of
+waiting for, or moving to, another runner: an environment has one runtime,
+so there is nowhere else for the step to go.
 
-- No header: the runtime is unchanged, and every step is offered as today.
-  Sealed steps are never offered, since the program cannot write them.
-- With the header: a step is offered only if its resolved executor is
-  enabled, or is `program` because the release declares none and the
-  runtime's default is `program`. A sealed step also needs a resolved executor that writes sealed
-  values (`helm` or `host`) and the `sealed_secrets` capability (ADR 0045).
-- A step held back this way stays pending, with the reason named in plan
-  status.
-
-A server that predates this decision ignores the header and offers every
-step. A runtime then fails closed on a release whose executor it has not
-enabled, so the plan fails visibly instead of running elsewhere. Upgrade the
-servers before enabling built-in executors on a runtime. A runtime with none
-enabled keeps today's behavior against any server.
+A runtime in built-in mode fetches each step's release package from an
+endpoint that older servers lack. Against such a server the step fails and
+names the upgrade. Upgrade the servers before switching a runtime to
+built-in mode. A program-mode runtime keeps its behavior against any server.
 
 ## Consequences
 
@@ -179,6 +177,8 @@ enabled keeps today's behavior against any server.
 - `tenkai-runtime` takes on `tenkai-executor` and its Kubernetes and Helm
   dependencies. Its build and binary size grow accordingly.
 - Raw Kubernetes descriptors cannot read sealed values yet.
+- A runtime in built-in mode does not report the observed runtime of what it
+  applied; the server's read views show only what it applied itself.
 - A hardware-backed runtime still needs its sealing key in hardware (ADR 0045
   §1), which needs a key-agreement operation in the hardware key path. Until
   that exists, such a runtime refuses sealed steps with a named reason.
@@ -199,5 +199,9 @@ enabled keeps today's behavior against any server.
 - **Mutable, fixed-name Secrets.** Rejected for the reasons in ADR 0045:
   running pods would see a new value before their rollout, and rollback could
   not restore the old one.
+- **Executor capabilities on work pull, so the server routes steps.**
+  Rejected for now: with one runtime per environment there is no other
+  runner to route to, and a visible failure on the runtime names the missing
+  executor as clearly as a pending step would.
 - **A new manifest field for the host file owner now.** Deferred: no release
   needs it yet, and it can be added without changing this decision.

@@ -633,6 +633,64 @@ pub struct RuntimeSelfReleaseFile {
     pub name: String,
 }
 
+/// Which step's release a runtime in built-in mode asks for (ADR 0048 §3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeReleaseRequest {
+    pub plan_id: String,
+    pub generation: u64,
+    pub step_id: String,
+    /// The step's restore pin, the release a failure restores and a
+    /// rollback removes, instead of its target.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restore: bool,
+}
+
+/// The signed release of one claimed step, for a runtime that applies it
+/// itself. The runtime trusts none of it until the signature verifies
+/// against its own trust roots and the entries hash to the step's artifact
+/// digest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeRelease {
+    /// The release manifest text exactly as signed.
+    pub manifest: String,
+    pub signature: crate::release_signing::SignatureEnvelope,
+    /// The executor request the server computed: overlays, configuration
+    /// digest, admitted mirror pulls, and the dependency document. Its
+    /// host-local fields (workdir, cluster configuration, secret directory)
+    /// are empty; the runtime fills them from its own configuration.
+    pub request: crate::software_executor::SoftwareApplyRequest,
+    /// Every file and directory of the immutable deploy inputs, parents first.
+    pub entries: Vec<RuntimeReleaseEntry>,
+    /// The release this step replaces, when the step has no restore pin to
+    /// read it from, so the runtime keeps the product on one executor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<RuntimeReplacedRelease>,
+}
+
+/// The installed release a step replaces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeReplacedRelease {
+    /// Its declared `deploy.executor`, by name. Absent: it declares none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor: Option<String>,
+}
+
+/// One file or directory of a release's deploy inputs, relative to the
+/// release root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeReleaseEntry {
+    pub path: String,
+    /// Permission bits; they are part of the artifact digest.
+    pub mode: u32,
+    /// Standard base64 of the file's bytes. Absent for a directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contents: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeHeartbeat {
@@ -671,6 +729,10 @@ pub enum RuntimeDeliveryError {
     ForeignEnvironment,
     #[error("{0}")]
     InvalidRequest(String),
+    /// The server will not hand this step's release to a built-in runtime;
+    /// the step fails with this reason.
+    #[error("{0}")]
+    ReleaseRefused(String),
     #[error("{0}")]
     Conflict(String),
     #[error("{0}")]
@@ -1109,6 +1171,52 @@ impl RuntimeDeliveryOperations {
         read().map_err(|_| {
             RuntimeDeliveryError::Unavailable("runtime agent release content unavailable".into())
         })
+    }
+
+    /// The signed release of a step of the plan this runtime holds (ADR 0048
+    /// §3). Renews the claim first, so a fenced runtime gets nothing.
+    pub async fn release(
+        &self,
+        token: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
+        environment: &str,
+        request: &RuntimeReleaseRequest,
+    ) -> Result<RuntimeRelease, RuntimeDeliveryError> {
+        self.renew(
+            token,
+            caller.into(),
+            environment,
+            &RuntimeHeartbeat {
+                plan_id: request.plan_id.clone(),
+                generation: request.generation,
+            },
+        )
+        .await?;
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "plans unavailable".into(),
+            ));
+        };
+        let plan = crate::plan::load(&mut ctx, &request.plan_id)
+            .await
+            .map_err(|_| RuntimeDeliveryError::Unavailable("plans unavailable".into()))?;
+        let Some(step) = plan.steps.iter().find(|step| step.id == request.step_id) else {
+            return Err(RuntimeDeliveryError::ReleaseRefused(
+                "the plan has no step with that id".into(),
+            ));
+        };
+        crate::apply::runtime_release(&mut ctx, &plan, step, request.restore)
+            .await
+            .map_err(
+                |error| match error.downcast_ref::<crate::apply::ReleaseRefused>() {
+                    Some(refused) => RuntimeDeliveryError::ReleaseRefused(refused.to_string()),
+                    // May pass: the runtime keeps its claim and asks again.
+                    None => {
+                        eprintln!("building a runtime release package failed: {error:#}");
+                        RuntimeDeliveryError::Unavailable("release package unavailable".into())
+                    }
+                },
+            )
     }
 
     pub async fn report_inventory(

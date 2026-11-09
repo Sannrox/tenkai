@@ -263,6 +263,7 @@ pub mod runner_attestation;
 pub mod runner_ca;
 pub mod runner_key;
 pub mod runtime_agent;
+pub mod runtime_builtin;
 pub mod runtime_capabilities;
 pub mod runtime_credentials;
 pub mod runtime_delivery;

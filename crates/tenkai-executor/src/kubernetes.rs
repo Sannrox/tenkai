@@ -1,6 +1,6 @@
 //! Native Kubernetes apply via `kubectl` (plain manifests, not Helm charts).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use anyhow::{Context as _, Result, bail};
@@ -29,18 +29,31 @@ impl Default for KubernetesSoftwareExecutor {
     }
 }
 
+impl KubernetesSoftwareExecutor {
+    /// A `kubectl` command for `request`, pointed at its cluster configuration
+    /// when the request names one. Every call uses this, so a request never
+    /// reaches a different cluster than its other calls.
+    fn kubectl(&self, request: &SoftwareApplyRequest) -> Command {
+        let mut command = Command::new(&self.kubectl_binary);
+        if let Some(path) = &request.cluster_config_path {
+            command.arg("--kubeconfig").arg(path);
+        }
+        command
+    }
+}
+
 impl SoftwareExecutor for KubernetesSoftwareExecutor {
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
         let materialized = materialize_kubernetes_manifests(request)?;
         let manifests = materialized.dir.clone();
         let files = list_manifest_files(&manifests)?;
-        ensure_namespace(self, &request.environment)?;
+        ensure_namespace(self, request)?;
         apply_dependency_configmap(self, request, SoftwareDeployPhase::Apply)?;
         for path in &files {
             let path_s = path.to_string_lossy();
             run_kubectl(
-                &self.kubectl_binary,
+                self.kubectl(request),
                 &[
                     "apply",
                     "-f",
@@ -71,7 +84,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
             args.push(label.as_str());
         }
         run_kubectl(
-            &self.kubectl_binary,
+            self.kubectl(request),
             &args,
             SoftwareDeployPhase::Apply,
             "label --overwrite",
@@ -90,7 +103,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
         for path in files.iter().rev() {
             let path_s = path.to_string_lossy();
             run_kubectl(
-                &self.kubectl_binary,
+                self.kubectl(request),
                 &[
                     "delete",
                     "-f",
@@ -123,7 +136,8 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
         }
         // Present only if every manifest file still resolves in the namespace.
         for path in &files {
-            let output = Command::new(&self.kubectl_binary)
+            let output = self
+                .kubectl(request)
                 .arg("get")
                 .arg("-f")
                 .arg(path)
@@ -159,7 +173,8 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
         }
         let mut restarted = false;
         for kind in ["deployment", "statefulset"] {
-            let output = Command::new(&self.kubectl_binary)
+            let output = self
+                .kubectl(request)
                 .arg("rollout")
                 .arg("restart")
                 .arg(kind)
@@ -193,9 +208,14 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
     }
 }
 
-fn ensure_namespace(executor: &KubernetesSoftwareExecutor, namespace: &str) -> Result<()> {
+fn ensure_namespace(
+    executor: &KubernetesSoftwareExecutor,
+    request: &SoftwareApplyRequest,
+) -> Result<()> {
     use std::process::Stdio;
-    let get = Command::new(&executor.kubectl_binary)
+    let namespace = &request.environment;
+    let get = executor
+        .kubectl(request)
         .arg("get")
         .arg("namespace")
         .arg(namespace)
@@ -213,7 +233,7 @@ fn ensure_namespace(executor: &KubernetesSoftwareExecutor, namespace: &str) -> R
         return Ok(());
     }
     run_kubectl(
-        &executor.kubectl_binary,
+        executor.kubectl(request),
         &["create", "namespace", namespace],
         SoftwareDeployPhase::Apply,
         "create namespace",
@@ -235,14 +255,13 @@ fn ownership_label_args(request: &SoftwareApplyRequest) -> Vec<String> {
 }
 
 fn run_kubectl(
-    binary: &Path,
+    mut command: Command,
     args: &[&str],
     phase: SoftwareDeployPhase,
     phase_hint: &str,
     product: &str,
     environment: &str,
 ) -> Result<()> {
-    let mut command = Command::new(binary);
     command.args(args);
     run_captured_command(
         &mut command,
@@ -260,7 +279,8 @@ fn kubernetes_labels_mismatch(
     request: &SoftwareApplyRequest,
 ) -> bool {
     let selector = format!("tenkai.product={}", k8s_label_value(&request.product));
-    let output = Command::new(&executor.kubectl_binary)
+    let output = executor
+        .kubectl(request)
         .arg("get")
         .arg("deploy,statefulset")
         .arg("--namespace")
@@ -294,7 +314,8 @@ fn kubernetes_labeled_workloads_exist(
     request: &SoftwareApplyRequest,
     selector: &str,
 ) -> Result<bool> {
-    let output = Command::new(&executor.kubectl_binary)
+    let output = executor
+        .kubectl(request)
         .arg("get")
         .arg("deploy,sts")
         .arg("--namespace")
@@ -381,7 +402,7 @@ fn apply_dependency_configmap(
     std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
     let path_s = path.to_string_lossy().into_owned();
     let result = run_kubectl(
-        &executor.kubectl_binary,
+        executor.kubectl(request),
         &["apply", "-f", &path_s, "--namespace", &request.environment],
         phase,
         "apply dependency ConfigMap",
@@ -398,7 +419,7 @@ fn delete_dependency_configmap(
 ) -> Result<()> {
     let name = tenkai::dependency_document::configmap_name(request.instance_name());
     run_kubectl(
-        &executor.kubectl_binary,
+        executor.kubectl(request),
         &[
             "delete",
             "configmap",
@@ -426,7 +447,7 @@ fn annotate_config_digest(
         format!("tenkai.config-digest={}", request.config_digest)
     };
     run_kubectl(
-        &executor.kubectl_binary,
+        executor.kubectl(request),
         &[
             "annotate",
             "--overwrite",
@@ -473,6 +494,39 @@ mod tests {
         assert_eq!(
             executor.observe(&request).unwrap(),
             SoftwareObserveStatus::Unknown
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn every_kubectl_call_targets_the_requested_cluster_config() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("tenkai-k8s-kube-{}", uuid::Uuid::new_v4()));
+        let manifests = root.join("release").join(KUBERNETES_MANIFESTS_DIR);
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::write(manifests.join("cm.yaml"), "kind: ConfigMap\n").unwrap();
+        let log = root.join("argv");
+        let script = root.join("fake-kubectl");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut request = sample_request(&root.join("release"));
+        request.cluster_config_path = Some(root.join("cluster.yaml"));
+        let executor = KubernetesSoftwareExecutor {
+            kubectl_binary: script,
+        };
+        executor.apply(&request).unwrap();
+        executor.remove(&request).unwrap();
+        let _ = executor.observe(&request).unwrap();
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let expected = format!("--kubeconfig {}", root.join("cluster.yaml").display());
+        assert!(calls.lines().count() >= 5, "{calls}");
+        assert!(
+            calls.lines().all(|call| call.starts_with(&expected)),
+            "{calls}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

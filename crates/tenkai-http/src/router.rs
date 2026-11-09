@@ -47,7 +47,7 @@ use super::runtime::{
     create_runtime_enrollment, inspect_runtime_runner, list_environment_recipients,
     list_runtime_runners, revoke_runtime_credential, revoke_runtime_credential_legacy,
     runtime_certificate, runtime_complete, runtime_enroll, runtime_heartbeat, runtime_inventory,
-    runtime_self_release, runtime_work,
+    runtime_release, runtime_self_release, runtime_work,
 };
 
 pub(super) struct AppState {
@@ -366,6 +366,10 @@ pub fn router(
         .route(
             "/v1/runtime/environments/{environment}/self-release",
             post(runtime_self_release),
+        )
+        .route(
+            "/v1/runtime/environments/{environment}/release",
+            post(runtime_release),
         )
         .route(
             "/v1/runtime/environments/{environment}/enroll",
