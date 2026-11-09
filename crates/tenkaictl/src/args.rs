@@ -477,6 +477,46 @@ pub(crate) enum SecretCommand {
         #[command(flatten)]
         remote: crate::env_args::RemoteChange,
     },
+    /// The offline recovery key that recovers sealed values after every
+    /// runtime is lost (ADR 0045 §7).
+    RecoveryKey {
+        #[command(subcommand)]
+        command: RecoveryKeyCommand,
+    },
+    /// Recover sealed values for a new runtime with the offline recovery
+    /// key: open each value's recovery wrap here, wrap its data key for the
+    /// pinned runtime key `--recipient`, and plan the re-wrap step that
+    /// carries them. The plan needs signed approval; no value is sent.
+    Recover {
+        env: String,
+        /// The recovery private key (PKCS#8 PEM).
+        #[arg(long)]
+        key: std::path::PathBuf,
+        /// The new runtime's recipient key fingerprint, pinned with
+        /// `secret trust`.
+        #[arg(long)]
+        recipient: String,
+        /// Current fencing generation.
+        #[arg(long)]
+        generation: u64,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RecoveryKeyCommand {
+    /// Generate a recovery key pair offline: the private key is written
+    /// owner-only to `path` and never overwritten; the public key and
+    /// fingerprint are printed. Keep the private key off every runtime.
+    Generate { path: std::path::PathBuf },
+    /// Record the recovery public key of an environment. New values are
+    /// sealed to it once it is pinned; a replaced key's wraps are dropped.
+    Set {
+        env: String,
+        /// The public key `recovery-key generate` printed.
+        public_key: String,
+        #[command(flatten)]
+        remote: crate::env_args::RemoteChange,
+    },
 }
 
 #[derive(Subcommand)]

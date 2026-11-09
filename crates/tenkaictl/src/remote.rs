@@ -440,7 +440,7 @@ pub(crate) async fn run(
                 .await
             }
             crate::args::SecretCommand::List { env } => {
-                crate::secret::print_list(&client.list_sealed_secrets(&env).await?);
+                crate::secret::print_list(&client.list_sealed_secrets(&env, false).await?);
                 Ok(())
             }
             crate::args::SecretCommand::Rewrap {
@@ -449,16 +449,47 @@ pub(crate) async fn run(
                 generation,
             } => {
                 let result = client
-                    .rewrap_sealed_secrets(&env, &recipient, generation)
+                    .rewrap_sealed_secrets(&env, &recipient, generation, Default::default())
                     .await?;
-                println!("{}", result.message);
-                if let Some(plan_id) = &result.resource {
-                    println!("plan id: {plan_id}");
-                }
-                if let Some(digest) = &result.digest {
-                    println!("plan digest: {digest}");
-                }
+                crate::secret::print_plan(&result);
                 Ok(())
+            }
+            crate::args::SecretCommand::RecoveryKey { command } => match command {
+                crate::args::RecoveryKeyCommand::Generate { path } => {
+                    crate::secret::generate_recovery_key(&path)
+                }
+                crate::args::RecoveryKeyCommand::Set {
+                    env,
+                    public_key,
+                    remote,
+                } => {
+                    let (generation, reason) = crate::remote_env_config::require(&remote)?;
+                    let change =
+                        tenkai::environment_config::EnvironmentConfigChange::SetSealedRecoveryKey {
+                            public_key,
+                        };
+                    let result = client
+                        .configure_environment(&env, change, reason, generation)
+                        .await?;
+                    println!("{}", result.message);
+                    Ok(())
+                }
+            },
+            crate::args::SecretCommand::Recover {
+                env,
+                key,
+                recipient,
+                generation,
+            } => {
+                crate::secret::recover(
+                    &client,
+                    cli.server_url.as_deref(),
+                    &env,
+                    &key,
+                    &recipient,
+                    generation,
+                )
+                .await
             }
             crate::args::SecretCommand::Delete {
                 env,

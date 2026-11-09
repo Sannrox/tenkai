@@ -118,6 +118,12 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
         Command::Runtime { .. } => anyhow::bail!(
             "runtime agents enroll with a Tenkai server; run this with --target remote"
         ),
+        Command::Secret {
+            command:
+                crate::args::SecretCommand::RecoveryKey {
+                    command: crate::args::RecoveryKeyCommand::Generate { path },
+                },
+        } => crate::secret::generate_recovery_key(&path),
         Command::Secret { .. } => anyhow::bail!(
             "sealed secrets and recipient pins need a Tenkai server; run this with --target remote"
         ),

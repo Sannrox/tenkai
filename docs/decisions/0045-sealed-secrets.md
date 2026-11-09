@@ -9,6 +9,8 @@
   host file owner and host hand-off)
 - Amended: 2026-11-09 by [#1051](https://github.com/Sannrox/tenkai/issues/1051)
   (§5 how a recipient step is requested, carried, run, and accepted)
+- Amended: 2026-11-09 by [#1138](https://github.com/Sannrox/tenkai/issues/1138)
+  (§7 how recovered wraps ride on the recipient step)
 - Related: [ADR 0037](0037-multi-party-plan-approval.md),
   [ADR 0041](0041-per-release-executor-and-privileged-host-releases.md),
   [ADR 0044](0044-product-instances-and-dependency-bindings.md),
@@ -254,6 +256,15 @@ private key. It reads the wraps for that key, opens the data keys locally,
 and submits re-wraps for a set of pinned runtime keys. It never submits a
 value. The recovered wraps still take effect only through the approved
 recipient plan of section 5.
+
+The recovered wraps ride in that plan's re-wrap step (`recovered`), so its
+digest and approvals cover them. The runtime that holds the recipient key
+runs the step: it opens each value through its recovered wrap, which
+authenticates the wrap, and returns a wrap of its own. The server stores that
+wrap as it stores any re-wrap. A recovered wrap that does not open its value
+fails the step. Replacing the recovery key drops the old key's wraps, as
+revoking a runtime does. Values sealed before a key was set get a wrap for it
+through a re-wrap step for the recovery key's fingerprint.
 
 Without a recovery key, `secret list` and `env inspect` show that losing every
 runtime loses the environment's sealed values.

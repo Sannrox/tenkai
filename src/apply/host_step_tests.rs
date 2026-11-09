@@ -1430,9 +1430,10 @@ async fn a_host_instance_with_sealed_values_gets_a_rewrap_plan() {
     host.ctx.put(env_obj).await.unwrap();
 
     let recipient = format!("sha256:{}", "b".repeat(64));
-    let (steps, undeployed) = crate::plan::rewrap_steps(&mut host.ctx, "edge", &recipient)
-        .await
-        .unwrap();
+    let (steps, undeployed) =
+        crate::plan::rewrap_steps(&mut host.ctx, "edge", &recipient, &Default::default())
+            .await
+            .unwrap();
     assert!(undeployed.is_empty());
     let rewrap = crate::plan::create_from_steps(&mut host.ctx, "edge", steps)
         .await

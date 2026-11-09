@@ -2304,6 +2304,24 @@
         },
         {
           "additionalProperties": false,
+          "description": "Record the environment's offline recovery public key (ADR 0045 §7):\nstandard base64 of an uncompressed P-256 point. Its private half\nnever reaches Tenkai. A replaced key's wraps are dropped.",
+          "properties": {
+            "kind": {
+              "const": "set_sealed_recovery_key",
+              "type": "string"
+            },
+            "public_key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "public_key"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "Remove one sealed key. `present_in_target` states that a release\nreading it finds the key in the target by other means.",
           "properties": {
             "instance": {
@@ -2627,6 +2645,10 @@
           "$ref": "#/$defs/EnvironmentRetirement",
           "description": "Present after this environment has been retired from operational use."
         },
+        "sealed_recovery_warning": {
+          "description": "Why sealed values would be lost with every runtime (ADR 0045 §7):\nno recovery key, or values without a wrap for it.",
+          "type": "string"
+        },
         "subscriptions": {
           "items": {
             "$ref": "#/$defs/EnvironmentSubscriptionView"
@@ -2948,7 +2970,7 @@
       "type": "object"
     },
     "EnvironmentRecipient": {
-      "description": "One unrevoked runtime recipient key an operator or client may pin.",
+      "description": "One recipient key an operator or client may pin: an unrevoked\nruntime's, or the environment's offline recovery key (ADR 0045 §7),\nwhich has no runtime.",
       "properties": {
         "capability": {
           "type": "string"
@@ -2958,6 +2980,10 @@
         },
         "public_key": {
           "type": "string"
+        },
+        "recovery": {
+          "description": "The environment's offline recovery key, not a runtime's.",
+          "type": "boolean"
         },
         "runtime_id": {
           "type": "string"
@@ -5428,6 +5454,32 @@
       ],
       "type": "object"
     },
+    "RecipientWrap": {
+      "additionalProperties": false,
+      "description": "A wrap a runtime made for an approved recipient (ADR 0045 §5), for one\nstored value of an instance, named by its slot and sealed digest.",
+      "properties": {
+        "digest": {
+          "description": "The value's sealed digest when it was re-wrapped.",
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "secret": {
+          "type": "string"
+        },
+        "wrap": {
+          "$ref": "#/$defs/SealedWrap"
+        }
+      },
+      "required": [
+        "secret",
+        "key",
+        "digest",
+        "wrap"
+      ],
+      "type": "object"
+    },
     "RegisterEnvironmentRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/environments`.",
@@ -6100,6 +6152,16 @@
           "description": "`sha256:<hex>` fingerprint of an unrevoked recipient key of the\nenvironment.",
           "type": "string"
         },
+        "recovered": {
+          "additionalProperties": {
+            "items": {
+              "$ref": "#/$defs/RecipientWrap"
+            },
+            "type": "array"
+          },
+          "description": "Wraps for `recipient` that `secret recover` made offline with the\nrecovery key (ADR 0045 §7), by instance. The plan's steps carry\nthem; they take effect only once the recipient's runtime runs the\napproved step and opens each value with them. Omitted when empty,\nso a plain re-wrap request is unchanged; a server that predates the\nfield refuses it.",
+          "type": "object"
+        },
         "version": {
           "format": "uint32",
           "minimum": 0,
@@ -6135,6 +6197,10 @@
           },
           "type": "array"
         },
+        "sealed": {
+          "$ref": "#/$defs/SealedValue",
+          "description": "The stored ciphertext and wraps, only when the caller asked for them\n(`secret recover` opens its wraps offline). Never a value."
+        },
         "secret": {
           "type": "string"
         },
@@ -6160,6 +6226,10 @@
     "SealedSecretList": {
       "properties": {
         "environment": {
+          "type": "string"
+        },
+        "recovery_key": {
+          "description": "Fingerprint of the environment's offline recovery key (ADR 0045 §7).\nAbsent: losing every runtime loses the environment's sealed values.",
           "type": "string"
         },
         "secrets": {

@@ -40,6 +40,9 @@ pub(crate) const MAX_WRAPS: usize = 64;
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const PROPERTY_PREFIX: &str = "sealed.";
+/// Environment property with the offline recovery public key (ADR 0045 §7).
+/// It does not start with [`PROPERTY_PREFIX`], so instance scans skip it.
+const RECOVERY_KEY_PROPERTY: &str = "sealed_recovery_key";
 
 type Kem = hpke::kem::DhP256HkdfSha256;
 type Kdf = hpke::kdf::HkdfSha256;
@@ -238,7 +241,6 @@ impl SealedOpener {
     /// its runner key store names. A token key that cannot derive is
     /// refused with a named reason.
     pub fn load(dir: &std::path::Path) -> Result<Self> {
-        use p256::pkcs8::DecodePrivateKey as _;
         let path = dir.join(crate::sealing_key::SEALING_KEY);
         if !path.is_file() {
             let Some(store) = crate::runner_key::HardwareStore::from_dir(dir)? else {
@@ -252,12 +254,18 @@ impl SealedOpener {
                 .context("opening the hardware sealing key; sealed steps are refused")?;
             return Self::from_hardware(key);
         }
+        Self::from_pem_file(&path)
+    }
+
+    /// An opener over a P-256 PKCS#8 PEM private key file, such as the
+    /// offline recovery key `secret recover` reads (ADR 0045 §7).
+    pub fn from_pem_file(path: &std::path::Path) -> Result<Self> {
+        use p256::pkcs8::DecodePrivateKey as _;
         let pem = zeroize::Zeroizing::new(
-            std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?,
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
         );
         let secret = p256::SecretKey::from_pkcs8_pem(&pem)
-            .map_err(|_| anyhow::anyhow!("{} is not a P-256 sealing key", path.display()))?;
+            .map_err(|_| anyhow::anyhow!("{} is not a P-256 PKCS#8 private key", path.display()))?;
         Self::from_private(secret.to_bytes().as_slice())
     }
 
@@ -581,18 +589,34 @@ pub struct SealedSecretEntry {
     pub set_at: i64,
     /// Recipient fingerprints that can open the value.
     pub recipients: Vec<String>,
+    /// The stored ciphertext and wraps, only when the caller asked for them
+    /// (`secret recover` opens its wraps offline). Never a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub sealed: Option<SealedValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SealedSecretList {
     pub environment: String,
     pub secrets: Vec<SealedSecretEntry>,
+    /// Fingerprint of the environment's offline recovery key (ADR 0045 §7).
+    /// Absent: losing every runtime loses the environment's sealed values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub recovery_key: Option<String>,
 }
 
-/// Every sealed key of `environment`, by instance and key.
-pub async fn list(ctx: &mut Ctx, environment: &str) -> Result<SealedSecretList> {
+/// Every sealed key of `environment`, by instance and key. `with_sealed`
+/// includes each value's stored ciphertext and wraps.
+pub async fn list(ctx: &mut Ctx, environment: &str, with_sealed: bool) -> Result<SealedSecretList> {
     validate_identifier("environment", environment)?;
     let env_obj = crate::environment::environment(ctx, environment).await?;
+    list_from_object(&env_obj, with_sealed)
+}
+
+/// [`list`] over an environment object already read.
+pub fn list_from_object(env_obj: &Object, with_sealed: bool) -> Result<SealedSecretList> {
     let mut instances: Vec<&str> = env_obj
         .properties
         .keys()
@@ -601,7 +625,7 @@ pub async fn list(ctx: &mut Ctx, environment: &str) -> Result<SealedSecretList> 
     instances.sort_unstable();
     let mut secrets = Vec::new();
     for instance in instances {
-        for (name, record) in instance_records(&env_obj, instance)? {
+        for (name, record) in instance_records(env_obj, instance)? {
             let secret = SecretRef::parse(&name)?;
             secrets.push(SealedSecretEntry {
                 instance: instance.into(),
@@ -613,16 +637,116 @@ pub async fn list(ctx: &mut Ctx, environment: &str) -> Result<SealedSecretList> 
                 recipients: record
                     .sealed
                     .wraps
-                    .into_iter()
-                    .map(|wrap| wrap.fingerprint)
+                    .iter()
+                    .map(|wrap| wrap.fingerprint.clone())
                     .collect(),
+                sealed: with_sealed.then_some(record.sealed),
             });
         }
     }
     Ok(SealedSecretList {
-        environment: environment.into(),
+        environment: env_obj.name.clone(),
         secrets,
+        recovery_key: recovery_key(env_obj)?.map(|key| key.fingerprint()),
     })
+}
+
+impl SealedSecretList {
+    /// Values without a wrap for the recovery key, as `instance secret/key`.
+    /// Every value when no recovery key is set.
+    pub fn without_recovery(&self) -> Vec<String> {
+        self.secrets
+            .iter()
+            .filter(|entry| {
+                self.recovery_key
+                    .as_ref()
+                    .is_none_or(|fingerprint| !entry.recipients.contains(fingerprint))
+            })
+            .map(|entry| format!("{} {}/{}", entry.instance, entry.secret, entry.key))
+            .collect()
+    }
+
+    /// Why losing every runtime would lose sealed values (ADR 0045 §7), or
+    /// `None` when every value can be recovered.
+    pub fn recovery_warning(&self) -> Option<String> {
+        let lost = self.without_recovery().len();
+        if lost == 0 {
+            return None;
+        }
+        Some(match &self.recovery_key {
+            None => format!(
+                "{} has {lost} sealed value(s) and no recovery key: losing every runtime loses them; set one with tenkaictl secret recovery-key set",
+                self.environment
+            ),
+            Some(fingerprint) => format!(
+                "{lost} sealed value(s) of {} have no wrap for the recovery key; add one with tenkaictl secret rewrap --recipient {fingerprint}",
+                self.environment
+            ),
+        })
+    }
+}
+
+/// [`recovery_key`] of `environment` by name; none when the environment
+/// has no object yet.
+pub async fn stored_recovery_key(
+    ctx: &mut Ctx,
+    environment: &str,
+) -> Result<Option<SealingPublicKey>> {
+    validate_identifier("environment", environment)?;
+    match ctx.get(&crate::ontology::env_id(environment)).await? {
+        Some(env_obj) => recovery_key(&env_obj),
+        None => Ok(None),
+    }
+}
+
+/// The environment's offline recovery public key (ADR 0045 §7), if set.
+pub fn recovery_key(env_obj: &Object) -> Result<Option<SealingPublicKey>> {
+    env_obj
+        .properties
+        .get(RECOVERY_KEY_PROPERTY)
+        .map(|raw| SealingPublicKey::from_wire(raw))
+        .transpose()
+        .context("the stored recovery key is not a valid sealing key")
+}
+
+/// Record `key` as `environment`'s recovery key under the configuration
+/// `lease` (ADR 0045 §7). A replaced key opens nothing any more: its wraps
+/// are dropped from every value, as a revoked runtime's are. Values sealed
+/// before the key was set carry no wrap for it until a re-wrap step for it
+/// runs. Setting the same key again changes nothing.
+pub(crate) async fn set_recovery_key_locked(
+    ctx: &mut Ctx,
+    environment: &str,
+    key: &SealingPublicKey,
+    lease: &crate::apply::EnvironmentLease,
+) -> Result<String> {
+    let mut env_obj = crate::environment::environment(ctx, environment).await?;
+    let fingerprint = key.fingerprint();
+    let previous = recovery_key(&env_obj)?.map(|key| key.fingerprint());
+    if previous.as_deref() == Some(fingerprint.as_str()) {
+        return Ok(format!(
+            "{environment} recovery key is already {fingerprint}"
+        ));
+    }
+    let mut lost = Vec::new();
+    if let Some(previous) = &previous {
+        lost = drop_wraps(&mut env_obj, previous)?.1;
+    }
+    env_obj
+        .properties
+        .insert(RECOVERY_KEY_PROPERTY.into(), key.to_wire());
+    env_obj.updated = crate::now_millis();
+    put_fenced(ctx, env_obj, lease).await?;
+    let mut message = format!(
+        "set {environment} recovery key {fingerprint}; values sealed before it carry no recovery wrap until `secret rewrap --recipient {fingerprint}` runs"
+    );
+    if let Some(previous) = previous {
+        message.push_str(&format!("; dropped the wraps of {previous}"));
+    }
+    if !lost.is_empty() {
+        message.push_str(&format!("; no recipient left for: {}", lost.join(", ")));
+    }
+    Ok(message)
 }
 
 /// Secret names the release subscribed for `instance` declares (#1019),
@@ -737,7 +861,7 @@ pub(crate) async fn delete_locked(
 
 /// A wrap a runtime made for an approved recipient (ADR 0045 §5), for one
 /// stored value of an instance, named by its slot and sealed digest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecipientWrap {
     pub secret: String,
@@ -807,8 +931,11 @@ pub async fn store_completion_wraps(
     let purpose = format!("sealed-rewrap-store:{}", crate::now_millis());
     let lease = crate::apply::claim_environment_for_completion(ctx, environment, &purpose).await?;
     let stored = async {
-        let current = current()?;
+        let mut current = current()?;
         let mut env_obj = crate::environment::environment(ctx, environment).await?;
+        // The recovery key is a recipient too (ADR 0045 §7), and it is read
+        // here, inside the lease, like the runtime keys.
+        current.extend(recovery_key(&env_obj)?.map(|key| key.fingerprint()));
         for (instance, wraps) in wraps {
             let kept: Vec<RecipientWrap> = wraps
                 .iter()
@@ -881,28 +1008,7 @@ pub async fn drop_recipient(
     let lease = crate::apply::claim_environment(ctx, environment, &owner).await?;
     let dropped = async {
         let mut env_obj = crate::environment::environment(ctx, environment).await?;
-        let instances: Vec<String> = env_obj
-            .properties
-            .keys()
-            .filter_map(|key| key.strip_prefix(PROPERTY_PREFIX).map(str::to_owned))
-            .collect();
-        let mut changed = false;
-        let mut lost = Vec::new();
-        for instance in instances {
-            let mut records = instance_records(&env_obj, &instance)?;
-            for (name, record) in &mut records {
-                let before = record.sealed.wraps.len();
-                record
-                    .sealed
-                    .wraps
-                    .retain(|wrap| wrap.fingerprint != fingerprint);
-                changed |= record.sealed.wraps.len() != before;
-                if record.sealed.wraps.is_empty() {
-                    lost.push(format!("{instance} {name}"));
-                }
-            }
-            persist_instance_records(&mut env_obj, &instance, &records);
-        }
+        let (changed, lost) = drop_wraps(&mut env_obj, fingerprint)?;
         if changed {
             env_obj.updated = crate::now_millis();
             put_fenced(ctx, env_obj, &lease).await?;
@@ -916,6 +1022,35 @@ pub async fn drop_recipient(
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error.context("releasing the environment lease")),
     }
+}
+
+/// Drop every wrap for `fingerprint` from `env_obj`'s stored values.
+/// Returns whether any was dropped, and `<instance> <secret>/<key>` of the
+/// values no wrap is left on.
+fn drop_wraps(env_obj: &mut Object, fingerprint: &str) -> Result<(bool, Vec<String>)> {
+    let instances: Vec<String> = env_obj
+        .properties
+        .keys()
+        .filter_map(|key| key.strip_prefix(PROPERTY_PREFIX).map(str::to_owned))
+        .collect();
+    let mut changed = false;
+    let mut lost = Vec::new();
+    for instance in instances {
+        let mut records = instance_records(env_obj, &instance)?;
+        for (name, record) in &mut records {
+            let before = record.sealed.wraps.len();
+            record
+                .sealed
+                .wraps
+                .retain(|wrap| wrap.fingerprint != fingerprint);
+            changed |= record.sealed.wraps.len() != before;
+            if record.sealed.wraps.is_empty() {
+                lost.push(format!("{instance} {name}"));
+            }
+        }
+        persist_instance_records(env_obj, &instance, &records);
+    }
+    Ok((changed, lost))
 }
 
 mod hpke_receiver;
@@ -1033,7 +1168,7 @@ mod tests {
             };
             (entry.digest.clone(), entry.recipients.clone())
         };
-        let listed = list(&mut ctx, "prod").await.unwrap();
+        let listed = list(&mut ctx, "prod", false).await.unwrap();
         assert_eq!(
             stored(&listed),
             (
@@ -1048,7 +1183,7 @@ mod tests {
             .unwrap();
         assert!(lost.is_empty(), "{lost:?}");
         assert_eq!(
-            stored(&list(&mut ctx, "prod").await.unwrap()),
+            stored(&list(&mut ctx, "prod", false).await.unwrap()),
             (digest.clone(), vec![public_b.fingerprint()])
         );
         // Revoking B too leaves a value nobody can open, and names it.
@@ -1066,6 +1201,83 @@ mod tests {
                 .await
                 .unwrap(),
             ["api db/password"]
+        );
+        let _ = std::fs::remove_file(database);
+    }
+
+    /// Replacing the recovery key drops the old key's wraps (ADR 0045 §7):
+    /// the retired private key opens nothing the server still stores, and
+    /// a value only it could open is named.
+    #[tokio::test]
+    async fn replacing_the_recovery_key_drops_its_wraps() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-sealed-recovery-{}-{}.db",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "prod", "sealed")
+            .await
+            .unwrap();
+        let (_, runtime) = recipient();
+        let (_, first) = recipient();
+        let (_, second) = recipient();
+        let target = target();
+        let lease = crate::apply::claim_environment(&mut ctx, "prod", "test")
+            .await
+            .unwrap();
+        set_recovery_key_locked(&mut ctx, "prod", &first, &lease)
+            .await
+            .unwrap();
+        let mut env_obj = crate::environment::environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+        let record = |sealed: SealedValue| SealedRecord {
+            digest: digest(&target, &sealed).unwrap(),
+            sealed,
+            set_by: "operator".into(),
+            set_at: 1,
+        };
+        persist_instance_records(
+            &mut env_obj,
+            "api",
+            &BTreeMap::from([
+                (
+                    "db/password".to_string(),
+                    record(seal(&target, b"a", &[runtime.clone(), first.clone()]).unwrap()),
+                ),
+                (
+                    "db/token".to_string(),
+                    record(seal(&target, b"b", std::slice::from_ref(&first)).unwrap()),
+                ),
+            ]),
+        );
+        ctx.put(env_obj).await.unwrap();
+        assert_eq!(
+            list(&mut ctx, "prod", false)
+                .await
+                .unwrap()
+                .recovery_warning(),
+            None
+        );
+
+        let message = set_recovery_key_locked(&mut ctx, "prod", &second, &lease)
+            .await
+            .unwrap();
+        assert!(message.contains("api db/token"), "{message}");
+        let listed = list(&mut ctx, "prod", false).await.unwrap();
+        assert_eq!(listed.recovery_key, Some(second.fingerprint()));
+        assert!(
+            listed
+                .secrets
+                .iter()
+                .all(|entry| !entry.recipients.contains(&first.fingerprint())),
+            "{listed:?}"
+        );
+        assert_eq!(
+            listed.without_recovery(),
+            ["api db/password", "api db/token"]
         );
         let _ = std::fs::remove_file(database);
     }
@@ -1450,7 +1662,7 @@ mod tests {
         );
         change(&mut ctx, set(&rotated)).await.unwrap();
 
-        let listed = list(&mut ctx, "local").await.unwrap();
+        let listed = list(&mut ctx, "local", false).await.unwrap();
         assert_eq!(listed.secrets.len(), 1);
         assert_eq!(listed.secrets[0].set_by, "alice");
         assert_eq!(listed.secrets[0].recipients.len(), 2);
@@ -1481,7 +1693,13 @@ mod tests {
             "{refused}"
         );
         change(&mut ctx, delete(true)).await.unwrap();
-        assert!(list(&mut ctx, "local").await.unwrap().secrets.is_empty());
+        assert!(
+            list(&mut ctx, "local", false)
+                .await
+                .unwrap()
+                .secrets
+                .is_empty()
+        );
         let audit = crate::environment_config::audit(&mut ctx, "local")
             .await
             .unwrap();

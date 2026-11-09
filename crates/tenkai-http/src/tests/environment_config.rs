@@ -613,7 +613,74 @@ async fn sealed_secret_wraps_must_name_an_offered_recipient() {
         format!("{missing:#}").contains("has no sealed db/password"),
         "{missing:#}"
     );
-    let listed = client.list_sealed_secrets("stage").await.unwrap();
+    let listed = client.list_sealed_secrets("stage", false).await.unwrap();
     assert!(listed.secrets.is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The recovery key is a recipient once set (ADR 0045 §7): the server
+/// offers it, takes a wrap for it, and warns while values lack one.
+#[tokio::test]
+async fn a_recovery_key_is_offered_and_accepted_as_a_recipient() {
+    let root = temp_root("recovery");
+    let (app, _config, _store) = lifecycle_router(&root).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = RemoteClient::new(format!("http://{addr}"), "management-secret").unwrap();
+    let recovery = tenkai::sealing_key::generate_recovery_key(&root.join("recovery.pem")).unwrap();
+    let generation = current_generation(&client, "stage").await;
+    client
+        .configure_environment(
+            "stage",
+            Change::SetSealedRecoveryKey {
+                public_key: recovery.to_wire(),
+            },
+            "recovery",
+            generation,
+        )
+        .await
+        .unwrap();
+    let offered = client.list_environment_recipients("stage").await.unwrap();
+    assert!(
+        offered
+            .recipients
+            .iter()
+            .any(|recipient| recipient.recovery && recipient.fingerprint == recovery.fingerprint()),
+        "{offered:?}"
+    );
+    let listed = client.list_sealed_secrets("stage", true).await.unwrap();
+    assert_eq!(listed.recovery_key, Some(recovery.fingerprint()));
+
+    // A wrap for the recovery key passes the recipient check; this fixture
+    // subscribes nothing, so the instance check refuses next.
+    let target = tenkai::sealed_secret::SealedTarget::new(
+        "stage",
+        "api",
+        tenkai::sealed_secret::SecretRef::parse("db/password").unwrap(),
+    )
+    .unwrap();
+    let sealed = tenkai::sealed_secret::seal(&target, b"s3cret", &[recovery]).unwrap();
+    let generation = current_generation(&client, "stage").await;
+    let refused = client
+        .configure_environment(
+            "stage",
+            Change::SetSealedSecret {
+                instance: "api".into(),
+                secret: "db".into(),
+                key: "password".into(),
+                sealed,
+            },
+            "seal",
+            generation,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("api is not subscribed in stage"),
+        "{refused:#}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

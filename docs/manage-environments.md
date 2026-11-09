@@ -126,6 +126,43 @@ tenkaictl --target remote secret rewrap prod --recipient sha256:<hex> --generati
   Rotating a runtime's sealing key is enrolling a new runtime, re-wrapping
   for it, and revoking the old one.
 
+#### Recovery key
+
+Losing every runtime loses every sealed value, unless the environment has an
+offline recovery key (ADR 0045 §7). Generate it on a machine that is not a
+runtime, keep the private key offline, and record its public half:
+
+```sh
+tenkaictl secret recovery-key generate ./prod-recovery.pem
+tenkaictl --target remote secret recovery-key set prod <public-key> --generation 10 --reason "recovery key"
+tenkaictl --target remote secret recipients prod
+tenkaictl --target remote secret rewrap prod --recipient <recovery-fingerprint> --generation 11
+```
+
+- The server offers the recovery key with the runtime keys (`recovery` in
+  `secret recipients`). Pin it like they are; `secret set` then seals every
+  new value to it too.
+- A value sealed before the key was set has no wrap for it. `secret list`
+  shows `recovery=no` for it, and the re-wrap above adds one. Without a key,
+  `secret list` and `env inspect` (`sealed_recovery_warning`) warn.
+- Replacing the key drops the old key's wraps from every value.
+
+After losing every runtime, enroll a new one, pin its key, and recover on the
+machine with the private key:
+
+```sh
+tenkaictl --target remote secret recover prod --key ./prod-recovery.pem \
+  --recipient sha256:<new-runtime> --generation 12
+```
+
+The client reads each value's ciphertext and wraps (`GET` with
+`?sealed=true`, which needs management access), opens its data key with the
+recovery key, and wraps it for the new runtime. It submits only those wraps,
+as a re-wrap request for the new runtime. The plan needs signed approvals as
+any re-wrap does. Only the new runtime is handed it; it opens each value through its
+recovered wrap, and returns a wrap of its own; until then nothing changes. A
+value without a recovery wrap refuses the request by name: set it again first.
+
 Servers that predate sealed secrets ignore the stored records and never plan
 them. Set the first sealed value only once every server and runtime of the
 environment understands them: an older server computes the configuration

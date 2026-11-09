@@ -447,6 +447,8 @@ pub fn http_contract() -> Value {
             request: Some(config.clone()),
             response: lifecycle.clone(),
         },
+        // `?sealed=true` adds each value's ciphertext and wraps for
+        // `secret recover` (ADR 0045 §7) and needs management auth.
         Route {
             method: "GET",
             path: "/v1/environments/{environment}/sealed-secrets",

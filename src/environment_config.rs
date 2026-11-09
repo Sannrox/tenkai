@@ -138,6 +138,12 @@ pub enum EnvironmentConfigChange {
         key: String,
         sealed: crate::sealed_secret::SealedValue,
     },
+    /// Record the environment's offline recovery public key (ADR 0045 §7):
+    /// standard base64 of an uncompressed P-256 point. Its private half
+    /// never reaches Tenkai. A replaced key's wraps are dropped.
+    SetSealedRecoveryKey {
+        public_key: String,
+    },
     /// Remove one sealed key. `present_in_target` states that a release
     /// reading it finds the key in the target by other means.
     DeleteSealedSecret {
@@ -198,9 +204,9 @@ impl EnvironmentConfigChange {
             }
             Self::SetCriticality { .. } | Self::ClearCriticality => ConfigResource::Criticality,
             Self::Bind { .. } | Self::Unbind { .. } => ConfigResource::Bindings,
-            Self::SetSealedSecret { .. } | Self::DeleteSealedSecret { .. } => {
-                ConfigResource::SealedSecrets
-            }
+            Self::SetSealedSecret { .. }
+            | Self::SetSealedRecoveryKey { .. }
+            | Self::DeleteSealedSecret { .. } => ConfigResource::SealedSecrets,
         }
     }
 
@@ -259,6 +265,7 @@ impl EnvironmentConfigChange {
             Self::Bind { .. } => "bind",
             Self::Unbind { .. } => "unbind",
             Self::SetSealedSecret { .. } => "set_sealed_secret",
+            Self::SetSealedRecoveryKey { .. } => "set_sealed_recovery_key",
             Self::DeleteSealedSecret { .. } => "delete_sealed_secret",
         }
     }
@@ -389,6 +396,9 @@ pub fn validate(change: &EnvironmentConfigChange) -> Result<()> {
             validate_identifier("instance", instance)?;
             crate::sealed_secret::SecretRef::new(secret, key)?;
             crate::sealed_secret::check_form(sealed)
+        }
+        Change::SetSealedRecoveryKey { public_key } => {
+            crate::sealing_key::SealingPublicKey::from_wire(public_key).map(drop)
         }
         Change::DeleteSealedSecret {
             instance,
@@ -686,6 +696,10 @@ async fn mutate(
                 crate::sealed_secret::SecretRef::new(secret, key)?,
             )?;
             crate::sealed_secret::set_locked(ctx, &target, sealed, actor).await?
+        }
+        Change::SetSealedRecoveryKey { public_key } => {
+            let key = crate::sealing_key::SealingPublicKey::from_wire(public_key)?;
+            crate::sealed_secret::set_recovery_key_locked(ctx, environment, &key, lease).await?
         }
         Change::DeleteSealedSecret {
             instance,

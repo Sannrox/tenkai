@@ -196,6 +196,16 @@ succeeded re-wrap step, for its recipient, and for a value at that digest.
 `wraps` and `rewrap_recipient` are omitted when empty, so other receipts and
 packages are unchanged.
 
+A recovery re-wrap (ADR 0045 §7) also carries `rewrap.recovered`: wraps for
+the step's recipient, each with `secret`, `key`, `digest` and `wrap`, that the
+offline recovery key made. The runtime whose key is the recipient, and that
+has no wrap of its own for a value, opens the value through the recovered
+wrap for its slot and digest and returns a fresh wrap. Work with such a step
+is handed only to that runtime; any other runtime polls idle. The recipient of a
+re-wrap step may also be the environment's recovery key, so values sealed
+before it was set get a wrap for it.
+`recovered` is omitted when empty, so other steps keep their digest.
+
 ### Host records
 
 A built-in runtime with a host applier (`TENKAI_HOST_SPOOL_DIR`) posts every
