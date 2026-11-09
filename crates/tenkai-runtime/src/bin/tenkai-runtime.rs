@@ -140,6 +140,9 @@ async fn main() -> Result<()> {
                 release_roots: tenkai::runtime_builtin::load_release_roots(&roots)?,
                 cluster_config: cli.cluster_config,
                 secret_dir: cli.secret_dir,
+                sealing_dir: cli.credential_file.as_deref().map(|file| {
+                    tenkai::runtime_agent::sealing_dir(cli.certificate_dir.as_deref(), file)
+                }),
                 work_root: cli
                     .work_dir
                     .context("built-in mode needs --work-dir or TENKAI_RUNTIME_WORK_DIR")?,

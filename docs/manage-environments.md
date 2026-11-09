@@ -100,8 +100,13 @@ configuration (`PUT`/`DELETE /v1/environments/{environment}/sealed-secrets`,
 Servers that predate sealed secrets ignore the stored records and never plan
 them. Set the first sealed value only once every server and runtime of the
 environment understands them: an older server computes the configuration
-digest without them and would plan its own restart. Writing values to the
-target is not part of this release.
+digest without them and would plan its own restart.
+
+Only an environment runtime in built-in mode writes a value to the target,
+and only for `helm` releases: an immutable Secret named
+`<instance>-<secret>-<digest8>` in the release's namespace, passed to the
+chart as `tenkai.secrets.<secret>.name`
+([built-in executors](run-tenkai-server.md)). Host targets follow (#1125).
 
 `env add --connectivity <class>` also sets the connectivity class.
 

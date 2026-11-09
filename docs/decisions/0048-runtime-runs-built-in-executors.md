@@ -5,6 +5,9 @@
 - Amended: 2026-11-09 by [#1121](https://github.com/Sannrox/tenkai/issues/1121)
   (§1 mode switch, §3 release package, §5 no work-pull header; host releases
   on the runtime follow in [#1122](https://github.com/Sannrox/tenkai/issues/1122))
+- Amended: 2026-11-09 by [#1050](https://github.com/Sannrox/tenkai/issues/1050)
+  (§4 Secret name digest and cleanup timing; host sealed files follow in
+  [#1125](https://github.com/Sannrox/tenkai/issues/1125))
 - Issue: [#1119](https://github.com/Sannrox/tenkai/issues/1119)
 - Owner: Tenkai maintainers
 - Amends: [ADR 0045](0045-sealed-secrets.md) §4 (who writes the target, host
@@ -110,6 +113,14 @@ of the step's release, in-process.
   configuration (§2): `helm` receives them as flags and never falls back to
   an ambient configuration, and both use the namespace `helm` installs into.
   Cleanup of older Tenkai-owned Secrets is unchanged from ADR 0045 §4.
+
+  One Secret holds every key of one secret name, so `<digest8>` is the first
+  8 hex characters of a digest over that secret's keys and their sealed
+  digests. Cleanup runs once `helm upgrade --wait` succeeds, before the
+  runtime's health check; it still keeps the previous Secret, so a failed
+  health check that restores the previous release finds it. The runtime
+  opens values with its file sealing key; a hardware-backed sealing key
+  refuses sealed steps until the token can derive the shared secret.
 - **Kubernetes descriptors (`kubernetes`, `kubernetes-inprocess`):** these
   have no values to carry a name. A sealed step for such a release is refused
   with a named reason until a descriptor substitution exists.

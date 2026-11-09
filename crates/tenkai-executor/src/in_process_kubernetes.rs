@@ -1523,7 +1523,7 @@ where
 }
 
 /// `fut`, failing after [`LIVE_CALL_TIMEOUT`].
-async fn bounded<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+pub(crate) async fn bounded<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
     tokio::time::timeout(LIVE_CALL_TIMEOUT, fut)
         .await
         .unwrap_or_else(|_| {
@@ -1534,7 +1534,7 @@ async fn bounded<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result
         })
 }
 
-async fn live_client(cluster_config: &Path) -> Result<kube::Client> {
+pub(crate) async fn live_client(cluster_config: &Path) -> Result<kube::Client> {
     validate_cluster_config_path(cluster_config)?;
     if !cluster_config.is_file() {
         bail!(
@@ -2055,7 +2055,7 @@ fn label_selector_query(selector: &Value) -> Option<String> {
     (!terms.is_empty()).then(|| terms.join(","))
 }
 
-async fn ensure_namespace(client: &kube::Client, namespace: &str) -> Result<()> {
+pub(crate) async fn ensure_namespace(client: &kube::Client, namespace: &str) -> Result<()> {
     use k8s_openapi::api::core::v1::Namespace;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     let api: kube::Api<Namespace> = kube::Api::all(client.clone());
@@ -2326,7 +2326,7 @@ fn is_not_found(error: &kube::Error) -> bool {
     )
 }
 
-fn is_already_exists(error: &kube::Error) -> bool {
+pub(crate) fn is_already_exists(error: &kube::Error) -> bool {
     matches!(
         error,
         kube::Error::Api(status) if status.code == 409
@@ -2386,6 +2386,7 @@ mod tests {
             secret_dir_path: None,
             apply_attempt: String::new(),
             dependency_document: String::new(),
+            opened_secrets: Vec::new(),
         }
     }
 

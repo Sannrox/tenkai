@@ -210,6 +210,107 @@ pub fn seal(
     })
 }
 
+/// The private half of this runtime's file sealing key. It opens values
+/// wrapped for its fingerprint (ADR 0045 §4). Errors never carry a value.
+pub struct SealedOpener {
+    private: <Kem as hpke::Kem>::PrivateKey,
+    fingerprint: String,
+}
+
+impl SealedOpener {
+    /// Load the file sealing key in `dir`, the one
+    /// [`crate::sealing_key::SealingKey::open_or_generate`] keeps there.
+    pub fn load(dir: &std::path::Path) -> Result<Self> {
+        use p256::pkcs8::DecodePrivateKey as _;
+        let path = dir.join(crate::sealing_key::SEALING_KEY);
+        if !path.is_file() {
+            bail!(
+                "no file sealing key at {}; a hardware-backed sealing key does not open sealed values yet",
+                path.display()
+            );
+        }
+        let pem = zeroize::Zeroizing::new(
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?,
+        );
+        let secret = p256::SecretKey::from_pkcs8_pem(&pem)
+            .map_err(|_| anyhow::anyhow!("{} is not a P-256 sealing key", path.display()))?;
+        Self::from_private(secret.to_bytes().as_slice())
+    }
+
+    fn from_private(scalar: &[u8]) -> Result<Self> {
+        use hpke::{Deserializable as _, Kem as _, Serializable as _};
+        let private = <Kem as hpke::Kem>::PrivateKey::from_bytes(scalar)
+            .map_err(|_| anyhow::anyhow!("the sealing key is not a P-256 scalar"))?;
+        let public = Kem::sk_to_pk(&private);
+        let fingerprint = SealingPublicKey::from_point(public.to_bytes().to_vec())?.fingerprint();
+        Ok(Self {
+            private,
+            fingerprint,
+        })
+    }
+
+    /// `sha256:<hex>` of the public half: the wrap this opener reads.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// Unwrap the data key from this opener's wrap and decrypt `sealed`
+    /// under `target`'s associated data. A value sealed for another target,
+    /// or without a wrap for this key, is refused.
+    pub fn open(
+        &self,
+        target: &SealedTarget,
+        sealed: &SealedValue,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        use hpke::Deserializable as _;
+        use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+        check_form(sealed)?;
+        let wrap = sealed
+            .wraps
+            .iter()
+            .find(|wrap| wrap.fingerprint == self.fingerprint)
+            .with_context(|| {
+                format!(
+                    "{} has no wrap for this runtime's sealing key {}",
+                    target.secret, self.fingerprint
+                )
+            })?;
+        let aad = target.associated_data();
+        let refused = || anyhow::anyhow!("{} does not open for this target", target.secret);
+        let encapsulated = <Kem as hpke::Kem>::EncappedKey::from_bytes(
+            &STANDARD
+                .decode(&wrap.encapsulated_key)
+                .map_err(|_| refused())?,
+        )
+        .map_err(|_| refused())?;
+        let data_key = zeroize::Zeroizing::new(
+            hpke::single_shot_open::<Aead, Kdf, Kem>(
+                &hpke::OpModeR::Base,
+                &self.private,
+                &encapsulated,
+                WRAP_INFO,
+                &STANDARD.decode(&wrap.wrapped_key).map_err(|_| refused())?,
+                &aad,
+            )
+            .map_err(|_| refused())?,
+        );
+        let mut body =
+            zeroize::Zeroizing::new(STANDARD.decode(&sealed.ciphertext).map_err(|_| refused())?);
+        if body.len() < NONCE_BYTES + TAG_BYTES {
+            return Err(refused());
+        }
+        let nonce =
+            Nonce::try_assume_unique_for_key(&body[..NONCE_BYTES]).map_err(|_| refused())?;
+        let key =
+            LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &data_key).map_err(|_| refused())?);
+        let plain = key
+            .open_within(nonce, Aad::from(&aad), &mut body[..], NONCE_BYTES..)
+            .map_err(|_| refused())?;
+        Ok(zeroize::Zeroizing::new(plain.to_vec()))
+    }
+}
+
 /// `sha256:<hex>` over the associated data and the ciphertext, not the
 /// wraps: what the configuration digest and a plan step name.
 pub fn digest(target: &SealedTarget, sealed: &SealedValue) -> Result<String> {
@@ -332,6 +433,28 @@ pub fn step_bindings(env_obj: &Object, instance: &str) -> Result<Vec<SealedStep>
                 key: secret.key,
                 digest: record.digest,
             })
+        })
+        .collect()
+}
+
+/// The stored values `step` names, in its order, for a runtime to open. A
+/// value set, changed or deleted since the plan refuses it: the runtime must
+/// write exactly what was approved.
+pub fn step_values(
+    env_obj: &Object,
+    instance: &str,
+    step: &[SealedStep],
+) -> Result<Vec<(SealedStep, SealedValue)>> {
+    let mut records = instance_records(env_obj, instance)?;
+    step.iter()
+        .map(|binding| {
+            let name = format!("{}/{}", binding.secret, binding.key);
+            match records.remove(&name) {
+                Some(record) if record.digest == binding.digest => {
+                    Ok((binding.clone(), record.sealed))
+                }
+                _ => bail!("sealed {instance} {name} changed since the plan was made"),
+            }
         })
         .collect()
 }
@@ -547,42 +670,75 @@ mod tests {
         (private, public)
     }
 
-    /// What the runtime will do (#1050): unwrap and open with `private`.
     fn open(
         target: &SealedTarget,
         sealed: &SealedValue,
         private: &<Kem as hpke::Kem>::PrivateKey,
-        fingerprint: &str,
+        _fingerprint: &str,
     ) -> Result<Vec<u8>> {
-        use hpke::Deserializable as _;
-        use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
-        let wrap = sealed
-            .wraps
-            .iter()
-            .find(|wrap| wrap.fingerprint == fingerprint)
-            .context("no wrap")?;
-        let aad = target.associated_data();
-        let encapsulated =
-            <Kem as hpke::Kem>::EncappedKey::from_bytes(&STANDARD.decode(&wrap.encapsulated_key)?)
-                .map_err(|_| anyhow::anyhow!("encapsulated key"))?;
-        let data_key = hpke::single_shot_open::<Aead, Kdf, Kem>(
-            &hpke::OpModeR::Base,
-            private,
-            &encapsulated,
-            WRAP_INFO,
-            &STANDARD.decode(&wrap.wrapped_key)?,
-            &aad,
-        )
-        .map_err(|_| anyhow::anyhow!("unwrap refused"))?;
-        let mut ciphertext = STANDARD.decode(&sealed.ciphertext)?;
-        let body = ciphertext.split_off(NONCE_BYTES);
-        let key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &data_key).unwrap());
-        let mut body = body;
-        let nonce = Nonce::try_assume_unique_for_key(&ciphertext).unwrap();
-        let plain = key
-            .open_in_place(nonce, Aad::from(&aad), &mut body)
-            .map_err(|_| anyhow::anyhow!("open refused"))?;
-        Ok(plain.to_vec())
+        use hpke::Serializable as _;
+        let opener = SealedOpener::from_private(&private.to_bytes())?;
+        Ok(opener.open(target, sealed)?.to_vec())
+    }
+
+    #[test]
+    fn the_runtime_file_key_opens_what_was_sealed_to_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-opener-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let key = crate::sealing_key::SealingKey::open_or_generate(&dir).unwrap();
+        let opener = SealedOpener::load(&dir).unwrap();
+        assert_eq!(opener.fingerprint(), key.fingerprint());
+        let sealed = seal(&target(), b"s3cret", &[key.public().clone()]).unwrap();
+        assert_eq!(
+            opener.open(&target(), &sealed).unwrap().as_slice(),
+            b"s3cret"
+        );
+        let other =
+            SealedTarget::new("prod", "worker", SecretRef::parse("db/password").unwrap()).unwrap();
+        let refused = opener.open(&other, &sealed).unwrap_err().to_string();
+        assert!(!refused.contains("s3cret"), "{refused}");
+        let (_, stranger) = recipient();
+        let unwrapped = seal(&target(), b"s3cret", &[stranger]).unwrap();
+        assert!(
+            opener
+                .open(&target(), &unwrapped)
+                .unwrap_err()
+                .to_string()
+                .contains("no wrap for this runtime's sealing key")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_runtime_receives_only_the_values_the_plan_named() {
+        let (_, public) = recipient();
+        let sealed = seal(&target(), b"s3cret", &[public]).unwrap();
+        let digest = digest(&target(), &sealed).unwrap();
+        let mut env_obj = Object::default();
+        let records = BTreeMap::from([(
+            "db/password".to_string(),
+            SealedRecord {
+                sealed: sealed.clone(),
+                digest: digest.clone(),
+                set_by: "ops".into(),
+                set_at: 0,
+            },
+        )]);
+        persist_instance_records(&mut env_obj, "api", &records);
+        let planned = step_bindings(&env_obj, "api").unwrap();
+        let values = step_values(&env_obj, "api", &planned).unwrap();
+        assert_eq!(values, vec![(planned[0].clone(), sealed)]);
+
+        // A rotation after the plan was made is not what was approved.
+        let mut stale = planned.clone();
+        stale[0].digest = "sha256:00".into();
+        let refused = step_values(&env_obj, "api", &stale)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("changed since the plan"), "{refused}");
     }
 
     #[test]

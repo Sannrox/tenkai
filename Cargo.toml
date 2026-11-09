@@ -54,6 +54,7 @@ cryptoki = "0.10"
 sekai-keys = { git = "https://github.com/Sannrox/sekai-chisei", rev = "40ab00a4954d435c67c6c12b560522ba5eaebb53", version = "1.0.0" }
 fencing-lease = { git = "https://github.com/Sannrox/agent-kit", rev = "7adf5da3254b6a78f93c49837ab9f7cd6103b2d0" }
 hpke = { version = "0.13", default-features = false, features = ["alloc", "p256", "std"] }
+p256 = { version = "0.13", default-features = false, features = ["pem", "pkcs8"] }
 rand_core = { version = "0.9", features = ["os_rng"] }
 zeroize = "1"
 

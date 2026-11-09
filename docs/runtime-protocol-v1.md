@@ -154,12 +154,17 @@ and answers with:
   runtime fills them from its own configuration.
 - `entries`: every deploy input, parents first, each a relative `path`, a
   `mode`, and base64 `contents` (absent for a directory).
+- `sealed`: for a step that writes sealed secrets, each value the step
+  names, in its order: `secret`, `key`, and the stored `sealed` value with
+  every wrap. Omitted otherwise. A value changed since the plan was made is
+  refused (`412`).
 
 The runtime trusts none of it until it checks it: the manifest digest and
 names against the plan step, the signature against its own release trust
 roots (`TENKAI_RUNTIME_RELEASE_TRUST_ROOTS`), the request against the step,
-the pulls against the manifest's artifacts, and the rebuilt inputs against
-the signed artifact digest. The runtime then runs the step as the server
+the pulls against the manifest's artifacts, the rebuilt inputs against
+the signed artifact digest, and each sealed value against the step's digest
+before it opens the one wrapped for its own key. The runtime then runs the step as the server
 would, including its recovery: a failed restart re-applies the current pin,
 and a failed activation is cleaned up and the restore pin applied. Host
 steps and removals have no package (`412`); built-in

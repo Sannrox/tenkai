@@ -411,8 +411,23 @@ tenkai-runtime
   `cluster_config_path` is ignored on the runtime.
 - **Shell releases** run under `tenkai-executor-guard`, installed next to
   `tenkai-runtime`, fenced by the runtime's claim.
-- **Not yet:** `host` releases (#1122), and observed-runtime reports for
-  what the runtime applied.
+- **Sealed secrets.** After the local approval policy passes, the runtime
+  checks each sealed value against the plan step's digest and opens it with
+  its file sealing key (enroll with `--credential-file`). Only `helm`
+  releases take them: the executor writes an immutable Secret
+  `<instance>-<secret>-<digest8>`, labelled Tenkai owned, into the release's
+  namespace through the same cluster configuration, and passes its name as
+  `tenkai.secrets.<secret>.name`. A Secret of that name Tenkai does not own
+  fails the step, as do an instance or secret name that is not a DNS label
+  (lowercase letters, digits and `-`, at most 63). After a successful apply,
+  Tenkai's older Secrets of that instance are deleted except the previous
+  one of each secret name. Removing an instance does not run on a
+  built-in runtime yet; until it does, that removal step fails rather than
+  leaving its Secrets behind. Other executors,
+  operator programs and the server's own apply refuse sealed steps, as does
+  a hardware-backed sealing key for now.
+- **Not yet:** `host` releases (#1122) and their sealed files (#1125), and
+  observed-runtime reports for what the runtime applied.
 
 Upgrade the servers before switching a runtime to built-in mode: an older
 server has no release endpoint, and each step fails naming the upgrade.

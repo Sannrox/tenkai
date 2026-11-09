@@ -1,7 +1,7 @@
 //! Pull-only environment runtime for one configured Tenkai environment.
 
 use std::os::unix::process::CommandExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -31,6 +31,15 @@ fn protected_base_url(base_url: String) -> Result<String> {
         "runtime credentials require HTTPS or an HTTP loopback URL"
     );
     Ok(base_url)
+}
+
+/// Where an enrolled runtime keeps its sealing key: the certificate
+/// directory, else beside its credential file.
+pub fn sealing_dir(certificate_dir: Option<&Path>, credential_file: &Path) -> PathBuf {
+    certificate_dir
+        .map(PathBuf::from)
+        .or_else(|| credential_file.parent().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// The agent's own credential (#630): the one kept in `credential_file`, or,
@@ -89,10 +98,7 @@ pub async fn enrolled_credential(
     let csr = certificate_dir
         .map(|dir| crate::runner_key::RunnerKey::open_or_generate(dir)?.csr())
         .transpose()?;
-    let sealing_dir = certificate_dir
-        .map(PathBuf::from)
-        .or_else(|| credential_file.parent().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
+    let sealing_dir = sealing_dir(certificate_dir, credential_file);
     let sealing = crate::sealing_key::SealingKey::open_or_generate(&sealing_dir)?;
     // No redirects: the token goes only to the protected URL checked above.
     let client = crate::outbound_tls::client()?
@@ -1149,6 +1155,17 @@ impl RuntimeClient {
         generation: u64,
         step: &Step,
     ) -> Result<RuntimeStepReceipt> {
+        // A sealed value is never handed to a command or program (ADR 0048 §4).
+        if !step.sealed.is_empty() {
+            return Ok(RuntimeStepReceipt {
+                step_id: step.id.clone(),
+                succeeded: false,
+                detail: format!(
+                    "step {} writes sealed secrets; operator executor programs never receive them (run the runtime in built-in mode)",
+                    step.id
+                ),
+            });
+        }
         let guard = std::env::current_exe().ok().and_then(|path| {
             path.parent()
                 .map(|parent| parent.join("tenkai-runtime-guard"))
