@@ -13,6 +13,7 @@ path = "src/bin/tenkai-host-applier.rs"
 [dependencies]
 tenkai = { path = "../..", version = "0.7.1" }
 anyhow = "1"
+zeroize = "1"
 rustix = { version = "1", features = ["fs", "process"] }
 tokio = { version = "1", default-features = false, features = ["macros", "process", "rt", "signal", "time"] }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
@@ -21,4 +22,5 @@ toml = "0.8"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+base64 = "0.22"
 tenkai = { path = "../..", version = "0.7.1", features = ["test-support"] }

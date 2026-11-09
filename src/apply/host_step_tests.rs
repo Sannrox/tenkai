@@ -367,6 +367,7 @@ async fn run_host_step(
             inputs: &inputs,
             artifact_digest: &release.artifact_digest,
             dependency_document: None,
+            sealed: None,
         },
     )
     .await

@@ -68,9 +68,22 @@ The command sees only this environment:
 | `TENKAI_RELEASE_DIGEST` | sha256 of the signed manifest |
 | `TENKAI_HOST_ACTION` | `install`, `uninstall`, or `health` |
 | `TENKAI_PLAN_ID` | the approved plan's id |
+| `TENKAI_SECRETS_DIR` | only for a step that writes sealed values: `/var/lib/tenkai-host/secrets/<environment>/<instance>`, holding `<secret>/<key>` |
 
 Nothing the server supplies becomes an environment variable, an argument, or
-a path the command interprets. Its working directory is the root-owned copy,
+a path the command interprets.
+
+A step whose approved plan writes sealed values gets them from the
+environment runtime, the only component that can open them (ADR 0048 §4).
+The runtime spools each opened value with its ciphertext next to the request;
+the spool must be memory-backed (tmpfs), or both the runtime and the applier
+refuse the step. The applier binds every value to the approved step's slot
+and ciphertext digest, then writes it, root-owned and mode 0600, to
+`<secret>/<key>` under `TENKAI_SECRETS_DIR` before the command runs. A
+service running as another user reads it through its service manager's
+credential hand-off. A runtime host that writes sealed values needs swap
+off or encrypted: the values sit in memory, and memory reaches disk only
+through swap. Its working directory is the root-owned copy,
 which is removed after the step.
 
 The applier kills the command's process group when its own timeout fires

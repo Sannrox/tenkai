@@ -131,12 +131,13 @@ async fn main() -> Result<()> {
     tenkai::key_revocation::load_configured()?;
     let executor = if executor == tenkai::runtime_builtin::BUILTIN {
         tenkai_executor::install();
+        let executors = tenkai::software_executor::SoftwareExecutors::try_from_process()?;
         let roots = cli.release_trust_roots.context(
             "built-in mode needs --release-trust-roots or TENKAI_RUNTIME_RELEASE_TRUST_ROOTS",
         )?;
         StepExecutor::Builtin(std::sync::Arc::new(
             tenkai::runtime_builtin::BuiltinConfig {
-                executors: tenkai::software_executor::SoftwareExecutors::try_from_process()?,
+                executors,
                 release_roots: tenkai::runtime_builtin::load_release_roots(&roots)?,
                 cluster_config: cli.cluster_config,
                 secret_dir: cli.secret_dir,

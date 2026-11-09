@@ -59,6 +59,9 @@ pub struct VerifiedHostStep {
     pub approvals: HostApprovals,
     /// The purposes every host step of this plan needs, from the plan alone.
     pub purposes: Vec<QuorumPurpose>,
+    /// The sealed values the approved step writes before its command runs
+    /// (ADR 0048 §4). Empty for most steps.
+    pub sealed: Vec<crate::plan::SealedStep>,
 }
 
 /// Verify a request copied into root-owned storage, and the copied release
@@ -205,6 +208,7 @@ pub fn verify_request(
         signer_identity: signer.identity,
         approvals,
         purposes,
+        sealed: step.sealed.clone(),
     })
 }
 

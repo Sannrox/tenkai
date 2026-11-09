@@ -7,7 +7,7 @@ use anyhow::Result;
 use tenkai::host_apply::state::{HostApplyOutcome, HostApplyResult};
 
 use crate::store::{self, Admission};
-use crate::{ApplierConfig, ApplierPaths, config, discard_work, intake, run};
+use crate::{ApplierConfig, ApplierPaths, config, discard_work, intake, run, secrets};
 
 /// How one run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,17 +70,29 @@ pub async fn apply<F: Future<Output = ()>>(
         }
         Admission::Run(running) => running,
     };
-    let end = match run::adopt_descendants().and_then(|()| stop()) {
-        Ok(stop) => {
-            run::run_command(
-                &intake.verified,
-                &intake.workdir,
-                Duration::from_secs(config.timeout_seconds),
-                stop,
-            )
-            .await
-        }
-        Err(error) => Err(error),
+    // The sealed values are written before the command runs and recorded
+    // with its result; a write that fails ends the step as failed.
+    let secrets_dir = if intake.verified.sealed.is_empty() {
+        Ok(None)
+    } else {
+        secrets::write(paths, &intake.verified, &intake.secrets).map(Some)
+    };
+    drop(intake.secrets);
+    let end = match secrets_dir {
+        Ok(secrets_dir) => match run::adopt_descendants().and_then(|()| stop()) {
+            Ok(stop) => {
+                run::run_command(
+                    &intake.verified,
+                    &intake.workdir,
+                    secrets_dir.as_deref(),
+                    Duration::from_secs(config.timeout_seconds),
+                    stop,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        },
+        Err(error) => Err(error.context("writing the step's sealed values")),
     };
     let (outcome, exit_status, detail) = match end {
         Ok(end) => (end.outcome, end.exit_status, end.detail),

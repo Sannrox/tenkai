@@ -13,6 +13,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, Stat};
+use tenkai::host_apply::sealed::{HostSealedValues, MAX_SEALED_BYTES, SEALED_FILE};
 use tenkai::host_apply::{ARTIFACTS_DIR, HostApplyRequest, MAX_REQUEST_BYTES, REQUEST_FILE};
 
 /// Bounds on what one release may copy.
@@ -98,6 +99,41 @@ impl SpooledRequest {
             }
         }
         Ok(workdir)
+    }
+}
+
+impl SpooledRequest {
+    /// The sealed values spooled next to the request, or `None` when there
+    /// are none. They are read into memory only, never copied, and only from
+    /// memory-backed storage: a value on a disk would outlive the step.
+    pub fn read_sealed(&self) -> Result<Option<HostSealedValues>> {
+        match rustix::fs::statat(
+            self.instance_fd.as_fd(),
+            SEALED_FILE,
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(error) => return Err(error).context("reading the spooled sealed values"),
+            Ok(_) => {}
+        }
+        let (file, _mode, size) = open_regular_at(self.instance_fd.as_fd(), SEALED_FILE)
+            .context("opening the spooled sealed values")?;
+        let fs = rustix::fs::fstatfs(&file)?;
+        #[allow(clippy::unnecessary_cast)]
+        if !tenkai::host_apply::sealed::is_memory_backed(fs.f_type as i64) {
+            bail!(
+                "the spooled sealed values are on persistent storage; the spool must be memory-backed (tmpfs)"
+            );
+        }
+        if size > MAX_SEALED_BYTES {
+            bail!("the spooled sealed values exceed {MAX_SEALED_BYTES} bytes");
+        }
+        let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(size as usize));
+        file.take(size.saturating_add(1)).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != size {
+            bail!("{SEALED_FILE} changed size while it was read");
+        }
+        HostSealedValues::parse(&bytes).map(Some)
     }
 }
 

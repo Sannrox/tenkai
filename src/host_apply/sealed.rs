@@ -1,0 +1,278 @@
+//! Sealed values a runtime hands the host applier (ADR 0048 §4, Host).
+//!
+//! The runtime opens a host step's sealed values in memory and writes them,
+//! with their ciphertexts, to [`SEALED_FILE`] next to the request, in a spool
+//! on memory-backed storage. The applier cannot open a value itself, so it
+//! binds what it reads to the approved step instead: the same slots in the
+//! same order, and each ciphertext's digest equal to the one the approved
+//! step names. A forged value can therefore land only in a slot an approved
+//! step names. Errors name the slot, never a value.
+
+use anyhow::{Result, bail};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+use crate::plan::SealedStep;
+use crate::sealed_secret::{SealedTarget, SealedValue, SecretRef};
+
+pub const SEALED_SCHEMA: &str = "tenkai.host-sealed-values.v1";
+/// The sealed values inside a spooled instance directory.
+pub const SEALED_FILE: &str = "sealed.json";
+/// Largest [`SEALED_FILE`] the applier reads.
+pub const MAX_SEALED_BYTES: u64 = 4 * 1024 * 1024;
+
+/// One opened value and the ciphertext it was opened from.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostSealedValue {
+    pub secret: String,
+    pub key: String,
+    /// The sealed ciphertext (standard base64), so the applier can recompute
+    /// the digest the approved step names.
+    pub ciphertext: String,
+    /// Standard base64 of the opened value.
+    #[serde(with = "zeroizing_string")]
+    pub value: Zeroizing<String>,
+}
+
+/// Serde for a value that is wiped when dropped.
+mod zeroizing_string {
+    use serde::{Deserialize as _, Deserializer, Serializer};
+    use zeroize::Zeroizing;
+
+    pub fn serialize<S: Serializer>(
+        value: &Zeroizing<String>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(value)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Zeroizing<String>, D::Error> {
+        String::deserialize(deserializer).map(Zeroizing::new)
+    }
+}
+
+impl std::fmt::Debug for HostSealedValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HostSealedValue")
+            .field("secret", &self.secret)
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+
+/// [`SEALED_FILE`]: every value one host step writes, in the step's order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostSealedValues {
+    pub schema: String,
+    pub values: Vec<HostSealedValue>,
+}
+
+/// A value bound to an approved slot, ready to write.
+pub struct BoundSecret {
+    pub secret: String,
+    pub key: String,
+    pub value: Zeroizing<Vec<u8>>,
+}
+
+impl std::fmt::Debug for BoundSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BoundSecret")
+            .field("secret", &self.secret)
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+
+impl HostSealedValues {
+    /// The document for `values`, already checked by the runtime against the
+    /// plan step it writes.
+    pub fn new(values: Vec<HostSealedValue>) -> Self {
+        Self {
+            schema: SEALED_SCHEMA.into(),
+            values,
+        }
+    }
+
+    /// Parse the document, refusing other schemas and unknown fields. A
+    /// parse error never quotes the input.
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        let parsed: Self = serde_json::from_slice(bytes)
+            .map_err(|_| anyhow::anyhow!("{SEALED_FILE} is not a valid sealed-values document"))?;
+        if parsed.schema != SEALED_SCHEMA {
+            bail!("{SEALED_FILE} is not a {SEALED_SCHEMA} document");
+        }
+        Ok(parsed)
+    }
+
+    /// Bind the values to `approved`, the sealed slots of the verified step
+    /// of `instance` in `environment`: the same slots in the same order, and
+    /// each ciphertext's digest the approved one.
+    pub fn bind(
+        &self,
+        environment: &str,
+        instance: &str,
+        approved: &[SealedStep],
+    ) -> Result<Vec<BoundSecret>> {
+        let slots = self.values.iter().map(|value| (&value.secret, &value.key));
+        if !slots.eq(approved.iter().map(|step| (&step.secret, &step.key))) {
+            bail!("the sealed values do not name the slots the approved step writes");
+        }
+        approved
+            .iter()
+            .zip(&self.values)
+            .map(|(step, value)| {
+                let slot = SecretRef::new(&step.secret, &step.key)?;
+                // Path segments on the host: a leading letter or digit, so
+                // never `.` or `..`.
+                crate::ontology::validate_identifier("secret key", &step.key)?;
+                let target = SealedTarget::new(environment, instance, slot)?;
+                let sealed = SealedValue {
+                    format_version: 1,
+                    ciphertext: value.ciphertext.clone(),
+                    wraps: Vec::new(),
+                };
+                if crate::sealed_secret::digest(&target, &sealed)? != step.digest {
+                    bail!(
+                        "sealed {}/{} does not match the approved step's digest",
+                        step.secret,
+                        step.key
+                    );
+                }
+                let plain = STANDARD.decode(value.value.as_bytes()).map_err(|_| {
+                    anyhow::anyhow!("sealed {}/{} is not standard base64", step.secret, step.key)
+                })?;
+                Ok(BoundSecret {
+                    secret: step.secret.clone(),
+                    key: step.key.clone(),
+                    value: Zeroizing::new(plain),
+                })
+            })
+            .collect()
+    }
+}
+
+/// Filesystem types whose pages stay in memory (reaching disk only through
+/// swap): tmpfs and ramfs.
+const MEMORY_BACKED: [i64; 2] = [0x0102_1994, 0x8584_58f6];
+
+/// Whether the filesystem `f_type` reports is memory-backed.
+pub fn is_memory_backed(f_type: i64) -> bool {
+    MEMORY_BACKED.contains(&f_type)
+}
+
+/// Refuse `path` unless it is on memory-backed storage.
+pub fn require_memory_backed(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: `c_path` is a valid NUL-terminated path and `stat` is a
+    // zeroed, writable statfs that outlives the call.
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return Err(std::io::Error::last_os_error()).map_err(|error| {
+            anyhow::anyhow!("reading the filesystem of {}: {error}", path.display())
+        });
+    }
+    #[allow(clippy::unnecessary_cast)]
+    let f_type = stat.f_type as i64;
+    if !is_memory_backed(f_type) {
+        bail!(
+            "{} is on persistent storage; sealed host values are written only to a memory-backed directory (tmpfs)",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VALUE: &str = "a-distinct-plain-value";
+
+    fn approved(digest: &str) -> Vec<SealedStep> {
+        vec![SealedStep {
+            secret: "db".into(),
+            key: "password".into(),
+            digest: digest.into(),
+        }]
+    }
+
+    fn values(ciphertext: &str) -> HostSealedValues {
+        HostSealedValues::new(vec![HostSealedValue {
+            secret: "db".into(),
+            key: "password".into(),
+            ciphertext: ciphertext.into(),
+            value: Zeroizing::new(STANDARD.encode(VALUE)),
+        }])
+    }
+
+    fn digest_of(ciphertext: &str) -> String {
+        let target =
+            SealedTarget::new("edge", "api", SecretRef::new("db", "password").unwrap()).unwrap();
+        crate::sealed_secret::digest(
+            &target,
+            &SealedValue {
+                format_version: 1,
+                ciphertext: ciphertext.into(),
+                wraps: Vec::new(),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn only_the_approved_slot_and_ciphertext_bind() {
+        let ciphertext = STANDARD.encode(b"sealed-bytes");
+        let bound = values(&ciphertext)
+            .bind("edge", "api", &approved(&digest_of(&ciphertext)))
+            .unwrap();
+        assert_eq!(bound[0].value.as_slice(), VALUE.as_bytes());
+
+        let other = STANDARD.encode(b"other-bytes");
+        let refusals = [
+            // Another ciphertext than the approved one.
+            values(&other).bind("edge", "api", &approved(&digest_of(&ciphertext))),
+            // The approved ciphertext for another instance.
+            values(&ciphertext).bind("edge", "web", &approved(&digest_of(&ciphertext))),
+            // A slot the step does not write.
+            values(&ciphertext).bind("edge", "api", &[]),
+        ];
+        for refused in refusals {
+            let error = format!("{:#}", refused.expect_err("refused"));
+            assert!(!error.contains(VALUE), "{error}");
+        }
+        // Debug output and parse errors never carry the value.
+        assert!(!format!("{:?}", values(&ciphertext)).contains(&STANDARD.encode(VALUE)));
+        let error = HostSealedValues::parse(format!("{{\"x\":\"{VALUE}\"}}").as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains(VALUE), "{error}");
+    }
+
+    #[test]
+    fn a_key_that_could_name_a_parent_directory_never_binds() {
+        let ciphertext = STANDARD.encode(b"sealed-bytes");
+        let mut document = values(&ciphertext);
+        document.values[0].key = "..".into();
+        let mut steps = approved(&digest_of(&ciphertext));
+        steps[0].key = "..".into();
+        assert!(document.bind("edge", "api", &steps).is_err());
+    }
+
+    #[test]
+    fn only_tmpfs_and_ramfs_count_as_memory_backed() {
+        assert!(is_memory_backed(0x0102_1994));
+        assert!(is_memory_backed(0x8584_58f6));
+        // ext4 and xfs.
+        assert!(!is_memory_backed(0xef53));
+        assert!(!is_memory_backed(0x5846_5342));
+    }
+}

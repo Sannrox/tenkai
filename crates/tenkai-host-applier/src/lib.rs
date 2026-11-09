@@ -14,12 +14,13 @@ pub mod config;
 pub mod copy;
 pub mod fence;
 pub mod run;
+pub mod secrets;
 pub mod store;
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use tenkai::host_apply::{HostApplyRequest, HostTrust, VerifiedHostStep};
 
 pub use apply::{Applied, apply};
@@ -32,6 +33,9 @@ pub struct Intake {
     /// The copied release workdir the command runs in.
     pub workdir: PathBuf,
     pub verified: VerifiedHostStep,
+    /// The step's sealed values, bound to its approved slots and held only
+    /// in memory until they are written ([`secrets::write`]).
+    pub secrets: Vec<tenkai::host_apply::sealed::BoundSecret>,
 }
 
 /// Copy `instance` from the spool into an empty root-owned work directory and
@@ -54,12 +58,28 @@ pub fn intake(
         let spooled = copy::copy_request(&config.spool_dir, instance, &work)?;
         let verified =
             tenkai::host_apply::verify_request(&spooled.request, instance, trust, now_ms)?;
+        // A step writes exactly the sealed values its approved plan names.
+        let secrets = match (spooled.read_sealed()?, verified.sealed.is_empty()) {
+            (None, true) => Vec::new(),
+            (Some(values), false) => values.bind(
+                &verified.environment,
+                if verified.product_instance.is_empty() {
+                    &verified.product
+                } else {
+                    &verified.product_instance
+                },
+                &verified.sealed,
+            )?,
+            (None, false) => bail!("the approved step writes sealed values, and none were spooled"),
+            (Some(_), true) => bail!("sealed values were spooled for a step that writes none"),
+        };
         let workdir = spooled.copy_artifacts(&verified.inputs, config.copy_limits())?;
         verified.verify_artifacts(&workdir)?;
         Ok(Intake {
             request: spooled.request,
             workdir,
             verified,
+            secrets,
         })
     })();
     if result.is_err() {

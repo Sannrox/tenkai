@@ -413,8 +413,8 @@ tenkai-runtime
   `tenkai-runtime`, fenced by the runtime's claim.
 - **Sealed secrets.** After the local approval policy passes, the runtime
   checks each sealed value against the plan step's digest and opens it with
-  its file sealing key (enroll with `--credential-file`). Only `helm`
-  releases take them: the executor writes an immutable Secret
+  its file sealing key (enroll with `--credential-file`). `helm` and host
+  releases take them. For `helm`, the executor writes an immutable Secret
   `<instance>-<secret>-<digest8>`, labelled Tenkai owned, into the release's
   namespace through the same cluster configuration, and passes its name as
   `tenkai.secrets.<secret>.name`. A Secret of that name Tenkai does not own
@@ -434,10 +434,12 @@ tenkai-runtime
   them before the first report unless it runs an applier itself. The
   runtime hands each host step to its own applier, which verifies the
   request against its own trust and approval policy. A failed host step is
-  never restored automatically, as on the server.
-- **Not yet:** sealed files for host releases (#1125), removals on a
-  built-in runtime (#1128), and observed-runtime reports for what the
-  runtime applied.
+  never restored automatically, as on the server. Host steps that write
+  sealed values need the spool on tmpfs and swap off or encrypted
+  ([host releases](host-releases.md#the-command)); the applier writes each
+  value to a root-owned 0600 file under `TENKAI_SECRETS_DIR`.
+- **Not yet:** removals on a built-in runtime (#1128), and observed-runtime
+  reports for what the runtime applied.
 
 Upgrade the servers before switching a runtime to built-in mode: an older
 server has no release endpoint, and each step fails naming the upgrade.

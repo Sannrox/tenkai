@@ -409,6 +409,76 @@ impl HostExecutor {
         Ok(())
     }
 
+    /// Spool a host step's opened sealed values next to its request
+    /// (ADR 0048 §4): mode 0600, and only when the spool is memory-backed,
+    /// so a value never reaches a disk. The spool is removed once the step
+    /// ended ([`Self::discard_spool`]); [`Self::discard_sealed`] removes
+    /// what a crashed attempt left, under the environment's fence.
+    pub fn write_sealed(
+        &self,
+        instance: &str,
+        values: &crate::host_apply::sealed::HostSealedValues,
+    ) -> Result<()> {
+        validate_instance_name(instance)?;
+        crate::host_apply::sealed::require_memory_backed(&self.spool_dir)
+            .with_context(|| format!("refusing to spool sealed values into {SPOOL_DIR_ENV}"))?;
+        let path = self
+            .spool_dir
+            .join(instance)
+            .join(crate::host_apply::sealed::SEALED_FILE);
+        let bytes = zeroize::Zeroizing::new(serde_json::to_vec(values)?);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("creating {}", path.display()))?;
+        use std::io::Write as _;
+        file.write_all(&bytes)
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Remove the sealed values spooled for `environment` whose unit is not
+    /// running: what a crashed attempt left. Call it only while holding the
+    /// environment's fence, after [`step::fence_environment`] stopped the
+    /// units an earlier holder left, so no live step loses its values.
+    /// Another environment's files are never touched.
+    pub async fn discard_sealed(&self, environment: &str) -> Result<()> {
+        let entries = match std::fs::read_dir(&self.spool_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", self.spool_dir.display()));
+            }
+        };
+        let running = self.units.running().await?;
+        for entry in entries {
+            let name = entry?.file_name();
+            let Some(instance) = name.to_str() else {
+                continue;
+            };
+            if validate_instance_name(instance).is_err()
+                || running.iter().any(|unit| unit == instance)
+                || self.instance_environment(instance).as_deref() != Some(environment)
+            {
+                continue;
+            }
+            let path = self
+                .spool_dir
+                .join(instance)
+                .join(crate::host_apply::sealed::SEALED_FILE);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("removing {}", path.display()));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Ask systemd to stop every running host unit that acts on
     /// `environment`, and return their instances. Only the environment
     /// lease's holder may have one running, so a unit still running when
