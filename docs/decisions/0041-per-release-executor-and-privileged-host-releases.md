@@ -4,6 +4,8 @@
 - Date: 2026-11-04
 - Issue: [#907](https://github.com/Sannrox/tenkai/issues/907)
 - Owner: Tenkai maintainers
+- Amended by: [ADR 0049](0049-removing-built-in-executor-instances.md)
+  (§1 a product changes executor by an approved removal, then an install)
 - Related: [software executor](../software-executor.md),
   [manifest](../manifest.md),
   [release signing](../release-signing.md),
@@ -74,7 +76,8 @@ A product keeps one executor across its releases in an environment. A plan
 whose target release resolves to a different executor than the currently
 installed release of the same product is refused and names both. Moving a
 product to another executor is an explicit remove of the old product followed
-by an install of the new one; no in-place transition is defined. A release
+by an install of the new one; no in-place transition is defined. ADR 0049
+makes that removal plannable for every built-in executor, not only `host`. A release
 whose executor is not available in the process fails closed and names it; it
 never falls back to another executor.
 
