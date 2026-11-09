@@ -497,6 +497,7 @@ mod tests {
                 host: None,
                 sealed: Vec::new(),
                 restore: None,
+                rewrap: None,
             }],
             state,
             gates_skipped: Some(false),

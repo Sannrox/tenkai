@@ -1473,6 +1473,7 @@ impl VerifiedReceipt {
                         "offline receipt {} result {}",
                         receipt.receipt_id, receipt.result_digest
                     ),
+                    wraps: Vec::new(),
                 })
                 .collect(),
         }

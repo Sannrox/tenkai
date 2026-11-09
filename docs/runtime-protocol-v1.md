@@ -181,6 +181,21 @@ neither compatibility nor placement is checked. Only host releases are
 removed by a plan, so a removal of any other release has no package
 (`412`).
 
+### Re-wrap steps
+
+A step with `rewrap` (ADR 0045 §5) asks the runtime to wrap the data keys
+of the instance's sealed values, as the step's `sealed` names them, for one
+more recipient. Its release package carries the step's sealed values and
+`rewrap_recipient`: that recipient's public key, which the runtime checks
+against the step's fingerprint. The package has no manifest, inputs or
+artifact pulls, so the server admits no release content for it, and the
+runtime verifies nothing about the release and deploys nothing. A re-wrap
+step has no restore pin (`412`). Its receipt carries `wraps`: for each value, `secret`, `key`, the
+approved `digest`, and the new `wrap`. The server keeps them only for a
+succeeded re-wrap step, for its recipient, and for a value at that digest.
+`wraps` and `rewrap_recipient` are omitted when empty, so other receipts and
+packages are unchanged.
+
 ### Host records
 
 A built-in runtime with a host applier (`TENKAI_HOST_SPOOL_DIR`) posts every

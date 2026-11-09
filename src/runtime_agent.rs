@@ -601,6 +601,7 @@ impl RuntimeClient {
                             } else {
                                 "not executed after an earlier step failed".into()
                             },
+                            wraps: Vec::new(),
                         })
                         .collect();
                     self.complete(RuntimeCompletion {
@@ -659,6 +660,7 @@ impl RuntimeClient {
                 step_id: step.id.clone(),
                 succeeded: false,
                 detail: "not executed after an earlier step failed".into(),
+                wraps: Vec::new(),
             });
         }
         self.complete(RuntimeCompletion {
@@ -694,6 +696,7 @@ impl RuntimeClient {
                 step_id: step.id.clone(),
                 succeeded,
                 detail,
+                wraps: Vec::new(),
             })
         };
         if !last {
@@ -845,6 +848,7 @@ impl RuntimeClient {
                 step_id: pending.step_id.clone(),
                 succeeded,
                 detail,
+                wraps: Vec::new(),
             });
             let all = receipts.iter().all(|receipt| receipt.succeeded);
             self.complete(RuntimeCompletion {
@@ -1224,6 +1228,7 @@ impl RuntimeClient {
                     "step {} writes sealed secrets; operator executor programs never receive them (run the runtime in built-in mode)",
                     step.id
                 ),
+                wraps: Vec::new(),
             });
         }
         let guard = std::env::current_exe().ok().and_then(|path| {
@@ -1235,6 +1240,7 @@ impl RuntimeClient {
                 step_id: step.id.clone(),
                 succeeded: false,
                 detail: "runtime guard could not be located".into(),
+                wraps: Vec::new(),
             });
         };
         let mut command = Command::new(guard);
@@ -1296,16 +1302,19 @@ impl RuntimeClient {
                 step_id: step.id.clone(),
                 succeeded: true,
                 detail: "executor completed successfully".into(),
+                wraps: Vec::new(),
             }),
             Ok(_) => Ok(RuntimeStepReceipt {
                 step_id: step.id.clone(),
                 succeeded: false,
                 detail: "executor returned a non-success status".into(),
+                wraps: Vec::new(),
             }),
             Err(_) => Ok(RuntimeStepReceipt {
                 step_id: step.id.clone(),
                 succeeded: false,
                 detail: "executor could not be started".into(),
+                wraps: Vec::new(),
             }),
         }
     }

@@ -449,6 +449,7 @@ mod tests {
             host: None,
             sealed: Vec::new(),
             restore: None,
+            rewrap: None,
         }
     }
 

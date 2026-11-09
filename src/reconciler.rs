@@ -534,6 +534,7 @@ mod tests {
                 artifact_digest: "restore-artifact-digest".into(),
                 workdir: "/srv/api".into(),
             }),
+            rewrap: None,
         }];
         let mut normalized = steps.clone();
         for step in &mut normalized {
@@ -660,6 +661,7 @@ mod tests {
                 step_id: plan.steps[0].id.clone(),
                 succeeded,
                 detail: "runtime fixture".into(),
+                wraps: Vec::new(),
             }],
         };
         let before = crate::now_millis();

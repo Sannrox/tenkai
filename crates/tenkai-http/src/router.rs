@@ -35,8 +35,8 @@ use super::lifecycle::{
     import_derived_criticality, install_model_evaluation_trust, plan_environment, promote_release,
     publish_release, recall_release, record_model_evaluation_evidence,
     record_software_compatibility_evidence, release_channel_hold, release_environment_hold,
-    retire_environment, retry_failed_target, rollback_environment, set_channel_hold,
-    set_environment_hold, set_product_criticality, software_compatibility_report,
+    retire_environment, retry_failed_target, rewrap_sealed_secrets, rollback_environment,
+    set_channel_hold, set_environment_hold, set_product_criticality, software_compatibility_report,
     subscribe_environment, unsubscribe_environment,
 };
 use super::package_migration::{
@@ -243,6 +243,10 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/bindings",
             put(configure_bindings).delete(configure_bindings),
+        )
+        .route(
+            "/v1/environments/{environment}/sealed-secrets/rewrap",
+            post(rewrap_sealed_secrets),
         )
         .route(
             "/v1/environments/{environment}/sealed-secrets",

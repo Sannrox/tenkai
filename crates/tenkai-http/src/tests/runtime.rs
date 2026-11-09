@@ -437,14 +437,14 @@ async fn recipient_keys_omit_revoked_runtimes() {
         offered["recipients"][0]["capability"],
         tenkai::sealing_key::SEALED_SECRETS_CAPABILITY
     );
-    let (status, _) = call(
+    let (status, revoked) = call(
         "POST",
         &format!("/v1/runners/{id}/revoke"),
         Some("management-secret"),
         serde_json::json!({"reason": "retired"}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "{revoked}");
     let (status, offered) = call(
         "GET",
         "/v1/environments/prod/recipient-keys",

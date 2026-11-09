@@ -20,7 +20,7 @@ use base64::Engine as _;
 use crate::fenced_mutation::{MutationCommand, MutationFence};
 use crate::host_executor::step::{HOST_NOT_RESTORED, HostStepEnd, SpooledRelease};
 use crate::manifest::{self, Manifest};
-use crate::plan::{Action, HostStep, Plan, SealedStep, Step};
+use crate::plan::{Action, HostStep, Plan, RewrapStep, SealedStep, Step};
 use crate::plan_approval::ApprovalEnvelope;
 use crate::release_signing::TrustRoots;
 use crate::runtime_agent::RuntimeClient;
@@ -93,6 +93,7 @@ pub(crate) async fn execute_step(
         detail: result
             .err()
             .unwrap_or_else(|| "built-in executor completed successfully".into()),
+        wraps: Vec::new(),
     };
     let run = Run {
         client,
@@ -102,6 +103,9 @@ pub(crate) async fn execute_step(
     };
     if let Some(host) = step.host {
         return Ok(receipt(run.host(plan, step, host, approvals).await?));
+    }
+    if let Some(rewrap) = &step.rewrap {
+        return run.rewrap(step, rewrap).await;
     }
     let target = match run.prepare(step, false).await? {
         Ok(target) => target,
@@ -429,6 +433,51 @@ impl Run<'_> {
         )
         .await?;
         Ok(host_outcome(step, host, ended))
+    }
+
+    /// Re-wrap every sealed value `step` names for its recipient (ADR 0045
+    /// §5). Nothing is deployed, so the release is neither verified nor
+    /// placed: only its sealed values are used, each checked against the
+    /// approved step before it is opened. The wraps go back on the receipt.
+    async fn rewrap(&self, step: &Step, rewrap: &RewrapStep) -> Result<RuntimeStepReceipt> {
+        let failed = |detail: String| RuntimeStepReceipt {
+            step_id: step.id.clone(),
+            succeeded: false,
+            detail,
+            wraps: Vec::new(),
+        };
+        let release = match self
+            .client
+            .fetch_release(self.plan_id, self.generation, step, false)
+            .await?
+        {
+            Ok(release) => release,
+            Err(detail) => return Ok(failed(detail)),
+        };
+        let wrapped = tokio::task::spawn_blocking({
+            let config = self.config.clone();
+            let environment = self.client.environment().to_owned();
+            let step = step.clone();
+            let rewrap = rewrap.clone();
+            move || config.rewrap_sealed(&release, &environment, &step, &rewrap)
+        })
+        .await?;
+        Ok(match wrapped {
+            Ok(wraps) => RuntimeStepReceipt {
+                step_id: step.id.clone(),
+                succeeded: true,
+                detail: format!(
+                    "re-wrapped {} sealed values for {}",
+                    wraps.len(),
+                    rewrap.fingerprint
+                ),
+                wraps,
+            },
+            Err(error) => failed(sanitize_diagnostic_text(&format!(
+                "re-wrapping for {} failed: {error:#}",
+                rewrap.fingerprint
+            ))),
+        })
     }
 
     fn lock(&self, release: &Prepared) -> PathBuf {
@@ -853,6 +902,83 @@ impl BuiltinConfig {
             .collect()
     }
 
+    /// Wrap the data key of every sealed value `step` names for its approved
+    /// recipient. The server's recipient key must have the fingerprint the
+    /// step names, and each value the slot and digest the step names; only
+    /// then is it opened, and only its data key is wrapped again. Errors
+    /// name a slot, never a value.
+    pub fn rewrap_sealed(
+        &self,
+        release: &RuntimeRelease,
+        environment: &str,
+        step: &Step,
+        rewrap: &RewrapStep,
+    ) -> Result<Vec<crate::sealed_secret::RecipientWrap>> {
+        let recipient = crate::sealing_key::SealingPublicKey::from_wire(
+            release
+                .rewrap_recipient
+                .as_deref()
+                .context("the server sent no recipient key for the re-wrap step")?,
+        )?;
+        if recipient.fingerprint() != rewrap.fingerprint {
+            bail!(
+                "the server sent a recipient key other than the approved {}",
+                rewrap.fingerprint
+            );
+        }
+        let slots = release
+            .sealed
+            .iter()
+            .map(|value| (&value.secret, &value.key));
+        if step.sealed.is_empty()
+            || !slots.eq(step
+                .sealed
+                .iter()
+                .map(|sealed| (&sealed.secret, &sealed.key)))
+        {
+            bail!("the server's sealed values do not match the re-wrap step");
+        }
+        let dir = self.sealing_dir.as_deref().context(
+            "the step re-wraps sealed values, and this runtime has no sealing key (enroll with --credential-file)",
+        )?;
+        let opener = SealedOpener::load(dir)?;
+        step.sealed
+            .iter()
+            .zip(&release.sealed)
+            .map(|(sealed, value)| {
+                let slot = SecretRef::new(&sealed.secret, &sealed.key)?;
+                let target = SealedTarget::new(environment, step.instance_name(), slot)?;
+                if crate::sealed_secret::digest(&target, &value.sealed)? != sealed.digest {
+                    bail!(
+                        "sealed {}/{} does not match the re-wrap step's digest",
+                        sealed.secret,
+                        sealed.key
+                    );
+                }
+                if value.sealed.wraps.len() >= crate::sealed_secret::MAX_WRAPS
+                    && !value
+                        .sealed
+                        .wraps
+                        .iter()
+                        .any(|wrap| wrap.fingerprint == rewrap.fingerprint)
+                {
+                    bail!(
+                        "sealed {}/{} already has {} recipients; revoke a runtime before adding one",
+                        sealed.secret,
+                        sealed.key,
+                        crate::sealed_secret::MAX_WRAPS
+                    );
+                }
+                Ok(crate::sealed_secret::RecipientWrap {
+                    secret: sealed.secret.clone(),
+                    key: sealed.key.clone(),
+                    digest: sealed.digest.clone(),
+                    wrap: opener.rewrap(&target, &value.sealed, &recipient)?,
+                })
+            })
+            .collect()
+    }
+
     /// Refuse a release this runtime must not run with a built-in executor,
     /// naming why. Only Helm and the host applier write sealed values
     /// (ADR 0048 §4). A host
@@ -1120,6 +1246,7 @@ mod tests {
             restore: None,
             host: None,
             sealed: Vec::new(),
+            rewrap: None,
         };
         Case {
             config: BuiltinConfig {
@@ -1137,6 +1264,7 @@ mod tests {
                 entries,
                 replaces: None,
                 sealed: Vec::new(),
+                rewrap_recipient: None,
             },
             step,
             root,
@@ -1320,6 +1448,85 @@ mod tests {
             sealed,
         }];
         case
+    }
+
+    /// A re-wrap step (ADR 0045 §5) wraps exactly the approved values for
+    /// exactly the approved key: the new key then opens them, the digest is
+    /// unchanged, and a substituted key or value is refused. No value
+    /// reaches an error.
+    #[test]
+    fn a_rewrap_wraps_only_the_approved_values_for_the_approved_key() {
+        let case = sealed_case("api", b"hunter2");
+        let newcomer_dir = case.root.join("newcomer");
+        let newcomer = crate::sealing_key::SealingKey::open_or_generate(&newcomer_dir).unwrap();
+        let rewrap = RewrapStep {
+            fingerprint: newcomer.fingerprint(),
+        };
+        let mut release = case.release.clone();
+        release.rewrap_recipient = Some(newcomer.to_wire());
+
+        let wraps = case
+            .config
+            .rewrap_sealed(&release, ENVIRONMENT, &case.step, &rewrap)
+            .unwrap();
+        let [wrap] = wraps.as_slice() else {
+            panic!("one wrap per value");
+        };
+        assert_eq!(wrap.wrap.fingerprint, newcomer.fingerprint());
+        assert_eq!(wrap.digest, case.step.sealed[0].digest);
+        let target = SealedTarget::new(
+            ENVIRONMENT,
+            "api",
+            SecretRef::new("db", "password").unwrap(),
+        )
+        .unwrap();
+        let mut sealed = release.sealed[0].sealed.clone();
+        sealed.wraps.push(wrap.wrap.clone());
+        assert_eq!(
+            crate::sealed_secret::digest(&target, &sealed).unwrap(),
+            case.step.sealed[0].digest
+        );
+        let opened = SealedOpener::load(&newcomer_dir)
+            .unwrap()
+            .open(&target, &sealed)
+            .unwrap();
+        assert_eq!(opened.as_slice(), b"hunter2");
+
+        let refusal = |release: &RuntimeRelease| {
+            let error = format!(
+                "{:#}",
+                case.config
+                    .rewrap_sealed(release, ENVIRONMENT, &case.step, &rewrap)
+                    .unwrap_err()
+            );
+            assert!(!error.contains("hunter2"), "{error}");
+            error
+        };
+        // A key other than the one the approved step names.
+        let mut substituted = release.clone();
+        let stranger =
+            crate::sealing_key::SealingKey::open_or_generate(&case.root.join("stranger")).unwrap();
+        substituted.rewrap_recipient = Some(stranger.to_wire());
+        assert!(refusal(&substituted).contains("other than the approved"));
+        // A value the server swapped in.
+        let mut swapped = release.clone();
+        swapped.sealed = sealed_case("api", b"forged").release.sealed.clone();
+        assert!(refusal(&swapped).contains("does not match"));
+        // No recipient key at all.
+        let mut keyless = release.clone();
+        keyless.rewrap_recipient = None;
+        assert!(refusal(&keyless).contains("no recipient key"));
+        // A value at the wrap limit: one more wrap would open it for no one.
+        let mut full = release.clone();
+        let filler = full.sealed[0].sealed.wraps[0].clone();
+        full.sealed[0].sealed.wraps = (0..crate::sealed_secret::MAX_WRAPS)
+            .map(|n| crate::sealed_secret::SealedWrap {
+                fingerprint: format!("sha256:{n:064x}"),
+                ..filler.clone()
+            })
+            .collect();
+        full.sealed[0].sealed.wraps[0] = filler;
+        assert!(refusal(&full).contains("already has"));
     }
 
     #[test]

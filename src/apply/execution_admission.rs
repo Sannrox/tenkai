@@ -103,6 +103,14 @@ pub(crate) async fn classify_candidate(ctx: &mut Ctx, plan: &Plan) -> Result<Can
 }
 
 pub(super) async fn admit(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
+    // Only a runtime holds a sealing key, so only a runtime re-wraps.
+    if let Some(step) = plan.steps.iter().find(|step| step.rewrap.is_some()) {
+        anyhow::bail!(
+            "plan {} step {} re-wraps sealed values; only an environment runtime in built-in mode runs it",
+            plan.id,
+            step.id
+        );
+    }
     inspect(ctx, plan)
         .await?
         .map_err(|rejection| anyhow::anyhow!("plan {} {rejection}", plan.id))
@@ -292,6 +300,7 @@ mod tests {
                 host: None,
                 sealed: Vec::new(),
                 restore: None,
+                rewrap: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,
@@ -519,6 +528,7 @@ mod tests {
                 host: None,
                 sealed: Vec::new(),
                 restore: None,
+                rewrap: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,

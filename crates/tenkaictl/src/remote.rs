@@ -407,6 +407,12 @@ pub(crate) async fn run(
                     "revoked runtime credential {} of {} at {}",
                     revoked.credential_id, revoked.environment, revoked.revoked_at
                 );
+                if !revoked.unopenable.is_empty() {
+                    println!("no recipient can open these sealed values any more; set them again:");
+                    for value in &revoked.unopenable {
+                        println!("  {value}");
+                    }
+                }
                 Ok(())
             }
         },
@@ -435,6 +441,23 @@ pub(crate) async fn run(
             }
             crate::args::SecretCommand::List { env } => {
                 crate::secret::print_list(&client.list_sealed_secrets(&env).await?);
+                Ok(())
+            }
+            crate::args::SecretCommand::Rewrap {
+                env,
+                recipient,
+                generation,
+            } => {
+                let result = client
+                    .rewrap_sealed_secrets(&env, &recipient, generation)
+                    .await?;
+                println!("{}", result.message);
+                if let Some(plan_id) = &result.resource {
+                    println!("plan id: {plan_id}");
+                }
+                if let Some(digest) = &result.digest {
+                    println!("plan digest: {digest}");
+                }
                 Ok(())
             }
             crate::args::SecretCommand::Delete {

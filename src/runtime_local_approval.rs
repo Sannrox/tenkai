@@ -184,6 +184,7 @@ mod tests {
                         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                             .into(),
                 }],
+                rewrap: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,
@@ -252,6 +253,33 @@ mod tests {
             now,
         )
         .unwrap();
+    }
+
+    /// A re-wrap step (ADR 0045 §5) needs the runtime's local quorum like a
+    /// sealed apply, and its approvals are bound to the recipient it names:
+    /// changing the recipient after approval fails the check.
+    #[test]
+    fn a_rewrap_step_needs_local_approvals_for_its_recipient() {
+        let fixture = HostFixture::new(&[("alice", &["ops"]), ("bob", &["ops"])], vec![rule(2)]);
+        let now = crate::now_millis();
+        let mut plan = sealed_plan(now);
+        plan.steps[0].action = Action::Restart;
+        plan.steps[0].from = Some("1.0.0".into());
+        plan.steps[0].rewrap = Some(crate::plan::RewrapStep {
+            fingerprint: format!("sha256:{}", "b".repeat(64)),
+        });
+        let policy = Some(&fixture.trust.policy);
+        require_step(None, &plan, &plan.steps[0], &[], now).unwrap_err();
+        let one = envelopes(&fixture, &plan, now, &[0]);
+        require_step(policy, &plan, &plan.steps[0], &one, now).unwrap_err();
+        let both = envelopes(&fixture, &plan, now, &[0, 1]);
+        require_step(policy, &plan, &plan.steps[0], &both, now).unwrap();
+
+        let mut redirected = plan.clone();
+        redirected.steps[0].rewrap = Some(crate::plan::RewrapStep {
+            fingerprint: format!("sha256:{}", "c".repeat(64)),
+        });
+        require_step(policy, &redirected, &redirected.steps[0], &both, now).unwrap_err();
     }
 
     #[test]

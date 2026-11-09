@@ -483,6 +483,30 @@ impl RemoteClient {
     }
 
     /// Sealed keys of `environment` (ADR 0045). Never a value.
+    /// Ask for a plan that re-wraps `environment`'s sealed values for the
+    /// recipient key `recipient` (ADR 0045 §5).
+    pub async fn rewrap_sealed_secrets(
+        &self,
+        environment: &str,
+        recipient: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/sealed-secrets/rewrap"),
+            Some(&tenkai::management_lifecycle::SealedRewrapRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Plan
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                recipient: recipient.to_string(),
+            }),
+        )
+        .await
+    }
+
     pub async fn list_sealed_secrets(
         &self,
         environment: &str,

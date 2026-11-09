@@ -5839,6 +5839,13 @@
         "revoked_at": {
           "format": "int64",
           "type": "integer"
+        },
+        "unopenable": {
+          "description": "Sealed values (`<instance> <secret>/<key>`) that no recipient can open\nonce the revoked runtime's wraps are dropped: they must be set again\n(ADR 0045 §5).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -6071,6 +6078,40 @@
         "stderr_sha256",
         "summary",
         "scanned_at_ms"
+      ],
+      "type": "object"
+    },
+    "SealedRewrapRequest": {
+      "additionalProperties": false,
+      "description": "Ask for a plan that re-wraps every sealed value of the environment for\none more recipient key (ADR 0045 §5). The operation is `plan`: the\nresult is a plan that needs signed approval like any other.",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "recipient": {
+          "description": "`sha256:<hex>` fingerprint of an unrevoked recipient key of the\nenvironment.",
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation",
+        "recipient"
       ],
       "type": "object"
     },
@@ -7484,6 +7525,17 @@
       "path": "/v1/environments/{environment}/sealed-secrets",
       "request": {
         "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/sealed-secrets/rewrap",
+      "request": {
+        "$ref": "#/$defs/SealedRewrapRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"

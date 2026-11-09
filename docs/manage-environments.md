@@ -97,6 +97,35 @@ the requirement. Changes are generation-fenced and audited like other environmen
 configuration (`PUT`/`DELETE /v1/environments/{environment}/sealed-secrets`,
 `GET` to list).
 
+#### Adding a recipient
+
+A runtime enrolled after a value was sealed cannot open it. Re-wrap the
+environment's values for its key through an approved plan (ADR 0045 §5):
+
+```sh
+tenkaictl --target remote secret recipients prod
+tenkaictl --target remote secret rewrap prod --recipient sha256:<hex> --generation 9
+```
+
+- The recipient must be an unrevoked runtime key of the environment. The
+  server builds one re-wrap step per instance with sealed values, pinned to
+  its deployed release. An instance with nothing deployed yet is named in
+  the result and re-wrapped by a later request.
+- The plan needs signed approvals like any other, and the runtime checks
+  them against its local approval policy. The approvals cover the
+  recipient's fingerprint, so a server cannot point them at another key.
+- A runtime that can open the values runs it: it opens each value, wraps the
+  data key for the named key, and returns only the wraps. A runtime that
+  cannot open them, such as the new one, fails the step and names why; apply
+  the plan from one that can. The server keeps a wrap only for the approved
+  recipient and for a value whose digest is unchanged. Ciphertext,
+  configuration digest and deployments do not change.
+- Revoking a runtime (`runtime revoke`) drops its wraps from every value. A
+  value left with no wrap is listed in the revocation result, and every
+  plan that writes it warns that no recipient can open it: set it again.
+  Rotating a runtime's sealing key is enrolling a new runtime, re-wrapping
+  for it, and revoking the old one.
+
 Servers that predate sealed secrets ignore the stored records and never plan
 them. Set the first sealed value only once every server and runtime of the
 environment understands them: an older server computes the configuration

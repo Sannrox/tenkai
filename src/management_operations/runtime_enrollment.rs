@@ -170,6 +170,11 @@ pub struct RuntimeCredentialRevoked {
     pub credential_id: String,
     pub environment: String,
     pub revoked_at: i64,
+    /// Sealed values (`<instance> <secret>/<key>`) that no recipient can open
+    /// once the revoked runtime's wraps are dropped: they must be set again
+    /// (ADR 0045 §5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unopenable: Vec<String>,
 }
 
 impl ManagementOperations {
@@ -293,11 +298,34 @@ impl ManagementOperations {
             Err(StoreError::NotFound { .. }) => return Err(unknown()),
             Err(error) => return Err(ManagementError::Unavailable(error.to_string())),
         }
+        // A revoked runtime's key opens nothing any more (ADR 0045 §5).
+        // Revoking is idempotent, so revoking again retries a failed drop.
+        let mut unopenable = Vec::new();
+        if let Some(sealing) = self
+            .store
+            .runtime_sealing_key(credential_id)
+            .map_err(|error| ManagementError::Unavailable(error.to_string()))?
+            && let Ok(key) = crate::sealing_key::SealingPublicKey::from_wire(&sealing.public_key)
+        {
+            let mut ctx = self.application_ctx()?;
+            unopenable = crate::sealed_secret::drop_recipient(
+                &mut ctx,
+                &record.environment_id,
+                &key.fingerprint(),
+            )
+            .await
+            .map_err(|error| {
+                ManagementError::Unavailable(format!(
+                    "the runtime is revoked, but dropping its sealed-value wraps failed: {error:#}; revoke it again to retry"
+                ))
+            })?;
+        }
         self.audit(&actor, "runtime.credential.revoke.completed")?;
         Ok(RuntimeCredentialRevoked {
             credential_id: credential_id.into(),
             environment: record.environment_id,
             revoked_at: record.revoked_at.unwrap_or(now),
+            unopenable,
         })
     }
 

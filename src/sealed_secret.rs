@@ -35,7 +35,8 @@ pub const SEALED_FORMAT_VERSION: u32 = 1;
 const WRAP_INFO: &[u8] = b"tenkai.sealed-secret.v1";
 /// Largest value accepted. A Kubernetes Secret holds at most 1 MiB in all.
 pub const MAX_VALUE_BYTES: usize = 64 * 1024;
-const MAX_WRAPS: usize = 64;
+/// Most wraps one value may carry; a value with more opens for no one.
+pub(crate) const MAX_WRAPS: usize = 64;
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const PROPERTY_PREFIX: &str = "sealed.";
@@ -181,32 +182,36 @@ pub fn seal(
     let mut ciphertext = nonce.to_vec();
     ciphertext.extend_from_slice(&sealed);
 
-    let mut rng = rand_core::UnwrapErr(rand_core::OsRng);
-    let mut wraps = Vec::with_capacity(recipients.len());
-    for recipient in recipients {
-        use hpke::{Deserializable as _, Serializable as _};
-        let public = <Kem as hpke::Kem>::PublicKey::from_bytes(&recipient.point).map_err(|_| {
-            anyhow::anyhow!("recipient {} is not a P-256 key", recipient.fingerprint())
-        })?;
-        let (encapsulated, wrapped) = hpke::single_shot_seal::<Aead, Kdf, Kem, _>(
-            &hpke::OpModeS::Base,
-            &public,
-            WRAP_INFO,
-            data_key.as_ref(),
-            &aad,
-            &mut rng,
-        )
-        .map_err(|error| anyhow::anyhow!("wrapping the data key: {error}"))?;
-        wraps.push(SealedWrap {
-            fingerprint: recipient.fingerprint(),
-            encapsulated_key: STANDARD.encode(encapsulated.to_bytes()),
-            wrapped_key: STANDARD.encode(wrapped),
-        });
-    }
+    let wraps = recipients
+        .iter()
+        .map(|recipient| wrap_data_key(data_key.as_ref(), &aad, recipient))
+        .collect::<Result<Vec<_>>>()?;
     Ok(SealedValue {
         format_version: SEALED_FORMAT_VERSION,
         ciphertext: STANDARD.encode(ciphertext),
         wraps,
+    })
+}
+
+/// Wrap `data_key` for `recipient` under the value's associated data.
+fn wrap_data_key(data_key: &[u8], aad: &[u8], recipient: &SealingPublicKey) -> Result<SealedWrap> {
+    use hpke::{Deserializable as _, Serializable as _};
+    let mut rng = rand_core::UnwrapErr(rand_core::OsRng);
+    let public = <Kem as hpke::Kem>::PublicKey::from_bytes(&recipient.point)
+        .map_err(|_| anyhow::anyhow!("recipient {} is not a P-256 key", recipient.fingerprint()))?;
+    let (encapsulated, wrapped) = hpke::single_shot_seal::<Aead, Kdf, Kem, _>(
+        &hpke::OpModeS::Base,
+        &public,
+        WRAP_INFO,
+        data_key,
+        aad,
+        &mut rng,
+    )
+    .map_err(|error| anyhow::anyhow!("wrapping the data key: {error}"))?;
+    Ok(SealedWrap {
+        fingerprint: recipient.fingerprint(),
+        encapsulated_key: STANDARD.encode(encapsulated.to_bytes()),
+        wrapped_key: STANDARD.encode(wrapped),
     })
 }
 
@@ -292,6 +297,30 @@ impl SealedOpener {
         target: &SealedTarget,
         sealed: &SealedValue,
     ) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        Ok(self.unwrap(target, sealed)?.1)
+    }
+
+    /// Wrap `sealed`'s data key for `recipient` too (ADR 0045 §5): only once
+    /// this opener's wrap opened it and it decrypted the ciphertext, so a
+    /// wrap that does not open the value is never passed on. The
+    /// ciphertext, and with it the value's digest, is unchanged.
+    pub fn rewrap(
+        &self,
+        target: &SealedTarget,
+        sealed: &SealedValue,
+        recipient: &SealingPublicKey,
+    ) -> Result<SealedWrap> {
+        let (data_key, _value) = self.unwrap(target, sealed)?;
+        wrap_data_key(&data_key, &target.associated_data(), recipient)
+    }
+
+    /// The data key and the value it decrypts.
+    #[allow(clippy::type_complexity)]
+    fn unwrap(
+        &self,
+        target: &SealedTarget,
+        sealed: &SealedValue,
+    ) -> Result<(zeroize::Zeroizing<Vec<u8>>, zeroize::Zeroizing<Vec<u8>>)> {
         use hpke::{Deserializable as _, Serializable as _};
         use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
         check_form(sealed)?;
@@ -348,7 +377,7 @@ impl SealedOpener {
         let plain = key
             .open_within(nonce, Aad::from(&aad), &mut body[..], NONCE_BYTES..)
             .map_err(|_| refused())?;
-        Ok(zeroize::Zeroizing::new(plain.to_vec()))
+        Ok((data_key, zeroize::Zeroizing::new(plain.to_vec())))
     }
 }
 
@@ -389,20 +418,31 @@ pub fn check_form(sealed: &SealedValue) -> Result<()> {
     }
     let mut seen = BTreeSet::new();
     for wrap in &sealed.wraps {
-        let fingerprint = crate::sealing_key::normalize_fingerprint(&wrap.fingerprint)?;
-        if fingerprint != wrap.fingerprint || !seen.insert(fingerprint.clone()) {
+        check_wrap(wrap)?;
+        if !seen.insert(wrap.fingerprint.clone()) {
             bail!("wrap fingerprints must be distinct and in sha256:<hex> form");
         }
-        for (field, value) in [
-            ("encapsulated key", &wrap.encapsulated_key),
-            ("wrapped key", &wrap.wrapped_key),
-        ] {
-            let bytes = STANDARD
-                .decode(value)
-                .with_context(|| format!("the {field} of wrap {fingerprint} is not base64"))?;
-            if bytes.is_empty() || bytes.len() > 256 {
-                bail!("the {field} of wrap {fingerprint} has an invalid length");
-            }
+    }
+    Ok(())
+}
+
+/// Check one wrap's form: a `sha256:<hex>` fingerprint and base64 fields of
+/// a sane length. A value with one malformed wrap opens for no one, so a
+/// wrap is checked before it is stored.
+pub fn check_wrap(wrap: &SealedWrap) -> Result<()> {
+    let fingerprint = crate::sealing_key::normalize_fingerprint(&wrap.fingerprint)?;
+    if fingerprint != wrap.fingerprint {
+        bail!("wrap fingerprints must be distinct and in sha256:<hex> form");
+    }
+    for (field, value) in [
+        ("encapsulated key", &wrap.encapsulated_key),
+        ("wrapped key", &wrap.wrapped_key),
+    ] {
+        let bytes = STANDARD
+            .decode(value)
+            .with_context(|| format!("the {field} of wrap {fingerprint} is not base64"))?;
+        if bytes.is_empty() || bytes.len() > 256 {
+            bail!("the {field} of wrap {fingerprint} has an invalid length");
         }
     }
     Ok(())
@@ -695,6 +735,189 @@ pub(crate) async fn delete_locked(
     Ok(format!("deleted {environment} sealed {instance} {secret}"))
 }
 
+/// A wrap a runtime made for an approved recipient (ADR 0045 §5), for one
+/// stored value of an instance, named by its slot and sealed digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecipientWrap {
+    pub secret: String,
+    pub key: String,
+    /// The value's sealed digest when it was re-wrapped.
+    pub digest: String,
+    pub wrap: SealedWrap,
+}
+
+/// Add `wraps` to `instance`'s stored values. A wrap replaces one for the
+/// same key. A value changed or deleted since it was re-wrapped is skipped:
+/// a new value is sealed to the recipients of its time. The ciphertext and
+/// digest of a value never change. Returns the slots that got a wrap.
+pub(crate) fn add_wraps(
+    env_obj: &mut Object,
+    instance: &str,
+    wraps: &[RecipientWrap],
+) -> Result<Vec<String>> {
+    let mut records = instance_records(env_obj, instance)?;
+    let mut added = Vec::new();
+    for wrap in wraps {
+        let name = SecretRef::new(&wrap.secret, &wrap.key)?.to_string();
+        let Some(record) = records.get_mut(&name) else {
+            continue;
+        };
+        if record.digest != wrap.digest {
+            continue;
+        }
+        // A value at the wrap limit would no longer open for anyone.
+        let known = record
+            .sealed
+            .wraps
+            .iter()
+            .any(|existing| existing.fingerprint == wrap.wrap.fingerprint);
+        if !known && record.sealed.wraps.len() >= MAX_WRAPS {
+            continue;
+        }
+        let mut updated = record.sealed.clone();
+        updated
+            .wraps
+            .retain(|existing| existing.fingerprint != wrap.wrap.fingerprint);
+        updated.wraps.push(wrap.wrap.clone());
+        check_form(&updated).with_context(|| format!("refusing a wrap for {name}"))?;
+        record.sealed = updated;
+        added.push(name);
+    }
+    persist_instance_records(env_obj, instance, &records);
+    Ok(added)
+}
+
+/// Store the wraps a re-wrap plan's runtime returned, per instance, under
+/// the environment lease (ADR 0045 §5). `current` yields the environment's
+/// unrevoked recipients and is read inside the lease, and revocation drops
+/// a key's wraps under the same lease, so a recipient revoked before this
+/// commits gets no wrap, and one revoked after it has its wrap dropped.
+/// Storing the same wraps again changes nothing, so a replayed completion
+/// is safe. A busy lease fails, and the completion is retried.
+pub async fn store_completion_wraps(
+    ctx: &mut Ctx,
+    environment: &str,
+    wraps: &[(String, Vec<RecipientWrap>)],
+    current: impl FnOnce() -> Result<BTreeSet<String>>,
+) -> Result<()> {
+    if wraps.iter().all(|(_, wraps)| wraps.is_empty()) {
+        return Ok(());
+    }
+    let owner = format!("sealed-rewrap-store:{}", crate::now_millis());
+    let lease = crate::apply::claim_environment(ctx, environment, &owner).await?;
+    let stored = async {
+        let current = current()?;
+        let mut env_obj = crate::environment::environment(ctx, environment).await?;
+        for (instance, wraps) in wraps {
+            let kept: Vec<RecipientWrap> = wraps
+                .iter()
+                .filter(|wrap| current.contains(&wrap.wrap.fingerprint))
+                .cloned()
+                .collect();
+            add_wraps(&mut env_obj, instance, &kept)?;
+        }
+        env_obj.updated = crate::now_millis();
+        put_fenced(ctx, env_obj, &lease).await?;
+        anyhow::Ok(())
+    }
+    .await;
+    let unlock = crate::apply::release_environment(ctx, &lease).await;
+    match (stored, unlock) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error.context("releasing the environment lease")),
+    }
+}
+
+/// The values of `instance` that no wrap is left on: no recipient can open
+/// them, and they must be set again (ADR 0045 §5).
+pub fn unopenable(env_obj: &Object, instance: &str) -> Result<Vec<String>> {
+    Ok(instance_records(env_obj, instance)?
+        .into_iter()
+        .filter(|(_, record)| record.sealed.wraps.is_empty())
+        .map(|(name, _)| name)
+        .collect())
+}
+
+/// Write `env_obj` only while `lease` is still the environment's current
+/// holder: a holder that stalled past its lease never overwrites a newer
+/// one, so a revocation cannot be undone by a delayed write.
+async fn put_fenced(
+    ctx: &mut Ctx,
+    env_obj: Object,
+    lease: &crate::apply::EnvironmentLease,
+) -> Result<()> {
+    ctx.guarded_update(
+        env_obj,
+        crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+        &lease.environment,
+        &lease.fencing_token,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Drop every wrap for `fingerprint` from `environment`'s stored values,
+/// under the environment lease: a retired or revoked runtime's key opens
+/// nothing any more (ADR 0045 §5). Returns `<instance> <secret>/<key>` of
+/// the values no wrap is left on. Dropping wraps that are gone already
+/// changes nothing, so this is safe to retry.
+pub async fn drop_recipient(
+    ctx: &mut Ctx,
+    environment: &str,
+    fingerprint: &str,
+) -> Result<Vec<String>> {
+    validate_identifier("environment", environment)?;
+    // An environment the store does not register holds no sealed values.
+    if ctx
+        .get(&crate::ontology::env_id(environment))
+        .await?
+        .is_none()
+    {
+        return Ok(Vec::new());
+    }
+    let owner = format!("sealed-recipient-drop:{}", crate::now_millis());
+    let lease = crate::apply::claim_environment(ctx, environment, &owner).await?;
+    let dropped = async {
+        let mut env_obj = crate::environment::environment(ctx, environment).await?;
+        let instances: Vec<String> = env_obj
+            .properties
+            .keys()
+            .filter_map(|key| key.strip_prefix(PROPERTY_PREFIX).map(str::to_owned))
+            .collect();
+        let mut changed = false;
+        let mut lost = Vec::new();
+        for instance in instances {
+            let mut records = instance_records(&env_obj, &instance)?;
+            for (name, record) in &mut records {
+                let before = record.sealed.wraps.len();
+                record
+                    .sealed
+                    .wraps
+                    .retain(|wrap| wrap.fingerprint != fingerprint);
+                changed |= record.sealed.wraps.len() != before;
+                if record.sealed.wraps.is_empty() {
+                    lost.push(format!("{instance} {name}"));
+                }
+            }
+            persist_instance_records(&mut env_obj, &instance, &records);
+        }
+        if changed {
+            env_obj.updated = crate::now_millis();
+            put_fenced(ctx, env_obj, &lease).await?;
+        }
+        anyhow::Ok(lost)
+    }
+    .await;
+    let unlock = crate::apply::release_environment(ctx, &lease).await;
+    match (dropped, unlock) {
+        (Ok(lost), Ok(())) => Ok(lost),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.context("releasing the environment lease")),
+    }
+}
+
 mod hpke_receiver;
 
 #[cfg(test)]
@@ -742,6 +965,172 @@ mod tests {
         let error = format!("{:#}", opener.open(&other, &sealed).unwrap_err());
         assert!(!error.contains("token-held-plain-value"), "{error}");
         assert!(error.contains("does not open"), "{error}");
+    }
+
+    /// Wraps reach a stored value only for its current digest, a revoked
+    /// key's wraps are dropped from every value, and a value left with none
+    /// is named (ADR 0045 §5).
+    #[tokio::test]
+    async fn recipients_are_added_and_dropped_without_touching_values() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-sealed-recipients-{}-{}.db",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "prod", "sealed")
+            .await
+            .unwrap();
+        let (private_a, public_a) = recipient();
+        let (_, public_b) = recipient();
+        let target = target();
+        let sealed = seal(&target, b"hunter2", std::slice::from_ref(&public_a)).unwrap();
+        let digest = digest(&target, &sealed).unwrap();
+        let mut env_obj = crate::environment::environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+        persist_instance_records(
+            &mut env_obj,
+            "api",
+            &BTreeMap::from([(
+                "db/password".to_string(),
+                SealedRecord {
+                    sealed: sealed.clone(),
+                    digest: digest.clone(),
+                    set_by: "operator".into(),
+                    set_at: 1,
+                },
+            )]),
+        );
+
+        // A runtime re-wraps for B; a wrap for a changed value is skipped.
+        use hpke::Serializable as _;
+        let opener_a = SealedOpener::from_private(&private_a.to_bytes()).unwrap();
+        let wrap_b = opener_a.rewrap(&target, &sealed, &public_b).unwrap();
+        let wraps = [
+            RecipientWrap {
+                secret: "db".into(),
+                key: "password".into(),
+                digest: digest.clone(),
+                wrap: wrap_b.clone(),
+            },
+            RecipientWrap {
+                secret: "db".into(),
+                key: "password".into(),
+                digest: "sha256:changed".into(),
+                wrap: wrap_b.clone(),
+            },
+        ];
+        assert_eq!(
+            add_wraps(&mut env_obj, "api", &wraps).unwrap(),
+            ["db/password"]
+        );
+        ctx.put(env_obj).await.unwrap();
+        let stored = |list: &SealedSecretList| {
+            let [entry] = list.secrets.as_slice() else {
+                panic!("one sealed key");
+            };
+            (entry.digest.clone(), entry.recipients.clone())
+        };
+        let listed = list(&mut ctx, "prod").await.unwrap();
+        assert_eq!(
+            stored(&listed),
+            (
+                digest.clone(),
+                vec![public_a.fingerprint(), public_b.fingerprint()]
+            )
+        );
+
+        // Revoking A drops its wraps; B still opens the value.
+        let lost = drop_recipient(&mut ctx, "prod", &public_a.fingerprint())
+            .await
+            .unwrap();
+        assert!(lost.is_empty(), "{lost:?}");
+        assert_eq!(
+            stored(&list(&mut ctx, "prod").await.unwrap()),
+            (digest.clone(), vec![public_b.fingerprint()])
+        );
+        // Revoking B too leaves a value nobody can open, and names it.
+        let lost = drop_recipient(&mut ctx, "prod", &public_b.fingerprint())
+            .await
+            .unwrap();
+        assert_eq!(lost, ["api db/password"]);
+        let env_obj = crate::environment::environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+        assert_eq!(unopenable(&env_obj, "api").unwrap(), ["db/password"]);
+        // Dropping again changes nothing.
+        assert_eq!(
+            drop_recipient(&mut ctx, "prod", &public_b.fingerprint())
+                .await
+                .unwrap(),
+            ["api db/password"]
+        );
+        let _ = std::fs::remove_file(database);
+    }
+
+    /// A value at the wrap limit gets no more: one more would make it open
+    /// for no one.
+    #[test]
+    fn a_value_at_the_wrap_limit_gets_no_more_wraps() {
+        let wrap = |n: usize| SealedWrap {
+            fingerprint: format!("sha256:{n:064x}"),
+            encapsulated_key: "AA==".into(),
+            wrapped_key: "AA==".into(),
+        };
+        let mut env_obj = Object {
+            id: "tenkai:environment:prod".into(),
+            kind: crate::ontology::KIND_ENVIRONMENT.into(),
+            name: "prod".into(),
+            namespace: crate::ontology::NS.into(),
+            external_id: String::new(),
+            properties: Default::default(),
+            created: 0,
+            updated: 0,
+        };
+        persist_instance_records(
+            &mut env_obj,
+            "api",
+            &BTreeMap::from([(
+                "db/password".to_string(),
+                SealedRecord {
+                    sealed: SealedValue {
+                        format_version: 1,
+                        ciphertext: STANDARD.encode([0_u8; 40]),
+                        wraps: (0..MAX_WRAPS).map(wrap).collect(),
+                    },
+                    digest: "sha256:value".into(),
+                    set_by: "operator".into(),
+                    set_at: 1,
+                },
+            )]),
+        );
+        let one_more = |n: usize| RecipientWrap {
+            secret: "db".into(),
+            key: "password".into(),
+            digest: "sha256:value".into(),
+            wrap: wrap(n),
+        };
+        assert!(
+            add_wraps(&mut env_obj, "api", &[one_more(MAX_WRAPS)])
+                .unwrap()
+                .is_empty()
+        );
+        // Replacing an existing recipient's wrap is still fine.
+        assert_eq!(
+            add_wraps(&mut env_obj, "api", &[one_more(0)]).unwrap(),
+            ["db/password"]
+        );
+        let records = instance_records(&env_obj, "api").unwrap();
+        assert_eq!(records["db/password"].sealed.wraps.len(), MAX_WRAPS);
+
+        // A malformed wrap would make the value open for no one: refused,
+        // and the stored value is unchanged.
+        let mut malformed = one_more(0);
+        malformed.wrap.wrapped_key = "not base64!".into();
+        assert!(add_wraps(&mut env_obj, "api", &[malformed]).is_err());
+        assert_eq!(instance_records(&env_obj, "api").unwrap(), records);
     }
 
     fn open(

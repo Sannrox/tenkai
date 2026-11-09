@@ -2595,6 +2595,84 @@ impl ManagementOperations {
         .with_digest(digest))
     }
 
+    /// A plan that re-wraps every sealed value of `environment` for one more
+    /// recipient (ADR 0045 §5). The recipient must be an unrevoked runtime
+    /// key of the environment. The plan needs signed approval, and only a
+    /// runtime that can open the values runs it.
+    pub async fn rewrap_sealed_secrets(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: management_lifecycle::SealedRewrapRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.admit_agent_plan(&context, "plan.rewrap")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_sealed_rewrap(
+            &request,
+            environment,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(&context, environment, request.expected_generation)
+            .await?;
+        let recipient = crate::sealing_key::normalize_fingerprint(&request.recipient)
+            .map_err(|error| ManagementError::BadRequest(error.to_string()))?;
+        if !self
+            .environment_recipient_fingerprints(environment)?
+            .contains(&recipient)
+        {
+            return Err(ManagementError::BadRequest(format!(
+                "{recipient} is not an unrevoked recipient key of {environment}"
+            )));
+        }
+        let actor = &context.audit_principal();
+        self.audit(actor, "plan.rewrap.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let (steps, undeployed) = crate::plan::rewrap_steps(&mut ctx, environment, &recipient)
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        if steps.is_empty() {
+            return Err(ManagementError::BadRequest(if undeployed.is_empty() {
+                format!("{environment} has no sealed values to re-wrap")
+            } else {
+                format!(
+                    "{environment} has sealed values only for instances with nothing deployed ({}); re-wrap once they are installed",
+                    undeployed.join(", ")
+                )
+            }));
+        }
+        let stored = crate::plan::create_from_steps(&mut ctx, environment, steps)
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        self.audit(actor, "plan.rewrap.completed")?;
+        let digest = format!(
+            "sha256:{}",
+            stored
+                .executable_digest()
+                .map_err(map_plan_lifecycle_error)?
+        );
+        let mut message = format!(
+            "re-wrap plan {} for {recipient} requires signed approval",
+            stored.id
+        );
+        if !undeployed.is_empty() {
+            message.push_str(&format!(
+                "; not re-wrapped, nothing deployed yet: {}",
+                undeployed.join(", ")
+            ));
+        }
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Plan,
+            message,
+            Some(stored.id),
+        )
+        .with_digest(digest))
+    }
+
     /// Refuse `expected` unless it is the environment's current execution
     /// lease generation: the value `env inspect` reports and every apply
     /// advances, so remote `--generation` and inspect share one counter
@@ -2992,6 +3070,7 @@ mod tests {
             host: None,
             sealed: Vec::new(),
             restore: None,
+            rewrap: None,
         };
         use crate::apply::{Outcome, StepOutcomeStatus};
         let outcomes = [

@@ -469,6 +469,15 @@ pub fn http_contract() -> Value {
             response: lifecycle.clone(),
         },
         Route {
+            method: "POST",
+            path: "/v1/environments/{environment}/sealed-secrets/rewrap",
+            auth: Auth::Management,
+            request: Some(schema::<tenkai::management_lifecycle::SealedRewrapRequest>(
+                &mut g,
+            )),
+            response: lifecycle.clone(),
+        },
+        Route {
             method: "DELETE",
             path: "/v1/environments/{environment}/facts",
             auth: Auth::Management,

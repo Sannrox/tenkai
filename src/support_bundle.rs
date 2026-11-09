@@ -921,6 +921,7 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
                 host: None,
                 sealed: Vec::new(),
                 restore: None,
+                rewrap: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,

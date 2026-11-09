@@ -421,6 +421,7 @@ async fn runtime_timeout_fails_closed(
                 step_id: step.id.clone(),
                 succeeded: false,
                 detail: "synthetic runtime timeout".into(),
+                wraps: Vec::new(),
             })
             .collect(),
     };
@@ -471,6 +472,7 @@ async fn reject_conflicting_completion(
             step_id: step.id.clone(),
             succeeded: true,
             detail: "synthetic runtime completion".into(),
+            wraps: Vec::new(),
         })
         .collect::<Vec<_>>();
     let success = RuntimeCompletion {
@@ -492,6 +494,7 @@ async fn reject_conflicting_completion(
                 step_id: step.id.clone(),
                 succeeded: false,
                 detail: "synthetic conflicting completion".into(),
+                wraps: Vec::new(),
             })
             .collect(),
         ..success
