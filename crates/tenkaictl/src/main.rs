@@ -131,6 +131,9 @@ async fn main() -> ExitCode {
 
 async fn run(mut cli: Cli) -> Result<()> {
     tenkai::key_revocation::load_configured()?;
+    if let Some(path) = &cli.deploy_profile {
+        tenkai::signer::bind_deploy_profile(tenkai::key_provider::DeployProfile::load(path)?)?;
+    }
     if let Some(operation_id) = cli
         .operation_id
         .as_deref()

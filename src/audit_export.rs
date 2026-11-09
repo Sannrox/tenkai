@@ -380,7 +380,7 @@ pub fn export(
         previous_digest,
         entries,
     };
-    let signer = crate::signer::open_key(seed_path)?;
+    let signer = crate::signer::open_key("the audit export key", seed_path)?;
     let signature = crate::signer::ContentSigner::sign(&signer, &canonical_bytes(&statement)?)?;
     Ok(AuditExport {
         schema: AUDIT_EXPORT_SCHEMA.into(),
@@ -551,7 +551,10 @@ fn publish_new(path: &Path, bytes: &[u8]) -> Result<()> {
 /// The roots a chain signed with `seed_path` verifies against: its key, plus
 /// `extra_roots` for exports made before a key rotation.
 pub fn exporter_roots(seed_path: &Path, extra_roots: Option<&TrustRoots>) -> Result<TrustRoots> {
-    let public = *crate::signer::ContentSigner::public_key(&crate::signer::open_key(seed_path)?);
+    let public = *crate::signer::ContentSigner::public_key(&crate::signer::open_key(
+        "the audit export key",
+        seed_path,
+    )?);
     let mut roots = extra_roots.cloned().unwrap_or(TrustRoots {
         version: crate::release_signing::TRUST_ROOT_VERSION,
         signers: Vec::new(),

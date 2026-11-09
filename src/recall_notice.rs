@@ -763,7 +763,10 @@ pub async fn propose(
         reason,
         recalled: recalled_entries.clone(),
     };
-    let notice = sign(&statement, &crate::signer::open_key(&request.signing_key)?)?;
+    let notice = sign(
+        &statement,
+        &crate::signer::open_key("remediate propose --signing-key", &request.signing_key)?,
+    )?;
     if crate::key_revocation::is_revoked(&notice.key_id) {
         bail!("recall notice signer {} is revoked", notice.key_id);
     }

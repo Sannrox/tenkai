@@ -47,6 +47,10 @@ pub(crate) struct Cli {
     /// Inbound delivery correlation identity for spans and metrics.
     #[arg(long, env = "TENKAI_OPERATION_ID", global = true)]
     pub(crate) operation_id: Option<String>,
+    /// Deploy profile to sign under. A production profile refuses seed-file
+    /// signing keys; without one, both key forms are accepted.
+    #[arg(long, env = "TENKAI_DEPLOY_PROFILE", global = true)]
+    pub(crate) deploy_profile: Option<PathBuf>,
     #[command(subcommand)]
     pub(crate) command: Command,
 }

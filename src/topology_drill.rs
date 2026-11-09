@@ -601,7 +601,7 @@ async fn observe_remaining(
 /// Serialize the statement once and sign those bytes with the Ed25519 seed
 /// at `seed_path`.
 fn sign(statement: &DrillStatement, seed_path: &Path) -> Result<DrillEvidence> {
-    let signer = crate::signer::open_key(seed_path)?;
+    let signer = crate::signer::open_key("topology drill --signing-key", seed_path)?;
     let signed = crate::signed_bytes::sign(SIGNING_DOMAIN, statement, |message| {
         Ok(crate::signer::ContentSigner::sign(&signer, message)?.to_vec())
     })?;
