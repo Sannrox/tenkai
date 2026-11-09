@@ -159,7 +159,7 @@ pub(super) async fn execute(
                 Err(error) => Some(format!("cleanup executor failed: {error}")),
             };
         if let Some(detail) = cleanup_failure {
-            let outcome = Outcome::new(
+            let mut outcome = Outcome::new(
                 step.clone(),
                 StepOutcomeStatus::Failed,
                 format!("rollback blocked: outgoing release cleanup failed: {detail}"),
@@ -170,7 +170,7 @@ pub(super) async fn execute(
                 lease,
                 environment,
                 plan_id,
-                &outcome,
+                &mut outcome,
                 crate::environment::DeploymentTransition::Unknown,
             )
             .await?;
@@ -198,7 +198,7 @@ pub(super) async fn execute(
                     .is_some() =>
         {
             if outgoing_removed {
-                let outcome =
+                let mut outcome =
                     Outcome::new(step.clone(), StepOutcomeStatus::Blocked, error.to_string());
                 record(
                     ctx,
@@ -206,7 +206,7 @@ pub(super) async fn execute(
                     lease,
                     environment,
                     plan_id,
-                    &outcome,
+                    &mut outcome,
                     crate::environment::DeploymentTransition::Unknown,
                 )
                 .await?;
@@ -242,7 +242,7 @@ pub(super) async fn execute(
                     .await;
                 }
                 Ok(Some(decision)) => {
-                    let outcome = decision.halted_outcome(step);
+                    let mut outcome = decision.halted_outcome(step);
                     let transition = if step.action == Action::Restart {
                         crate::environment::DeploymentTransition::Refreshed
                     } else {
@@ -257,7 +257,7 @@ pub(super) async fn execute(
                         lease,
                         environment,
                         plan_id,
-                        &outcome,
+                        &mut outcome,
                         transition,
                     )
                     .await
@@ -288,7 +288,8 @@ pub(super) async fn execute(
                     .await);
                 }
             }
-            let outcome = Outcome::new(step.clone(), StepOutcomeStatus::Succeeded, String::new());
+            let mut outcome =
+                Outcome::new(step.clone(), StepOutcomeStatus::Succeeded, String::new());
             let transition = if step.action == Action::Restart {
                 crate::environment::DeploymentTransition::Refreshed
             } else {
@@ -303,7 +304,7 @@ pub(super) async fn execute(
                 lease,
                 environment,
                 plan_id,
-                &outcome,
+                &mut outcome,
                 transition,
             )
             .await
@@ -341,7 +342,7 @@ pub(super) async fn execute(
         }
     };
 
-    let (outcome, transition) = outcome;
+    let (mut outcome, transition) = outcome;
     if let Some(transition) = transition {
         record(
             ctx,
@@ -349,7 +350,7 @@ pub(super) async fn execute(
             lease,
             environment,
             plan_id,
-            &outcome,
+            &mut outcome,
             transition,
         )
         .await?;
@@ -427,7 +428,7 @@ async fn execute_host(
         },
         Err(detail) => HostStepEnd::NotRun(detail),
     };
-    let (outcome, transition) = match ended {
+    let (mut outcome, transition) = match ended {
         HostStepEnd::Recorded(result) if result.outcome.succeeded() => (
             Outcome::new(
                 step.clone(),
@@ -491,7 +492,7 @@ async fn execute_host(
         lease,
         environment,
         plan_id,
-        &outcome,
+        &mut outcome,
         transition,
     )
     .await
@@ -651,7 +652,7 @@ async fn recover_activation(
         ));
     };
     let Some(previous_content) = restore_content else {
-        let outcome = Outcome::recorded(
+        let mut outcome = Outcome::recorded(
             step.clone(),
             StepOutcomeStatus::Failed,
             format!("{detail}; step {} has no pinned restore release", step.id),
@@ -668,7 +669,7 @@ async fn recover_activation(
             step_context.lease,
             step_context.environment,
             step_context.plan_id,
-            &outcome,
+            &mut outcome,
             crate::environment::DeploymentTransition::Unknown,
         )
         .await?;
@@ -1039,7 +1040,7 @@ async fn restore_after_health_gate(
         match product_execution::deactivate(ctx, lease, &current, adapters.clone()).await {
             Ok(Ok(())) => {}
             Ok(Err(cleanup)) => {
-                let outcome = Outcome::recorded(
+                let mut outcome = Outcome::recorded(
                     step.clone(),
                     StepOutcomeStatus::Failed,
                     format!(
@@ -1061,7 +1062,7 @@ async fn restore_after_health_gate(
                     lease,
                     environment,
                     plan_id,
-                    &outcome,
+                    &mut outcome,
                     crate::environment::DeploymentTransition::Unknown,
                 )
                 .await?;
@@ -1069,7 +1070,7 @@ async fn restore_after_health_gate(
             }
             Err(error) if is_execution_fence_lost(&error) => return Err(error),
             Err(error) => {
-                let outcome = Outcome::recorded(
+                let mut outcome = Outcome::recorded(
                     step.clone(),
                     StepOutcomeStatus::Failed,
                     format!(
@@ -1091,7 +1092,7 @@ async fn restore_after_health_gate(
                     lease,
                     environment,
                     plan_id,
-                    &outcome,
+                    &mut outcome,
                     crate::environment::DeploymentTransition::Unknown,
                 )
                 .await?;
@@ -1105,7 +1106,7 @@ async fn restore_after_health_gate(
         .unwrap_or(&previous.manifest.product.version);
     let (restored, detail, restore) =
         restore_previous(ctx, lease, &previous, version, detail, adapters).await?;
-    let outcome = Outcome::recorded(
+    let mut outcome = Outcome::recorded(
         step.clone(),
         if restored {
             StepOutcomeStatus::RolledBack
@@ -1122,7 +1123,7 @@ async fn restore_after_health_gate(
         lease,
         environment,
         plan_id,
-        &outcome,
+        &mut outcome,
         if restored {
             // Keep the environment's existing rollback history. The rejected
             // release never recorded a successful deploy, so it must not become
@@ -1153,7 +1154,7 @@ async fn record_live_restore_failure(
     } else {
         DeploymentCauseKind::RestoreFailed
     };
-    let outcome = Outcome::recorded(
+    let mut outcome = Outcome::recorded(
         step.clone(),
         StepOutcomeStatus::Failed,
         format!("{detail}; {restore_reason}"),
@@ -1173,7 +1174,7 @@ async fn record_live_restore_failure(
         lease,
         environment,
         plan_id,
-        &outcome,
+        &mut outcome,
         crate::environment::DeploymentTransition::Deployed {
             version: step.to.clone(),
             previous: step.from.clone(),
@@ -1204,23 +1205,26 @@ async fn record(
     lease: &EnvironmentLease,
     environment: &str,
     plan_id: &str,
-    outcome: &Outcome,
+    outcome: &mut Outcome,
     transition: crate::environment::DeploymentTransition,
 ) -> Result<()> {
-    crate::environment::record_deployment_observation(
-        ctx,
-        lease,
-        crate::environment::DeploymentObservation {
-            environment,
-            plan_id,
-            step: &outcome.step,
-            status: &outcome.status,
-            detail: &outcome.detail,
-            transition,
-            started_at_ms: Some(started_at_ms),
-            cause: outcome.cause.as_ref(),
-            restore: outcome.restore.as_ref(),
-        },
-    )
-    .await
+    outcome.attempt_id = Some(
+        crate::environment::record_deployment_observation(
+            ctx,
+            lease,
+            crate::environment::DeploymentObservation {
+                environment,
+                plan_id,
+                step: &outcome.step,
+                status: &outcome.status,
+                detail: &outcome.detail,
+                transition,
+                started_at_ms: Some(started_at_ms),
+                cause: outcome.cause.as_ref(),
+                restore: outcome.restore.as_ref(),
+            },
+        )
+        .await?,
+    );
+    Ok(())
 }

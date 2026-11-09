@@ -88,6 +88,16 @@ async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
     assert_eq!(bypass.status(), StatusCode::BAD_REQUEST);
 
     let applied_a = client.apply_plan(&plan_a_id, &apply_a).await.unwrap();
+    // The client asks for steps (#1076); each carries its recorded attempt.
+    assert!(!applied_a.steps.is_empty());
+    assert!(
+        applied_a
+            .steps
+            .iter()
+            .all(|step| step.status == "succeeded" && step.attempt_id.is_some()),
+        "{:?}",
+        applied_a.steps
+    );
     // The apply advanced the fence, so the value read before it is stale (#703).
     let stale_err = client
         .plan_environment("stage", read)

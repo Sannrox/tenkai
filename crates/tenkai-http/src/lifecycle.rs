@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
-use axum::response::Response;
+use axum::response::{IntoResponse as _, Response};
 
 use super::auth::{manage_result, parse_management_json, require_management};
 use super::router::AppState;
@@ -177,9 +178,19 @@ pub(super) async fn approve_plan(
     )
 }
 
+/// Query of `POST /v1/plans/{plan}/apply`. `steps=true` asks for one
+/// result per step (#1076); a server that predates it ignores the query and
+/// answers with the message alone.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(super) struct ApplyQuery {
+    #[serde(default)]
+    steps: bool,
+}
+
 pub(super) async fn apply_plan(
     State(state): State<Arc<AppState>>,
     Path(plan_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ApplyQuery>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
@@ -191,12 +202,31 @@ pub(super) async fn apply_plan(
         Ok(request) => request,
         Err(error) => return *error,
     };
-    manage_result(
-        state
-            .management
-            .apply_plan(&credential, &plan_id, request)
-            .await,
-    )
+    let applied = state
+        .management
+        .apply_plan(&credential, &plan_id, request)
+        .await;
+    match applied {
+        Err(tenkai::management_operations::ManagementError::StepsFailed { message, steps })
+            if query.steps =>
+        {
+            (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                Json(tenkai::management_lifecycle::ApplyFailedBody {
+                    error: message,
+                    steps,
+                }),
+            )
+                .into_response()
+        }
+        Ok(mut result) => {
+            if !query.steps {
+                result.steps.clear();
+            }
+            Json(result).into_response()
+        }
+        Err(error) => manage_result::<()>(Err(error)),
+    }
 }
 
 pub(super) async fn rollback_environment(

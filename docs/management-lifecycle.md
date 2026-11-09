@@ -77,6 +77,22 @@ servers answered such an apply with a success result; that was a defect, and
 the correction only turns a false success into a refusal. Cached inspect payloads and retained files cannot grant
 execution authority.
 
+With `?steps=true`, an apply response carries `steps`: one entry per step
+(#1076). A refused apply's `422` body carries the same list. Each entry has
+these fields:
+
+- `product`, `instance`, `action`, `status` and `to_version`;
+- `detail`, cut to 2,000 characters, with `detail_truncated` set when it was
+  cut;
+- `cause`, the structured cause when one was recorded;
+- `restored_version` when the step restored a version;
+- `attempt_id`, the recorded deployment attempt.
+
+Without the query the response is unchanged, so older clients keep reading
+it. `tenkaictl apply --target remote` asks for steps and prints them as an
+embedded apply does. Against an older server, which ignores the query, it
+prints the message.
+
 `--allow-unapproved-development` remains embedded-only and restricted to the
 built-in `local` environment.
 

@@ -466,6 +466,10 @@ pub struct Outcome {
     pub cause: Option<DeploymentCause>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore: Option<DeploymentCause>,
+    /// The deployment attempt this outcome recorded (#1054), if it recorded
+    /// one in this execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
 }
 
 impl Outcome {
@@ -494,6 +498,7 @@ impl Outcome {
             detail: detail.into(),
             cause,
             restore,
+            attempt_id: None,
         }
     }
 
@@ -570,6 +575,7 @@ mod tests {
             detail: String::new(),
             cause: None,
             restore: None,
+            attempt_id: None,
         };
 
         assert!(outcome.classified_status().is_err());

@@ -99,6 +99,13 @@ pub enum ManagementError {
     /// The operation ran, but one or more delivery steps did not succeed.
     #[error("{0}")]
     ExecutionFailed(String),
+    /// An apply ran, but one or more of its steps did not succeed: the
+    /// message as [`Self::ExecutionFailed`] carries it, plus every step.
+    #[error("{message}")]
+    StepsFailed {
+        message: String,
+        steps: Vec<crate::management_lifecycle::ApplyStepResult>,
+    },
     #[error("{0}")]
     Unavailable(String),
     #[error("{0}")]
@@ -2507,6 +2514,11 @@ impl ManagementOperations {
         )
         .await
         .map_err(map_plan_lifecycle_error)?;
+        let steps = outcomes
+            .iter()
+            .map(crate::management_lifecycle::ApplyStepResult::from_outcome)
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map_err(map_plan_lifecycle_error)?;
         if let Some(message) =
             failed_steps_message(plan_id, &outcomes).map_err(map_plan_lifecycle_error)?
         {
@@ -2517,7 +2529,7 @@ impl ManagementOperations {
                 plan_id,
                 Some(&request.environment),
             )?;
-            return Err(ManagementError::ExecutionFailed(message));
+            return Err(ManagementError::StepsFailed { message, steps });
         }
         self.audit(actor, "plan.apply.completed")?;
         self.record_change(
@@ -2526,12 +2538,14 @@ impl ManagementOperations {
             plan_id,
             Some(&request.environment),
         )?;
-        Ok(ManagementLifecycleResult::new(
+        let mut result = ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Apply,
             format!("applied {} step(s) for {plan_id}", outcomes.len()),
             Some(stored.id),
         )
-        .with_digest(digest))
+        .with_digest(digest);
+        result.steps = steps;
+        Ok(result)
     }
 
     pub async fn rollback_environment(

@@ -219,23 +219,12 @@ pub(crate) async fn run_plan(
             failed |= !o.classified_status()?.is_success();
             continue;
         }
-        match o.classified_status()? {
-            apply::StepOutcomeStatus::Succeeded => {
-                println!("  ok        {:<24} {}", o.step.product, o.step.to)
-            }
-            apply::StepOutcomeStatus::Blocked => {
-                failed = true;
-                println!("  BLOCKED   {:<24} {}", o.step.product, o.detail);
-            }
-            apply::StepOutcomeStatus::RolledBack => {
-                failed = true;
-                println!("  ROLLBACK  {:<24} {}", o.step.product, o.detail);
-            }
-            apply::StepOutcomeStatus::Failed => {
-                failed = true;
-                println!("  FAILED    {:<24} {}", o.step.product, o.detail);
-            }
-        }
+        let status = o.classified_status()?;
+        failed |= !status.is_success();
+        println!(
+            "{}",
+            step_line(status, &o.step.product, &o.step.to, &o.detail)
+        );
     }
     if failed {
         if result_context.output == OutputFormat::JsonV1 {
@@ -262,4 +251,20 @@ pub(crate) async fn run_plan(
         )?;
     }
     Ok(())
+}
+
+/// One step's line in human apply output, the same for embedded and remote
+/// applies (#1076).
+pub(crate) fn step_line(
+    status: apply::StepOutcomeStatus,
+    product: &str,
+    to_version: &str,
+    detail: &str,
+) -> String {
+    match status {
+        apply::StepOutcomeStatus::Succeeded => format!("  ok        {product:<24} {to_version}"),
+        apply::StepOutcomeStatus::Blocked => format!("  BLOCKED   {product:<24} {detail}"),
+        apply::StepOutcomeStatus::RolledBack => format!("  ROLLBACK  {product:<24} {detail}"),
+        apply::StepOutcomeStatus::Failed => format!("  FAILED    {product:<24} {detail}"),
+    }
 }

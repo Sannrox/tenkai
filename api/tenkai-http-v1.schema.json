@@ -92,6 +92,53 @@
       ],
       "type": "object"
     },
+    "ApplyStepResult": {
+      "description": "The result of one step of a remote apply (#1076): the same facts an\nembedded apply prints and records. Readers ignore fields they do not know.",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "description": "The recorded deployment attempt (#1054), when one was recorded.",
+          "type": "string"
+        },
+        "cause": {
+          "$ref": "#/$defs/DeploymentCause"
+        },
+        "detail": {
+          "description": "The step's detail, cut to [`STEP_DETAIL_CHARS`].",
+          "type": "string"
+        },
+        "detail_truncated": {
+          "type": "boolean"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "restored_version": {
+          "description": "The version running after a restore: the previous version of a step\nrolled back on failure, or the target of a rollback step.",
+          "type": "string"
+        },
+        "status": {
+          "description": "`succeeded`, `blocked`, `failed` or `rolled_back`.",
+          "type": "string"
+        },
+        "to_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "product",
+        "instance",
+        "action",
+        "status",
+        "to_version"
+      ],
+      "type": "object"
+    },
     "ApprovalEnvelope": {
       "additionalProperties": false,
       "properties": {
@@ -4096,6 +4143,13 @@
         },
         "resource": {
           "type": "string"
+        },
+        "steps": {
+          "description": "One entry per step of an applied plan (#1076). Returned only to a\nclient that asks with `?steps=true`: older clients refuse unknown\nfields here, so the default response stays as it was.",
+          "items": {
+            "$ref": "#/$defs/ApplyStepResult"
+          },
+          "type": "array"
         },
         "version": {
           "format": "uint32",
