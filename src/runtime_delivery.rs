@@ -667,6 +667,19 @@ pub struct RuntimeRelease {
     /// read it from, so the runtime keeps the product on one executor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<RuntimeReplacedRelease>,
+    /// The sealed values the step names, in its order, with every wrap. The
+    /// runtime opens the one wrapped for its own key (ADR 0045 §4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sealed: Vec<RuntimeSealedValue>,
+}
+
+/// One sealed value a step writes. The plan step names its digest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSealedValue {
+    pub secret: String,
+    pub key: String,
+    pub sealed: crate::sealed_secret::SealedValue,
 }
 
 /// The installed release a step replaces.

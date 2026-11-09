@@ -6,7 +6,7 @@
 //! executor request it computed. The runtime verifies all of it on its own.
 
 use super::*;
-use crate::runtime_delivery::{RuntimeRelease, RuntimeReleaseEntry};
+use crate::runtime_delivery::{RuntimeRelease, RuntimeReleaseEntry, RuntimeSealedValue};
 use anyhow::anyhow;
 use base64::Engine as _;
 use std::path::Path;
@@ -116,12 +116,28 @@ pub(crate) async fn runtime_release(
         }
         _ => None,
     };
+    // The restore pin reads the same values: they are the instance's, not
+    // the release's.
+    let sealed = if step.sealed.is_empty() {
+        Vec::new()
+    } else {
+        crate::sealed_secret::step_values(&environment, step.instance_name(), &step.sealed)
+            .map_err(refused)?
+            .into_iter()
+            .map(|(binding, sealed)| RuntimeSealedValue {
+                secret: binding.secret,
+                key: binding.key,
+                sealed,
+            })
+            .collect()
+    };
     Ok(RuntimeRelease {
         manifest: content.raw_manifest,
         signature,
         request,
         entries,
         replaces,
+        sealed,
     })
 }
 

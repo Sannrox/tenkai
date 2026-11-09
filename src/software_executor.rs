@@ -135,6 +135,33 @@ pub struct SoftwareApplyRequest {
     /// field; new ones treat empty as no document.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dependency_document: String,
+    /// Sealed values the environment runtime opened for this apply (ADR
+    /// 0045 §4). Never serialized: they reach no server, operator program,
+    /// or log. Only the Helm executor writes them.
+    #[serde(skip)]
+    pub opened_secrets: Vec<OpenedSecret>,
+}
+
+/// One sealed value opened in memory, for the slot a plan step names. Its
+/// `Debug` names the slot, never the value.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OpenedSecret {
+    pub secret: String,
+    pub key: String,
+    /// The sealed digest the plan step names.
+    pub digest: String,
+    pub value: zeroize::Zeroizing<Vec<u8>>,
+}
+
+impl std::fmt::Debug for OpenedSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenedSecret")
+            .field("secret", &self.secret)
+            .field("key", &self.key)
+            .field("digest", &self.digest)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Literal substituted in native/in-process Kubernetes YAML at apply, and
@@ -976,6 +1003,7 @@ pub fn request_from_parts(
         secret_dir_path: None,
         apply_attempt: uuid::Uuid::new_v4().simple().to_string(),
         dependency_document: String::new(),
+        opened_secrets: Vec::new(),
     }
 }
 
@@ -1009,6 +1037,7 @@ mod tests {
             secret_dir_path: None,
             apply_attempt: String::new(),
             dependency_document: String::new(),
+            opened_secrets: Vec::new(),
         }
     }
 

@@ -2,6 +2,7 @@
 
 mod docker;
 mod helm;
+mod helm_secrets;
 mod in_process_kubernetes;
 mod kubernetes;
 mod kubernetes_model_runtime;

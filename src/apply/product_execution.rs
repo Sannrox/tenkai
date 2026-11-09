@@ -22,12 +22,26 @@ async fn prepare_fenced_mutation(
 /// Product target failures are returned in the inner result. Fence, integrity,
 /// and executor-control failures remain outer errors so callers cannot mistake
 /// an unsafe or indeterminate execution for an ordinary target failure.
+/// The server cannot open sealed values, so it never applies a release
+/// that reads them: the environment runtime does (ADR 0045 §4).
+fn sealed_refusal(content: &ReleaseContent) -> Option<String> {
+    (!content.sealed.is_empty()).then(|| {
+        format!(
+            "{} writes sealed secrets; only an environment runtime in built-in mode opens them",
+            content.instance_name()
+        )
+    })
+}
+
 pub(super) async fn activate(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
     content: &ReleaseContent,
     adapters: TargetAdapters<'_>,
 ) -> Result<Result<(), String>> {
+    if let Some(refusal) = sealed_refusal(content) {
+        return Ok(Err(refusal));
+    }
     crate::software_compatibility::require_manifest(
         ctx,
         &content.environment,
@@ -283,6 +297,9 @@ pub(super) async fn restart(
     content: &ReleaseContent,
     adapters: TargetAdapters<'_>,
 ) -> Result<Result<(), String>> {
+    if let Some(refusal) = sealed_refusal(content) {
+        return Ok(Err(refusal));
+    }
     crate::software_compatibility::require_manifest(
         ctx,
         &content.environment,

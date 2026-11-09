@@ -19,13 +19,14 @@ use base64::Engine as _;
 
 use crate::fenced_mutation::{MutationCommand, MutationFence};
 use crate::manifest::{self, Manifest};
-use crate::plan::{Action, Step};
+use crate::plan::{Action, SealedStep, Step};
 use crate::release_signing::TrustRoots;
 use crate::runtime_agent::RuntimeClient;
-use crate::runtime_delivery::{RuntimeRelease, RuntimeStepReceipt};
+use crate::runtime_delivery::{RuntimeRelease, RuntimeSealedValue, RuntimeStepReceipt};
+use crate::sealed_secret::{SealedOpener, SealedTarget, SecretRef};
 use crate::software_executor::{
-    SoftwareApplyRequest, SoftwareDeployPhase, SoftwareExecutor, SoftwareExecutorKind,
-    SoftwareExecutors, format_software_phase_error, rollback_channel_note,
+    OpenedSecret, SoftwareApplyRequest, SoftwareDeployPhase, SoftwareExecutor,
+    SoftwareExecutorKind, SoftwareExecutors, format_software_phase_error, rollback_channel_note,
     sanitize_diagnostic_text,
 };
 
@@ -43,6 +44,9 @@ pub struct BuiltinConfig {
     pub cluster_config: Option<PathBuf>,
     /// Directory of Docker env files.
     pub secret_dir: Option<PathBuf>,
+    /// Where this runtime's file sealing key lives, when it enrolled with a
+    /// credential file. Without one, sealed steps are refused.
+    pub sealing_dir: Option<PathBuf>,
     /// Where verified releases are placed, one directory per environment.
     pub work_root: PathBuf,
 }
@@ -83,12 +87,6 @@ pub(crate) async fn execute_step(
             .err()
             .unwrap_or_else(|| "built-in executor completed successfully".into()),
     };
-    if !step.sealed.is_empty() {
-        return Ok(receipt(Err(format!(
-            "step {} writes sealed secrets; a runtime in built-in mode does not write them yet",
-            step.id
-        ))));
-    }
     let run = Run {
         client,
         config,
@@ -257,7 +255,7 @@ impl Run<'_> {
                     Expected::target(&step)
                 };
                 let verified = config.verify(release, &environment, &expected)?;
-                config.admit_executor(&verified.manifest)?;
+                config.admit_executor(&verified.manifest, !step.sealed.is_empty())?;
                 Ok::<_, anyhow::Error>(verified)
             }
         })
@@ -503,6 +501,9 @@ pub struct Expected<'a> {
     pub release_id: &'a str,
     pub release_digest: &'a str,
     pub artifact_digest: &'a str,
+    /// The sealed values the step writes. A restore writes the same ones:
+    /// they belong to the instance, not the release.
+    pub sealed: &'a [SealedStep],
 }
 
 impl<'a> Expected<'a> {
@@ -515,6 +516,7 @@ impl<'a> Expected<'a> {
             release_id: &step.release_id,
             release_digest: &step.release_digest,
             artifact_digest: &step.artifact_digest,
+            sealed: &step.sealed,
         }
     }
 
@@ -528,6 +530,7 @@ impl<'a> Expected<'a> {
             release_id: &pin.release_id,
             release_digest: &pin.digest,
             artifact_digest: &pin.artifact_digest,
+            sealed: &step.sealed,
         })
     }
 }
@@ -608,6 +611,7 @@ impl BuiltinConfig {
         request.workdir = workdir;
         request.cluster_config_path = self.cluster_config.clone();
         request.secret_dir_path = self.secret_dir.clone();
+        request.opened_secrets = self.open_sealed(&release.sealed, environment, expected)?;
         let replaced_executor = match release.replaces {
             None => None,
             Some(replaced) => Some(match replaced.executor {
@@ -626,9 +630,54 @@ impl BuiltinConfig {
         })
     }
 
+    /// Check the server's sealed values against the plan step, which the
+    /// local approval policy covered, and open them with this runtime's own
+    /// key (ADR 0045 §4). Errors name the slot, never a value.
+    fn open_sealed(
+        &self,
+        delivered: &[RuntimeSealedValue],
+        environment: &str,
+        expected: &Expected<'_>,
+    ) -> Result<Vec<OpenedSecret>> {
+        if expected.sealed.is_empty() && delivered.is_empty() {
+            return Ok(Vec::new());
+        }
+        let slots = delivered.iter().map(|value| (&value.secret, &value.key));
+        if !slots.eq(expected.sealed.iter().map(|step| (&step.secret, &step.key))) {
+            bail!("the server's sealed values do not match the plan step");
+        }
+        let dir = self.sealing_dir.as_deref().context(
+            "the step writes sealed secrets, and this runtime has no sealing key (enroll with --credential-file)",
+        )?;
+        let opener = SealedOpener::load(dir)?;
+        expected
+            .sealed
+            .iter()
+            .zip(delivered)
+            .map(|(step, value)| {
+                let slot = SecretRef::new(&step.secret, &step.key)?;
+                let target = SealedTarget::new(environment, expected.instance, slot)?;
+                if crate::sealed_secret::digest(&target, &value.sealed)? != step.digest {
+                    bail!(
+                        "sealed {}/{} does not match the plan step's digest",
+                        step.secret,
+                        step.key
+                    );
+                }
+                Ok(OpenedSecret {
+                    secret: step.secret.clone(),
+                    key: step.key.clone(),
+                    digest: step.digest.clone(),
+                    value: opener.open(&target, &value.sealed)?,
+                })
+            })
+            .collect()
+    }
+
     /// Refuse a release this runtime must not run with a built-in executor,
-    /// naming why. `Ok` means [`SoftwareExecutors::resolve`] decides.
-    pub fn admit_executor(&self, manifest: &Manifest) -> Result<()> {
+    /// naming why. Only Helm writes sealed values (ADR 0048 §4). `Ok` means
+    /// [`SoftwareExecutors::resolve`] decides.
+    pub fn admit_executor(&self, manifest: &Manifest, sealed: bool) -> Result<()> {
         if manifest.product.kind.policy().target() != crate::product_kind::ProductTarget::Software {
             bail!("only software releases run on an environment runtime");
         }
@@ -644,6 +693,11 @@ impl BuiltinConfig {
             ) if self.cluster_config.is_none() => bail!(
                 "release declares deploy.executor = \"{}\", and this runtime has no cluster configuration (TENKAI_RUNTIME_CLUSTER_CONFIG)",
                 kind.map_or("", SoftwareExecutorKind::as_str)
+            ),
+            Some(SoftwareExecutorKind::Helm) => Ok(()),
+            _ if sealed => bail!(
+                "the step writes sealed secrets, and only the helm executor writes them; this release runs with {}",
+                kind.map_or("shell", SoftwareExecutorKind::as_str)
             ),
             _ => Ok(()),
         }
@@ -883,6 +937,7 @@ mod tests {
                 release_roots: fixture.trust.release_roots.clone(),
                 cluster_config: None,
                 secret_dir: None,
+                sealing_dir: None,
                 work_root: root.join("work"),
             },
             release: RuntimeRelease {
@@ -891,6 +946,7 @@ mod tests {
                 request,
                 entries,
                 replaces: None,
+                sealed: Vec::new(),
             },
             step,
             root,
@@ -985,19 +1041,116 @@ mod tests {
     fn kubernetes_releases_need_a_local_cluster_config_and_host_releases_are_refused() {
         let mut case = case("executor = \"helm\"\n");
         let manifest = manifest::parse_raw(&case.release.manifest).unwrap();
-        let refused = format!("{:#}", case.config.admit_executor(&manifest).unwrap_err());
+        let refused = format!(
+            "{:#}",
+            case.config.admit_executor(&manifest, false).unwrap_err()
+        );
         assert!(
             refused.contains("TENKAI_RUNTIME_CLUSTER_CONFIG"),
             "{refused}"
         );
         case.config.cluster_config = Some(case.root.join("cluster.yaml"));
-        case.config.admit_executor(&manifest).unwrap();
+        case.config.admit_executor(&manifest, false).unwrap();
 
         let host = manifest::parse_raw(
             "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\nexecutor = \"host\"\ninstall = \"true\"\nuninstall = \"true\"\nhealth = \"true\"\ninputs = [\"app\"]\n",
         )
         .unwrap();
-        let refused = format!("{:#}", case.config.admit_executor(&host).unwrap_err());
+        let refused = format!(
+            "{:#}",
+            case.config.admit_executor(&host, false).unwrap_err()
+        );
         assert!(refused.contains("host releases"), "{refused}");
+
+        // Only Helm writes sealed values (ADR 0048 §4).
+        case.config.admit_executor(&manifest, true).unwrap();
+        let shell = manifest::parse_raw(
+            "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\ninputs = [\"app\"]\n",
+        )
+        .unwrap();
+        let refused = format!(
+            "{:#}",
+            case.config.admit_executor(&shell, true).unwrap_err()
+        );
+        assert!(refused.contains("only the helm executor"), "{refused}");
+    }
+
+    /// `case` with one sealed value, sealed for `instance` to a runtime key
+    /// in the case's sealing directory.
+    fn sealed_case(instance: &str, value: &[u8]) -> Case {
+        let mut case = case("");
+        let dir = case.root.join("sealing");
+        let key = crate::sealing_key::SealingKey::open_or_generate(&dir).unwrap();
+        case.config.sealing_dir = Some(dir);
+        let target = SealedTarget::new(
+            ENVIRONMENT,
+            instance,
+            SecretRef::new("db", "password").unwrap(),
+        )
+        .unwrap();
+        let sealed = crate::sealed_secret::seal(&target, value, &[key.public().clone()]).unwrap();
+        case.step.sealed = vec![SealedStep {
+            secret: "db".into(),
+            key: "password".into(),
+            digest: crate::sealed_secret::digest(&target, &sealed).unwrap(),
+        }];
+        case.release.sealed = vec![RuntimeSealedValue {
+            secret: "db".into(),
+            key: "password".into(),
+            sealed,
+        }];
+        case
+    }
+
+    #[test]
+    fn a_sealed_value_opens_only_as_the_approved_step_names_it() {
+        let case = sealed_case("api", b"hunter2");
+        let verified = case
+            .config
+            .verify(
+                case.release.clone(),
+                ENVIRONMENT,
+                &Expected::target(&case.step),
+            )
+            .unwrap();
+        let [opened] = verified.request.opened_secrets.as_slice() else {
+            panic!("one opened value");
+        };
+        assert_eq!(
+            (opened.secret.as_str(), opened.key.as_str()),
+            ("db", "password")
+        );
+        assert_eq!(opened.value.as_slice(), b"hunter2");
+        assert!(!format!("{verified:?}").contains("hunter2"));
+        assert!(
+            !serde_json::to_string(&verified.request)
+                .unwrap()
+                .contains("hunter2")
+        );
+
+        // A value the server swapped in, even one sealed to this runtime,
+        // is not what the approved plan names.
+        let mut swapped = case.release.clone();
+        swapped.sealed = sealed_case("api", b"forged").release.sealed.clone();
+        let refused = refusal(&case, swapped);
+        assert!(refused.contains("does not match"), "{refused}");
+        assert!(!refused.contains("forged"), "{refused}");
+
+        // A value sealed for another instance does not open for this one,
+        // even when the step names its digest.
+        let other = sealed_case("worker", b"hunter2");
+        let refused = refusal(&other, other.release.clone());
+        assert!(refused.contains("does not match"), "{refused}");
+
+        // Missing or extra values are refused.
+        let mut missing = case.release.clone();
+        missing.sealed.clear();
+        assert!(refusal(&case, missing).contains("do not match the plan step"));
+
+        // A runtime without a sealing key refuses to write any.
+        let mut keyless = sealed_case("api", b"hunter2");
+        keyless.config.sealing_dir = None;
+        let refused = refusal(&keyless, keyless.release.clone());
+        assert!(refused.contains("no sealing key"), "{refused}");
     }
 }

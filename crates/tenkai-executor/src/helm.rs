@@ -6,6 +6,8 @@ use std::process::Command;
 use anyhow::{Context as _, Result, bail};
 
 use tenkai::now_millis;
+
+use crate::helm_secrets::{self, LiveSecrets};
 use tenkai::software_executor::{
     SoftwareApplyRequest, SoftwareDeployPhase, SoftwareExecutor, SoftwareObserveStatus,
     run_captured_command, validate_request,
@@ -55,6 +57,19 @@ impl HelmSoftwareExecutor {
                 request.workdir.display()
             );
         }
+        // Sealed values land first, so the release can read them as it starts.
+        let secrets = match &request.opened_secrets[..] {
+            [] => None,
+            _ => {
+                let cluster_config = request
+                    .cluster_config_path
+                    .as_deref()
+                    .context("writing sealed secrets needs a cluster configuration")?;
+                let api = LiveSecrets::connect(cluster_config, &request.environment)?;
+                let sets = helm_secrets::write(&api, request)?;
+                Some((api, sets))
+            }
+        };
         let mut command = self.helm(request);
         command
             .arg("upgrade")
@@ -69,7 +84,8 @@ impl HelmSoftwareExecutor {
             .arg("5m");
         apply_helm_set_flags(&mut command, request);
         let _dependency_file = helm_dependency_file(request, &mut command)?;
-        for set in extra_sets {
+        let secret_sets = secrets.iter().flat_map(|(_, sets)| sets);
+        for set in extra_sets.iter().chain(secret_sets) {
             command.arg("--set").arg(set);
         }
         run_captured_command(
@@ -80,7 +96,18 @@ impl HelmSoftwareExecutor {
             &request.environment,
             "helm",
             "set TENKAI_HELM_BIN or install helm",
-        )
+        )?;
+        // Older Secrets are an optional cleanup: the apply stands, and the
+        // next one retries.
+        if let Some((api, _)) = &secrets
+            && let Err(error) = helm_secrets::prune(api, request)
+        {
+            eprintln!(
+                "{}: leaving older sealed Secrets in place: {error:#}",
+                request.instance_name()
+            );
+        }
+        Ok(())
     }
 }
 
@@ -111,7 +138,19 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
             &request.environment,
             "helm",
             "set TENKAI_HELM_BIN or install helm",
-        )
+        )?;
+        // Helm does not own the sealed Secrets. When a runtime that writes
+        // sealed values removes a release it applied (failed-apply cleanup,
+        // a rollback's outgoing release), they go with it. Other removals
+        // never touch the cluster's Secrets API. Instance removal does not
+        // run on a built-in runtime yet, so it cannot strand them.
+        if !request.opened_secrets.is_empty()
+            && let Some(cluster_config) = &request.cluster_config_path
+        {
+            let api = LiveSecrets::connect(cluster_config, &request.environment)?;
+            helm_secrets::remove_all(&api, request)?;
+        }
+        Ok(())
     }
 
     fn observe(&self, request: &SoftwareApplyRequest) -> Result<SoftwareObserveStatus> {
