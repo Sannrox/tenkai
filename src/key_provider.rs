@@ -258,7 +258,7 @@ fn run_software_ceremony(request: CeremonyRequest<'_>) -> Result<CeremonyEvidenc
     for tenant in &tenants {
         crate::ontology::validate_identifier("tenant", tenant)?;
     }
-    let signer = crate::signer::open_key(request.signing_key)?;
+    let signer = crate::signer::open_key("keys ceremony --signing-key", request.signing_key)?;
 
     let provider_dir = request.provider_dir;
     if provider_dir.exists() {

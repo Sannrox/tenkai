@@ -217,3 +217,22 @@ its verifiers trust only that key. Each setting takes one of two forms:
 
 Drill and lab material (`tenkaictl dev`, the offline fleet drill, and the HA
 qualification drill) keeps its own fixed or generated keys.
+
+### Production profile
+
+A process runs under the deploy profile that `--deploy-profile` (or
+`TENKAI_DEPLOY_PROFILE`) names. This is the same file that `tenkaictl keys
+ceremony --profile` reads. Under a `class = "production"` profile, every key
+in the table above must be a token key. A seed file is refused before it is
+read, and the error names the setting to change.
+
+- **`tenkai-server`:** refuses seed files for every key the server signs
+  with. The server signs automatic plan approvals, backups, scheduled
+  audit exports, exports over HTTP, and spoke promotion evidence.
+- **`tenkaictl`:** refuses only when the command runs with
+  `--deploy-profile`. Without a profile, a command signs with a seed file as
+  before.
+
+A lab profile, or no profile, accepts both forms. Before upgrading a
+production server to run with its profile, move each family's key to a token
+and set its setting to the family's `pkcs11:` locator. Keep one key per family.
