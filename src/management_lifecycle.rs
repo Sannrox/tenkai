@@ -329,6 +329,86 @@ pub struct ManagementLifecycleResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub digest: Option<String>,
+    /// One entry per step of an applied plan (#1076). Returned only to a
+    /// client that asks with `?steps=true`: older clients refuse unknown
+    /// fields here, so the default response stays as it was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<ApplyStepResult>,
+}
+
+/// Longest step detail an apply response carries, in characters.
+pub const STEP_DETAIL_CHARS: usize = 2_000;
+
+/// The result of one step of a remote apply (#1076): the same facts an
+/// embedded apply prints and records. Readers ignore fields they do not know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ApplyStepResult {
+    pub product: String,
+    pub instance: String,
+    pub action: String,
+    /// `succeeded`, `blocked`, `failed` or `rolled_back`.
+    pub status: String,
+    pub to_version: String,
+    /// The step's detail, cut to [`STEP_DETAIL_CHARS`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detail_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub cause: Option<crate::apply::DeploymentCause>,
+    /// The version running after a restore: the previous version of a step
+    /// rolled back on failure, or the target of a rollback step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub restored_version: Option<String>,
+    /// The recorded deployment attempt (#1054), when one was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub attempt_id: Option<String>,
+}
+
+impl ApplyStepResult {
+    /// The result of `outcome`, with the attempt it recorded, if any.
+    pub fn from_outcome(outcome: &crate::apply::Outcome) -> Result<Self> {
+        use crate::apply::StepOutcomeStatus;
+        let status = outcome.classified_status()?;
+        let step = &outcome.step;
+        let restored_version = match status {
+            StepOutcomeStatus::RolledBack => step.from.clone(),
+            StepOutcomeStatus::Succeeded if step.action == crate::plan::Action::Rollback => {
+                Some(step.to.clone())
+            }
+            _ => None,
+        };
+        let detail_truncated = outcome.detail.chars().count() > STEP_DETAIL_CHARS;
+        Ok(Self {
+            product: step.product.clone(),
+            instance: step.instance_name().to_string(),
+            action: step.action.to_string(),
+            status: status.as_str().into(),
+            to_version: step.to.clone(),
+            detail: outcome.detail.chars().take(STEP_DETAIL_CHARS).collect(),
+            detail_truncated,
+            cause: outcome.cause.clone(),
+            restored_version,
+            attempt_id: outcome.attempt_id.clone(),
+        })
+    }
+
+    /// The step's status, or `None` for one this release does not know.
+    pub fn outcome_status(&self) -> Option<crate::apply::StepOutcomeStatus> {
+        crate::apply::StepOutcomeStatus::parse(&self.status).ok()
+    }
+}
+
+/// The body of a refused apply whose steps did not all succeed, when the
+/// client asked for steps: the usual `error` plus every step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ApplyFailedBody {
+    pub error: String,
+    #[serde(default)]
+    pub steps: Vec<ApplyStepResult>,
 }
 
 impl ManagementLifecycleResult {
@@ -343,6 +423,7 @@ impl ManagementLifecycleResult {
             message: message.into(),
             resource,
             digest: None,
+            steps: Vec::new(),
         }
     }
 
@@ -1439,6 +1520,107 @@ fn load_approval_envelope(path: &Path) -> Result<ApprovalEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn step(product: &str, action: crate::plan::Action) -> crate::plan::Step {
+        crate::plan::Step {
+            id: format!("step-{product}"),
+            order: 0,
+            product: product.into(),
+            instance: String::new(),
+            action,
+            from: Some("1.0.0".into()),
+            to: "2.0.0".into(),
+            release_id: format!("tenkai:release:{product}@2.0.0"),
+            release_digest: "sha256:release".into(),
+            artifact_digest: "sha256:artifact".into(),
+            workdir: ".".into(),
+            host: None,
+            sealed: Vec::new(),
+            restore: None,
+            rewrap: None,
+        }
+    }
+
+    #[test]
+    fn every_step_of_an_apply_is_reported_with_its_status() {
+        use crate::apply::{Outcome, StepOutcomeStatus};
+        use crate::plan::Action;
+        let oversized = "x".repeat(STEP_DETAIL_CHARS + 10);
+        let outcomes = [
+            Outcome::new(
+                step("api", Action::Upgrade),
+                StepOutcomeStatus::Failed,
+                &oversized,
+            ),
+            Outcome::new(
+                step("web", Action::Upgrade),
+                StepOutcomeStatus::Failed,
+                "Deployment web cannot become Available",
+            ),
+            Outcome::new(
+                step("db", Action::Upgrade),
+                StepOutcomeStatus::RolledBack,
+                "restored 1.0.0",
+            ),
+        ];
+        let steps: Vec<ApplyStepResult> = outcomes
+            .iter()
+            .map(|outcome| {
+                let mut outcome = outcome.clone();
+                outcome.attempt_id = Some(format!("attempt-{}", outcome.step.product));
+                ApplyStepResult::from_outcome(&outcome).unwrap()
+            })
+            .collect();
+        let statuses: Vec<_> = steps
+            .iter()
+            .map(|step| (step.product.as_str(), step.status.as_str()))
+            .collect();
+        assert_eq!(
+            statuses,
+            [("api", "failed"), ("web", "failed"), ("db", "rolled_back")]
+        );
+        // An oversized detail is cut and marked as cut.
+        assert_eq!(steps[0].detail.chars().count(), STEP_DETAIL_CHARS);
+        assert!(steps[0].detail_truncated);
+        assert!(!steps[1].detail_truncated);
+        assert!(steps[1].cause.is_some());
+        assert_eq!(steps[2].restored_version.as_deref(), Some("1.0.0"));
+        assert_eq!(steps[2].attempt_id.as_deref(), Some("attempt-db"));
+
+        // A rollback step reports the version it restored.
+        let rollback = ApplyStepResult::from_outcome(&Outcome::new(
+            step("api", Action::Rollback),
+            StepOutcomeStatus::Succeeded,
+            "",
+        ))
+        .unwrap();
+        assert_eq!(rollback.restored_version.as_deref(), Some("2.0.0"));
+        // A step that recorded no attempt in this execution names none.
+        assert_eq!(rollback.attempt_id, None);
+    }
+
+    #[test]
+    fn a_result_without_steps_keeps_the_shape_older_clients_read() {
+        let result = ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Apply,
+            "applied 1 step(s) for plan-1",
+            Some("plan-1".into()),
+        );
+        let wire = serde_json::to_value(&result).unwrap();
+        assert!(wire.get("steps").is_none(), "{wire}");
+        // What an older client, which refuses unknown fields, would read.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct OlderResult {
+            version: u32,
+            operation: String,
+            message: String,
+            resource: Option<String>,
+            digest: Option<String>,
+        }
+        serde_json::from_value::<OlderResult>(wire).unwrap();
+    }
 
     fn fleet_publish() -> &'static str {
         r#"{"version":1,"operation":"publish"}"#

@@ -515,11 +515,12 @@ pub(crate) async fn record_unknown(
     guarded_update(ctx, lease, object).await
 }
 
+/// Record one deployment attempt and return its id (#1054, #1076).
 pub(crate) async fn record_deployment_observation(
     ctx: &mut Ctx,
     lease: &crate::apply::EnvironmentLease,
     observation: DeploymentObservation<'_>,
-) -> Result<()> {
+) -> Result<String> {
     let observed_at = crate::now_millis();
     let instance = observation.step.instance_name();
     let attempt_id = deployment_id(observation.environment, instance, observed_at);
@@ -840,7 +841,7 @@ pub(crate) async fn record_deployment_observation(
         guarded_update(ctx, lease, deployment).await
     };
     match update_result {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(attempt_id),
         Err(error) => {
             let persisted = ctx.get(&attempt_id).await;
             if matches!(
@@ -849,7 +850,7 @@ pub(crate) async fn record_deployment_observation(
                     if object.properties.get("status").map(String::as_str) == Some(observation.status)
                         && object.properties.get("detail").map(String::as_str) == Some(observation.detail)
             ) {
-                Ok(())
+                Ok(attempt_id)
             } else {
                 Err(error)
             }

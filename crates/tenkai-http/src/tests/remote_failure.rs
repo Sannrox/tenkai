@@ -80,9 +80,19 @@ async fn failed_apply_steps_are_rejected_not_reported_as_applied() {
     client.approve_plan(&plan_id, &approve).await.unwrap();
 
     let error = client.apply_plan(&plan_id, &apply).await.unwrap_err();
-    assert!(
-        matches!(failure(&error), RemoteFailure::Rejected { status: 422, .. }),
-        "{error:#}"
-    );
+    let RemoteFailure::Rejected {
+        status: 422,
+        detail,
+    } = failure(&error)
+    else {
+        panic!("{error:#}");
+    };
+    // The refusal names every step, not only the first failure (#1076).
+    let body: tenkai::management_lifecycle::ApplyFailedBody = serde_json::from_str(detail).unwrap();
+    assert!(body.error.contains("did not succeed"), "{}", body.error);
+    assert_eq!(body.steps.len(), 1, "{body:?}");
+    assert_eq!(body.steps[0].product, "api");
+    assert_ne!(body.steps[0].status, "succeeded");
+    assert!(body.steps[0].attempt_id.is_some(), "{body:?}");
     let _ = std::fs::remove_dir_all(&root);
 }

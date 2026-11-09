@@ -298,7 +298,8 @@ pub(super) fn management_error(error: ManagementError) -> Response {
         ManagementError::NotFound(message) => error_response(StatusCode::NOT_FOUND, message),
         ManagementError::BadRequest(message) => error_response(StatusCode::BAD_REQUEST, message),
         ManagementError::Conflict(message) => error_response(StatusCode::CONFLICT, message),
-        ManagementError::ExecutionFailed(message) => {
+        ManagementError::ExecutionFailed(message)
+        | ManagementError::StepsFailed { message, .. } => {
             error_response(StatusCode::UNPROCESSABLE_ENTITY, message)
         }
         ManagementError::Unavailable(message) => {

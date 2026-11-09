@@ -271,9 +271,12 @@ impl RemoteClient {
         plan_id: &str,
         request: &tenkai::management_lifecycle::ApplyRequest,
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        // `steps=true` asks for one result per step (#1076). A server that
+        // predates it ignores the query and returns the message alone; a
+        // refused apply's 422 body then carries `steps` too.
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/plans/{}/apply", encode_plan_path(plan_id)),
+            &format!("/v1/plans/{}/apply?steps=true", encode_plan_path(plan_id)),
             Some(request),
         )
         .await

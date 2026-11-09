@@ -691,6 +691,8 @@ pub fn http_contract() -> Value {
             request: Some(schema::<ApproveRequest>(&mut g)),
             response: lifecycle.clone(),
         },
+        // `?steps=true` adds one result per step to the response, and to a
+        // refusal's 422 body (`ApplyFailedBody`) (#1076).
         Route {
             method: "POST",
             path: "/v1/plans/{plan_id}/apply",

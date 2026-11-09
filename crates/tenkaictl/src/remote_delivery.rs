@@ -48,6 +48,9 @@ pub(crate) async fn run(
                 .apply_plan(&plan_id, &request)
                 .await
                 .map_err(|error| {
+                    if !machine {
+                        print_refused_apply_steps(&error);
+                    }
                     with_remote_resources(
                         error,
                         output,
@@ -62,7 +65,12 @@ pub(crate) async fn run(
                         .resource("environment", env),
                 );
             }
-            println!("{}", result.message);
+            if result.steps.is_empty() {
+                // A server that predates per-step results.
+                println!("{}", result.message);
+            } else {
+                print_apply_steps(&result.steps);
+            }
             Ok(())
         }
         Command::Rollback {
@@ -284,5 +292,35 @@ pub(crate) async fn run_migrate(
             }
             Ok(())
         }
+    }
+}
+
+/// Print each step of a remote apply as an embedded apply does (#1076).
+fn print_apply_steps(steps: &[tenkai::management_lifecycle::ApplyStepResult]) {
+    for step in steps {
+        let Some(status) = step.outcome_status() else {
+            println!("  {:<9} {:<24} {}", step.status, step.product, step.detail);
+            continue;
+        };
+        let cut = if step.detail_truncated { " [cut]" } else { "" };
+        println!(
+            "{}{cut}",
+            crate::embedded_apply::step_line(status, &step.product, &step.to_version, &step.detail)
+        );
+    }
+}
+
+/// Print the steps a refused apply's body carries, when it carries them.
+fn print_refused_apply_steps(error: &anyhow::Error) {
+    let Some(tenkai_http::RemoteFailure::Rejected {
+        status: 422,
+        detail,
+    }) = error.downcast_ref()
+    else {
+        return;
+    };
+    if let Ok(body) = serde_json::from_str::<tenkai::management_lifecycle::ApplyFailedBody>(detail)
+    {
+        print_apply_steps(&body.steps);
     }
 }
