@@ -14,7 +14,7 @@ pub(crate) struct BundleBuild {
     /// New archive path; companion chunks are written beside it.
     #[arg(long)]
     pub(crate) out: PathBuf,
-    /// 32-byte Ed25519 seed (mode 0600) of the bundle exporter.
+    /// Key file (32-byte Ed25519 seed, mode 0600) or `pkcs11:` token locator of the bundle exporter.
     #[arg(long)]
     pub(crate) signing_key: PathBuf,
     /// Public Ed25519 trust roots copied into the archive. Never a seed.

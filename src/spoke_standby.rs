@@ -381,7 +381,7 @@ fn canonical(domain: &[u8], value: &impl Serialize) -> Result<Vec<u8>> {
 }
 
 fn sign_promotion(statement: PromotionStatement, seed_path: &Path) -> Result<PromotionEvidence> {
-    let signer = crate::signer::FileSigner::open(seed_path)?;
+    let signer = crate::signer::open_key(seed_path)?;
     let signature =
         crate::signer::ContentSigner::sign(&signer, &canonical(PROMOTION_DOMAIN, &statement)?)?;
     Ok(PromotionEvidence {
@@ -431,7 +431,7 @@ impl DrillEvidence {
 }
 
 fn sign_drill(statement: DrillStatement, seed_path: &Path) -> Result<DrillEvidence> {
-    let signer = crate::signer::FileSigner::open(seed_path)?;
+    let signer = crate::signer::open_key(seed_path)?;
     let signature =
         crate::signer::ContentSigner::sign(&signer, &canonical(DRILL_DOMAIN, &statement)?)?;
     Ok(DrillEvidence {

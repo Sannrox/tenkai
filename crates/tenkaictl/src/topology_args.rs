@@ -10,7 +10,7 @@ pub(crate) enum TopologyCommand {
         release: String,
         /// Replica environment to take out of service.
         replica: String,
-        /// 32-byte Ed25519 seed (mode 0600) that signs the evidence.
+        /// Key file (32-byte Ed25519 seed, mode 0600) or `pkcs11:` token locator that signs the evidence.
         #[arg(long)]
         signing_key: PathBuf,
         /// Where to write the signed evidence JSON.

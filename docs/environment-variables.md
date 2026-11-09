@@ -40,11 +40,11 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_HOST_WEBHOOKS` | unset | `tenkai-server` only: JSON list of webhook endpoints for host events (`backup.stale`, `clock.drift`, `trust.expiring`) ([operational events](deploy-webhooks.md#operational-events)) |
 | `TENKAI_SMTP_SINKS` | unset | `tenkai-server` only: JSON list of SMTP digest sinks for operational events ([SMTP digests](deploy-webhooks.md#smtp-digests)) |
 | `TENKAI_AUDIT_EXPORT_DIR` | unset | `tenkai-server` only: directory of the scheduled [audit export](audit-export.md) chain. Set with `TENKAI_AUDIT_SIGNING_KEY` |
-| `TENKAI_AUDIT_SIGNING_KEY` | unset | Ed25519 seed file that signs audit exports |
+| `TENKAI_AUDIT_SIGNING_KEY` | unset | Ed25519 seed file that signs audit exports; or a `pkcs11:` token locator ([keys of signed artifacts](release-signing.md#keys-of-the-other-signed-artifacts)) |
 | `TENKAI_AUDIT_EXPORT_INTERVAL_SECS` | `86400` | Seconds between scheduled audit exports |
 | `TENKAI_AUDIT_TRUST_ROOTS` | unset | Trust roots for exports in the chain signed before an audit key rotation |
 | `TENKAI_EXPORT_DIR` | unset | `tenkai-server` only: directory of exports created and downloaded over HTTP ([exports over HTTP](run-tenkai-server.md#exports-over-http)). Set with `TENKAI_EXPORT_SIGNING_KEY`. Refused in tenant mode |
-| `TENKAI_EXPORT_SIGNING_KEY` | unset | Ed25519 seed file that signs support bundles and audit exports made over HTTP |
+| `TENKAI_EXPORT_SIGNING_KEY` | unset | Ed25519 seed file that signs support bundles and audit exports made over HTTP; or a `pkcs11:` token locator ([keys of signed artifacts](release-signing.md#keys-of-the-other-signed-artifacts)) |
 | `TENKAI_EXPORT_TRUST_ROOTS` | unset | Trust roots for audit exports made over HTTP and signed before an export key rotation |
 | `TENKAI_EXPORT_RETENTION_DAYS` | unset | Days an export made over HTTP stays downloadable; unset keeps exports for good ([exports over HTTP](run-tenkai-server.md#exports-over-http)) |
 | `TENKAI_IMPORT_SCANNER` | unset | Absolute path of a scanner run on every offline bundle import after signature verification and before any write ([offline bundles](offline-bundles.md#content-scanner)) |
@@ -60,7 +60,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_BACKUP_INTERVAL_SECS` | `86400` | Seconds between scheduled backups; `0` takes backups only on demand |
 | `TENKAI_BACKUP_RETAIN` | `7` | Backups kept; older ones are removed after each backup |
 | `TENKAI_BACKUP_MAX_AGE_SECS` | twice the interval, else `172800` | Backup age after which health reports `backup.state` as `stale` |
-| `TENKAI_BACKUP_SIGNING_KEY` | unset | Ed25519 seed file (32 bytes, mode 0600) that signs each backup manifest; `tenkaictl restore-drill --trust-roots` verifies it. Refused in tenant mode, as are the interval and retention |
+| `TENKAI_BACKUP_SIGNING_KEY` | unset | Ed25519 seed file (32 bytes, mode 0600) that signs each backup manifest; `tenkaictl restore-drill --trust-roots` verifies it. Refused in tenant mode, as are the interval and retention; or a `pkcs11:` token locator ([keys of signed artifacts](release-signing.md#keys-of-the-other-signed-artifacts)) |
 | `TENKAI_IMPORT_STAGING_DIR` | unset | `tenkai-server` only: server-owned directory of staged offline bundles for `/v1/imports` ([offline bundles](offline-bundles.md#server-side-import)). Set with `TENKAI_BUNDLE_TRUST_ROOTS` |
 | `TENKAI_BUNDLE_TRUST_ROOTS` | unset | Trust roots that must authenticate an exporter of a bundle imported through the server |
 | `TENKAI_STATE_DIR` | `<workdir-parent>/.tenkai-state` | Immutable deploy-input snapshots and per-environment runtime directories; must be outside the source workdir |

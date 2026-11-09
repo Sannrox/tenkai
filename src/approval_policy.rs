@@ -212,7 +212,13 @@ impl ApprovalPolicy {
             let Some(key) = &self.auto_signer_key else {
                 bail!("auto plan approval policy requires auto_signer_key");
             };
-            validate_policy_file_path(key)?;
+            // A token locator is not a path; it is checked as a locator.
+            match key.to_str().filter(|key| key.starts_with("pkcs11:")) {
+                Some(locator) => {
+                    crate::signer::TokenLocator::parse(locator)?;
+                }
+                None => validate_policy_file_path(key)?,
+            }
         }
         for rule in &self.require_human {
             crate::ontology::validate_identifier("require_human product", &rule.product)?;
@@ -518,7 +524,7 @@ pub(crate) fn signer_key_id(policy: &ApprovalPolicy) -> Result<Option<String>> {
         return Ok(None);
     };
     Ok(Some(
-        crate::signer::ContentSigner::key_id(&crate::signer::FileSigner::open(path)?).to_string(),
+        crate::signer::ContentSigner::key_id(&crate::signer::open_key(path)?).to_string(),
     ))
 }
 
@@ -935,7 +941,7 @@ fn auto_signer_present(policy: &ApprovalPolicy) -> bool {
     policy
         .auto_signer_key
         .as_deref()
-        .is_some_and(|path| crate::signer::FileSigner::open(path).is_ok())
+        .is_some_and(|path| crate::signer::open_key(path).is_ok())
 }
 
 fn auto_signer_trusted(policy: &ApprovalPolicy, plan: &Plan, roots_path: &Path) -> bool {
@@ -973,7 +979,7 @@ fn sign_auto_approval(
         .auto_signer_key
         .as_deref()
         .context("auto plan approval policy requires auto_signer_key")?;
-    let signer = crate::signer::FileSigner::open(key_path)?;
+    let signer = crate::signer::open_key(key_path)?;
     let expires_at = now
         .checked_add(policy.ttl_ms)
         .ok_or_else(|| anyhow::anyhow!("plan approval policy ttl_ms overflowed expiry"))?;

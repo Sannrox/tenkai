@@ -30,7 +30,7 @@ pub(crate) fn run(command: &RevocationsCommand) -> Result<()> {
                     issued_at: tenkai::now_millis(),
                     revoked,
                 },
-                &tenkai::signer::FileSigner::open(signing_key)?,
+                &tenkai::signer::open_key(signing_key)?,
             )?;
             std::fs::write(out, serde_json::to_vec_pretty(&list)?)
                 .with_context(|| format!("writing {}", out.display()))?;
