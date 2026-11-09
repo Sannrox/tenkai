@@ -44,6 +44,7 @@
 - [0042 — Signer windows are checked at an artifact's signed time](0042-signer-window-at-signed-time.md)
 - [0043 — Product dependencies in the environment graph](0043-product-dependencies.md)
 - [0044 — Product instances and dependency bindings](0044-product-instances-and-dependency-bindings.md)
-- [0045 — Sealed secrets delivered by the environment runtime](0045-sealed-secrets.md)
+- [0045 — Sealed secrets delivered by the environment runtime](0045-sealed-secrets.md) (§4 amended by 0048)
 - [0046 — Workload identity and peer policy from dependency bindings](0046-workload-identity-and-peer-policy.md) (proposed)
 - [0047 — Host identity as the default operator sign-in](0047-host-identity.md)
+- [0048 — The environment runtime runs the built-in executors](0048-runtime-runs-built-in-executors.md)
