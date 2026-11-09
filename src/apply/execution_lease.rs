@@ -151,6 +151,41 @@ pub(crate) async fn claim_environment_for_drill(
         .await
 }
 
+/// Owner prefix of [`claim_environment_for_completion`] leases.
+const COMPLETION_OWNER: &str = "runtime-completion:";
+
+/// How long a runtime completion may hold the environment lease.
+const COMPLETION_LEASE_MS: i64 = 2 * 60 * 1000;
+
+/// Environment lease for applying a runtime completion (#1139): short, and
+/// an expired completion lease is taken over, so a server that crashed
+/// mid-completion stalls delivery only for minutes and needs no unlock. Safe
+/// because a completion writes only through the lease's fence and a replay
+/// of an applied one changes nothing. `purpose` names the completion.
+pub(crate) async fn claim_environment_for_completion(
+    ctx: &mut Ctx,
+    environment: &str,
+    purpose: &str,
+) -> Result<EnvironmentLease> {
+    let now = crate::now_millis();
+    let expired_completion =
+        get_environment_lease(ctx, environment)
+            .await?
+            .is_some_and(|existing| {
+                existing.status == "active"
+                    && existing.expires_at_ms <= now
+                    && existing.owner.starts_with(COMPLETION_OWNER)
+            });
+    claim_environment_with_options(
+        ctx,
+        environment,
+        &format!("{COMPLETION_OWNER}{purpose}"),
+        COMPLETION_LEASE_MS,
+        expired_completion,
+    )
+    .await
+}
+
 /// Release a leftover drill apply lease from its durable fencing token.
 pub(crate) async fn release_environment_fence(
     ctx: &mut Ctx,
@@ -963,6 +998,37 @@ mod tests {
             err.contains("expired apply lease") && err.contains("env unlock"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn only_a_lapsed_completion_lease_is_taken_over_by_a_completion() {
+        let mut ctx = context("completion-takeover");
+        // A server crashed while applying a completion.
+        ctx.acquire_lease(
+            ENVIRONMENT_LEASE_NAMESPACE,
+            "prod",
+            "runtime-completion:plan-1",
+            1,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let lease = claim_environment_for_completion(&mut ctx, "prod", "plan-1")
+            .await
+            .unwrap();
+        assert!(lease.took_over);
+        release_environment(&mut ctx, &lease).await.unwrap();
+
+        // Any other lapsed holder still needs an operator's unlock.
+        ctx.acquire_lease(ENVIRONMENT_LEASE_NAMESPACE, "prod", "plan-2", 1)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let refused = match claim_environment_for_completion(&mut ctx, "prod", "plan-1").await {
+            Ok(_) => panic!("a lapsed apply lease must require unlock"),
+            Err(error) => error.to_string(),
+        };
+        assert!(refused.contains("env unlock"), "{refused}");
     }
 
     #[tokio::test]

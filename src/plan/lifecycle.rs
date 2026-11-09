@@ -67,8 +67,12 @@ pub(crate) enum Persistence<'a> {
         provider_events: &'a [crate::storage::ProviderEventRecord],
         observations: &'a [crate::feedback_observation::FeedbackObservation],
     },
-    WithEnvironmentAndProviderEvents {
+    /// The plan with its environment object, provider events and feedback
+    /// observations, in one transaction, written only while the environment
+    /// lease `fencing_token` names is still held (#1139).
+    WithFencedEnvironment {
         environment: Object,
+        fencing_token: &'a str,
         provider_events: &'a [crate::storage::ProviderEventRecord],
         observations: &'a [crate::feedback_observation::FeedbackObservation],
     },
@@ -95,15 +99,19 @@ pub(crate) async fn transition(
             provider_events,
             observations,
         } => store_with_provider_events(ctx, plan, provider_events, observations).await,
-        Persistence::WithEnvironmentAndProviderEvents {
+        Persistence::WithFencedEnvironment {
             environment,
+            fencing_token,
             provider_events,
             observations,
         } => {
-            store_with_environment_and_provider_events(
-                ctx,
-                plan,
-                environment,
+            let plan_object = validated_plan_object(ctx, plan).await?;
+            let lease_key = plan.environment.clone();
+            ctx.guarded_update_objects_with_provider_events(
+                &[plan_object, environment],
+                crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+                &lease_key,
+                fencing_token,
                 provider_events,
                 observations,
             )
@@ -291,18 +299,6 @@ pub(super) async fn store_with_provider_events(
     ctx.put_with_provider_events(object, provider_events, observations)
         .await?;
     Ok(())
-}
-
-pub(super) async fn store_with_environment_and_provider_events(
-    ctx: &mut Ctx,
-    plan: &Plan,
-    environment: Object,
-    provider_events: &[crate::storage::ProviderEventRecord],
-    observations: &[crate::feedback_observation::FeedbackObservation],
-) -> Result<()> {
-    let plan_object = validated_plan_object(ctx, plan).await?;
-    ctx.put_objects_with_provider_events(&[plan_object, environment], provider_events, observations)
-        .await
 }
 
 async fn validated_plan_object(ctx: &mut Ctx, plan: &Plan) -> Result<Object> {

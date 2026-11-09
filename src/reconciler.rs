@@ -738,6 +738,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_runtime_completion_never_overwrites_a_change_made_under_the_lease() {
+        let (database, mut ctx) = registered_ctx("completion-lease", &["env-a"]).await;
+        let deployed = test_plan("env-a", 100, PlanState::Computed);
+        plan::store(&mut ctx, &deployed).await.unwrap();
+        ctx.put(crate::pb::sekai::Object {
+            id: deployed.steps[0].release_id.clone(),
+            kind: crate::ontology::KIND_RELEASE.into(),
+            name: "api@2.0.0".into(),
+            namespace: crate::ontology::NS.into(),
+            properties: std::collections::HashMap::from([
+                ("product".into(), "api".into()),
+                ("version".into(), "2.0.0".into()),
+            ]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let completion = RuntimeCompletion {
+            plan_id: deployed.id.clone(),
+            generation: 1,
+            succeeded: true,
+            detail: "runtime fixture".into(),
+            receipts: vec![RuntimeStepReceipt {
+                step_id: deployed.steps[0].id.clone(),
+                succeeded: true,
+                detail: "runtime fixture".into(),
+                wraps: Vec::new(),
+            }],
+        };
+        // A configuration change holds the lease while the completion arrives.
+        let lease = crate::apply::claim_environment(&mut ctx, "env-a", "secret-set")
+            .await
+            .unwrap();
+        let refused =
+            crate::runtime_delivery::complete_runtime_work(&mut ctx, "env-a", &completion)
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(refused.contains("apply in progress"), "{refused}");
+        let mut environment = crate::environment::environment(&mut ctx, "env-a")
+            .await
+            .unwrap();
+        environment
+            .properties
+            .insert("config.changed".into(), "kept".into());
+        ctx.guarded_update(
+            environment,
+            crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+            "env-a",
+            &lease.fencing_token,
+        )
+        .await
+        .unwrap();
+        crate::apply::release_environment(&mut ctx, &lease)
+            .await
+            .unwrap();
+
+        // Retried once the lease is free, it applies, and a replay is a no-op.
+        for _ in 0..2 {
+            crate::runtime_delivery::complete_runtime_work(&mut ctx, "env-a", &completion)
+                .await
+                .unwrap();
+        }
+        let environment = crate::environment::environment(&mut ctx, "env-a")
+            .await
+            .unwrap();
+        assert_eq!(environment.properties["config.changed"], "kept");
+        assert_eq!(environment.properties["deployed.api"], "2.0.0");
+        assert_eq!(
+            plan::load(&mut ctx, &deployed.id).await.unwrap().state,
+            PlanState::Succeeded
+        );
+        // The completion released its own lease.
+        assert!(
+            crate::apply::environment_lease_status(&mut ctx, "env-a")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[tokio::test]
     async fn runtime_noop_reconcile_does_not_persist_empty_plans() {
         let (database, ctx) = registered_ctx("noop-empty-plans", &["env-a"]).await;
         let reconciler = Reconciler::new(ctx.clone(), config())

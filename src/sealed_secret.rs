@@ -804,8 +804,8 @@ pub async fn store_completion_wraps(
     if wraps.iter().all(|(_, wraps)| wraps.is_empty()) {
         return Ok(());
     }
-    let owner = format!("sealed-rewrap-store:{}", crate::now_millis());
-    let lease = crate::apply::claim_environment(ctx, environment, &owner).await?;
+    let purpose = format!("sealed-rewrap-store:{}", crate::now_millis());
+    let lease = crate::apply::claim_environment_for_completion(ctx, environment, &purpose).await?;
     let stored = async {
         let current = current()?;
         let mut env_obj = crate::environment::environment(ctx, environment).await?;
