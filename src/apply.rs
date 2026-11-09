@@ -29,6 +29,7 @@ mod product_execution;
 mod release_content;
 #[cfg(test)]
 mod release_executor_tests;
+mod runtime_release;
 mod start_admission;
 mod step_lifecycle;
 
@@ -46,6 +47,7 @@ pub use outcome::{
     DeploymentCause, DeploymentCauseKind, DeploymentCausePhase, Outcome, StepOutcomeStatus,
 };
 use release_content::{ReleaseContent, admit as admit_release, verify_integrity};
+pub(crate) use runtime_release::{ReleaseRefused, runtime_release};
 
 #[derive(Clone)]
 struct TargetAdapters<'a> {

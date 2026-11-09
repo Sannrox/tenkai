@@ -167,7 +167,7 @@ pub(super) async fn activate(
         .software
         .resolve(content.manifest.deploy.executor)?
     {
-        let request = software_request(ctx, content, lease).await?;
+        let request = software_request(ctx, content, format!("lease-{}", lease.generation)).await?;
         // A missing target is an outer error: nothing ran, nothing to clean up.
         executor.require_target(&request)?;
         prepare_fenced_mutation(ctx, lease, content).await?;
@@ -303,7 +303,7 @@ pub(super) async fn restart(
         .software
         .resolve(content.manifest.deploy.executor)?
     {
-        let request = software_request(ctx, content, lease).await?;
+        let request = software_request(ctx, content, format!("lease-{}", lease.generation)).await?;
         executor.require_target(&request)?;
         prepare_fenced_mutation(ctx, lease, content).await?;
         if let Err(detail) = require_artifact_pull_consumer(content, Some(executor.as_ref())) {
@@ -435,7 +435,7 @@ async fn deactivate_for(
         if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
             return Ok(Err(detail));
         }
-        let request = software_request(ctx, content, lease).await?;
+        let request = software_request(ctx, content, format!("lease-{}", lease.generation)).await?;
         let removed = software_blocking(|| match removal {
             Removal::Release => executor.remove(&request),
             Removal::FailedApply => executor.cleanup_failed_apply(&request),
@@ -507,10 +507,12 @@ fn software_blocking<T>(work: impl FnOnce() -> T) -> T {
     }
 }
 
-async fn software_request(
+/// The executor request for `content`. `apply_attempt` identifies the
+/// attempt: an apply and its failed-apply cleanup pass the same value.
+pub(super) async fn software_request(
     ctx: &mut Ctx,
     content: &ReleaseContent,
-    lease: &EnvironmentLease,
+    apply_attempt: String,
 ) -> Result<crate::software_executor::SoftwareApplyRequest> {
     let env_obj = crate::environment::environment(ctx, &content.environment).await?;
     let overlays = crate::environment::product_overlays(&env_obj, &content.product)?;
@@ -535,8 +537,7 @@ async fn software_request(
         crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;
     request.secret_dir_path =
         crate::software_executor::secret_dir_from_properties(&env_obj.properties)?;
-    // Apply and its failed-apply cleanup run under the same lease.
-    request.apply_attempt = format!("lease-{}", lease.generation);
+    request.apply_attempt = apply_attempt;
     if let Some(profile) = &content.manifest.compatibility {
         request.dependency_document = crate::dependency_document::json_for_release(
             ctx,

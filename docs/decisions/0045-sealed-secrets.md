@@ -5,6 +5,8 @@
 - Issue: [#1020](https://github.com/Sannrox/tenkai/issues/1020)
 - Owner: Tenkai maintainers
 - Amends: [ADR 0016](0016-same-version-remediation.md) (no secret storage)
+- Amended by: [ADR 0048](0048-runtime-runs-built-in-executors.md) (§4 writer,
+  host file owner and host hand-off)
 - Related: [ADR 0037](0037-multi-party-plan-approval.md),
   [ADR 0041](0041-per-release-executor-and-privileged-host-releases.md),
   [ADR 0044](0044-product-instances-and-dependency-bindings.md),

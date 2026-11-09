@@ -9,6 +9,7 @@ There is no served gRPC `RuntimeService`.
 | `GET /v1/runtime/environments/{environment}/work` | Bearer token and `x-tenkai-runtime-instance`. No body. | JSON `RuntimeWork` (`environment`, optional `plan`, optional `claim`, optional `approvals`) |
 | `POST /v1/runtime/environments/{environment}/complete` | JSON `RuntimeCompletion` (`plan_id`, `generation`, `succeeded`, `detail`, `receipts`) | `204` |
 | `POST /v1/runtime/environments/{environment}/heartbeat` | JSON `RuntimeHeartbeat` (`plan_id`, `generation`) | JSON claim |
+| `POST /v1/runtime/environments/{environment}/release` | JSON `RuntimeReleaseRequest` (`plan_id`, `generation`, `step_id`, optional `restore`). Renews the claim. | JSON `RuntimeRelease` (`manifest`, `signature`, `request`, `entries`) for a built-in runtime ([below](#release-package)); `412` naming why the step has none |
 | `POST /v1/runtime/environments/{environment}/inventory` | JSON `RuntimeInventoryReport` (`facts`, `source`) | JSON `RuntimeInventoryResponse` |
 | `POST /v1/runtime/environments/{environment}/enroll` | No bearer. JSON `RuntimeEnrollRequest` (`token`: a single-use enrollment token; optional `csr`; optional `attestation`; optional `sealing_public_key`) | `201`, JSON `RuntimeEnrolled` (`environment`, `credential`, `credential_id`); `403` for an unknown, spent, expired or foreign token |
 | `POST /v1/runtime/environments/{environment}/certificate` | Runner certificate (or, once it expired, the enrolled bearer) and `x-tenkai-runtime-instance`. JSON `RuntimeCertificateRequest` (`csr`; optional `attestation`; optional `sealing_public_key`) | JSON `RuntimeCertificate` (`certificate`, `ca`) ([runner certificates](run-tenkai-server.md#runner-certificates)) |
@@ -135,6 +136,35 @@ but before its receipt reached Tenkai.
 Cancellation is advisory until observed by the runtime. Losing a lease is a
 hard fence: the runtime must stop work, and a completion from that generation
 is rejected.
+
+### Release package
+
+A runtime in built-in mode (`TENKAI_RUNTIME_EXECUTOR=builtin`, ADR 0048)
+applies each claimed step itself. For every step it posts the plan id, claim
+generation and step id to `/release`, and with `restore: true` asks for the
+step's restore pin: the release a failed activation restores and a rollback
+removes first. The server admits the release as it would before applying it
+and answers with:
+
+- `manifest`: the signed manifest text, and `signature`: its release
+  signature envelope.
+- `request`: the executor request the server computed (overlays, config
+  digest, admitted environment-mirror pulls, dependency document). Its
+  `workdir`, `cluster_config_path` and `secret_dir_path` are empty: the
+  runtime fills them from its own configuration.
+- `entries`: every deploy input, parents first, each a relative `path`, a
+  `mode`, and base64 `contents` (absent for a directory).
+
+The runtime trusts none of it until it checks it: the manifest digest and
+names against the plan step, the signature against its own release trust
+roots (`TENKAI_RUNTIME_RELEASE_TRUST_ROOTS`), the request against the step,
+the pulls against the manifest's artifacts, and the rebuilt inputs against
+the signed artifact digest. The runtime then runs the step as the server
+would, including its recovery: a failed restart re-applies the current pin,
+and a failed activation is cleaned up and the restore pin applied. Host
+steps and removals have no package (`412`); built-in
+mode refuses them. An older server answers `404`, and the runtime fails the
+step naming the server upgrade.
 
 ## Typed proto contract
 
