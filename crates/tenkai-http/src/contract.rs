@@ -723,7 +723,7 @@ pub fn http_contract() -> Value {
             method: "POST",
             path: "/v1/model-evaluation/trust",
             auth: Auth::Management,
-            request: Some(schema::<tenkai::model_release_evidence::EvaluationTrustRoots>(&mut g)),
+            request: Some(schema::<tenkai::release_signing::TrustRoots>(&mut g)),
             response: schema::<()>(&mut g),
         },
         Route {

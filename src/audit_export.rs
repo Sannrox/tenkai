@@ -565,6 +565,7 @@ pub fn exporter_roots(seed_path: &Path, extra_roots: Option<&TrustRoots>) -> Res
         public_key: STANDARD.encode(public),
         not_before: None,
         not_after: None,
+        ..Default::default()
     });
     Ok(roots)
 }
@@ -702,6 +703,7 @@ mod tests {
                 public_key: STANDARD.encode(public),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         (path, roots)

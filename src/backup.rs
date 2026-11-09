@@ -1063,6 +1063,7 @@ mod tests {
                 public_key: STANDARD.encode(public),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         (path, roots)

@@ -108,7 +108,10 @@ pub async fn admit(
     validate(&profile)?;
     let digest = crate::manifest::digest(&raw);
     let envelope = SignatureEnvelope::load(evidence.signature)?;
-    let roots = TrustRoots::load(evidence.trust_roots)?;
+    let roots = TrustRoots::load(
+        evidence.trust_roots,
+        crate::signature_verification::TrustRootKind::Release,
+    )?;
     verify_release(
         &envelope,
         &roots,

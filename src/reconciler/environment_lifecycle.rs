@@ -573,7 +573,11 @@ mod tests {
                         crate::approval_policy::AutoEnvelope::Signed(_)
                     ));
                     ctx.put(environment).await.unwrap();
-                    let mut trust = crate::plan_approval::TrustRoots::load(&roots).unwrap();
+                    let mut trust = crate::plan_approval::TrustRoots::load(
+                        &roots,
+                        crate::signature_verification::TrustRootKind::PlanApproval,
+                    )
+                    .unwrap();
                     trust.signers[0].environments = vec!["local".into()];
                     trust.signers[0].providers = vec!["builtin-auto".into()];
                     std::fs::write(&roots, toml::to_string(&trust).unwrap()).unwrap();

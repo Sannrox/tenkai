@@ -21,7 +21,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use approval::{canonical_approval_bytes, verify_approval_envelope, verify_authorization};
+pub use approval::{verify_approval_envelope, verify_authorization};
 pub use approval_files::{RemoteApprovalFiles, load_trust_roots, require_migration_api_version};
 pub use execute::{approve, execute, resume, resume_in};
 pub use persist::list_in;
@@ -31,11 +31,11 @@ pub use preview::{
 };
 pub use rollback::{load, load_in, rollback, rollback_in};
 pub use types::{
-    APPROVAL_PURPOSE, APPROVAL_SCHEMA, ApprovalTrustRoots, ApprovalTrustedSigner,
-    COMPATIBILITY_VERSION, CheckpointClass, CheckpointDecl, CheckpointReceipt,
-    CompatibilityEvidence, CompatibilityStatus, MIGRATION_API_VERSION, MIGRATION_DOCUMENT_VERSION,
-    MIGRATION_PROFILE, MigrationApprovalEnvelope, MigrationApprovalStatement,
-    MigrationAuthorization, MigrationDeclaration, MigrationListEntry, MigrationPage,
-    MigrationRecord, MigrationStatus, PackageMigrationApplyRequest, PackageMigrationMutateRequest,
-    PackageMigrationPreviewRequest, PackageMigrationResult, PackagePin,
+    APPROVAL_PURPOSE, APPROVAL_SCHEMA, COMPATIBILITY_VERSION, CheckpointClass, CheckpointDecl,
+    CheckpointReceipt, CompatibilityEvidence, CompatibilityStatus, MIGRATION_API_VERSION,
+    MIGRATION_DOCUMENT_VERSION, MIGRATION_PROFILE, MigrationApprovalEnvelope,
+    MigrationApprovalStatement, MigrationAuthorization, MigrationDeclaration, MigrationListEntry,
+    MigrationPage, MigrationRecord, MigrationStatus, PackageMigrationApplyRequest,
+    PackageMigrationMutateRequest, PackageMigrationPreviewRequest, PackageMigrationResult,
+    PackagePin,
 };

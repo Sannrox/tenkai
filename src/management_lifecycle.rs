@@ -14,8 +14,9 @@ use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
 use crate::auth_context::PrincipalKind;
-use crate::plan_approval::{ApprovalEnvelope, TrustRoots as PlanApprovalTrustRoots};
-use crate::release_signing::{SignatureEnvelope, TrustRoots};
+use crate::plan_approval::ApprovalEnvelope;
+use crate::release_signing::SignatureEnvelope;
+use crate::signature_verification::{TrustRootKind, TrustRoots};
 
 /// Wire and Rust contract version for `tenkai.management-lifecycle.v1`.
 pub const MANAGEMENT_LIFECYCLE_API_VERSION: u32 = 1;
@@ -456,7 +457,7 @@ pub struct ApproveRequest {
     pub environment: String,
     pub expected_generation: u64,
     pub approval: ApprovalEnvelope,
-    pub trust_roots: PlanApprovalTrustRoots,
+    pub trust_roots: TrustRoots,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -469,7 +470,7 @@ pub struct ApplyRequest {
     pub approval: ApprovalEnvelope,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approvals: Vec<ApprovalEnvelope>,
-    pub trust_roots: PlanApprovalTrustRoots,
+    pub trust_roots: TrustRoots,
     #[serde(default)]
     pub skip_gates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -617,17 +618,14 @@ pub struct RemoteApprovalFiles {
 }
 
 impl RemoteApprovalFiles {
-    pub fn materialize(
-        approval: &ApprovalEnvelope,
-        trust_roots: &PlanApprovalTrustRoots,
-    ) -> Result<Self> {
+    pub fn materialize(approval: &ApprovalEnvelope, trust_roots: &TrustRoots) -> Result<Self> {
         Self::materialize_set(approval, &[], trust_roots)
     }
 
     pub fn materialize_set(
         approval: &ApprovalEnvelope,
         extra: &[ApprovalEnvelope],
-        trust_roots: &PlanApprovalTrustRoots,
+        trust_roots: &TrustRoots,
     ) -> Result<Self> {
         require_approval_files(approval, trust_roots)?;
         for envelope in extra {
@@ -1127,10 +1125,7 @@ fn require_plan_id(plan_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn require_approval_files(
-    approval: &ApprovalEnvelope,
-    trust_roots: &PlanApprovalTrustRoots,
-) -> Result<()> {
+fn require_approval_files(approval: &ApprovalEnvelope, trust_roots: &TrustRoots) -> Result<()> {
     if approval.schema.trim().is_empty() || approval.signature.trim().is_empty() {
         bail!("missing approval evidence");
     }
@@ -1193,7 +1188,10 @@ pub fn load_publish_request(
         operation: ManagementLifecycleOperation::Publish.as_str().into(),
         manifest: loaded.raw,
         signature: SignatureEnvelope::load(signature)?,
-        trust_roots: TrustRoots::load(trust_roots)?,
+        trust_roots: TrustRoots::load(
+            trust_roots,
+            crate::signature_verification::TrustRootKind::Release,
+        )?,
         inputs: collect_publish_inputs(&loaded.workdir, &loaded.manifest.immutable_inputs())?,
     })
 }
@@ -1395,7 +1393,7 @@ pub fn load_approve_request(
         environment: environment.to_string(),
         expected_generation,
         approval: load_approval_envelope(approval)?,
-        trust_roots: PlanApprovalTrustRoots::load(trust_roots)?,
+        trust_roots: TrustRoots::load(trust_roots, TrustRootKind::PlanApproval)?,
     })
 }
 
@@ -1424,7 +1422,7 @@ pub fn load_apply_request(
         expected_generation,
         approval: first,
         approvals: extra,
-        trust_roots: PlanApprovalTrustRoots::load(trust_roots)?,
+        trust_roots: TrustRoots::load(trust_roots, TrustRootKind::PlanApproval)?,
         skip_gates,
         emergency_reason,
     })

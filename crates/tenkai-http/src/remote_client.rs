@@ -203,7 +203,7 @@ impl RemoteClient {
 
     pub async fn install_model_evaluation_trust(
         &self,
-        roots: &tenkai::model_release_evidence::EvaluationTrustRoots,
+        roots: &tenkai::release_signing::TrustRoots,
     ) -> anyhow::Result<()> {
         self.request_json_body(
             reqwest::Method::POST,

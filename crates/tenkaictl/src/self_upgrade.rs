@@ -138,7 +138,10 @@ pub(crate) async fn run(command: SelfUpgradeCommand) -> Result<()> {
 /// stage them, and run their store check. The scratch copy is removed.
 fn candidate(home: &Home, source: &Source) -> Result<(String, StoreCheck)> {
     let envelope = tenkai::offline_bundle::BundleEnvelope::load(&source.bundle)?;
-    let roots = tenkai::release_signing::TrustRoots::load(&source.trust_roots)?;
+    let roots = tenkai::release_signing::TrustRoots::load(
+        &source.trust_roots,
+        tenkai::release_signing::TrustRootKind::Release,
+    )?;
     let platform = match &source.platform {
         Some(platform) => platform.clone(),
         None => tenkai::offline_host_binaries::detect_platform()?.to_string(),

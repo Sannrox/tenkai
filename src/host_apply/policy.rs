@@ -96,7 +96,8 @@ impl HostApprovalPolicy {
                 );
             }
         }
-        self.trust_roots().validate()?;
+        self.trust_roots()
+            .validate(crate::signature_verification::TrustRootKind::PlanApproval)?;
         Ok(())
     }
 
@@ -157,7 +158,12 @@ impl HostApprovalPolicy {
             // The gate-skip flag is server state; an approval binds it either way.
             match verify_envelope(plan, envelope, &roots, now_ms, statement.skip_gates) {
                 Ok(evidence) => {
-                    let signer = roots.signer(&envelope.key_id).ok();
+                    let signer = roots
+                        .signer(
+                            crate::signature_verification::TrustRootKind::PlanApproval,
+                            &envelope.key_id,
+                        )
+                        .ok();
                     candidates.push(Candidate {
                         approval: CountedApproval {
                             key_id: evidence.key_id,

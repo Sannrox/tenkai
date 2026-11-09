@@ -313,7 +313,10 @@ async fn run(mut cli: Cli) -> Result<()> {
             },
     } = &cli.command
     {
-        let roots = tenkai::release_signing::TrustRoots::load(trust_roots)?;
+        let roots = tenkai::release_signing::TrustRoots::load(
+            trust_roots,
+            tenkai::release_signing::TrustRootKind::Release,
+        )?;
         tenkai::support_bundle::verify(
             &tenkai::support_bundle::SupportBundle::load(bundle)?,
             &roots,
@@ -333,7 +336,12 @@ async fn run(mut cli: Cli) -> Result<()> {
                 let store = tenkai::storage::SqliteStore::open(&cli.database)?;
                 let rotated = trust_roots
                     .as_deref()
-                    .map(tenkai::release_signing::TrustRoots::load)
+                    .map(|path| {
+                        tenkai::release_signing::TrustRoots::load(
+                            path,
+                            tenkai::release_signing::TrustRootKind::Release,
+                        )
+                    })
                     .transpose()?;
                 let export = tenkai::audit_export::export_next(
                     &store,
@@ -359,7 +367,10 @@ async fn run(mut cli: Cli) -> Result<()> {
                 out,
                 trust_roots,
             } => {
-                let roots = tenkai::release_signing::TrustRoots::load(trust_roots)?;
+                let roots = tenkai::release_signing::TrustRoots::load(
+                    trust_roots,
+                    tenkai::release_signing::TrustRootKind::Release,
+                )?;
                 let range = tenkai::audit_export::range(dir, *from, *to, &roots)?;
                 tenkai::audit_export::write_range(&range, out)?;
                 println!(
@@ -373,7 +384,10 @@ async fn run(mut cli: Cli) -> Result<()> {
                 trust_roots,
                 anchor,
             } => {
-                let roots = tenkai::release_signing::TrustRoots::load(trust_roots)?;
+                let roots = tenkai::release_signing::TrustRoots::load(
+                    trust_roots,
+                    tenkai::release_signing::TrustRootKind::Release,
+                )?;
                 if let [single] = exports.as_slice() {
                     let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(single)?)?;
                     if raw["schema"] == tenkai::audit_export::AUDIT_RANGE_SCHEMA {
@@ -406,7 +420,12 @@ async fn run(mut cli: Cli) -> Result<()> {
         let scratch = scratch_dir.clone().unwrap_or_else(std::env::temp_dir);
         let roots = trust_roots
             .as_deref()
-            .map(tenkai::release_signing::TrustRoots::load)
+            .map(|path| {
+                tenkai::release_signing::TrustRoots::load(
+                    path,
+                    tenkai::release_signing::TrustRootKind::Release,
+                )
+            })
             .transpose()?;
         let evidence =
             tenkai::backup::drill(backup, &scratch, tenkai::now_millis(), roots.as_ref())?;

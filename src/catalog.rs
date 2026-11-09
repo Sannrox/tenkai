@@ -450,7 +450,10 @@ fn verify_publication(
                 bail!("--allow-unsigned-development cannot be combined with signed publication");
             }
             let envelope = release_signing::SignatureEnvelope::load(signature)?;
-            let roots = release_signing::TrustRoots::load(trust_roots)?;
+            let roots = release_signing::TrustRoots::load(
+                trust_roots,
+                crate::signature_verification::TrustRootKind::Release,
+            )?;
             let evidence = release_signing::verify_release(
                 &envelope,
                 &roots,
@@ -1244,6 +1247,7 @@ mod tests {
                     .encode(signing_key.verifying_key().to_bytes()),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         std::fs::write(&roots_path, toml::to_string(&roots).unwrap()).unwrap();
@@ -1820,6 +1824,7 @@ media_type = "{}"
                 public_key: STANDARD.encode(exporter.verifying_key().to_bytes()),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         let verified = envelope
@@ -1969,6 +1974,7 @@ media_type = "{}"
                 public_key: STANDARD.encode(exporter.verifying_key().to_bytes()),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         let bundle = |mut payloads: std::collections::BTreeMap<String, (String, Vec<u8>)>| {

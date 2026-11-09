@@ -299,7 +299,10 @@ pub async fn require_deployable_trust(
         let path = ctx.release_trust_roots.as_ref().ok_or_else(|| {
             anyhow::anyhow!("deployment requires server-configured release trust roots")
         })?;
-        let roots = release_signing::TrustRoots::load(path)?;
+        let roots = release_signing::TrustRoots::load(
+            path,
+            crate::signature_verification::TrustRootKind::Release,
+        )?;
         let envelope: release_signing::SignatureEnvelope =
             serde_json::from_str(property(&properties, "signature_envelope")?)?;
         release_signing::verify_release(
@@ -358,6 +361,7 @@ pub(super) fn verification_view(
                     public_key: property(properties, "signer_public_key")?.into(),
                     not_before: None,
                     not_after: None,
+                    ..Default::default()
                 }],
             };
             let evidence = release_signing::verify_release(
@@ -434,7 +438,10 @@ pub async fn reverify_release(
     let envelope: release_signing::SignatureEnvelope =
         serde_json::from_str(property(&properties, "signature_envelope")?)?;
     envelope.validate()?;
-    let roots = release_signing::TrustRoots::load(trust_roots_path)?;
+    let roots = release_signing::TrustRoots::load(
+        trust_roots_path,
+        crate::signature_verification::TrustRootKind::Release,
+    )?;
 
     let raw_manifest = property(&release.properties, "manifest")?;
     let manifest = manifest::parse_raw(raw_manifest)?;

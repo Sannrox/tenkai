@@ -59,8 +59,10 @@ pub(crate) async fn run(
         Command::EvalEvidence { command } => {
             match command {
                 EvalEvidenceCommand::Trust { trust_roots } => {
-                    let roots =
-                        tenkai::model_release_evidence::EvaluationTrustRoots::load(&trust_roots)?;
+                    let roots = tenkai::release_signing::TrustRoots::load(
+                        &trust_roots,
+                        tenkai::release_signing::TrustRootKind::ModelEvaluation,
+                    )?;
                     client.install_model_evaluation_trust(&roots).await?;
                     println!(
                         "installed model evaluation trust roots ({} signer{})",

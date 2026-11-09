@@ -146,7 +146,7 @@ async fn denial_stale_fence_conflict_and_irreversible_recovery() {
     let bad_sig = {
         use ed25519_dalek::Signer as _;
         base64::engine::general_purpose::STANDARD.encode(
-            key.sign(&canonical_approval_bytes(&statement).unwrap())
+            key.sign(&crate::plan_approval::SignedApproval::canonical_bytes(&statement).unwrap())
                 .to_bytes(),
         )
     };
@@ -193,7 +193,7 @@ async fn denial_stale_fence_conflict_and_irreversible_recovery() {
     let signature = {
         use ed25519_dalek::Signer as _;
         base64::engine::general_purpose::STANDARD.encode(
-            key.sign(&canonical_approval_bytes(&statement).unwrap())
+            key.sign(&crate::plan_approval::SignedApproval::canonical_bytes(&statement).unwrap())
                 .to_bytes(),
         )
     };

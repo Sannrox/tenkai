@@ -1,6 +1,6 @@
 //! Signed, provider-independent authorization for immutable plan execution.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
@@ -10,10 +10,11 @@ use sha2::{Digest as _, Sha256};
 use crate::client::Ctx;
 use crate::pb::sekai::Object;
 use crate::plan::Plan;
+use crate::signature_verification::validate_signer_text as validate_text;
+pub use crate::signature_verification::{TrustRootKind, TrustRoots, TrustedSigner};
 
 pub const APPROVAL_SCHEMA: &str = "tenkai.plan-approval.v1";
 const APPROVAL_DOMAIN: &[u8] = b"TENKAI-PLAN-APPROVAL-V1\0";
-const TRUST_ROOT_VERSION: u32 = 1;
 const PURPOSE: &str = "execute_plan";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -30,49 +31,86 @@ pub struct ApprovalStatement {
     pub policy_digest: String,
 }
 
+/// A signed approval: a statement, the key that signed it and the
+/// signature. Plan approvals use [`ApprovalStatement`]; package migration
+/// approvals sign their own statement in the same envelope, under their own
+/// schema, purpose and domain ([`SignedApproval`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ApprovalEnvelope {
+#[schemars(rename = "{S}Envelope")]
+pub struct ApprovalEnvelope<S = ApprovalStatement> {
     pub schema: String,
     pub key_id: String,
-    pub statement: ApprovalStatement,
+    pub statement: S,
     pub signature: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[schemars(rename = "PlanApprovalTrustRoots")]
-pub struct TrustRoots {
-    pub version: u32,
-    pub signers: Vec<TrustedSigner>,
+/// A statement an approver signs into an [`ApprovalEnvelope`]. Each kind
+/// keeps its own schema and signing domain, so one kind's signature never
+/// verifies as another's.
+pub trait SignedApproval {
+    /// The envelope `schema` this statement is signed under.
+    const SCHEMA: &'static str;
+    /// Whose trust roots pin its signers.
+    const KIND: TrustRootKind;
+    /// The bytes the signature covers, once the statement is well formed.
+    fn canonical_bytes(&self) -> Result<Vec<u8>>;
+    /// Unix milliseconds from which the approval is valid.
+    fn issued_at(&self) -> i64;
+    /// Unix milliseconds at which it expires.
+    fn expires_at(&self) -> i64;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[schemars(rename = "PlanApprovalTrustedSigner")]
-pub struct TrustedSigner {
-    pub key_id: String,
-    pub identity: String,
-    pub public_key: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub environments: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub providers: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub groups: Vec<String>,
-    /// Unix milliseconds. Absent: validity is not recorded (#812).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(transform = crate::schema_contract::omitted_when_none)]
-    pub not_before: Option<i64>,
-    /// Unix milliseconds. Absent: validity is not recorded (#812).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(transform = crate::schema_contract::omitted_when_none)]
-    pub not_after: Option<i64>,
+impl<S: SignedApproval> ApprovalEnvelope<S> {
+    /// Check the schema, the approval's time window at `now`, the signer's
+    /// validity window and revocation, and the signature, and return the
+    /// signer. Callers check first what the statement is bound to.
+    pub fn verify_signature<'r>(
+        &self,
+        roots: &'r TrustRoots,
+        now: i64,
+    ) -> Result<&'r TrustedSigner> {
+        let label = S::KIND.label();
+        if self.schema != S::SCHEMA {
+            bail!("unsupported {label} schema {}", self.schema);
+        }
+        if now < self.statement.issued_at() {
+            bail!("{label} is not valid yet");
+        }
+        if now >= self.statement.expires_at() {
+            bail!("{label} expired at {}", self.statement.expires_at());
+        }
+        let signer = roots.signer(S::KIND, &self.key_id)?;
+        signer.validity().check(&signer.identity, now)?;
+        let public_key = crate::signature_verification::trusted_key(
+            &format!("{label} public key"),
+            &signer.public_key,
+            &signer.key_id,
+        )?;
+        crate::signature_verification::verify_strict(
+            &public_key,
+            &format!("{label} signature"),
+            &self.signature,
+            &self.statement.canonical_bytes()?,
+        )?;
+        Ok(signer)
+    }
 }
 
-impl TrustedSigner {
-    pub(crate) fn validity(&self) -> crate::signature_verification::SignerValidityWindow {
-        crate::signature_verification::SignerValidityWindow::new(self.not_before, self.not_after)
+impl SignedApproval for ApprovalStatement {
+    const SCHEMA: &'static str = APPROVAL_SCHEMA;
+    const KIND: TrustRootKind = TrustRootKind::PlanApproval;
+
+    fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        canonical_bytes(self)
+    }
+
+    fn issued_at(&self) -> i64 {
+        self.issued_at
+    }
+
+    fn expires_at(&self) -> i64 {
+        self.expires_at
     }
 }
 
@@ -234,14 +272,6 @@ pub fn canonical_bytes(statement: &ApprovalStatement) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn validate_text(name: &str, value: &str) -> Result<()> {
-    if value.trim().is_empty() || value != value.trim() || value.len() > 512 || value.contains('\0')
-    {
-        bail!("{name} is empty, non-canonical, or too long");
-    }
-    Ok(())
-}
-
 fn validate_statement(statement: &ApprovalStatement) -> Result<()> {
     crate::signature_verification::validate_prefixed_digest("plan digest", &statement.plan_digest)?;
     validate_text("environment", &statement.environment)?;
@@ -260,73 +290,38 @@ fn validate_statement(statement: &ApprovalStatement) -> Result<()> {
     Ok(())
 }
 
-impl TrustRoots {
-    pub fn load(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading plan approval trust roots {}", path.display()))?;
-        let roots: Self = toml::from_str(&raw)
-            .with_context(|| format!("parsing plan approval trust roots {}", path.display()))?;
-        roots.validate()?;
-        Ok(roots)
+/// Plan approval's scope rules for one signer, on top of the checks every
+/// trust-roots kind shares ([`TrustRoots::validate`]): scopes are canonical
+/// text, and automatic and preflight signers are pinned to explicit
+/// environments and to their one provider.
+pub(crate) fn check_signer_scopes(signer: &TrustedSigner) -> Result<()> {
+    for scope in signer
+        .environments
+        .iter()
+        .chain(&signer.providers)
+        .chain(&signer.groups)
+    {
+        validate_text("trusted signer scope", scope)?;
     }
-
-    /// The structural checks [`Self::load`] applies, for roots built in memory.
-    pub fn validate(&self) -> Result<()> {
-        let roots = self;
-        if roots.version != TRUST_ROOT_VERSION || roots.signers.is_empty() {
-            bail!("plan approval trust roots must use version 1 and contain at least one signer");
-        }
-        let mut keys = BTreeMap::new();
-        let mut identities = std::collections::BTreeSet::new();
-        for signer in &roots.signers {
-            for scope in signer
-                .environments
-                .iter()
-                .chain(&signer.providers)
-                .chain(&signer.groups)
-            {
-                validate_text("trusted signer scope", scope)?;
-            }
-            if signer
-                .providers
-                .iter()
-                .any(|provider| provider == "builtin-auto")
-                && (signer.environments.is_empty() || signer.providers.len() != 1)
-            {
-                bail!(
-                    "automatic approval signers require explicit environments and only the builtin-auto provider"
-                );
-            }
-            if signer
-                .providers
-                .iter()
-                .any(|provider| provider == crate::host_preflight::PREFLIGHT_PROVIDER)
-                && (signer.environments.is_empty() || signer.providers.len() != 1)
-            {
-                bail!(
-                    "preflight signers require explicit environments and only the preflight provider"
-                );
-            }
-            validate_text("trusted signer identity", &signer.identity)?;
-            crate::signature_verification::well_formed_key(
-                "plan approval public key",
-                &signer.public_key,
-                &signer.key_id,
-            )?;
-            signer.validity().validate()?;
-            if keys.insert(&signer.key_id, ()).is_some() || !identities.insert(&signer.identity) {
-                bail!("plan approval trust roots contain duplicate keys or identities");
-            }
-        }
-        Ok(())
+    if signer
+        .providers
+        .iter()
+        .any(|provider| provider == "builtin-auto")
+        && (signer.environments.is_empty() || signer.providers.len() != 1)
+    {
+        bail!(
+            "automatic approval signers require explicit environments and only the builtin-auto provider"
+        );
     }
-
-    pub(crate) fn signer(&self, key_id: &str) -> Result<&TrustedSigner> {
-        self.signers
-            .iter()
-            .find(|signer| signer.key_id == key_id)
-            .with_context(|| format!("plan approval signer {key_id} is not currently trusted"))
+    if signer
+        .providers
+        .iter()
+        .any(|provider| provider == crate::host_preflight::PREFLIGHT_PROVIDER)
+        && (signer.environments.is_empty() || signer.providers.len() != 1)
+    {
+        bail!("preflight signers require explicit environments and only the preflight provider");
     }
+    Ok(())
 }
 
 /// Load one envelope, a JSON array, or every `*.json` file in a directory.
@@ -390,7 +385,7 @@ pub async fn verify_for_execution_named(
     skip_gates: bool,
     requester: Option<&str>,
 ) -> Result<VerificationEvidence> {
-    let roots = TrustRoots::load(trust_roots_path)?;
+    let roots = TrustRoots::load(trust_roots_path, TrustRootKind::PlanApproval)?;
     let mut envelopes = load_envelopes(envelope_path)?;
     envelopes.extend(list_collected_envelopes(ctx, &plan.id).await?);
     if envelopes.is_empty() {
@@ -434,7 +429,9 @@ pub async fn verify_for_execution_named(
     let candidates: Vec<CountedApproval> = unique
         .iter()
         .filter_map(|(envelope, _)| {
-            let signer = roots.signer(&envelope.key_id).ok()?;
+            let signer = roots
+                .signer(TrustRootKind::PlanApproval, &envelope.key_id)
+                .ok()?;
             Some(CountedApproval {
                 key_id: envelope.key_id.clone(),
                 identity: signer.identity.clone(),
@@ -497,9 +494,9 @@ pub async fn verify_for_execution_named(
             bail!("live environment policy requires human approval");
         }
     }
-    let roots = TrustRoots::load(trust_roots_path)?;
+    let roots = TrustRoots::load(trust_roots_path, TrustRootKind::PlanApproval)?;
     for counted in &tally.counted {
-        let signer = roots.signer(&counted.key_id)?;
+        let signer = roots.signer(TrustRootKind::PlanApproval, &counted.key_id)?;
         refuse_unscoped_host_automatic_key(ctx, &counted.key_id, signer).await?;
     }
     let environment = crate::environment::environment(ctx, &plan.environment).await?;
@@ -537,7 +534,7 @@ pub fn verify(
         .with_context(|| format!("reading plan approval {}", envelope_path.display()))?;
     let envelope: ApprovalEnvelope =
         serde_json::from_slice(&raw).context("parsing plan approval envelope")?;
-    let roots = TrustRoots::load(trust_roots_path)?;
+    let roots = TrustRoots::load(trust_roots_path, TrustRootKind::PlanApproval)?;
     verify_envelope(plan, &envelope, &roots, now, skip_gates)
 }
 
@@ -548,9 +545,6 @@ pub fn verify_envelope(
     now: i64,
     skip_gates: bool,
 ) -> Result<VerificationEvidence> {
-    if envelope.schema != APPROVAL_SCHEMA {
-        bail!("unsupported plan approval schema {}", envelope.schema);
-    }
     let expected_digest = format!("sha256:{}", plan.executable_digest()?);
     if envelope.statement.plan_digest != expected_digest
         || envelope.statement.environment != plan.environment
@@ -560,14 +554,7 @@ pub fn verify_envelope(
             "plan approval is bound to different executable content, environment, or gate policy"
         );
     }
-    if now < envelope.statement.issued_at {
-        bail!("plan approval is not valid yet");
-    }
-    if now >= envelope.statement.expires_at {
-        bail!("plan approval expired at {}", envelope.statement.expires_at);
-    }
-    let signer = roots.signer(&envelope.key_id)?;
-    signer.validity().check(&signer.identity, now)?;
+    let signer = envelope.verify_signature(roots, now)?;
     if !signer.environments.is_empty() && !signer.environments.contains(&plan.environment) {
         bail!("plan approval signer is outside its environment scope");
     }
@@ -586,17 +573,6 @@ pub fn verify_envelope(
     {
         bail!("automatic approval requires an environment-scoped builtin-auto signer");
     }
-    let public_key = crate::signature_verification::trusted_key(
-        "trusted signer public key",
-        &signer.public_key,
-        &signer.key_id,
-    )?;
-    crate::signature_verification::verify_strict(
-        &public_key,
-        "plan approval signature",
-        &envelope.signature,
-        &canonical_bytes(&envelope.statement)?,
-    )?;
     Ok(VerificationEvidence {
         schema: APPROVAL_SCHEMA.into(),
         plan_id: plan.id.clone(),
@@ -615,11 +591,17 @@ pub fn verify_envelope(
     })
 }
 
-pub fn local_bypass(plan: &Plan, reason: &str, now: i64) -> Result<VerificationEvidence> {
-    if plan.environment != "local" {
+/// The development bypass's guard, for plans and package migrations alike:
+/// only the built-in `local` environment, and only with a canonical reason.
+pub(crate) fn require_local_bypass(environment: &str, reason: &str) -> Result<()> {
+    if environment != "local" {
         bail!("unapproved development execution is restricted to the built-in local environment");
     }
-    validate_text("development bypass reason", reason)?;
+    validate_text("development bypass reason", reason)
+}
+
+pub fn local_bypass(plan: &Plan, reason: &str, now: i64) -> Result<VerificationEvidence> {
+    require_local_bypass(&plan.environment, reason)?;
     Ok(VerificationEvidence {
         schema: APPROVAL_SCHEMA.into(),
         plan_id: plan.id.clone(),
@@ -845,7 +827,7 @@ pub async fn collect_envelope(
     now: i64,
 ) -> Result<CollectedApproval> {
     let evidence = verify_envelope(plan, envelope, roots, now, envelope.statement.skip_gates)?;
-    let signer = roots.signer(&envelope.key_id)?;
+    let signer = roots.signer(TrustRootKind::PlanApproval, &envelope.key_id)?;
     let object = Object {
         id: collected_id(&plan.id, &envelope.key_id, envelope.statement.skip_gates),
         kind: crate::ontology::KIND_PLAN_APPROVAL_ENVELOPE.into(),
@@ -1023,7 +1005,7 @@ pub async fn approvals_view(
             if verify_envelope(plan, &envelope, roots, now, skip_gates).is_err() {
                 continue;
             }
-            let Ok(signer) = roots.signer(&key_id) else {
+            let Ok(signer) = roots.signer(TrustRootKind::PlanApproval, &key_id) else {
                 continue;
             };
             identity = signer.identity.clone();
