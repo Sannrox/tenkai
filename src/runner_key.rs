@@ -262,16 +262,27 @@ impl RunnerKey {
 }
 
 impl HardwareStore {
-    /// A non-extractable P-256 public point for HPKE sealing, generated in
-    /// this token as `{key_label}-sealing`. The private half never leaves
-    /// the store.
-    pub fn open_or_generate_sealing_point(&self) -> Result<Vec<u8>> {
-        let sealing = Self {
+    fn sealing(&self) -> Self {
+        Self {
             module: self.module.clone(),
             token_label: self.token_label.clone(),
             pin: self.pin.clone(),
             key_label: format!("{}-sealing", self.key_label),
-        };
+        }
+    }
+
+    /// The existing sealing key `{key_label}-sealing`, for opening sealed
+    /// values (ADR 0045 §4): non-extractable, sensitive, and allowed to
+    /// derive. A token that does not allow it is refused with a named reason.
+    pub fn open_sealing_key(&self) -> Result<HardwareRunnerKey> {
+        spawn_store(&self.sealing(), false, P256Role::Derive)
+    }
+
+    /// A non-extractable P-256 public point for HPKE sealing, generated in
+    /// this token as `{key_label}-sealing`. The private half never leaves
+    /// the store.
+    pub fn open_or_generate_sealing_point(&self) -> Result<Vec<u8>> {
+        let sealing = self.sealing();
         match spawn_store(&sealing, false, P256Role::Derive) {
             Ok(key) => Ok(key.point.clone()),
             Err(open) => spawn_store(&sealing, true, P256Role::Derive)
@@ -399,6 +410,12 @@ enum Command {
     Export {
         reply: std::sync::mpsc::Sender<Result<Vec<u8>, String>>,
     },
+    /// ECDH with `peer` against a derive key: the shared point's x
+    /// coordinate.
+    Derive {
+        peer: Vec<u8>,
+        reply: std::sync::mpsc::Sender<Result<Vec<u8>, String>>,
+    },
 }
 
 /// PKCS#11-backed ECDSA P-256 runner key. The private object is not extractable.
@@ -436,6 +453,21 @@ impl HardwareRunnerKey {
             message: message.to_vec(),
             reply,
         })
+    }
+
+    /// ECDH of this derive key with `peer`. Only a sealing key opened with
+    /// [`HardwareStore::open_sealing_key`] can derive.
+    pub fn derive(&self, peer: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        self.call(|reply| Command::Derive {
+            peer: peer.to_vec(),
+            reply,
+        })
+        .map(zeroize::Zeroizing::new)
+    }
+
+    /// The public point of this key.
+    pub fn point(&self) -> &[u8] {
+        &self.point
     }
 
     /// The store refuses to return the private value; the agent never has it.
@@ -487,6 +519,9 @@ fn spawn_store(store: &HardwareStore, mint: bool, role: P256Role) -> Result<Hard
                         Command::Export { reply } => {
                             let _ = reply.send(export_on_token(&session, private));
                         }
+                        Command::Derive { peer, reply } => {
+                            let _ = reply.send(derive_on_token(&session, private, &peer));
+                        }
                     }
                 }
             }
@@ -516,6 +551,40 @@ fn sign_on_token(
         .sign(&Mechanism::Ecdsa, private, &hash)
         .map_err(|error| format!("signing with the hardware runner key: {error}"))?;
     ecdsa_der(&raw).map_err(|error| error.to_string())
+}
+
+/// ECDH (`CKM_ECDH1_DERIVE`, no KDF) of the private key with `peer`, an
+/// uncompressed P-256 point, into a session object that is read once and
+/// destroyed. The shared secret leaves the token; the private key does not.
+/// Errors never carry the secret.
+fn derive_on_token(
+    session: &Session,
+    private: ObjectHandle,
+    peer: &[u8],
+) -> Result<Vec<u8>, String> {
+    use cryptoki::mechanism::elliptic_curve::{EcKdf, Ecdh1DeriveParams};
+    let mechanism = Mechanism::Ecdh1Derive(Ecdh1DeriveParams::new(EcKdf::null(), peer));
+    let template = [
+        Attribute::Class(ObjectClass::SECRET_KEY),
+        Attribute::KeyType(KeyType::GENERIC_SECRET),
+        Attribute::ValueLen(32.into()),
+        Attribute::Token(false),
+        Attribute::Sensitive(false),
+        Attribute::Extractable(true),
+    ];
+    let derived = session
+        .derive_key(&mechanism, private, &template)
+        .map_err(|error| format!("deriving with the hardware sealing key: {error}"))?;
+    let value = session.get_attributes(derived, &[AttributeType::Value]);
+    let _ = session.destroy_object(derived);
+    let value = value.map_err(|_| "reading the derived shared secret".to_string())?;
+    value
+        .into_iter()
+        .find_map(|attribute| match attribute {
+            Attribute::Value(bytes) if bytes.len() == 32 => Some(bytes),
+            _ => None,
+        })
+        .ok_or_else(|| "the token derived no 32-byte shared secret".to_string())
 }
 
 fn export_on_token(session: &Session, private: ObjectHandle) -> Result<Vec<u8>, String> {

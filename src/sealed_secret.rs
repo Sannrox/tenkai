@@ -213,21 +213,39 @@ pub fn seal(
 /// The private half of this runtime's file sealing key. It opens values
 /// wrapped for its fingerprint (ADR 0045 §4). Errors never carry a value.
 pub struct SealedOpener {
-    private: <Kem as hpke::Kem>::PrivateKey,
+    private: OpenerKey,
     fingerprint: String,
 }
 
+/// Where the sealing key's private half is.
+enum OpenerKey {
+    File(<Kem as hpke::Kem>::PrivateKey),
+    /// In a PKCS#11 token: only the ECDH runs there ([`hpke_receiver`]).
+    Token {
+        key: crate::runner_key::HardwareRunnerKey,
+        point: Vec<u8>,
+    },
+}
+
 impl SealedOpener {
-    /// Load the file sealing key in `dir`, the one
-    /// [`crate::sealing_key::SealingKey::open_or_generate`] keeps there.
+    /// Load the sealing key [`crate::sealing_key::SealingKey::open_or_generate`]
+    /// keeps for `dir`: the file key there, or the hardware key in the token
+    /// its runner key store names. A token key that cannot derive is
+    /// refused with a named reason.
     pub fn load(dir: &std::path::Path) -> Result<Self> {
         use p256::pkcs8::DecodePrivateKey as _;
         let path = dir.join(crate::sealing_key::SEALING_KEY);
         if !path.is_file() {
-            bail!(
-                "no file sealing key at {}; a hardware-backed sealing key does not open sealed values yet",
-                path.display()
-            );
+            let Some(store) = crate::runner_key::HardwareStore::from_dir(dir)? else {
+                bail!(
+                    "no sealing key at {} and no hardware key store; sealed steps are refused",
+                    path.display()
+                );
+            };
+            let key = store
+                .open_sealing_key()
+                .context("opening the hardware sealing key; sealed steps are refused")?;
+            return Self::from_hardware(key);
         }
         let pem = zeroize::Zeroizing::new(
             std::fs::read_to_string(&path)
@@ -238,6 +256,17 @@ impl SealedOpener {
         Self::from_private(secret.to_bytes().as_slice())
     }
 
+    /// An opener over a sealing key in a PKCS#11 token
+    /// ([`crate::runner_key::HardwareStore::open_sealing_key`]).
+    pub fn from_hardware(key: crate::runner_key::HardwareRunnerKey) -> Result<Self> {
+        let point = key.point().to_vec();
+        let fingerprint = SealingPublicKey::from_point(point.clone())?.fingerprint();
+        Ok(Self {
+            private: OpenerKey::Token { key, point },
+            fingerprint,
+        })
+    }
+
     fn from_private(scalar: &[u8]) -> Result<Self> {
         use hpke::{Deserializable as _, Kem as _, Serializable as _};
         let private = <Kem as hpke::Kem>::PrivateKey::from_bytes(scalar)
@@ -245,7 +274,7 @@ impl SealedOpener {
         let public = Kem::sk_to_pk(&private);
         let fingerprint = SealingPublicKey::from_point(public.to_bytes().to_vec())?.fingerprint();
         Ok(Self {
-            private,
+            private: OpenerKey::File(private),
             fingerprint,
         })
     }
@@ -263,7 +292,7 @@ impl SealedOpener {
         target: &SealedTarget,
         sealed: &SealedValue,
     ) -> Result<zeroize::Zeroizing<Vec<u8>>> {
-        use hpke::Deserializable as _;
+        use hpke::{Deserializable as _, Serializable as _};
         use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
         check_form(sealed)?;
         let wrap = sealed
@@ -284,17 +313,29 @@ impl SealedOpener {
                 .map_err(|_| refused())?,
         )
         .map_err(|_| refused())?;
-        let data_key = zeroize::Zeroizing::new(
-            hpke::single_shot_open::<Aead, Kdf, Kem>(
-                &hpke::OpModeR::Base,
-                &self.private,
-                &encapsulated,
+        let wrapped = STANDARD.decode(&wrap.wrapped_key).map_err(|_| refused())?;
+        let data_key = match &self.private {
+            OpenerKey::File(private) => zeroize::Zeroizing::new(
+                hpke::single_shot_open::<Aead, Kdf, Kem>(
+                    &hpke::OpModeR::Base,
+                    private,
+                    &encapsulated,
+                    WRAP_INFO,
+                    &wrapped,
+                    &aad,
+                )
+                .map_err(|_| refused())?,
+            ),
+            OpenerKey::Token { key, point } => hpke_receiver::open(
+                point,
+                &encapsulated.to_bytes(),
                 WRAP_INFO,
-                &STANDARD.decode(&wrap.wrapped_key).map_err(|_| refused())?,
                 &aad,
+                &wrapped,
+                |peer| key.derive(peer),
             )
             .map_err(|_| refused())?,
-        );
+        };
         let mut body =
             zeroize::Zeroizing::new(STANDARD.decode(&sealed.ciphertext).map_err(|_| refused())?);
         if body.len() < NONCE_BYTES + TAG_BYTES {
@@ -654,6 +695,8 @@ pub(crate) async fn delete_locked(
     Ok(format!("deleted {environment} sealed {instance} {secret}"))
 }
 
+mod hpke_receiver;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,6 +711,37 @@ mod tests {
         let (private, public) = <Kem as hpke::Kem>::gen_keypair(&mut rng);
         let public = SealingPublicKey::from_point(public.to_bytes().to_vec()).unwrap();
         (private, public)
+    }
+
+    /// A value sealed to a key in a PKCS#11 token opens with the token
+    /// computing only the ECDH; one sealed for another target is refused,
+    /// and neither the value nor the shared secret reaches an error. Runs
+    /// against SoftHSM in CI.
+    #[test]
+    fn a_value_sealed_to_a_token_key_opens_through_the_token() {
+        let Some((module, token_label)) = crate::pkcs11_provider::next_software_token() else {
+            return;
+        };
+        let store = crate::runner_key::HardwareStore {
+            module,
+            token_label,
+            pin: crate::pkcs11_provider::TEST_USER_PIN.into(),
+            key_label: "runner".into(),
+        };
+        let point = store.open_or_generate_sealing_point().unwrap();
+        let public = SealingPublicKey::from_point(point).unwrap();
+        let value = b"token-held-plain-value";
+        let sealed = seal(&target(), value, std::slice::from_ref(&public)).unwrap();
+
+        let opener = SealedOpener::from_hardware(store.open_sealing_key().unwrap()).unwrap();
+        assert_eq!(opener.fingerprint(), public.fingerprint());
+        assert_eq!(opener.open(&target(), &sealed).unwrap().as_slice(), value);
+
+        let other =
+            SealedTarget::new("prod", "worker", SecretRef::parse("db/password").unwrap()).unwrap();
+        let error = format!("{:#}", opener.open(&other, &sealed).unwrap_err());
+        assert!(!error.contains("token-held-plain-value"), "{error}");
+        assert!(error.contains("does not open"), "{error}");
     }
 
     fn open(

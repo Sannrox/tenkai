@@ -3099,6 +3099,7 @@ dependencies = [
  "cryptoki",
  "ed25519-dalek",
  "fencing-lease",
+ "hkdf",
  "hpke",
  "libc",
  "p256",

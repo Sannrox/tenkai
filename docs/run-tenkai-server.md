@@ -424,8 +424,11 @@ tenkai-runtime
   one of each secret name. Whenever the runtime removes a Helm release (a
   failed install's cleanup, a rollback's outgoing release), it deletes every
   Tenkai-owned Secret of that instance, found by its labels. Other executors,
-  operator programs and the server's own apply refuse sealed steps, as does
-  a hardware-backed sealing key for now.
+  operator programs and the server's own apply refuse sealed steps. A
+  runtime whose runner key is in a PKCS#11 token opens values with its
+  sealing key in the same token (`<key label>-sealing`): only the ECDH runs
+  in the token, and the private key never leaves it. A token key that
+  cannot derive refuses sealed steps with a named reason.
 - **Host releases:** set `TENKAI_HOST_SPOOL_DIR` (and `TENKAI_HOST_STATE_DIR`
   when it is not the default) on the runtime, and install the host applier
   on the runtime's host as for a server ([run host releases](#run-host-releases)).

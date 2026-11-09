@@ -12,6 +12,8 @@
   (§1 host releases run, §2 the runtime reports the applier's records)
 - Amended: 2026-11-09 by [#1125](https://github.com/Sannrox/tenkai/issues/1125)
   (§4 Host: the request file sits in the spool, the target base directory)
+- Amended: 2026-11-09 by [#1127](https://github.com/Sannrox/tenkai/issues/1127)
+  (§4 a hardware-backed sealing key opens values; consequence resolved)
 - Amended: 2026-11-09 by [#1128](https://github.com/Sannrox/tenkai/issues/1128)
   (§3 removal packages; §4 Helm Secrets deleted on every runtime removal)
 - Issue: [#1119](https://github.com/Sannrox/tenkai/issues/1119)
@@ -148,8 +150,10 @@ of the step's release, in-process.
   runtime removes a Helm release, it deletes every Tenkai-owned Secret of
   that instance, found by its labels without the opened values; removals
   elsewhere never use the Secrets API. The runtime
-  opens values with its file sealing key; a hardware-backed sealing key
-  refuses sealed steps until the token can derive the shared secret.
+  opens values with its sealing key. A hardware-backed key computes only
+  the ECDH with each wrap's ephemeral key in the token; the runtime does
+  the rest of the HPKE receiver, so the private key never leaves the token.
+  A token key that cannot derive refuses sealed steps with a named reason.
 - **Kubernetes descriptors (`kubernetes`, `kubernetes-inprocess`):** these
   have no values to carry a name. A sealed step for such a release is refused
   with a named reason until a descriptor substitution exists.
@@ -228,9 +232,9 @@ built-in mode. A program-mode runtime keeps its behavior against any server.
 - Raw Kubernetes descriptors cannot read sealed values yet.
 - A runtime in built-in mode does not report the observed runtime of what it
   applied; the server's read views show only what it applied itself.
-- A hardware-backed runtime still needs its sealing key in hardware (ADR 0045
-  §1), which needs a key-agreement operation in the hardware key path. Until
-  that exists, such a runtime refuses sealed steps with a named reason.
+- A hardware-backed runtime keeps its sealing key in hardware (ADR 0045 §1):
+  the token derives the ECDH shared secret, which leaves it, while the
+  private key does not.
 
 ## Alternatives considered
 
