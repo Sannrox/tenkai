@@ -230,6 +230,13 @@ impl LiveSecrets {
         })
     }
 
+    /// Connect through `cluster_config` only, for cleanup: a removal must
+    /// not need the cluster-scoped Namespace access that [`Self::connect`]
+    /// uses, only list and delete of Secrets in the release's namespace.
+    pub(crate) fn connect_existing(cluster_config: &Path) -> Result<Self> {
+        block_on(async { Ok(Self(bounded(live_client(cluster_config)).await?)) })
+    }
+
     fn api(&self, namespace: &str) -> kube::Api<Secret> {
         kube::Api::namespaced(self.0.clone(), namespace)
     }
@@ -479,8 +486,9 @@ mod tests {
             "{left:?}"
         );
 
-        // Removing the instance deletes all of its Secrets.
-        remove_all(&api, &cache).unwrap();
+        // Removing the instance deletes all of its Secrets, found by their
+        // labels: the removal carries no opened values.
+        remove_all(&api, &request(&[])).unwrap();
         let left = api.names();
         assert_eq!(left.len(), 1, "{left:?}");
         assert!(left[0].starts_with("worker-"), "{left:?}");

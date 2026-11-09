@@ -787,6 +787,7 @@ impl BuiltinConfig {
         request.cluster_config_path = self.cluster_config.clone();
         request.secret_dir_path = self.secret_dir.clone();
         request.opened_secrets = self.open_sealed(&release.sealed, environment, expected)?;
+        request.remove_owned_secrets = true;
         let replaced_executor = match release.replaces {
             None => None,
             Some(replaced) => Some(match replaced.executor {
@@ -1173,6 +1174,10 @@ mod tests {
             std::fs::read(workdir.join("app/run.sh")).unwrap(),
             b"echo hi\n"
         );
+        // Only a runtime removes Tenkai-owned Secrets with a release; a
+        // server's request can never ask for it.
+        assert!(verified.request.remove_owned_secrets);
+        assert!(!case.release.request.remove_owned_secrets);
         // A retry after a crash reuses the placed release.
         let again = case
             .config

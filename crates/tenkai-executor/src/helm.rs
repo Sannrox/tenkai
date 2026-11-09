@@ -139,15 +139,15 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
             "helm",
             "set TENKAI_HELM_BIN or install helm",
         )?;
-        // Helm does not own the sealed Secrets. When a runtime that writes
-        // sealed values removes a release it applied (failed-apply cleanup,
-        // a rollback's outgoing release), they go with it. Other removals
-        // never touch the cluster's Secrets API. Instance removal does not
-        // run on a built-in runtime yet, so it cannot strand them.
-        if !request.opened_secrets.is_empty()
+        // Helm does not own the sealed Secrets. When a runtime, their only
+        // writer, removes a release (failed-apply cleanup, a rollback's
+        // outgoing release), every Tenkai-owned Secret of the instance goes
+        // with it, found by its labels without the opened values. Removals
+        // anywhere else never touch the cluster's Secrets API.
+        if request.remove_owned_secrets
             && let Some(cluster_config) = &request.cluster_config_path
         {
-            let api = LiveSecrets::connect(cluster_config, &request.environment)?;
+            let api = LiveSecrets::connect_existing(cluster_config)?;
             helm_secrets::remove_all(&api, request)?;
         }
         Ok(())

@@ -12,6 +12,8 @@
   (§1 host releases run, §2 the runtime reports the applier's records)
 - Amended: 2026-11-09 by [#1125](https://github.com/Sannrox/tenkai/issues/1125)
   (§4 Host: the request file sits in the spool, the target base directory)
+- Amended: 2026-11-09 by [#1128](https://github.com/Sannrox/tenkai/issues/1128)
+  (§3 removal packages; §4 Helm Secrets deleted on every runtime removal)
 - Issue: [#1119](https://github.com/Sannrox/tenkai/issues/1119)
 - Owner: Tenkai maintainers
 - Amends: [ADR 0045](0045-sealed-secrets.md) §4 (who writes the target, host
@@ -116,6 +118,11 @@ names, rebuilds the deploy inputs under a work directory addressed by the
 signed artifact digest, and checks them against that digest before any
 executor runs.
 
+A removal's package is the installed release, admitted as the server admits
+a removal: a recalled release can still be removed, and neither
+compatibility nor placement is checked. Only host releases are removed by a
+plan.
+
 ### 4. Sealed values are written by the executor that applies the release
 
 This replaces the writer in ADR 0045 §4. After the runtime's checks of ADR
@@ -137,7 +144,10 @@ of the step's release, in-process.
   8 hex characters of a digest over that secret's keys and their sealed
   digests. Cleanup runs once `helm upgrade --wait` succeeds, before the
   runtime's health check; it still keeps the previous Secret, so a failed
-  health check that restores the previous release finds it. The runtime
+  health check that restores the previous release finds it. Whenever the
+  runtime removes a Helm release, it deletes every Tenkai-owned Secret of
+  that instance, found by its labels without the opened values; removals
+  elsewhere never use the Secrets API. The runtime
   opens values with its file sealing key; a hardware-backed sealing key
   refuses sealed steps until the token can derive the shared secret.
 - **Kubernetes descriptors (`kubernetes`, `kubernetes-inprocess`):** these

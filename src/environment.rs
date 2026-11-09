@@ -1200,8 +1200,9 @@ async fn unsubscribe_held(
         }
     }
     if !candidates.is_empty() {
-        // Only the host executor can plan the uninstall this promises.
-        executors.host()?;
+        // The uninstall this promises is planned from the applier's records:
+        // this server's own, or those the environment's runtime reports.
+        crate::host_records::HostRecords::of(ctx, executors, env).await?;
     }
     let removed = if instance == product {
         let mut removed = 0;

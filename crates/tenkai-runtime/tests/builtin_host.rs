@@ -220,10 +220,18 @@ async fn approve(ctx: &mut Ctx, root: &Path, plan: &plan::Plan) {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn host_steps_are_planned_from_reported_records_and_run_once_through_the_runtime() {
+/// A loopback server, `prod` with `cluster@1.0.0` subscribed, and a
+/// built-in runtime whose host applier is emulated.
+struct Rig {
+    root: PathBuf,
+    ctx: Ctx,
+    applier: Arc<Applier>,
+    runtime: RuntimeClient,
+}
+
+async fn rig(label: &str) -> Rig {
     let root = std::env::temp_dir().join(format!(
-        "tenkai-builtin-host-{}-{}",
+        "tenkai-builtin-host-{label}-{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
@@ -300,7 +308,22 @@ async fn host_steps_are_planned_from_reported_records_and_run_once_through_the_r
         false,
     )
     .unwrap();
+    Rig {
+        root,
+        ctx,
+        applier,
+        runtime,
+    }
+}
 
+#[tokio::test(flavor = "multi_thread")]
+async fn host_steps_are_planned_from_reported_records_and_run_once_through_the_runtime() {
+    let Rig {
+        root,
+        mut ctx,
+        applier,
+        runtime,
+    } = rig("install").await;
     // Reported, the empty record plans a first install at generation 0.
     runtime.report_host_records().await.unwrap();
     let install = plan::create(&mut ctx, "prod").await.unwrap();
@@ -391,6 +414,61 @@ async fn host_steps_are_planned_from_reported_records_and_run_once_through_the_r
         "{}",
         refused.reason
     );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Unsubscribing a host release in an environment served by a built-in
+/// runtime plans an approved uninstall from the reported record, and the
+/// runtime runs it through its applier: the release is removed once.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsubscribed_host_release_is_uninstalled_through_the_runtime() {
+    let Rig {
+        root,
+        mut ctx,
+        applier,
+        runtime,
+    } = rig("remove").await;
+    runtime.report_host_records().await.unwrap();
+    let install = plan::create(&mut ctx, "prod").await.unwrap();
+    approve(&mut ctx, &root, &install).await;
+    assert!(runtime.run_once().await.unwrap());
+
+    // The server runs no applier of its own; the reported records stand in.
+    tenkai::environment::unsubscribe(
+        &mut ctx,
+        "prod",
+        "cluster",
+        &tenkai::software_executor::SoftwareExecutors::default(),
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    let remove = plan::create(&mut ctx, "prod").await.unwrap();
+    let step = remove.steps[0].clone();
+    assert_eq!(step.action, plan::Action::Remove);
+    assert_eq!(
+        step.host
+            .map(|host| (host.action, host.expected_generation)),
+        Some((tenkai::host_apply::HostAction::Uninstall, 1))
+    );
+    approve(&mut ctx, &root, &remove).await;
+
+    assert!(runtime.run_once().await.unwrap());
+    let remove = plan::load(&mut ctx, &remove.id).await.unwrap();
+    assert_eq!(
+        remove.state,
+        PlanState::Succeeded,
+        "{}",
+        remove.status_detail
+    );
+    assert_eq!(
+        *applier.runs.lock().unwrap(),
+        ["install cluster@1.0.0", "uninstall cluster@1.0.0"]
+    );
+    // Nothing is left to plan, and nothing runs twice.
+    assert!(!runtime.run_once().await.unwrap());
+    assert_eq!(applier.runs.lock().unwrap().len(), 2);
 
     let _ = std::fs::remove_dir_all(root);
 }

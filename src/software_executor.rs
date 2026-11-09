@@ -140,6 +140,13 @@ pub struct SoftwareApplyRequest {
     /// or log. Only the Helm executor writes them.
     #[serde(skip)]
     pub opened_secrets: Vec<OpenedSecret>,
+    /// Set only by an environment runtime, the only writer of Tenkai-owned
+    /// Secrets: removing the release also deletes every such Secret of the
+    /// instance, with or without opened values (ADR 0048 §4). A removal
+    /// anywhere else never touches the cluster's Secrets API. Never
+    /// serialized, so a server cannot set it.
+    #[serde(skip)]
+    pub remove_owned_secrets: bool,
 }
 
 /// One sealed value opened in memory, for the slot a plan step names. Its
@@ -1004,6 +1011,7 @@ pub fn request_from_parts(
         apply_attempt: uuid::Uuid::new_v4().simple().to_string(),
         dependency_document: String::new(),
         opened_secrets: Vec::new(),
+        remove_owned_secrets: false,
     }
 }
 
@@ -1038,6 +1046,7 @@ mod tests {
             apply_attempt: String::new(),
             dependency_document: String::new(),
             opened_secrets: Vec::new(),
+            remove_owned_secrets: false,
         }
     }
 
