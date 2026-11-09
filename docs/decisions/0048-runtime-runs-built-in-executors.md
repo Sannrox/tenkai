@@ -16,6 +16,8 @@
   (§4 a hardware-backed sealing key opens values; consequence resolved)
 - Amended: 2026-11-09 by [#1128](https://github.com/Sannrox/tenkai/issues/1128)
   (§3 removal packages; §4 Helm Secrets deleted on every runtime removal)
+- Amended by: [ADR 0049](0049-removing-built-in-executor-instances.md)
+  (§3 which releases a plan removes)
 - Issue: [#1119](https://github.com/Sannrox/tenkai/issues/1119)
 - Owner: Tenkai maintainers
 - Amends: [ADR 0045](0045-sealed-secrets.md) §4 (who writes the target, host
@@ -123,7 +125,10 @@ executor runs.
 A removal's package is the installed release, admitted as the server admits
 a removal: a recalled release can still be removed, and neither
 compatibility nor placement is checked. Only host releases are removed by a
-plan.
+plan. [ADR 0049](0049-removing-built-in-executor-instances.md) supersedes
+that sentence: a plan also removes `helm`, `kubernetes`,
+`kubernetes-inprocess`, `docker` and `shell` releases, once
+[#1132](https://github.com/Sannrox/tenkai/issues/1132) implements it.
 
 ### 4. Sealed values are written by the executor that applies the release
 

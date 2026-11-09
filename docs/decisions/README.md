@@ -47,4 +47,5 @@
 - [0045 — Sealed secrets delivered by the environment runtime](0045-sealed-secrets.md) (§4 amended by 0048)
 - [0046 — Workload identity and peer policy from dependency bindings](0046-workload-identity-and-peer-policy.md) (proposed)
 - [0047 — Host identity as the default operator sign-in](0047-host-identity.md)
-- [0048 — The environment runtime runs the built-in executors](0048-runtime-runs-built-in-executors.md)
+- [0048 — The environment runtime runs the built-in executors](0048-runtime-runs-built-in-executors.md) (§3 amended by 0049)
+- [0049 — Removing instances of built-in executors](0049-removing-built-in-executor-instances.md)
