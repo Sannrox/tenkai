@@ -599,10 +599,12 @@ async fn delivered_work(
     plan: Plan,
     claim: RuntimeClaim,
 ) -> Result<RuntimeWork, RuntimeDeliveryError> {
+    // Sealed steps are verified against the runtime's local policy, and a
+    // host step's approvals go to the applier (ADR 0048 §2).
     let approvals = if plan
         .steps
         .iter()
-        .any(crate::plan::Step::requires_local_approval_policy)
+        .any(|step| step.requires_local_approval_policy() || step.host.is_some())
     {
         // Keep envelopes whose digest does not match so the runtime can
         // refuse a forged plan instead of treating it as "not yet approved".
@@ -728,6 +730,20 @@ pub struct RuntimeInventoryResponse {
     pub environment: String,
     pub source: String,
     pub applied: Vec<String>,
+}
+
+/// Every applied-state record the runtime's host applier keeps for the
+/// environment (ADR 0048 §2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeHostRecordsReport {
+    pub records: Vec<crate::host_apply::state::AppliedStateRecord>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RuntimeHostRecordsResponse {
+    /// Products whose reported record was not stored before.
+    pub stored: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1230,6 +1246,30 @@ impl RuntimeDeliveryOperations {
                     }
                 },
             )
+    }
+
+    /// Admit the host applier's applied-state records a runtime reports for
+    /// its environment (ADR 0048 §2). Returns the products whose record was
+    /// new; planning uses the most advanced record of each product.
+    pub async fn report_host_records(
+        &self,
+        token: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
+        environment: &str,
+        report: &RuntimeHostRecordsReport,
+    ) -> Result<RuntimeHostRecordsResponse, RuntimeDeliveryError> {
+        let caller = caller.into();
+        let identity = self.admit_work(token, &caller, environment).await?;
+        self.note_activity(&identity, environment, caller.version, Activity::Inventory);
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "environment state unavailable".into(),
+            ));
+        };
+        let stored = crate::host_records::admit(&mut ctx, environment, &report.records)
+            .await
+            .map_err(|error| RuntimeDeliveryError::InvalidRequest(format!("{error:#}")))?;
+        Ok(RuntimeHostRecordsResponse { stored })
     }
 
     pub async fn report_inventory(

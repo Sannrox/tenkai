@@ -34,6 +34,9 @@ struct Applier {
     fail: Mutex<BTreeSet<HostAction>>,
     /// Runs once a command starts; the command then waits for a stop.
     hang: Mutex<Option<Hook>>,
+    /// The next command's applier dies once it started it: the started
+    /// record stays without a result, as after a crash or reboot.
+    crash: std::sync::atomic::AtomicBool,
     stopped: tokio::sync::Notify,
     /// Every start, and every command that ran, as `action product@version`.
     starts: Mutex<Vec<String>>,
@@ -72,6 +75,25 @@ impl Applier {
             return Ok(());
         }
         let now = crate::now_millis();
+        // Recovery before intake, as the applier's store does: a start of
+        // this instance without a result settles as interrupted.
+        let started_path =
+            instance_dir(&self.state, instance).join(crate::host_apply::state::STARTED_FILE);
+        if let Ok(bytes) = std::fs::read(&started_path) {
+            let started: crate::host_apply::state::HostApplyStarted =
+                serde_json::from_slice(&bytes)?;
+            let path = record_path(&self.state, &started.environment, &started.product);
+            let record: AppliedStateRecord = serde_json::from_slice(&std::fs::read(&path)?)?;
+            let result = started.result(
+                HostApplyOutcome::Interrupted,
+                None,
+                "started but never finished",
+                now,
+            );
+            Self::write(&path, &record.complete(&started, &result))?;
+            Self::write(&result_path, &result)?;
+            return Ok(());
+        }
         let spooled = self.spool.join(instance);
         let request = HostApplyRequest::parse(&std::fs::read(spooled.join(REQUEST_FILE))?)?;
         let admitted = (|| {
@@ -106,6 +128,10 @@ impl Applier {
             "{} {}@{}",
             verified.action, verified.product, verified.release.version
         ));
+        if self.crash.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            Self::write(&started_path, &started)?;
+            anyhow::bail!("the applier died");
+        }
         let hang = self.hang.lock().unwrap().take();
         let outcome = if let Some(hook) = hang {
             hook().await;
@@ -187,6 +213,7 @@ impl Host {
             state: root.join("state"),
             fail: Mutex::default(),
             hang: Mutex::default(),
+            crash: Default::default(),
             stopped: tokio::sync::Notify::new(),
             starts: Mutex::default(),
             runs: Mutex::default(),
@@ -316,6 +343,33 @@ impl Drop for Host {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+/// One host step through the shared driver under the server's lease, as
+/// apply runs it.
+async fn run_host_step(
+    ctx: &mut Ctx,
+    lease: &super::EnvironmentLease,
+    host: &HostExecutor,
+    request: &HostApplyRequest,
+    release: &super::ReleaseContent,
+) -> Result<crate::host_executor::step::HostStepEnd> {
+    let inputs = release.manifest.immutable_inputs();
+    crate::host_executor::step::run(
+        &mut super::execution_lease::ApplyMutationFence { ctx, lease },
+        host,
+        request,
+        &crate::host_executor::step::SpooledRelease {
+            environment: &release.environment,
+            product: &release.product,
+            release_digest: &release.manifest_digest,
+            root: &release.content_root,
+            inputs: &inputs,
+            artifact_digest: &release.artifact_digest,
+            dependency_document: None,
+        },
+    )
+    .await
 }
 
 fn statuses(outcomes: &[Outcome]) -> Vec<StepOutcomeStatus> {
@@ -741,7 +795,7 @@ async fn losing_the_lease_stops_the_unit_and_a_retry_never_runs_it_again() {
     .unwrap();
     let executor = host.executors.host().unwrap().clone();
 
-    let error = super::host_step::run(&mut host.ctx, &lease, &executor, &request, &release)
+    let error = run_host_step(&mut host.ctx, &lease, &executor, &request, &release)
         .await
         .unwrap_err();
 
@@ -764,10 +818,13 @@ async fn losing_the_lease_stops_the_unit_and_a_retry_never_runs_it_again() {
     let lease = super::claim_environment(&mut host.ctx, "edge", &plan.id)
         .await
         .unwrap();
-    let retried = super::host_step::run(&mut host.ctx, &lease, &executor, &request, &release)
+    let retried = run_host_step(&mut host.ctx, &lease, &executor, &request, &release)
         .await
         .unwrap();
-    assert_eq!(retried, super::host_step::HostStepEnd::Recorded(result));
+    assert_eq!(
+        retried,
+        crate::host_executor::step::HostStepEnd::Recorded(result)
+    );
     assert_eq!(
         *host.applier.starts.lock().unwrap(),
         ["install cluster@1.0.0"]
@@ -855,9 +912,16 @@ async fn a_unit_left_running_by_an_earlier_holder_is_stopped_before_the_next_app
         .await
         .unwrap();
 
-    super::host_step::fence_environment(&mut host.ctx, &lease, &executor)
-        .await
-        .unwrap();
+    crate::host_executor::step::fence_environment(
+        &mut super::execution_lease::ApplyMutationFence {
+            ctx: &mut host.ctx,
+            lease: &lease,
+        },
+        &executor,
+        "edge",
+    )
+    .await
+    .unwrap();
 
     orphan.await.unwrap().unwrap();
     assert!(host.applier.running.lock().unwrap().is_empty());
@@ -1247,4 +1311,93 @@ async fn an_install_whose_outcome_was_never_recorded_can_still_be_removed() {
 
     assert_eq!(remove.steps.len(), 1);
     assert_eq!(remove.steps[0].action, Action::Remove);
+}
+
+/// The admitted release and the approved request of `plan`'s first step.
+async fn first_step_request(
+    host: &mut Host,
+    plan: &Plan,
+) -> (super::ReleaseContent, HostApplyRequest) {
+    let step = &plan.steps[0];
+    let release = super::release_content::admit(
+        &mut host.ctx,
+        &crate::plan::ReleasePin {
+            release_id: step.release_id.clone(),
+            digest: step.release_digest.clone(),
+            artifact_digest: step.artifact_digest.clone(),
+            workdir: step.workdir.clone(),
+        },
+        "edge",
+        step,
+        false,
+    )
+    .await
+    .unwrap();
+    let path = host.root.join("approval.json");
+    crate::dev_sign::sign_plan_approval_for_digest(
+        &host.root.join("keys"),
+        &format!("sha256:{}", plan.executable_digest().unwrap()),
+        "edge",
+        &path,
+        &host.root.join("approvers.toml"),
+        3600,
+    )
+    .unwrap();
+    let approvals = crate::plan_approval::load_envelopes(&path).unwrap();
+    let signature = crate::catalog::signature_envelope(&mut host.ctx, &step.release_id)
+        .await
+        .unwrap();
+    let request = super::step_lifecycle::host_request(
+        plan,
+        step,
+        step.host.unwrap(),
+        &release,
+        signature,
+        &approvals,
+    )
+    .unwrap();
+    (release, request)
+}
+
+/// A crash after the applier started a step (the runtime or the applier
+/// died, or the host rebooted) leaves a start without a result. A retry of
+/// the step, as a runtime runs it under a later claim, addresses the same
+/// instance, which settles as interrupted: it is never run again.
+#[tokio::test]
+async fn a_step_whose_applier_died_resolves_interrupted_and_never_runs_again() {
+    let mut host = Host::new("crash").await;
+    host.release("1.0.0", false).await;
+    let plan = host.plan().await;
+    let (release, request) = first_step_request(&mut host, &plan).await;
+    let executor = host.executors.host().unwrap().clone();
+    host.applier
+        .crash
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let lease = super::claim_environment(&mut host.ctx, "edge", &plan.id)
+        .await
+        .unwrap();
+    let crashed = run_host_step(&mut host.ctx, &lease, &executor, &request, &release)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&crashed, crate::host_executor::step::HostStepEnd::Unknown(detail) if detail.contains("recorded no result")),
+        "{crashed:?}"
+    );
+
+    let retried = run_host_step(&mut host.ctx, &lease, &executor, &request, &release)
+        .await
+        .unwrap();
+    let crate::host_executor::step::HostStepEnd::Recorded(result) = retried else {
+        panic!("{retried:?}");
+    };
+    assert_eq!(result.outcome, HostApplyOutcome::Interrupted);
+    assert_eq!(
+        *host.applier.runs.lock().unwrap(),
+        ["install cluster@1.0.0"]
+    );
+    // The record is dirty at the generation the start advanced to, so the
+    // next plan starts from it.
+    assert_eq!(host.record().generation, 1);
+    assert!(matches!(host.record().state, AppliedState::Dirty { .. }));
 }

@@ -18,8 +18,10 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
 
 use crate::fenced_mutation::{MutationCommand, MutationFence};
+use crate::host_executor::step::{HOST_NOT_RESTORED, HostStepEnd, SpooledRelease};
 use crate::manifest::{self, Manifest};
-use crate::plan::{Action, SealedStep, Step};
+use crate::plan::{Action, HostStep, Plan, SealedStep, Step};
+use crate::plan_approval::ApprovalEnvelope;
 use crate::release_signing::TrustRoots;
 use crate::runtime_agent::RuntimeClient;
 use crate::runtime_delivery::{RuntimeRelease, RuntimeSealedValue, RuntimeStepReceipt};
@@ -70,16 +72,21 @@ pub fn load_release_roots(path: &Path) -> Result<TrustRoots> {
 /// activation runs failed-apply cleanup when the release declares
 /// `deploy.uninstall`, then restores the release the step replaced.
 ///
+/// A host step instead goes to this host's applier once, with `approvals`,
+/// and is never cleaned up or restored ([`Run::host`]).
+///
 /// A failed step is a receipt. `Err` means the claim was fenced or its state
 /// is unknown: nothing is reported, and the plan is retried under a later
 /// claim.
 pub(crate) async fn execute_step(
     client: &RuntimeClient,
     config: &Arc<BuiltinConfig>,
-    plan_id: &str,
+    plan: &Plan,
     generation: u64,
     step: &Step,
+    approvals: &[ApprovalEnvelope],
 ) -> Result<RuntimeStepReceipt> {
+    let plan_id = plan.id.as_str();
     let receipt = |result: Result<(), String>| RuntimeStepReceipt {
         step_id: step.id.clone(),
         succeeded: result.is_ok(),
@@ -93,6 +100,9 @@ pub(crate) async fn execute_step(
         plan_id,
         generation,
     };
+    if let Some(host) = step.host {
+        return Ok(receipt(run.host(plan, step, host, approvals).await?));
+    }
     let target = match run.prepare(step, false).await? {
         Ok(target) => target,
         Err(detail) => return Ok(receipt(Err(detail))),
@@ -187,6 +197,9 @@ pub(crate) async fn execute_step(
 /// A release verified and placed here, with the executor it runs with.
 struct Prepared {
     manifest: Manifest,
+    /// The manifest text exactly as signed, and its signature.
+    raw_manifest: String,
+    signature: crate::release_signing::SignatureEnvelope,
     request: SoftwareApplyRequest,
     /// The signed digest the placed inputs hash to.
     artifact_digest: String,
@@ -255,7 +268,11 @@ impl Run<'_> {
                     Expected::target(&step)
                 };
                 let verified = config.verify(release, &environment, &expected)?;
-                config.admit_executor(&verified.manifest, !step.sealed.is_empty())?;
+                config.admit_executor(
+                    &verified.manifest,
+                    !step.sealed.is_empty(),
+                    step.host.is_some() && !restore,
+                )?;
                 Ok::<_, anyhow::Error>(verified)
             }
         })
@@ -264,6 +281,8 @@ impl Run<'_> {
             |error: anyhow::Error| Ok(Err(sanitize_diagnostic_text(&format!("{error:#}"))));
         let VerifiedRelease {
             manifest,
+            raw_manifest,
+            signature,
             request,
             artifact_digest,
             replaced_executor,
@@ -271,12 +290,19 @@ impl Run<'_> {
             Ok(verified) => verified,
             Err(error) => return refused(error),
         };
-        let executor = match self.config.executors.resolve(manifest.deploy.executor) {
-            Ok(executor) => executor,
-            Err(error) => return refused(error),
+        // A host release runs through the applier, not an executor.
+        let executor = if manifest.deploy.executor == Some(SoftwareExecutorKind::Host) {
+            None
+        } else {
+            match self.config.executors.resolve(manifest.deploy.executor) {
+                Ok(executor) => executor,
+                Err(error) => return refused(error),
+            }
         };
         Ok(Ok(Prepared {
             manifest,
+            raw_manifest,
+            signature,
             request,
             artifact_digest,
             replaced_executor,
@@ -306,6 +332,76 @@ impl Run<'_> {
                 command,
             },
         )
+    }
+
+    /// Run host `step` once through this host's applier (ADR 0048 §2): the
+    /// request is the claimed plan, the verified signed release, and the
+    /// plan's approvals, which the applier verifies itself against its own
+    /// trust and records. [`fence_host_units`] ran when the plan was claimed.
+    /// A failed host step is never cleaned up, re-applied, or restored.
+    async fn host(
+        &self,
+        plan: &Plan,
+        step: &Step,
+        host: HostStep,
+        approvals: &[ApprovalEnvelope],
+    ) -> Result<Result<(), String>> {
+        let target = match self.prepare(step, false).await? {
+            Ok(target) => target,
+            Err(detail) => return Ok(Err(detail)),
+        };
+        let did_not_run = |detail: String| {
+            Err(format!(
+                "host {} of {} {} did not run: {detail}",
+                host.action, step.product, step.to
+            ))
+        };
+        if target.manifest.deploy.executor != Some(SoftwareExecutorKind::Host) {
+            return Ok(did_not_run(format!(
+                "step {} is a host step, and {} is not a host release",
+                step.id, step.release_id
+            )));
+        }
+        let applier = match self.config.executors.host() {
+            Ok(applier) => applier,
+            Err(error) => return Ok(did_not_run(format!("{error:#}"))),
+        };
+        let request = match crate::host_apply::HostApplyRequest::new(
+            plan,
+            &step.id,
+            host.action,
+            &target.raw_manifest,
+            target.signature.clone(),
+            approvals,
+        ) {
+            Ok(request) => request,
+            Err(error) => return Ok(did_not_run(format!("{error:#}"))),
+        };
+        let mut fence = ClaimFence {
+            client: self.client,
+            plan_id: self.plan_id,
+            generation: self.generation,
+        };
+        let environment = self.client.environment();
+        let inputs = target.manifest.immutable_inputs();
+        let dependency_document = &target.request.dependency_document;
+        let ended = crate::host_executor::step::run(
+            &mut fence,
+            applier,
+            &request,
+            &SpooledRelease {
+                environment,
+                product: &step.product,
+                release_digest: &step.release_digest,
+                root: &target.request.workdir,
+                inputs: &inputs,
+                artifact_digest: &target.artifact_digest,
+                dependency_document: (!dependency_document.is_empty())
+                    .then_some(dependency_document.as_str()),
+            },
+        )
+        .await?;
+        Ok(host_outcome(step, host, ended))
     }
 
     fn lock(&self, release: &Prepared) -> PathBuf {
@@ -424,6 +520,48 @@ impl Run<'_> {
     }
 }
 
+/// Stop every host unit an earlier holder of this environment's claim left
+/// running, before any step of the plan claimed at `generation` runs, as the
+/// server does when it claims the environment lease. Nothing to do without
+/// a host applier. `Err` means the claim was fenced or a unit would not stop.
+pub(crate) async fn fence_host_units(
+    client: &RuntimeClient,
+    config: &BuiltinConfig,
+    plan_id: &str,
+    generation: u64,
+) -> Result<()> {
+    let Ok(host) = config.executors.host() else {
+        return Ok(());
+    };
+    crate::host_executor::step::fence_environment(
+        &mut ClaimFence {
+            client,
+            plan_id,
+            generation,
+        },
+        host,
+        client.environment(),
+    )
+    .await
+}
+
+/// A host step's receipt from how it ended: only a recorded success
+/// succeeds.
+fn host_outcome(step: &Step, host: HostStep, ended: HostStepEnd) -> Result<(), String> {
+    let what = format!("host {} of {} {}", host.action, step.product, step.to);
+    match ended {
+        HostStepEnd::Recorded(result) if result.outcome.succeeded() => Ok(()),
+        HostStepEnd::Recorded(result) => Err(format!(
+            "{what} ended {:?}: {}; {HOST_NOT_RESTORED}",
+            result.outcome, result.detail
+        )),
+        HostStepEnd::Unknown(detail) => {
+            Err(format!("{what} failed: {detail}; {HOST_NOT_RESTORED}"))
+        }
+        HostStepEnd::NotRun(detail) => Err(format!("{what} did not run: {detail}")),
+    }
+}
+
 /// Run a blocking executor call while renewing the claim every 30 seconds.
 /// Once the claim is fenced, or its renewal outcome is unknown, `work` is
 /// asked to stop and the outer `Err` reports why.
@@ -539,6 +677,9 @@ impl<'a> Expected<'a> {
 #[derive(Debug)]
 pub struct VerifiedRelease {
     pub manifest: Manifest,
+    /// The manifest text exactly as signed, and its signature.
+    pub raw_manifest: String,
+    pub signature: crate::release_signing::SignatureEnvelope,
     /// The server's request with this host's workdir, cluster configuration,
     /// and secret directory filled in.
     pub request: SoftwareApplyRequest,
@@ -624,6 +765,8 @@ impl BuiltinConfig {
         };
         Ok(VerifiedRelease {
             manifest,
+            raw_manifest: release.manifest,
+            signature: release.signature,
             request,
             artifact_digest: expected.artifact_digest.to_owned(),
             replaced_executor,
@@ -675,17 +818,30 @@ impl BuiltinConfig {
     }
 
     /// Refuse a release this runtime must not run with a built-in executor,
-    /// naming why. Only Helm writes sealed values (ADR 0048 §4). `Ok` means
+    /// naming why. Only Helm writes sealed values (ADR 0048 §4). A host
+    /// release runs only as a `host_step`, through this host's applier, and
+    /// is never restored: anything else would run its commands outside the
+    /// applier's approval and generation checks. `Ok` means
     /// [`SoftwareExecutors::resolve`] decides.
-    pub fn admit_executor(&self, manifest: &Manifest, sealed: bool) -> Result<()> {
+    pub fn admit_executor(&self, manifest: &Manifest, sealed: bool, host_step: bool) -> Result<()> {
         if manifest.product.kind.policy().target() != crate::product_kind::ProductTarget::Software {
             bail!("only software releases run on an environment runtime");
         }
         let kind = self.executors.effective_kind(manifest.deploy.executor);
+        if (kind == Some(SoftwareExecutorKind::Host)) != host_step {
+            bail!(if host_step {
+                "the step is a host step, and the release is not a host release"
+            } else {
+                "a host release runs only as a host step through the host applier"
+            });
+        }
         match kind {
-            Some(SoftwareExecutorKind::Host) => {
-                bail!("host releases do not run on an environment runtime in built-in mode yet")
+            Some(SoftwareExecutorKind::Host) if sealed => {
+                bail!("host releases do not write sealed secrets on an environment runtime yet")
             }
+            Some(SoftwareExecutorKind::Host) => self.executors.host().map(|_| ()).context(
+                "this runtime runs host releases only with a host applier (TENKAI_HOST_SPOOL_DIR)",
+            ),
             Some(
                 SoftwareExecutorKind::Helm
                 | SoftwareExecutorKind::Kubernetes
@@ -1038,19 +1194,21 @@ mod tests {
     }
 
     #[test]
-    fn kubernetes_releases_need_a_local_cluster_config_and_host_releases_are_refused() {
+    fn kubernetes_releases_need_a_local_cluster_config_and_host_releases_a_host_applier() {
         let mut case = case("executor = \"helm\"\n");
         let manifest = manifest::parse_raw(&case.release.manifest).unwrap();
         let refused = format!(
             "{:#}",
-            case.config.admit_executor(&manifest, false).unwrap_err()
+            case.config
+                .admit_executor(&manifest, false, false)
+                .unwrap_err()
         );
         assert!(
             refused.contains("TENKAI_RUNTIME_CLUSTER_CONFIG"),
             "{refused}"
         );
         case.config.cluster_config = Some(case.root.join("cluster.yaml"));
-        case.config.admit_executor(&manifest, false).unwrap();
+        case.config.admit_executor(&manifest, false, false).unwrap();
 
         let host = manifest::parse_raw(
             "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\nexecutor = \"host\"\ninstall = \"true\"\nuninstall = \"true\"\nhealth = \"true\"\ninputs = [\"app\"]\n",
@@ -1058,19 +1216,47 @@ mod tests {
         .unwrap();
         let refused = format!(
             "{:#}",
-            case.config.admit_executor(&host, false).unwrap_err()
+            case.config.admit_executor(&host, false, true).unwrap_err()
         );
-        assert!(refused.contains("host releases"), "{refused}");
+        assert!(refused.contains("TENKAI_HOST_SPOOL_DIR"), "{refused}");
+        let executors = std::mem::take(&mut case.config.executors);
+        case.config.executors =
+            executors.with_host(Arc::new(crate::host_executor::HostExecutor::new(
+                case.root.join("spool"),
+                case.root.join("state"),
+                Arc::new(crate::host_executor::Systemctl),
+            )));
+        case.config.admit_executor(&host, false, true).unwrap();
+        // Host sealed files are not written yet.
+        let refused = format!(
+            "{:#}",
+            case.config.admit_executor(&host, true, true).unwrap_err()
+        );
+        assert!(refused.contains("sealed"), "{refused}");
+        // A host release never runs outside a host step, as a plain step or
+        // a restore, and a host step runs nothing but a host release.
+        let refused = format!(
+            "{:#}",
+            case.config.admit_executor(&host, false, false).unwrap_err()
+        );
+        assert!(refused.contains("only as a host step"), "{refused}");
+        let refused = format!(
+            "{:#}",
+            case.config
+                .admit_executor(&manifest, false, true)
+                .unwrap_err()
+        );
+        assert!(refused.contains("not a host release"), "{refused}");
 
         // Only Helm writes sealed values (ADR 0048 §4).
-        case.config.admit_executor(&manifest, true).unwrap();
+        case.config.admit_executor(&manifest, true, false).unwrap();
         let shell = manifest::parse_raw(
             "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\ninputs = [\"app\"]\n",
         )
         .unwrap();
         let refused = format!(
             "{:#}",
-            case.config.admit_executor(&shell, true).unwrap_err()
+            case.config.admit_executor(&shell, true, false).unwrap_err()
         );
         assert!(refused.contains("only the helm executor"), "{refused}");
     }

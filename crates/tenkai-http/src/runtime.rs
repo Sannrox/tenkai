@@ -183,6 +183,29 @@ pub(super) async fn runtime_inventory(
     }
 }
 
+/// The host applier's records a runtime reports (ADR 0048 §2).
+pub(super) async fn runtime_host_records(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
+    Json(report): Json<tenkai::runtime_delivery::RuntimeHostRecordsReport>,
+) -> Response {
+    match state
+        .runtime_delivery
+        .report_host_records(
+            bearer(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
+            &environment,
+            &report,
+        )
+        .await
+    {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => runtime_delivery_error(error),
+    }
+}
+
 /// The calling instance, the agent's version when sent (#673), and the
 /// connection's verified client certificate (#674).
 fn runtime_caller<'a>(

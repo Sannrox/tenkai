@@ -25,17 +25,18 @@ fn refused(error: anyhow::Error) -> anyhow::Error {
 
 /// Build the release package for `step` of `plan`: its target, or with
 /// `restore` its restore pin. Refuses, with [`ReleaseRefused`], steps a
-/// runtime cannot apply with a built-in executor (host steps and removals)
-/// and releases the server would not apply itself.
+/// runtime cannot apply with a built-in executor (removals) and releases the
+/// server would not apply itself. A host step's package is its release; the
+/// runtime hands it to its own host applier.
 pub(crate) async fn runtime_release(
     ctx: &mut Ctx,
     plan: &Plan,
     step: &Step,
     restore: bool,
 ) -> Result<RuntimeRelease> {
-    if step.host.is_some() {
+    if step.host.is_some() && restore {
         return Err(refused(anyhow!(
-            "step {} is a host step; host releases do not run through a runtime's built-in executors yet",
+            "step {} is a host step; host releases are never restored automatically",
             step.id
         )));
     }

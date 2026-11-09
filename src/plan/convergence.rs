@@ -222,6 +222,8 @@ async fn bind_host_steps(
     steps: Vec<Step>,
 ) -> Result<Vec<Step>> {
     let mut bound = Vec::with_capacity(steps.len());
+    // Read once the first host step needs them.
+    let mut records = None;
     for mut step in steps {
         // A release that is missing or unreadable is left to apply
         // admission, which refuses it.
@@ -240,7 +242,13 @@ async fn bind_host_steps(
             continue;
         }
         require_host_product(ctx, executors, env, &step.product).await?;
-        let record = executors.host()?.applied_state(env, &step.product)?;
+        let records = match &mut records {
+            Some(records) => records,
+            None => {
+                records.insert(crate::host_records::HostRecords::of(ctx, executors, env).await?)
+            }
+        };
+        let record = records.applied_state(env, &step.product)?;
         match step.host {
             // An applied release's outstanding health step, at the record's
             // generation.
@@ -539,14 +547,17 @@ async fn compute_snapshot_with_policy(
         }
         crate::topology::require_placement(ctx, env, &release).await?;
         // The root-side applier's record, not the server's view, says what a
-        // host release has applied (ADR 0041 section 2).
+        // host release has applied (ADR 0041 section 2), read here or
+        // reported by the environment's runtime (ADR 0048 section 2).
         let host_record = match readable_manifest(ctx, &release).await? {
             Some(manifest)
                 if manifest.deploy.executor
                     == Some(crate::software_executor::SoftwareExecutorKind::Host) =>
             {
                 Some((
-                    executors.host()?.applied_state(env, &product)?,
+                    crate::host_records::HostRecords::of(ctx, executors, env)
+                        .await?
+                        .applied_state(env, &product)?,
                     declares_health(&manifest),
                 ))
             }
@@ -836,7 +847,7 @@ async fn compute_snapshot_with_policy(
             removable.insert(instance.to_string());
         }
     }
-    match executors.host() {
+    match crate::host_records::HostRecords::of(ctx, executors, env).await {
         Ok(host) => {
             // Only products this server delivered to the environment: its
             // deployment history names them, or the step that last started
