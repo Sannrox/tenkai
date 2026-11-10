@@ -24,7 +24,7 @@ pub(crate) enum CanaryCommand {
     },
     /// Rebuild durable canary outcomes for a completed apply.
     Repair { plan_id: String },
-    /// Remove an abandoned promotion lock after verifying no operation is running.
+    /// Free a promotion lock now instead of waiting a minute for it to expire.
     Unlock { product: String, channel: String },
 }
 
