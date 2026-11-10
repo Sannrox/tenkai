@@ -38,12 +38,20 @@ pub struct CommandEnd {
     pub detail: String,
 }
 
+/// Where a step's sealed values and workload certificate were written before
+/// its command runs.
+#[derive(Debug, Default)]
+pub struct Written {
+    pub secrets_dir: Option<std::path::PathBuf>,
+    pub identity_dir: Option<std::path::PathBuf>,
+}
+
 /// The command's whole environment: the fixed allowlist plus values from
-/// the verified step, and the directory of its sealed values when it writes
-/// any.
+/// the verified step, and the directories of its sealed values and workload
+/// certificate when it writes them.
 pub fn command_environment(
     step: &VerifiedHostStep,
-    secrets_dir: Option<&Path>,
+    written: &Written,
 ) -> Vec<(&'static str, String)> {
     let mut environment = vec![
         ("PATH", PATH.into()),
@@ -67,8 +75,11 @@ pub fn command_environment(
         ("TENKAI_HOST_ACTION", step.action.as_str().into()),
         ("TENKAI_PLAN_ID", step.plan_id.clone()),
     ];
-    if let Some(dir) = secrets_dir {
+    if let Some(dir) = &written.secrets_dir {
         environment.push(("TENKAI_SECRETS_DIR", dir.display().to_string()));
+    }
+    if let Some(dir) = &written.identity_dir {
+        environment.push(("TENKAI_IDENTITY_DIR", dir.display().to_string()));
     }
     environment
 }
@@ -95,7 +106,7 @@ pub fn adopt_descendants() -> Result<()> {
 pub async fn run_command(
     step: &VerifiedHostStep,
     workdir: &Path,
-    secrets_dir: Option<&Path>,
+    written: &Written,
     timeout: Duration,
     stop: impl Future<Output = ()>,
 ) -> Result<CommandEnd> {
@@ -105,7 +116,7 @@ pub async fn run_command(
         .arg(&step.command)
         .current_dir(workdir)
         .env_clear()
-        .envs(command_environment(step, secrets_dir))
+        .envs(command_environment(step, written))
         .stdin(Stdio::null())
         .kill_on_drop(true)
         .process_group(0);

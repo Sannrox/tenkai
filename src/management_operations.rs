@@ -3163,6 +3163,8 @@ mod tests {
             restore: None,
             rewrap: None,
             issuer: None,
+            identity: None,
+            restore_identity: None,
         };
         use crate::apply::{Outcome, StepOutcomeStatus};
         let outcomes = [

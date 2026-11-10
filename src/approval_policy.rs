@@ -1180,6 +1180,8 @@ mod tests {
                 },
                 rewrap: None,
                 issuer: None,
+                identity: None,
+                restore_identity: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,

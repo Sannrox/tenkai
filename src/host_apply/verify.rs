@@ -62,6 +62,9 @@ pub struct VerifiedHostStep {
     /// The sealed values the approved step writes before its command runs
     /// (ADR 0048 §4). Empty for most steps.
     pub sealed: Vec<crate::plan::SealedStep>,
+    /// The workload certificate the approved step installs before its
+    /// command runs (ADR 0046 §4).
+    pub identity: Option<crate::workload_identity::IdentityGrant>,
 }
 
 /// Verify a request copied into root-owned storage, and the copied release
@@ -209,6 +212,7 @@ pub fn verify_request(
         approvals,
         purposes,
         sealed: step.sealed.clone(),
+        identity: step.identity.clone(),
     })
 }
 

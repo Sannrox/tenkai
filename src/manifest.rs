@@ -313,6 +313,10 @@ pub struct DeploySection {
     /// (ADR 0044 §2). Absent is `"one"`.
     #[serde(default, skip_serializing_if = "is_one_instance")]
     pub instances: DeployInstances,
+    /// The workload certificate this release asks for (ADR 0046 §1).
+    /// Absent means none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<crate::workload_identity::IdentitySection>,
 }
 
 impl Default for DeploySection {
@@ -325,6 +329,7 @@ impl Default for DeploySection {
             health: None,
             executor: None,
             instances: DeployInstances::One,
+            identity: None,
         }
     }
 }
@@ -830,6 +835,15 @@ fn validate_deploy_executor(manifest: &Manifest) -> Result<()> {
         crate::ontology::validate_instance_name(&manifest.product.name).with_context(|| {
             "[deploy] instances = \"many\" requires the product name to be a DNS label of at most 40 characters"
         })?;
+    }
+    if let Some(identity) = &manifest.deploy.identity {
+        if manifest.product.kind.policy().target() != crate::product_kind::ProductTarget::Software {
+            bail!(
+                "[deploy.identity] is only supported for software products, not {:?}",
+                manifest.product.kind
+            );
+        }
+        crate::workload_identity::validate(identity, manifest.deploy.instances.allows_several())?;
     }
     Ok(())
 }

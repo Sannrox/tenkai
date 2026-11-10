@@ -8,6 +8,11 @@
 //! content-addressed, so a retry finds the Secret it already wrote, and the
 //! chart receives it as `tenkai.secrets.<secret>.name`. Tenkai never writes
 //! over a Secret it does not own.
+//!
+//! A workload certificate (ADR 0046 §4) is not content-addressed: it changes
+//! on every issuance and must not roll the workload. It lands in one stable
+//! Secret `<instance>-tenkai-identity`, replaced in place, which the chart
+//! receives as `tenkai.identity.secret`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -29,6 +34,9 @@ const OWNER_LABEL: &str = "tenkai.dev/owner";
 const OWNER: &str = "tenkai";
 const INSTANCE_LABEL: &str = "tenkai.dev/instance";
 const SECRET_LABEL: &str = "tenkai.dev/secret";
+/// Marks the workload certificate Secret. It carries no [`SECRET_LABEL`], so
+/// pruning sealed values never groups it with one.
+const IDENTITY_LABEL: &str = "tenkai.dev/identity";
 
 /// The Secrets API the writer needs, so tests can stand in for a cluster.
 pub(crate) trait SecretApi {
@@ -37,6 +45,9 @@ pub(crate) trait SecretApi {
     fn create(&self, namespace: &str, secret: &Secret) -> Result<bool>;
     fn list(&self, namespace: &str, selector: &str) -> Result<Vec<Secret>>;
     fn delete(&self, namespace: &str, name: &str) -> Result<()>;
+    /// Replace the Secret of that name, only if it still has the
+    /// `resourceVersion` `secret` carries; a conflict fails.
+    fn replace(&self, namespace: &str, secret: &Secret) -> Result<()>;
 }
 
 /// The Secret one secret name of `request` is written to.
@@ -163,6 +174,111 @@ pub(crate) fn write(api: &dyn SecretApi, request: &SoftwareApplyRequest) -> Resu
     Ok(sets)
 }
 
+/// The stable Secret a workload certificate of `instance` lands in.
+fn identity_secret_name(instance: &str) -> String {
+    format!("{instance}-tenkai-identity")
+}
+
+/// The `--set` values that hand the workload certificate Secret to the
+/// chart: its name, and the issuer generation the pod template carries so a
+/// rotated issuer rolls the workload.
+pub(crate) fn identity_sets(request: &SoftwareApplyRequest) -> Result<Vec<String>> {
+    let Some(issued) = &request.identity else {
+        return Ok(Vec::new());
+    };
+    let instance = request.instance_name();
+    require_dns_label("instance", instance)?;
+    Ok(vec![
+        format!("tenkai.identity.secret={}", identity_secret_name(instance)),
+        format!(
+            "tenkai.identity.generation={}",
+            issued.grant.issuer_generation
+        ),
+    ])
+}
+
+/// Write the workload certificate `request` carries into the instance's
+/// stable Secret, replacing the one it held. The Secret also records the
+/// grant, so renewal re-issues exactly it. Refuses a Secret of that name
+/// Tenkai does not own. Writes nothing when no certificate was issued.
+pub(crate) fn write_identity(api: &dyn SecretApi, request: &SoftwareApplyRequest) -> Result<()> {
+    let Some(issued) = &request.identity else {
+        return Ok(());
+    };
+    let namespace = &request.environment;
+    let instance = request.instance_name();
+    require_dns_label("instance", instance)?;
+    let name = identity_secret_name(instance);
+    let existing = api.get(namespace, &name)?;
+    if let Some(existing) = &existing
+        && !owns_identity(existing, instance)
+    {
+        bail!(
+            "Secret {name} in {namespace} exists and is not Tenkai's; Tenkai never writes over it"
+        );
+    }
+    let mut secret = Secret {
+        metadata: ObjectMeta {
+            name: Some(name.clone()),
+            labels: Some(BTreeMap::from([
+                (OWNER_LABEL.to_owned(), OWNER.to_owned()),
+                (INSTANCE_LABEL.to_owned(), instance.to_owned()),
+                (IDENTITY_LABEL.to_owned(), "true".to_owned()),
+            ])),
+            ..ObjectMeta::default()
+        },
+        type_: Some("Opaque".into()),
+        data: Some(
+            issued
+                .files()?
+                .into_iter()
+                .map(|(file, bytes)| (file.to_owned(), ByteString(bytes.to_vec())))
+                .collect(),
+        ),
+        ..Secret::default()
+    };
+    // Create when absent, else replace exactly the version checked as
+    // Tenkai's: a Secret created or changed meanwhile fails the write, and
+    // the step's retry checks it again.
+    let written = match existing {
+        None => api.create(namespace, &secret).and_then(|created| {
+            if created {
+                Ok(())
+            } else {
+                bail!("Secret {name} in {namespace} appeared while it was written")
+            }
+        }),
+        Some(existing) => {
+            secret.metadata.resource_version = existing.metadata.resource_version;
+            api.replace(namespace, &secret)
+        }
+    };
+    for value in secret.data.iter_mut().flat_map(|data| data.values_mut()) {
+        value.0.zeroize();
+    }
+    written
+}
+
+fn is_identity(secret: &Secret) -> bool {
+    secret
+        .metadata
+        .labels
+        .as_ref()
+        .is_some_and(|labels| labels.contains_key(IDENTITY_LABEL))
+}
+
+fn owns_identity(secret: &Secret, instance: &str) -> bool {
+    let labels = secret.metadata.labels.as_ref();
+    let label = |key: &str| {
+        labels
+            .and_then(|labels| labels.get(key))
+            .map(String::as_str)
+    };
+    label(OWNER_LABEL) == Some(OWNER)
+        && label(INSTANCE_LABEL) == Some(instance)
+        && label(IDENTITY_LABEL) == Some("true")
+}
+
 fn instance_selector(instance: &str) -> String {
     format!("{OWNER_LABEL}={OWNER},{INSTANCE_LABEL}={instance}")
 }
@@ -177,7 +293,7 @@ pub(crate) fn prune(api: &dyn SecretApi, request: &SoftwareApplyRequest) -> Resu
     let mut by_secret: BTreeMap<String, Vec<Secret>> = BTreeMap::new();
     for secret in api.list(namespace, &instance_selector(request.instance_name()))? {
         let name = secret.metadata.name.as_deref().unwrap_or_default();
-        if current.iter().any(|current| current == name) {
+        if is_identity(&secret) || current.iter().any(|current| current == name) {
             continue;
         }
         let label = secret
@@ -204,7 +320,9 @@ pub(crate) fn prune(api: &dyn SecretApi, request: &SoftwareApplyRequest) -> Resu
     Ok(())
 }
 
-/// Delete every Secret Tenkai wrote for the instance `request` removes.
+/// Delete every Secret Tenkai wrote for the instance `request` removes,
+/// the workload certificate's included: a release applied after it issues
+/// its own.
 pub(crate) fn remove_all(api: &dyn SecretApi, request: &SoftwareApplyRequest) -> Result<()> {
     let namespace = &request.environment;
     for secret in api.list(namespace, &instance_selector(request.instance_name()))? {
@@ -287,6 +405,18 @@ impl SecretApi for LiveSecrets {
         }))
     }
 
+    fn replace(&self, namespace: &str, secret: &Secret) -> Result<()> {
+        let name = secret.metadata.name.as_deref().unwrap_or_default();
+        block_on(bounded(async {
+            self.api(namespace)
+                .replace(name, &kube::api::PostParams::default(), secret)
+                .await
+                .map(|_| ())
+                // The API's error names the object, never its data.
+                .map_err(|error| anyhow::anyhow!("replacing Secret {name} in {namespace}: {error}"))
+        }))
+    }
+
     fn delete(&self, namespace: &str, name: &str) -> Result<()> {
         block_on(bounded(async {
             match self
@@ -366,6 +496,18 @@ mod tests {
                 .retain(|secret| secret.metadata.name.as_deref() != Some(name));
             Ok(())
         }
+
+        fn replace(&self, namespace: &str, secret: &Secret) -> Result<()> {
+            let name = secret.metadata.name.as_deref().unwrap();
+            let current = self.get(namespace, name)?.unwrap();
+            anyhow::ensure!(
+                current.metadata.resource_version == secret.metadata.resource_version,
+                "conflict"
+            );
+            self.delete(namespace, name)?;
+            self.0.borrow_mut().push(secret.clone());
+            Ok(())
+        }
     }
 
     impl Memory {
@@ -420,6 +562,48 @@ mod tests {
         // A retry after a crash finds the Secret it wrote.
         assert_eq!(write(&api, &request).unwrap(), sets);
         assert_eq!(api.names().len(), 1);
+    }
+
+    fn issued(certificate: &str) -> SoftwareApplyRequest {
+        use tenkai::workload_identity::{CertificateRole, IdentityGrant, IssuedIdentity, Reload};
+        let mut request = request(&[]);
+        request.identity = Some(IssuedIdentity {
+            grant: IdentityGrant {
+                uri: "tenkai://prod/api".into(),
+                dns_names: vec!["api.prod.svc".into()],
+                certificate: CertificateRole::Server,
+                reload: Reload::Runtime,
+                issuer_generation: 3,
+                issuer_fingerprint: "sha256:cc".into(),
+            },
+            certificate: certificate.into(),
+            key: zeroize::Zeroizing::new("key".into()),
+            ca: "ca".into(),
+        });
+        request
+    }
+
+    #[test]
+    fn re_running_an_applied_issuance_step_does_not_create_a_second_secret() {
+        let api = Memory::default();
+        write_identity(&api, &issued("first")).unwrap();
+        write_identity(&api, &issued("second")).unwrap();
+
+        assert_eq!(api.names(), ["api-tenkai-identity"]);
+        let data = api
+            .get("prod", "api-tenkai-identity")
+            .unwrap()
+            .unwrap()
+            .data
+            .unwrap();
+        assert_eq!(data["cert.pem"].0, b"second");
+        assert_eq!(
+            identity_sets(&issued("second")).unwrap(),
+            [
+                "tenkai.identity.secret=api-tenkai-identity",
+                "tenkai.identity.generation=3"
+            ]
+        );
     }
 
     #[test]

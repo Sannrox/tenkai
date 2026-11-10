@@ -241,6 +241,19 @@ receipt carries one wrap with `secret` `identity-issuer` and `key`
 from `secret rewrap`: the runtime that opens the issuer key need not open
 the sealed values. A lost issuer is rotated, not recovered.
 
+A step with `identity` grants a workload certificate: `uri`, `dns_names`,
+`certificate`, `reload`, `issuer_generation` and `issuer_fingerprint`.
+`restore_identity` grants the restore release's in the same shape, used
+only when the step fails and the runtime restores. The plan digest covers
+both. The server hands such a plan only to a runtime that
+names `workload_identity` and whose key wraps the current issuer, and blocks
+one whose issuer is no longer current. Its release package carries
+`identity_issuer`, the current `IssuerKey`. The runtime recomputes the grant
+from the signed manifest and that issuer and refuses the step on any
+difference. The certificate and its key never appear in the receipt.
+`identity`, `restore_identity` and `identity_issuer` are omitted when absent, so other steps
+keep their digest.
+
 ### Host records
 
 A built-in runtime with a host applier (`TENKAI_HOST_SPOOL_DIR`) posts every

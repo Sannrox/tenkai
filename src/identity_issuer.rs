@@ -593,6 +593,8 @@ fn issuer_step(
         sealed: Vec::new(),
         rewrap,
         issuer: Some(crate::plan::IssuerStep { key, recipient }),
+        identity: None,
+        restore_identity: None,
     }
 }
 

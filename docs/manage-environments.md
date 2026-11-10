@@ -210,6 +210,13 @@ tenkaictl --target remote identity-issuer rewrap prod --recipient sha256:<hex> -
 - An environment without a separate runtime cannot hold the key; its plans
   with an issuer step are refused.
 
+A release that declares [`[deploy.identity]`](manifest.md#workload-identity)
+needs a current issuer: planning it without one fails and names
+`identity-issuer prepare`. Each install, upgrade, rollback and restart step
+of it grants its certificate, and the runtime that runs the step issues it,
+valid for 24 hours. A step also grants the certificate of the release it
+restores on failure. Renewal before expiry is not automatic yet.
+
 `env add --connectivity <class>` also sets the connectivity class.
 
 ### Criticality

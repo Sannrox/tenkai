@@ -186,6 +186,8 @@ mod tests {
                 }],
                 rewrap: None,
                 issuer: None,
+                identity: None,
+                restore_identity: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,

@@ -451,6 +451,8 @@ mod tests {
             restore: None,
             rewrap: None,
             issuer: None,
+            identity: None,
+            restore_identity: None,
         }
     }
 

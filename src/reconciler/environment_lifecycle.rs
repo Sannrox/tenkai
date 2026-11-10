@@ -441,6 +441,8 @@ mod tests {
             restore: None,
             rewrap: None,
             issuer: None,
+            identity: None,
+            restore_identity: None,
         };
         let mut running = plan::create_from_steps(&mut ctx, "local", vec![step])
             .await
@@ -518,6 +520,8 @@ mod tests {
                     restore: None,
                     rewrap: None,
                     issuer: None,
+                    identity: None,
+                    restore_identity: None,
                 };
                 let old = plan::create_from_steps(&mut ctx, "local", vec![step.clone()])
                     .await

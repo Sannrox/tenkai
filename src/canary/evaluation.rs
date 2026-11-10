@@ -447,6 +447,8 @@ mod tests {
             restore: None,
             rewrap: None,
             issuer: None,
+            identity: None,
+            restore_identity: None,
         }];
         let content_id = plan_content_id(environment, created_at, &steps);
         let id = plan_id(environment, created_at, &content_id);

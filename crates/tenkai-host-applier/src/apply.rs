@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use tenkai::host_apply::state::{HostApplyOutcome, HostApplyResult};
 
 use crate::store::{self, Admission};
@@ -70,21 +70,43 @@ pub async fn apply<F: Future<Output = ()>>(
         }
         Admission::Run(running) => running,
     };
-    // The sealed values are written before the command runs and recorded
-    // with its result; a write that fails ends the step as failed.
-    let secrets_dir = if intake.verified.sealed.is_empty() {
-        Ok(None)
-    } else {
-        secrets::write(paths, &intake.verified, &intake.secrets).map(Some)
-    };
+    // The sealed values and the workload certificate are written before the
+    // command runs and recorded with its result; a write that fails ends the
+    // step as failed.
+    let written = (|| {
+        let secrets_dir = if intake.verified.sealed.is_empty() {
+            None
+        } else {
+            Some(
+                secrets::write(paths, &intake.verified, &intake.secrets)
+                    .context("writing the step's sealed values")?,
+            )
+        };
+        let identity_dir = match &intake.identity {
+            // A health step checks the certificate its install wrote.
+            None if intake.verified.action == tenkai::host_apply::HostAction::Health => {
+                secrets::installed_identity(paths, &intake.verified)?
+            }
+            None => None,
+            Some(issued) => Some(
+                secrets::write_identity(paths, &intake.verified, issued)
+                    .context("writing the step's workload certificate")?,
+            ),
+        };
+        anyhow::Ok(run::Written {
+            secrets_dir,
+            identity_dir,
+        })
+    })();
     drop(intake.secrets);
-    let end = match secrets_dir {
-        Ok(secrets_dir) => match run::adopt_descendants().and_then(|()| stop()) {
+    drop(intake.identity);
+    let end = match written {
+        Ok(written) => match run::adopt_descendants().and_then(|()| stop()) {
             Ok(stop) => {
                 run::run_command(
                     &intake.verified,
                     &intake.workdir,
-                    secrets_dir.as_deref(),
+                    &written,
                     Duration::from_secs(config.timeout_seconds),
                     stop,
                 )
@@ -92,7 +114,7 @@ pub async fn apply<F: Future<Output = ()>>(
             }
             Err(error) => Err(error),
         },
-        Err(error) => Err(error.context("writing the step's sealed values")),
+        Err(error) => Err(error),
     };
     let (outcome, exit_status, detail) = match end {
         Ok(end) => (end.outcome, end.exit_status, end.detail),

@@ -50,6 +50,8 @@ async fn compatible_migration_approves_executes_resumes_and_rolls_back() {
             restore: None,
             rewrap: None,
             issuer: None,
+            identity: None,
+            restore_identity: None,
         }],
     )
     .await

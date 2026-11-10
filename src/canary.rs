@@ -498,6 +498,8 @@ mod tests {
                 restore: None,
                 rewrap: None,
                 issuer: None,
+                identity: None,
+                restore_identity: None,
             }],
             state,
             gates_skipped: Some(false),

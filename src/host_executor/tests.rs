@@ -346,12 +346,15 @@ async fn sealed_values_are_spooled_only_to_memory_and_cleaned_up_per_environment
         }
     }
 
-    let values = HostSealedValues::new(vec![HostSealedValue {
-        secret: "db".into(),
-        key: "password".into(),
-        ciphertext: "Y2lwaGVy".into(),
-        value: zeroize::Zeroizing::new("dmFsdWU=".into()),
-    }]);
+    let values = HostSealedValues::new(
+        vec![HostSealedValue {
+            secret: "db".into(),
+            key: "password".into(),
+            ciphertext: "Y2lwaGVy".into(),
+            value: zeroize::Zeroizing::new("dmFsdWU=".into()),
+        }],
+        None,
+    );
     let [stopped, live, foreign] = ["a", "b", "c"].map(|c| c.repeat(64));
     let executor_in = |base: &std::path::Path| {
         let root = base.join(format!(

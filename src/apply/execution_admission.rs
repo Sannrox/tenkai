@@ -119,6 +119,17 @@ pub(super) async fn admit(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
             step.id
         );
     }
+    if let Some(step) = plan
+        .steps
+        .iter()
+        .find(|step| step.identity_grants().next().is_some())
+    {
+        anyhow::bail!(
+            "plan {} step {} issues a workload certificate; only an environment runtime that names workload_identity runs it",
+            plan.id,
+            step.id
+        );
+    }
     inspect(ctx, plan)
         .await?
         .map_err(|rejection| anyhow::anyhow!("plan {} {rejection}", plan.id))
@@ -319,6 +330,8 @@ mod tests {
                 restore: None,
                 rewrap: None,
                 issuer: None,
+                identity: None,
+                restore_identity: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,
@@ -548,6 +561,8 @@ mod tests {
                 restore: None,
                 rewrap: None,
                 issuer: None,
+                identity: None,
+                restore_identity: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,

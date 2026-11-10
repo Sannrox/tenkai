@@ -521,6 +521,7 @@ mod tests {
                     health: health.map(str::to_string),
                     executor: None,
                     instances: crate::manifest::DeployInstances::One,
+                    identity: None,
                 },
                 config: None,
                 routing: None,

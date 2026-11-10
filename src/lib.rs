@@ -301,6 +301,7 @@ pub mod trust_posture;
 pub mod version_skew;
 pub mod wave;
 pub mod worker_pool;
+pub mod workload_identity;
 pub mod workshop_module;
 pub mod writer_fence;
 

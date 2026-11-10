@@ -33,6 +33,8 @@ fn plan_with_steps(id: &str, environment: &str, steps: u32) -> Plan {
                 restore: None,
                 rewrap: None,
                 issuer: None,
+                identity: None,
+                restore_identity: None,
             })
             .collect(),
         state: PlanState::Computed,
