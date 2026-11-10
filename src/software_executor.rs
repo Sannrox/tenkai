@@ -147,6 +147,12 @@ pub struct SoftwareApplyRequest {
     /// serialized, so a server cannot set it.
     #[serde(skip)]
     pub remove_owned_secrets: bool,
+    /// The workload certificate the environment runtime issued for this
+    /// apply (ADR 0046 §4). Never
+    /// serialized: the key reaches no server, program, or log. Only the
+    /// Helm executor and the host applier use it.
+    #[serde(skip)]
+    pub identity: Option<crate::workload_identity::IssuedIdentity>,
 }
 
 /// One sealed value opened in memory, for the slot a plan step names. Its
@@ -1023,6 +1029,7 @@ pub fn request_from_parts(
         dependency_document: String::new(),
         opened_secrets: Vec::new(),
         remove_owned_secrets: false,
+        identity: None,
     }
 }
 
@@ -1058,6 +1065,7 @@ mod tests {
             dependency_document: String::new(),
             opened_secrets: Vec::new(),
             remove_owned_secrets: false,
+            identity: None,
         }
     }
 

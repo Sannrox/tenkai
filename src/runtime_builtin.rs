@@ -285,7 +285,7 @@ impl Run<'_> {
                 let verified = config.verify(release, &environment, &expected)?;
                 config.admit_executor(
                     &verified.manifest,
-                    !step.sealed.is_empty(),
+                    !step.sealed.is_empty() || verified.request.identity.is_some(),
                     step.host.is_some() && !restore,
                 )?;
                 Ok::<_, anyhow::Error>(verified)
@@ -403,8 +403,11 @@ impl Run<'_> {
         let inputs = target.manifest.immutable_inputs();
         let dependency_document = &target.request.dependency_document;
         // The opened values go to the applier with the ciphertexts they were
-        // opened from, which it binds to the approved step.
-        let sealed = (!target.request.opened_secrets.is_empty()).then(|| {
+        // opened from, which it binds to the approved step, and with the
+        // workload certificate the step issued.
+        let issued = target.request.identity.as_ref();
+        let spools = !target.request.opened_secrets.is_empty() || issued.is_some();
+        let sealed = spools.then(|| {
             crate::host_apply::sealed::HostSealedValues::new(
                 target
                     .request
@@ -422,6 +425,7 @@ impl Run<'_> {
                         },
                     )
                     .collect(),
+                issued.map(Into::into),
             )
         });
         let ended = crate::host_executor::step::run(
@@ -774,6 +778,12 @@ pub struct Expected<'a> {
     /// The sealed values the step writes. A restore writes the same ones:
     /// they belong to the instance, not the release.
     pub sealed: &'a [SealedStep],
+    /// The workload certificate the step grants (ADR 0046 §3).
+    pub identity: Option<&'a crate::workload_identity::IdentityGrant>,
+    /// Whether the step issues a certificate: not when it removes the
+    /// release, nor in a host health step, which checks what its install
+    /// wrote.
+    pub issues: bool,
 }
 
 impl<'a> Expected<'a> {
@@ -787,6 +797,12 @@ impl<'a> Expected<'a> {
             release_digest: &step.release_digest,
             artifact_digest: &step.artifact_digest,
             sealed: &step.sealed,
+            identity: step.identity.as_ref(),
+            issues: step.action != Action::Remove
+                && step
+                    .host
+                    .as_ref()
+                    .is_none_or(|host| host.action != crate::plan::HostAction::Health),
         }
     }
 
@@ -801,6 +817,8 @@ impl<'a> Expected<'a> {
             release_digest: &pin.digest,
             artifact_digest: &pin.artifact_digest,
             sealed: &step.sealed,
+            identity: step.restore_identity.as_ref(),
+            issues: true,
         })
     }
 }
@@ -890,6 +908,8 @@ impl BuiltinConfig {
         request.secret_dir_path = self.secret_dir.clone();
         request.opened_secrets = self.open_sealed(&release.sealed, environment, expected)?;
         request.remove_owned_secrets = true;
+        request.identity =
+            self.workload_identity(&manifest, release.identity_issuer, environment, expected)?;
         let replaced_executor = match release.replaces {
             None => None,
             Some(replaced) => Some(match replaced.executor {
@@ -909,6 +929,54 @@ impl BuiltinConfig {
             artifact_digest: expected.artifact_digest.to_owned(),
             replaced_executor,
         })
+    }
+
+    /// The workload certificate for this apply (ADR 0046 §3). For the step's
+    /// target, the grant the verified manifest gives must be the one the
+    /// approved step names, and the delivered issuer the granted one; the
+    /// runtime then issues a fresh key and certificate. A restore issues
+    /// from the step's restore grant, so the release it puts back gets its
+    /// own names. Errors name the grant, never key material.
+    fn workload_identity(
+        &self,
+        manifest: &Manifest,
+        issuer: Option<crate::identity_issuer::IssuerKey>,
+        environment: &str,
+        expected: &Expected<'_>,
+    ) -> Result<Option<crate::workload_identity::IssuedIdentity>> {
+        // A removal issues nothing, and its executor deletes the
+        // certificate with the release; a host health step keeps the one
+        // its install wrote.
+        if !expected.issues {
+            return Ok(None);
+        }
+        let (section, grant) = match (&manifest.deploy.identity, expected.identity) {
+            (None, None) => return Ok(None),
+            (Some(section), Some(grant)) => (section, grant),
+            (None, Some(_)) => bail!(
+                "the plan step grants a workload certificate, and the signed manifest asks for none"
+            ),
+            (Some(_), None) => bail!(
+                "the signed manifest asks for a workload certificate, and the plan step grants none"
+            ),
+        };
+        let issuer = issuer.context("the server sent no identity issuer for the step")?;
+        let computed =
+            crate::workload_identity::grant(section, environment, expected.instance, &issuer)?;
+        if &computed != grant {
+            bail!(
+                "the plan step's workload certificate grant ({}, {:?}) is not what the signed manifest gives ({}, {:?}) with the identity issuer the server sent",
+                grant.uri,
+                grant.dns_names,
+                computed.uri,
+                computed.dns_names
+            );
+        }
+        let dir = self.sealing_dir.as_deref().context(
+            "the step issues a workload certificate, and this runtime has no sealing key (enroll with --credential-file)",
+        )?;
+        let key = issuer.open(environment, &SealedOpener::load(dir)?)?;
+        crate::workload_identity::issue(grant, &issuer, key, crate::now_millis() / 1000).map(Some)
     }
 
     /// Check the server's sealed values against the plan step, which the
@@ -1133,7 +1201,7 @@ impl BuiltinConfig {
             ),
             Some(SoftwareExecutorKind::Helm) => Ok(()),
             _ if sealed => bail!(
-                "the step writes sealed secrets, and only the helm executor and the host applier write them; this release runs with {}",
+                "the step writes sealed secrets or a workload certificate, and only the helm executor and the host applier write them; this release runs with {}",
                 kind.map_or("shell", SoftwareExecutorKind::as_str)
             ),
             _ => Ok(()),
@@ -1369,6 +1437,8 @@ mod tests {
             sealed: Vec::new(),
             rewrap: None,
             issuer: None,
+            identity: None,
+            restore_identity: None,
         };
         Case {
             config: BuiltinConfig {
@@ -1387,10 +1457,124 @@ mod tests {
                 replaces: None,
                 sealed: Vec::new(),
                 rewrap_recipient: None,
+                identity_issuer: None,
             },
             step,
             root,
         }
+    }
+
+    /// [`case`] for a release that asks for a server certificate, with an
+    /// issuer sealed to this runtime and the grant the planner computes.
+    fn identity_case() -> Case {
+        let mut case = case(
+            "\n[deploy.identity]\ncertificate = \"server\"\nreload = \"restart\"\ndns_names = [\"api.prod.svc\"]\n",
+        );
+        let sealing = case.root.join("sealing");
+        std::fs::create_dir_all(&sealing).unwrap();
+        let public = crate::sealing_key::SealingKey::open_or_generate(&sealing)
+            .unwrap()
+            .public()
+            .clone();
+        let issuer =
+            crate::identity_issuer::generate(ENVIRONMENT, 1, &public, crate::now_millis() / 1000)
+                .unwrap();
+        let section = manifest::parse_raw(&case.release.manifest)
+            .unwrap()
+            .deploy
+            .identity
+            .unwrap();
+        case.step.identity =
+            Some(crate::workload_identity::grant(&section, ENVIRONMENT, "api", &issuer).unwrap());
+        case.config.sealing_dir = Some(sealing);
+        case.release.identity_issuer = Some(issuer);
+        case
+    }
+
+    #[test]
+    fn sans_that_differ_from_the_manifest_are_refused_by_the_runtime() {
+        let mut case = identity_case();
+        let verified = case
+            .config
+            .verify(
+                case.release.clone(),
+                ENVIRONMENT,
+                &Expected::target(&case.step),
+            )
+            .unwrap();
+        let issued = verified.request.identity.unwrap();
+        crate::workload_identity::check_issued(&issued, crate::now_millis() / 1000).unwrap();
+
+        // A plan step that grants a name the signed manifest does not ask for.
+        let grant = case.step.identity.as_mut().unwrap();
+        grant.dns_names.push("bank.example".into());
+        let error = refusal(&case, case.release.clone());
+        assert!(
+            error.contains("is not what the signed manifest gives"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_restore_issues_from_its_own_grant() {
+        let mut case = identity_case();
+        case.step.from = Some("1.0.0".into());
+        case.step.restore = Some(crate::plan::ReleasePin {
+            release_id: case.step.release_id.clone(),
+            digest: case.step.release_digest.clone(),
+            artifact_digest: case.step.artifact_digest.clone(),
+            workdir: String::new(),
+        });
+        let restore = |step: &Step| {
+            case.config.verify(
+                case.release.clone(),
+                ENVIRONMENT,
+                &Expected::restore(step).unwrap(),
+            )
+        };
+        // Without a restore grant the target's is never used for it.
+        let error = format!("{:#}", restore(&case.step).unwrap_err());
+        assert!(error.contains("the plan step grants none"), "{error}");
+
+        case.step.restore_identity = case.step.identity.take();
+        let issued = restore(&case.step).unwrap().request.identity.unwrap();
+        assert_eq!(Some(&issued.grant), case.step.restore_identity.as_ref());
+    }
+
+    #[test]
+    fn a_host_health_step_keeps_the_certificate_its_install_wrote() {
+        let mut case = identity_case();
+        case.step.identity = None;
+        case.step.host = Some(crate::plan::HostStep {
+            action: crate::plan::HostAction::Health,
+            expected_generation: 1,
+        });
+        let verified = case
+            .config
+            .verify(
+                case.release.clone(),
+                ENVIRONMENT,
+                &Expected::target(&case.step),
+            )
+            .unwrap();
+        assert!(verified.request.identity.is_none());
+    }
+
+    #[test]
+    fn removing_a_release_with_a_certificate_issues_none() {
+        let mut case = identity_case();
+        case.step.action = Action::Remove;
+        case.step.identity = None;
+        case.release.identity_issuer = None;
+        let verified = case
+            .config
+            .verify(
+                case.release.clone(),
+                ENVIRONMENT,
+                &Expected::target(&case.step),
+            )
+            .unwrap();
+        assert!(verified.request.identity.is_none());
     }
 
     fn refusal(case: &Case, release: RuntimeRelease) -> String {

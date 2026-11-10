@@ -102,6 +102,37 @@ in its commands, or `${TENKAI_INSTANCE}` in native Kubernetes YAML, so two
 instances do not collide. The default instance is named after the product and
 keeps today's derived names.
 
+## Workload identity
+
+`[deploy.identity]` asks for a workload certificate
+([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md) §1, §4):
+
+```toml
+[deploy.identity]
+certificate = "server"   # "server", "client" or "both"
+reload = "restart"       # "runtime" or "restart"
+dns_names = ["api-${TENKAI_INSTANCE}.prod.svc"]
+```
+
+- The certificate's identity is `tenkai://<environment>/<instance>`. A
+  server certificate also names `dns_names`; a client certificate names
+  none.
+- `${TENKAI_INSTANCE}` expands to the instance. A `"many"` release must use
+  it in every DNS name, so two instances never share one; a literal name is
+  refused at publication.
+- `reload` says how the workload picks up a renewed certificate: `runtime`
+  watches its files, `restart` needs a restart. A release that reads the
+  certificate through a subPath mount or environment variables does not see
+  file updates and declares `restart`.
+- Only software releases on `helm` or `host` take it.
+
+Planning grants the names to the step, so approving the plan approves them.
+The environment's runtime issues a fresh key and certificate from the
+[identity issuer](manage-environments.md#identity-issuer) and refuses names
+the plan step grants but the signed manifest does not. The private key is
+generated on the runtime and never reaches the server. Older binaries refuse
+a manifest that declares the table.
+
 ## Config schema
 
 Optional `[config]` is signed with the release. It names the overlay keys an

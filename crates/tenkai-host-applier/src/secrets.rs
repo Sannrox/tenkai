@@ -1,8 +1,11 @@
-//! Write a host step's sealed values to their target files (ADR 0048 §4).
+//! Write a host step's sealed values (ADR 0048 §4) and workload certificate
+//! (ADR 0046 §4) to their target files.
 //!
 //! The target path is never taken from the request. It is
-//! `<state_dir>/secrets/<environment>/<instance>/<secret>/<key>`, each
-//! segment from the verified step and validated as a Tenkai identifier. Each
+//! `<state_dir>/secrets/<environment>/<instance>/<secret>/<key>`, and
+//! `<state_dir>/identity/<environment>/<instance>/current/<file>` for the
+//! certificate, each segment from the verified step and validated as a
+//! Tenkai identifier. Each
 //! file is root-owned, mode 0600, written through a temporary file and a
 //! rename, so a crash leaves either the old file or the new one, never part
 //! of one. A retry writes the same bytes.
@@ -25,9 +28,20 @@ use crate::ApplierPaths;
 pub const OWNED_MARKER: &str = ".tenkai-owned";
 const TEMP_PREFIX: &str = ".tmp-";
 
-/// The directory `step`'s sealed values are written to, which its command
-/// receives as `TENKAI_SECRETS_DIR`.
-pub fn instance_dir(paths: &ApplierPaths, step: &VerifiedHostStep) -> Result<PathBuf> {
+/// The tree under the state directory that sealed values are written to.
+pub const SECRETS: &str = "secrets";
+/// The tree under the state directory that workload certificates are
+/// written to.
+pub const IDENTITY: &str = "identity";
+/// The link in an instance's certificate directory that names its current
+/// generation; the command receives its path as `TENKAI_IDENTITY_DIR`.
+pub const CURRENT_LINK: &str = "current";
+const GENERATION_PREFIX: &str = "gen-";
+
+/// The directory in `tree` ([`SECRETS`] or [`IDENTITY`]) that `step` writes
+/// to, which its command receives as `TENKAI_SECRETS_DIR` or
+/// `TENKAI_IDENTITY_DIR`.
+pub fn instance_dir(paths: &ApplierPaths, tree: &str, step: &VerifiedHostStep) -> Result<PathBuf> {
     let instance = if step.product_instance.is_empty() {
         &step.product
     } else {
@@ -37,7 +51,7 @@ pub fn instance_dir(paths: &ApplierPaths, step: &VerifiedHostStep) -> Result<Pat
     tenkai::ontology::validate_identifier("instance", instance)?;
     Ok(paths
         .state_dir
-        .join("secrets")
+        .join(tree)
         .join(&step.environment)
         .join(instance))
 }
@@ -48,8 +62,104 @@ pub fn write(
     step: &VerifiedHostStep,
     secrets: &[BoundSecret],
 ) -> Result<PathBuf> {
-    let dir = instance_dir(paths, step)?;
-    let base = paths.state_dir.join("secrets");
+    let dir = owned_dir(paths, SECRETS, step)?;
+    for secret in secrets {
+        tenkai::ontology::validate_identifier("secret name", &secret.secret)?;
+        tenkai::ontology::validate_identifier("secret key", &secret.key)?;
+        let secret_dir = dir.join(&secret.secret);
+        ensure_dir(&secret_dir)?;
+        write_one(&secret_dir, &secret.key, &secret.value)
+            .with_context(|| format!("writing sealed {}/{}", secret.secret, secret.key))?;
+    }
+    Ok(dir)
+}
+
+/// Write `issued`, the workload certificate of `step`, and return the path
+/// of its [`CURRENT_LINK`].
+pub fn write_identity(
+    paths: &ApplierPaths,
+    step: &VerifiedHostStep,
+    issued: &tenkai::workload_identity::IssuedIdentity,
+) -> Result<PathBuf> {
+    let dir = owned_dir(paths, IDENTITY, step)?;
+    write_generation(&dir, &issued.files()?)
+}
+
+/// The [`CURRENT_LINK`] of `step`'s instance, when an earlier step wrote a
+/// certificate there: what a health step's command reads.
+pub fn installed_identity(
+    paths: &ApplierPaths,
+    step: &VerifiedHostStep,
+) -> Result<Option<PathBuf>> {
+    let current = instance_dir(paths, IDENTITY, step)?.join(CURRENT_LINK);
+    match std::fs::symlink_metadata(&current) {
+        Ok(metadata) if metadata.file_type().is_symlink() && metadata.uid() == euid() => {
+            Ok(Some(current))
+        }
+        Ok(_) => bail!("{} is not a link Tenkai made", current.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Write `files` as a new generation directory in `dir`, then switch
+/// [`CURRENT_LINK`] to it with one rename. A reader that resolves the link
+/// once and opens every file from that directory reads one whole set; one
+/// that follows the link per file can straddle a switch. A crash before the
+/// rename leaves the previous set, and the next write removes what it left.
+/// The previous generation is kept, so a directory resolved just before the
+/// switch stays readable; older ones go.
+fn write_generation(dir: &Path, files: &[(&str, impl AsRef<[u8]>)]) -> Result<PathBuf> {
+    let current = dir.join(CURRENT_LINK);
+    let previous = match std::fs::symlink_metadata(&current) {
+        Ok(metadata) if metadata.file_type().is_symlink() && metadata.uid() == euid() => {
+            let target = std::fs::read_link(&current)?;
+            let name = target
+                .to_str()
+                .filter(|name| name.starts_with(GENERATION_PREFIX) && !name.contains('/'))
+                .with_context(|| format!("{} names no generation Tenkai wrote", current.display()))?
+                .to_owned();
+            Some(name)
+        }
+        Ok(_) => bail!("{} exists and is not a link Tenkai made", current.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(TEMP_PREFIX) {
+            std::fs::remove_file(entry.path())?;
+        } else if name.starts_with(GENERATION_PREFIX) && previous.as_deref() != Some(&*name) {
+            std::fs::remove_dir_all(entry.path())?;
+        }
+    }
+    let generation = format!("{GENERATION_PREFIX}{}", uuid::Uuid::new_v4().simple());
+    let staged = dir.join(&generation);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&staged)
+        .with_context(|| format!("creating {}", staged.display()))?;
+    for (file, bytes) in files {
+        let mut out = create_file(&staged.join(file))?;
+        out.write_all(bytes.as_ref())
+            .with_context(|| format!("writing {file}"))?;
+        out.sync_all()?;
+    }
+    sync_dir(&staged)?;
+    let link = dir.join(format!("{TEMP_PREFIX}{}", uuid::Uuid::new_v4().simple()));
+    std::os::unix::fs::symlink(&generation, &link)?;
+    std::fs::rename(&link, &current)?;
+    sync_dir(dir)?;
+    Ok(current)
+}
+
+/// The instance directory of `step` in `tree`, created marked as Tenkai's
+/// if it is missing, and refused if someone else created it.
+fn owned_dir(paths: &ApplierPaths, tree: &str, step: &VerifiedHostStep) -> Result<PathBuf> {
+    let dir = instance_dir(paths, tree, step)?;
+    let base = paths.state_dir.join(tree);
     let environment = base.join(&step.environment);
     for parent in [&base, &environment] {
         ensure_dir(parent)?;
@@ -58,17 +168,9 @@ pub fn write(
     ensure_dir(&dir)?;
     if !std::fs::symlink_metadata(dir.join(OWNED_MARKER)).is_ok_and(|metadata| metadata.is_file()) {
         bail!(
-            "{} was not created by Tenkai; its sealed values are not written there",
+            "{} was not created by Tenkai; nothing is written there",
             dir.display()
         );
-    }
-    for secret in secrets {
-        tenkai::ontology::validate_identifier("secret name", &secret.secret)?;
-        tenkai::ontology::validate_identifier("secret key", &secret.key)?;
-        let secret_dir = dir.join(&secret.secret);
-        ensure_dir(&secret_dir)?;
-        write_one(&secret_dir, &secret.key, &secret.value)
-            .with_context(|| format!("writing sealed {}/{}", secret.secret, secret.key))?;
     }
     Ok(dir)
 }
@@ -197,4 +299,72 @@ fn sync_dir(dir: &Path) -> Result<()> {
 
 fn euid() -> u32 {
     rustix::process::geteuid().as_raw()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(dir: &Path) -> Vec<(String, String)> {
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.file_name().into_string().unwrap(),
+                    std::fs::read_to_string(entry.path()).unwrap(),
+                )
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn a_host_write_interrupted_before_rename_leaves_the_previous_files_intact() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-identity-write-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let pairs = |set: [(&str, &str); 2]| {
+            set.map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .to_vec()
+        };
+        let old = [("cert.pem", "old-cert"), ("key.pem", "old-key")];
+        let current = write_generation(&dir, &old).unwrap();
+
+        // A crash while the next generation was staged, before the link
+        // switched: half a set, and a temporary link.
+        std::fs::create_dir(dir.join(format!("{GENERATION_PREFIX}crashed"))).unwrap();
+        std::fs::write(
+            dir.join(format!("{GENERATION_PREFIX}crashed/cert.pem")),
+            "new-cert",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            format!("{GENERATION_PREFIX}crashed"),
+            dir.join(format!("{TEMP_PREFIX}link")),
+        )
+        .unwrap();
+        assert_eq!(read(&current), pairs(old));
+
+        // The retry switches to a whole new set and removes what the crash
+        // left; the previous set stays for a reader that resolved the link
+        // before the switch.
+        let new = [("cert.pem", "new-cert"), ("key.pem", "new-key")];
+        assert_eq!(write_generation(&dir, &new).unwrap(), current);
+        assert_eq!(read(&current), pairs(new));
+        let generations = || {
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .filter(|entry| entry.as_ref().unwrap().file_name() != CURRENT_LINK)
+                .count()
+        };
+        assert_eq!(generations(), 2);
+        write_generation(&dir, &old).unwrap();
+        assert_eq!(generations(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

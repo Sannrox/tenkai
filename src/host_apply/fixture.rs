@@ -226,6 +226,8 @@ impl HostFixture {
                     sealed: Vec::new(),
                     rewrap: None,
                     issuer: None,
+                    identity: None,
+                    restore_identity: None,
                 }
             })
             .collect();

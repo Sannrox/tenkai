@@ -16,8 +16,8 @@ mod lifecycle;
 mod release_selection;
 
 pub(crate) use convergence::{
-    require_host_product, require_removable, split_release_id, stored_release_executor,
-    stored_release_manifest,
+    require_host_product, require_removable, split_release_id, step_identity,
+    stored_release_executor, stored_release_manifest,
 };
 
 pub(crate) use release_selection::resolve_subscription_selection;
@@ -136,6 +136,18 @@ pub struct Step {
     /// approval closed, as for `host`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issuer: Option<IssuerStep>,
+    /// The workload certificate this step issues for its instance (ADR 0046
+    /// §3), from the release's `[deploy.identity]`. The runtime issues
+    /// exactly this grant or refuses the step. Omitted when absent, so plan
+    /// digests of every other step are unchanged; a binary that predates it
+    /// fails approval closed, as for `host`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<crate::workload_identity::IdentityGrant>,
+    /// The workload certificate the step's restore release issues if the
+    /// step fails, from that release's `[deploy.identity]`: a restore runs
+    /// with its own approved grant, never the target's. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_identity: Option<crate::workload_identity::IdentityGrant>,
 }
 
 /// The issuer key an identity issuer step activates or re-wraps.
@@ -174,10 +186,18 @@ impl Step {
         }
     }
 
+    /// Every workload certificate grant the step may issue: its target's,
+    /// then its restore release's.
+    pub fn identity_grants(
+        &self,
+    ) -> impl Iterator<Item = &crate::workload_identity::IdentityGrant> {
+        self.identity.iter().chain(&self.restore_identity)
+    }
+
     /// Whether the environment runtime must verify this step against a local
     /// approval policy before it runs (ADR 0045 §4).
     pub fn requires_local_approval_policy(&self) -> bool {
-        !self.sealed.is_empty() || self.issuer.is_some()
+        !self.sealed.is_empty() || self.issuer.is_some() || self.identity_grants().next().is_some()
     }
 
     /// Whether this step deploys its release. A re-wrap step and an
@@ -820,6 +840,8 @@ mod tests {
                 }),
                 rewrap: None,
                 issuer: None,
+                identity: None,
+                restore_identity: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,

@@ -69,6 +69,7 @@ The command sees only this environment:
 | `TENKAI_HOST_ACTION` | `install`, `uninstall`, or `health` |
 | `TENKAI_PLAN_ID` | the approved plan's id |
 | `TENKAI_SECRETS_DIR` | only for a step that writes sealed values: `/var/lib/tenkai-host/secrets/<environment>/<instance>`, holding `<secret>/<key>` |
+| `TENKAI_IDENTITY_DIR` | only for a release with a [workload certificate](manifest.md#workload-identity), on install and health: `/var/lib/tenkai-host/identity/<environment>/<instance>/current`, holding `cert.pem`, `key.pem`, `ca.pem` and `grant.json` |
 
 Nothing the server supplies becomes an environment variable, an argument, or
 a path the command interprets.
@@ -85,6 +86,21 @@ credential hand-off. A runtime host that writes sealed values needs swap
 off or encrypted: the values sit in memory, and memory reaches disk only
 through swap. Its working directory is the root-owned copy,
 which is removed after the step.
+
+A workload certificate travels the same way: the runtime issues it and
+spools it with the sealed values. The applier accepts it only if the
+approved step's issuer signed it for exactly the approved names and role,
+it is valid now, and the key is its own; then it
+writes the whole set into a new directory and switches the `current` link
+to it with one rename. An interrupted write leaves the previous set. Each
+open follows the link again, so a reader that opens `cert.pem` and then
+`key.pem` across a switch can get a mixed pair. Read a consistent set by
+resolving the link once per load (`realpath "$TENKAI_IDENTITY_DIR"`) and
+opening every file from that directory. The previous set is kept until
+the next write, so a directory resolved just before a switch stays
+readable. A health step
+issues nothing; its command gets `TENKAI_IDENTITY_DIR` for the set its
+install wrote.
 
 The applier kills the command's process group when its own timeout fires
 (`timeout_seconds`) and when the unit is stopped (`systemctl stop` sends it

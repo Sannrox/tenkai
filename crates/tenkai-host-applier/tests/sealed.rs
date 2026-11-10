@@ -144,12 +144,15 @@ fn digest(ciphertext: &[u8]) -> String {
 }
 
 fn values(secret: &str, ciphertext: &[u8]) -> HostSealedValues {
-    HostSealedValues::new(vec![HostSealedValue {
-        secret: secret.into(),
-        key: "password".into(),
-        ciphertext: STANDARD.encode(ciphertext),
-        value: Zeroizing::new(STANDARD.encode(VALUE)),
-    }])
+    HostSealedValues::new(
+        vec![HostSealedValue {
+            secret: secret.into(),
+            key: "password".into(),
+            ciphertext: STANDARD.encode(ciphertext),
+            value: Zeroizing::new(STANDARD.encode(VALUE)),
+        }],
+        None,
+    )
 }
 
 /// A memory-backed directory for the spool, or `None` where there is none,
@@ -187,7 +190,7 @@ fn sealed_values_bind_to_the_approved_step_and_are_written_once() {
     let dir = secrets::write(&host.paths, &intake.verified, &intake.secrets).unwrap();
     assert_eq!(
         dir,
-        secrets::instance_dir(&host.paths, &intake.verified).unwrap()
+        secrets::instance_dir(&host.paths, secrets::SECRETS, &intake.verified).unwrap()
     );
     let file = dir.join("db").join("password");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), VALUE);
@@ -251,7 +254,7 @@ fn a_directory_tenkai_did_not_create_is_never_written() {
     let host = Host::new(&shm);
     let instance = host.spool(CIPHERTEXT, Some(values("db", CIPHERTEXT)));
     let intake = host.intake(&instance).unwrap();
-    let dir = secrets::instance_dir(&host.paths, &intake.verified).unwrap();
+    let dir = secrets::instance_dir(&host.paths, secrets::SECRETS, &intake.verified).unwrap();
     std::fs::create_dir_all(dir.join("db")).unwrap();
     std::fs::write(dir.join("db").join("password"), "someone else's").unwrap();
 
@@ -276,7 +279,7 @@ fn a_crash_while_creating_the_instance_directory_never_strands_it() {
     let host = Host::new(&shm);
     let instance = host.spool(CIPHERTEXT, Some(values("db", CIPHERTEXT)));
     let intake = host.intake(&instance).unwrap();
-    let dir = secrets::instance_dir(&host.paths, &intake.verified).unwrap();
+    let dir = secrets::instance_dir(&host.paths, secrets::SECRETS, &intake.verified).unwrap();
     // A crash left a half-made staging directory next to where the instance
     // directory goes, and no instance directory.
     let parent = dir.parent().unwrap().to_path_buf();

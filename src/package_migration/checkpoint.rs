@@ -217,6 +217,27 @@ pub(super) async fn create_pin_plan(
         Some(version) if version == pin.version => Action::Restart,
         Some(_) => Action::Upgrade,
     };
+    let identity = crate::plan::step_identity(
+        ctx,
+        &env,
+        &record.environment,
+        &descriptor.release_id,
+        &pin.product,
+    )
+    .await?;
+    let restore_identity = match &restore {
+        Some(restore) => {
+            crate::plan::step_identity(
+                ctx,
+                &env,
+                &record.environment,
+                &restore.release_id,
+                &pin.product,
+            )
+            .await?
+        }
+        None => None,
+    };
     let step = Step {
         id: String::new(),
         order: 0,
@@ -234,6 +255,8 @@ pub(super) async fn create_pin_plan(
         restore,
         rewrap: None,
         issuer: None,
+        identity,
+        restore_identity,
     };
     plan::create_from_steps(ctx, &record.environment, vec![step]).await
 }

@@ -906,6 +906,12 @@ pub struct RuntimeRelease {
     /// wraps anything for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewrap_recipient: Option<String>,
+    /// For a step that issues a workload certificate, the environment's
+    /// current identity issuer, sealed. The runtime uses it only if its
+    /// generation and fingerprint are the ones the approved step grants
+    /// (ADR 0046 §3). Sent only to a runtime that names `workload_identity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_issuer: Option<crate::identity_issuer::IssuerKey>,
 }
 
 /// One sealed value a step writes. The plan step names its digest.
@@ -1257,7 +1263,7 @@ impl RuntimeDeliveryOperations {
                 .retire_unrunnable(&mut ctx, environment, plan, &identity.owner, reason)
                 .await;
         }
-        if !caller.workload_identity && plan.steps.iter().any(|step| step.issuer.is_some()) {
+        if !caller.workload_identity && plan.steps.iter().any(needs_workload_identity) {
             return self.idle_after_lapsed(environment, &plan.id).await;
         }
         // A re-wrap step or a removal deploys nothing, so it needs no
@@ -1294,7 +1300,10 @@ impl RuntimeDeliveryOperations {
         }
         // Recovered wraps open only for the runtime whose key the step names
         // (ADR 0045 §7); another runtime would fail the plan, so it waits.
-        if !self.may_run_recovery(&plan, &identity, environment)? {
+        if !self
+            .may_run_recovery(&mut ctx, &plan, &identity, environment)
+            .await?
+        {
             return self.idle_after_lapsed(environment, &plan.id).await;
         }
         // A drifted clock must not touch leases: it could expire or take
@@ -1356,29 +1365,44 @@ impl RuntimeDeliveryOperations {
         }
     }
 
-    /// Why `plan` has an issuer step no runtime can run to completion, if
-    /// it has one: every key wrapping the issuer key was revoked, so no
-    /// runtime claims it; or the issuer changed since it was planned (a
-    /// re-wrap planned before a rotation finished), so its completion would
-    /// be refused. Either would block the environment.
+    /// Why `plan` has an issuer or workload certificate step no runtime can
+    /// run to completion, if it has one: every key wrapping the issuer key
+    /// was revoked, so no runtime claims it; or the issuer changed since it
+    /// was planned (a re-wrap planned before a rotation finished, or a
+    /// certificate granted from the previous issuer), so its completion or
+    /// issuance would be refused. Either would block the environment.
     async fn issuer_unrunnable(
         &self,
         ctx: &mut Ctx,
         plan: &crate::plan::Plan,
         environment: &str,
     ) -> Result<Option<&'static str>, RuntimeDeliveryError> {
-        if !plan.steps.iter().any(|step| step.issuer.is_some()) {
+        if !plan.steps.iter().any(needs_workload_identity) {
             return Ok(None);
         }
         let env_obj = crate::environment::environment(ctx, environment)
             .await
             .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
-        if plan
+        let current = crate::identity_issuer::current(&env_obj)
+            .map_err(|error| RuntimeDeliveryError::Internal(error.to_string()))?;
+        let stale_issuer = plan
             .steps
             .iter()
             .filter(|step| step.issuer.is_some())
-            .any(|step| crate::identity_issuer::require_current(&env_obj, step).is_err())
-        {
+            .any(|step| crate::identity_issuer::require_current(&env_obj, step).is_err());
+        // A certificate is issued only from the granted issuer; once it
+        // rotated, the grant names a key the runtime will not use.
+        let stale_grant = plan
+            .steps
+            .iter()
+            .flat_map(|step| step.identity_grants())
+            .any(|grant| {
+                current.as_ref().is_none_or(|issuer| {
+                    issuer.generation != grant.issuer_generation
+                        || issuer.fingerprint != grant.issuer_fingerprint
+                })
+            });
+        if stale_issuer || stale_grant {
             return Ok(Some(
                 "the identity issuer changed since this plan was made; plan again",
             ));
@@ -1386,7 +1410,9 @@ impl RuntimeDeliveryOperations {
         if !self
             .environment_recipient_keys(environment)?
             .iter()
-            .any(|record| recovery_claimable(plan, Some(record.fingerprint.as_str())))
+            .any(|record| {
+                recovery_claimable(plan, Some(record.fingerprint.as_str()), current.as_ref())
+            })
         {
             return Ok(Some(
                 "no unrevoked runtime holds the identity issuer key; prepare a new candidate",
@@ -2050,14 +2076,15 @@ impl RuntimeDeliveryOperations {
 
     /// Unrevoked runtimes of `environment` that advertised a sealing key.
     /// Whether `identity` may claim `plan` ([`recovery_claimable`]).
-    fn may_run_recovery(
+    async fn may_run_recovery(
         &self,
+        ctx: &mut Ctx,
         plan: &crate::plan::Plan,
         identity: &RuntimeIdentity,
         environment: &str,
     ) -> Result<bool, RuntimeDeliveryError> {
         if !plan.steps.iter().any(|step| {
-            step.issuer.is_some()
+            needs_workload_identity(step)
                 || step
                     .rewrap
                     .as_ref()
@@ -2065,8 +2092,21 @@ impl RuntimeDeliveryOperations {
         }) {
             return Ok(true);
         }
+        let current = if plan
+            .steps
+            .iter()
+            .any(|step| step.identity_grants().next().is_some())
+        {
+            let env_obj = crate::environment::environment(ctx, environment)
+                .await
+                .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+            crate::identity_issuer::current(&env_obj)
+                .map_err(|error| RuntimeDeliveryError::Internal(error.to_string()))?
+        } else {
+            None
+        };
         let own = self.own_recipient_fingerprint(identity, environment)?;
-        Ok(recovery_claimable(plan, own.as_deref()))
+        Ok(recovery_claimable(plan, own.as_deref(), current.as_ref()))
     }
 
     /// Fingerprint of the caller's unrevoked sealing key, if it has one.
@@ -2100,7 +2140,18 @@ impl RuntimeDeliveryOperations {
 /// a plan with identity issuer steps only by a runtime whose key wraps each
 /// step's issuer key (ADR 0046 §2): another runtime cannot open them and
 /// would fail the plan. Any other plan may be claimed by any runtime.
-fn recovery_claimable(plan: &crate::plan::Plan, own: Option<&str>) -> bool {
+/// Whether `step` needs a runtime that names `workload_identity` and opens
+/// the identity issuer: it activates or re-wraps the issuer, or issues a
+/// workload certificate from it (ADR 0046).
+fn needs_workload_identity(step: &crate::plan::Step) -> bool {
+    step.issuer.is_some() || step.identity_grants().next().is_some()
+}
+
+fn recovery_claimable(
+    plan: &crate::plan::Plan,
+    own: Option<&str>,
+    current_issuer: Option<&crate::identity_issuer::IssuerKey>,
+) -> bool {
     let recovered = plan
         .steps
         .iter()
@@ -2119,7 +2170,20 @@ fn recovery_claimable(plan: &crate::plan::Plan, own: Option<&str>) -> bool {
                 .iter()
                 .any(|wrap| Some(wrap.fingerprint.as_str()) == own)
         });
-    recovered && issuer
+    // A certificate is issued with the current issuer key, so only a
+    // runtime holding a wrap of it issues one.
+    let certificate = !plan
+        .steps
+        .iter()
+        .any(|step| step.identity_grants().next().is_some())
+        || current_issuer.is_some_and(|issuer| {
+            issuer
+                .sealed_key
+                .wraps
+                .iter()
+                .any(|wrap| Some(wrap.fingerprint.as_str()) == own)
+        });
+    recovered && issuer && certificate
 }
 
 fn parse_sealing_key(
@@ -2565,6 +2629,8 @@ mod tests {
             sealed: Vec::new(),
             rewrap: None,
             issuer: None,
+            identity: None,
+            restore_identity: None,
         };
         // What an older runtime sends: no removal field.
         let older: super::RuntimeReleaseRequest =
@@ -2673,6 +2739,8 @@ mod tests {
                     digest: "sha256:value".into(),
                 }],
                 issuer: None,
+                identity: None,
+                restore_identity: None,
                 rewrap: Some(crate::plan::RewrapStep {
                     fingerprint: new.clone(),
                     recovered: Vec::new(),
@@ -2798,6 +2866,8 @@ mod tests {
             host: None,
             sealed: Vec::new(),
             issuer: None,
+            identity: None,
+            restore_identity: None,
             rewrap: Some(crate::plan::RewrapStep {
                 fingerprint: recipient.clone(),
                 recovered,
@@ -2829,12 +2899,12 @@ mod tests {
                 wrapped_key: "AA==".into(),
             },
         }]));
-        assert!(recovery_claimable(&recovered, Some(&recipient)));
-        assert!(!recovery_claimable(&recovered, Some(&other)));
-        assert!(!recovery_claimable(&recovered, None));
+        assert!(recovery_claimable(&recovered, Some(&recipient), None));
+        assert!(!recovery_claimable(&recovered, Some(&other), None));
+        assert!(!recovery_claimable(&recovered, None, None));
         let plain = plan(step(Vec::new()));
-        assert!(recovery_claimable(&plain, Some(&other)));
-        assert!(recovery_claimable(&plain, None));
+        assert!(recovery_claimable(&plain, Some(&other), None));
+        assert!(recovery_claimable(&plain, None, None));
     }
 
     /// A recipient revoked after the runtime fetched its key gets no wraps
@@ -2897,6 +2967,8 @@ mod tests {
             host: None,
             sealed: vec![sealed.clone()],
             issuer: None,
+            identity: None,
+            restore_identity: None,
             rewrap: Some(crate::plan::RewrapStep {
                 fingerprint: recipient.clone(),
                 recovered: Vec::new(),

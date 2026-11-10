@@ -57,19 +57,21 @@ impl HelmSoftwareExecutor {
                 request.workdir.display()
             );
         }
-        // Sealed values land first, so the release can read them as it starts.
-        let secrets = match &request.opened_secrets[..] {
-            [] => None,
-            _ => {
-                let cluster_config = request
-                    .cluster_config_path
-                    .as_deref()
-                    .context("writing sealed secrets needs a cluster configuration")?;
-                let api = LiveSecrets::connect(cluster_config, &request.environment)?;
-                let sets = helm_secrets::write(&api, request)?;
-                Some((api, sets))
-            }
+        // Sealed values and the workload certificate land first, so the
+        // release can read them as it starts.
+        let secrets = if request.opened_secrets.is_empty() && request.identity.is_none() {
+            None
+        } else {
+            let cluster_config = request
+                .cluster_config_path
+                .as_deref()
+                .context("writing sealed secrets needs a cluster configuration")?;
+            let api = LiveSecrets::connect(cluster_config, &request.environment)?;
+            let sets = helm_secrets::write(&api, request)?;
+            helm_secrets::write_identity(&api, request)?;
+            Some((api, sets))
         };
+        let identity_sets = helm_secrets::identity_sets(request)?;
         let mut command = self.helm(request);
         command
             .arg("upgrade")
@@ -85,7 +87,7 @@ impl HelmSoftwareExecutor {
         apply_helm_set_flags(&mut command, request);
         let _dependency_file = helm_dependency_file(request, &mut command)?;
         let secret_sets = secrets.iter().flat_map(|(_, sets)| sets);
-        for set in extra_sets.iter().chain(secret_sets) {
+        for set in extra_sets.iter().chain(secret_sets).chain(&identity_sets) {
             command.arg("--set").arg(set);
         }
         run_captured_command(

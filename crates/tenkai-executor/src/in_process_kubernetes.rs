@@ -2402,6 +2402,7 @@ mod tests {
             dependency_document: String::new(),
             opened_secrets: Vec::new(),
             remove_owned_secrets: false,
+            identity: None,
         }
     }
 

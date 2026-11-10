@@ -464,6 +464,20 @@ tenkai-runtime
   sealing key in the same token (`<key label>-sealing`): only the ECDH runs
   in the token, and the private key never leaves it. A token key that
   cannot derive refuses sealed steps with a named reason.
+- **Workload certificates** ([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md) §4).
+  For a step that grants one, the runtime recomputes the grant from the
+  signed manifest and the issuer the server sent, refuses any difference,
+  opens the issuer key and issues a fresh key and certificate. For `helm`,
+  the executor replaces the data of one Secret `<instance>-tenkai-identity`
+  (`cert.pem`, `key.pem`, `ca.pem`, `grant.json`) in place and passes
+  `tenkai.identity.secret` and `tenkai.identity.generation`; the chart
+  puts the generation on the pod template, so a rotated issuer rolls the
+  workload. A step also grants its restore release's certificate, so a
+  failed upgrade puts the previous release back with its own names.
+  Removing a release deletes the Secret with the instance's other Secrets.
+  Host
+  releases get the files under `TENKAI_IDENTITY_DIR`. Other executors and
+  the server's own apply refuse these steps.
 - **Host releases:** set `TENKAI_HOST_SPOOL_DIR` (and `TENKAI_HOST_STATE_DIR`
   when it is not the default) on the runtime, and install the host applier
   on the runtime's host as for a server ([run host releases](#run-host-releases)).

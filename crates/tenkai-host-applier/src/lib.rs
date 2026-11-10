@@ -36,6 +36,9 @@ pub struct Intake {
     /// The step's sealed values, bound to its approved slots and held only
     /// in memory until they are written ([`secrets::write`]).
     pub secrets: Vec<tenkai::host_apply::sealed::BoundSecret>,
+    /// The workload certificate the step installs, bound to its approved
+    /// grant ([`secrets::write_identity`]).
+    pub identity: Option<tenkai::workload_identity::IssuedIdentity>,
 }
 
 /// Copy `instance` from the spool into an empty root-owned work directory and
@@ -58,20 +61,25 @@ pub fn intake(
         let spooled = copy::copy_request(&config.spool_dir, instance, &work)?;
         let verified =
             tenkai::host_apply::verify_request(&spooled.request, instance, trust, now_ms)?;
-        // A step writes exactly the sealed values its approved plan names.
-        let secrets = match (spooled.read_sealed()?, verified.sealed.is_empty()) {
-            (None, true) => Vec::new(),
-            (Some(values), false) => values.bind(
-                &verified.environment,
-                if verified.product_instance.is_empty() {
+        // A step writes exactly the sealed values and the workload
+        // certificate its approved plan names.
+        let (secrets, identity) = match spooled.read_sealed()? {
+            None if !verified.sealed.is_empty() => {
+                bail!("the approved step writes sealed values, and none were spooled")
+            }
+            None if verified.identity.is_some() => {
+                bail!("the approved step grants a workload certificate, and none was spooled")
+            }
+            None => (Vec::new(), None),
+            Some(values) => {
+                let instance = if verified.product_instance.is_empty() {
                     &verified.product
                 } else {
                     &verified.product_instance
-                },
-                &verified.sealed,
-            )?,
-            (None, false) => bail!("the approved step writes sealed values, and none were spooled"),
-            (Some(_), true) => bail!("sealed values were spooled for a step that writes none"),
+                };
+                let secrets = values.bind(&verified.environment, instance, &verified.sealed)?;
+                (secrets, values.bind_identity(verified.identity.as_ref())?)
+            }
         };
         let workdir = spooled.copy_artifacts(&verified.inputs, config.copy_limits())?;
         verified.verify_artifacts(&workdir)?;
@@ -80,6 +88,7 @@ pub fn intake(
             workdir,
             verified,
             secrets,
+            identity,
         })
     })();
     if result.is_err() {

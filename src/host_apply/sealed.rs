@@ -7,6 +7,11 @@
 //! same order, and each ciphertext's digest equal to the one the approved
 //! step names. A forged value can therefore land only in a slot an approved
 //! step names. Errors name the slot, never a value.
+//!
+//! The same document carries the workload certificate a step issues
+//! (ADR 0046 §4), whose private key the runtime generated: the applier
+//! accepts it only when it is signed by the approved issuer for exactly the
+//! approved grant.
 
 use anyhow::{Result, bail};
 use base64::Engine as _;
@@ -16,6 +21,7 @@ use zeroize::Zeroizing;
 
 use crate::plan::SealedStep;
 use crate::sealed_secret::{SealedTarget, SealedValue, SecretRef};
+use crate::workload_identity::{IdentityGrant, IssuedIdentity};
 
 pub const SEALED_SCHEMA: &str = "tenkai.host-sealed-values.v1";
 /// The sealed values inside a spooled instance directory.
@@ -66,12 +72,43 @@ impl std::fmt::Debug for HostSealedValue {
     }
 }
 
-/// [`SEALED_FILE`]: every value one host step writes, in the step's order.
+/// [`SEALED_FILE`]: every value one host step writes, in the step's order,
+/// and the workload certificate it installs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostSealedValues {
     pub schema: String,
     pub values: Vec<HostSealedValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<HostIdentity>,
+}
+
+/// A workload certificate the runtime issued, as PEM.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostIdentity {
+    pub certificate: String,
+    #[serde(with = "zeroizing_string")]
+    pub key: Zeroizing<String>,
+    pub ca: String,
+}
+
+impl std::fmt::Debug for HostIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HostIdentity")
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<&IssuedIdentity> for HostIdentity {
+    fn from(issued: &IssuedIdentity) -> Self {
+        Self {
+            certificate: issued.certificate.clone(),
+            key: issued.key.clone(),
+            ca: issued.ca.clone(),
+        }
+    }
 }
 
 /// A value bound to an approved slot, ready to write.
@@ -94,10 +131,11 @@ impl std::fmt::Debug for BoundSecret {
 impl HostSealedValues {
     /// The document for `values`, already checked by the runtime against the
     /// plan step it writes.
-    pub fn new(values: Vec<HostSealedValue>) -> Self {
+    pub fn new(values: Vec<HostSealedValue>, identity: Option<HostIdentity>) -> Self {
         Self {
             schema: SEALED_SCHEMA.into(),
             values,
+            identity,
         }
     }
 
@@ -157,6 +195,34 @@ impl HostSealedValues {
             })
             .collect()
     }
+
+    /// Bind the workload certificate to `approved`, the grant of the
+    /// verified step: one is spooled exactly when the step grants one, and
+    /// it is signed by the approved issuer for exactly the approved names.
+    pub fn bind_identity(
+        &self,
+        approved: Option<&IdentityGrant>,
+    ) -> Result<Option<IssuedIdentity>> {
+        match (&self.identity, approved) {
+            (None, None) => Ok(None),
+            (Some(identity), Some(grant)) => {
+                let issued = IssuedIdentity {
+                    grant: grant.clone(),
+                    certificate: identity.certificate.clone(),
+                    key: identity.key.clone(),
+                    ca: identity.ca.clone(),
+                };
+                crate::workload_identity::check_issued(&issued, crate::now_millis() / 1000)?;
+                Ok(Some(issued))
+            }
+            (None, Some(_)) => {
+                bail!("the approved step grants a workload certificate, and none was spooled")
+            }
+            (Some(_), None) => {
+                bail!("a workload certificate was spooled for a step that grants none")
+            }
+        }
+    }
 }
 
 /// Filesystem types whose pages stay in memory (reaching disk only through
@@ -206,12 +272,15 @@ mod tests {
     }
 
     fn values(ciphertext: &str) -> HostSealedValues {
-        HostSealedValues::new(vec![HostSealedValue {
-            secret: "db".into(),
-            key: "password".into(),
-            ciphertext: ciphertext.into(),
-            value: Zeroizing::new(STANDARD.encode(VALUE)),
-        }])
+        HostSealedValues::new(
+            vec![HostSealedValue {
+                secret: "db".into(),
+                key: "password".into(),
+                ciphertext: ciphertext.into(),
+                value: Zeroizing::new(STANDARD.encode(VALUE)),
+            }],
+            None,
+        )
     }
 
     fn digest_of(ciphertext: &str) -> String {

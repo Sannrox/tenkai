@@ -2,7 +2,7 @@
 //! materialization, and rollback step construction.
 
 use super::*;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
 struct PendingChange {
@@ -207,6 +207,36 @@ async fn readable_manifest(
     }))
 }
 
+/// The workload certificate grant (ADR 0046 §3) a step deploying `release`
+/// to `instance` carries, if the release declares `[deploy.identity]`. Every
+/// step that runs the release carries it, so each run re-issues and keeps
+/// handing the certificate to the release; a host health step only checks
+/// what its install wrote and carries none.
+pub(crate) async fn step_identity(
+    ctx: &mut Ctx,
+    env_obj: &crate::pb::sekai::Object,
+    env: &str,
+    release: &str,
+    instance: &str,
+) -> Result<Option<crate::workload_identity::IdentityGrant>> {
+    let Some(section) = readable_manifest(ctx, release)
+        .await?
+        .and_then(|manifest| manifest.deploy.identity)
+    else {
+        return Ok(None);
+    };
+    let issuer = crate::identity_issuer::current(env_obj)?.with_context(|| {
+        format!(
+            "{release} asks for a workload certificate, and {env} has no identity issuer; create one with identity-issuer prepare and plan"
+        )
+    })?;
+    ensure!(
+        !issuer.sealed_key.wraps.is_empty(),
+        "{release} asks for a workload certificate, and no runtime of {env} holds the identity issuer key; rotate in a new issuer"
+    );
+    crate::workload_identity::grant(&section, env, instance, &issuer).map(Some)
+}
+
 /// The executor the stored manifest of `release` declares.
 pub(crate) async fn stored_release_executor(
     ctx: &mut Ctx,
@@ -365,6 +395,9 @@ async fn bind_host_steps(
                 action: HostAction::Health,
                 ..
             }) => {
+                // It checks the certificate its install wrote.
+                step.identity = None;
+                step.restore_identity = None;
                 step.host = Some(HostStep {
                     action: HostAction::Health,
                     expected_generation: record.generation,
@@ -382,6 +415,7 @@ async fn bind_host_steps(
             None if step.action == Action::Remove => {
                 step.from = Some(step.to.clone());
                 step.restore = None;
+                step.restore_identity = None;
                 step.host = Some(HostStep {
                     action: HostAction::Uninstall,
                     expected_generation: record.generation,
@@ -399,7 +433,9 @@ async fn bind_host_steps(
             };
         }
         step.from = from;
+        // A failed host step is never restored.
         step.restore = None;
+        step.restore_identity = None;
         step.host = Some(HostStep {
             action: HostAction::Install,
             expected_generation: record.generation,
@@ -416,6 +452,8 @@ async fn bind_host_steps(
                 step.action = Action::Restart;
             }
             step.from = Some(step.to.clone());
+            // The health step checks the certificate its install wrote.
+            step.identity = None;
             step.host = Some(HostStep {
                 action: HostAction::Health,
                 expected_generation: installed,
@@ -1219,11 +1257,30 @@ async fn compute_snapshot_with_policy(
         &contract_order.installed_edges,
         &contract_order.overlay_edges,
     )?;
+    // A removal issues nothing; every other step grants its target's
+    // certificate and its restore release's.
+    let mut identities = Vec::with_capacity(pending.len());
+    for entry in &pending {
+        identities.push(if entry.action == Action::Remove {
+            (None, None)
+        } else {
+            let instance = entry.instance_name();
+            let restore = match &entry.restore {
+                Some(pin) => step_identity(ctx, &env_obj, env, &pin.release_id, instance).await?,
+                None => None,
+            };
+            (
+                step_identity(ctx, &env_obj, env, &entry.release.release_id, instance).await?,
+                restore,
+            )
+        });
+    }
     let steps = pending
         .into_iter()
+        .zip(identities)
         .enumerate()
         .map(|index_entry| {
-            let (index, entry) = index_entry;
+            let (index, (entry, (identity, restore_identity))) = index_entry;
             // Any step that runs the instance writes its sealed values first.
             let sealed = if entry.action == Action::Remove {
                 Vec::new()
@@ -1257,6 +1314,8 @@ async fn compute_snapshot_with_policy(
                 restore: entry.restore,
                 rewrap: None,
                 issuer: None,
+                identity,
+                restore_identity,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -2240,6 +2299,11 @@ pub(super) async fn rollback_step_with_recovery(
     } else {
         instance.to_string()
     };
+    let identity = step_identity(ctx, &env_obj, env, &target.release_id, instance).await?;
+    let restore_identity = match &restore {
+        Some(pin) => step_identity(ctx, &env_obj, env, &pin.release_id, instance).await?,
+        None => None,
+    };
     Ok(Step {
         id: format!("{}:rollback:{instance}", env_id(env)),
         order: 0,
@@ -2257,6 +2321,8 @@ pub(super) async fn rollback_step_with_recovery(
         to: prev,
         rewrap: None,
         issuer: None,
+        identity,
+        restore_identity,
     })
 }
 
@@ -2285,6 +2351,7 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
     } else {
         instance.to_string()
     };
+    let identity = step_identity(ctx, &env_obj, env, &target.release_id, instance).await?;
     Ok(Step {
         id: format!("{}:restart:{instance}", env_id(env)),
         order: 0,
@@ -2302,6 +2369,8 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
         to: current,
         rewrap: None,
         issuer: None,
+        identity,
+        restore_identity: None,
     })
 }
 
@@ -2382,6 +2451,8 @@ pub(super) async fn rewrap_steps(
             from: Some(current.clone()),
             to: current,
             issuer: None,
+            identity: None,
+            restore_identity: None,
             rewrap: Some(crate::plan::RewrapStep {
                 fingerprint: fingerprint.clone(),
                 recovered,

@@ -70,6 +70,7 @@ fn request(root: &Path, kubeconfig: &Path, env: &str, version: &str) -> Software
         dependency_document: String::new(),
         opened_secrets: Vec::new(),
         remove_owned_secrets: false,
+        identity: None,
     }
 }
 

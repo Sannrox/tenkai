@@ -166,6 +166,16 @@ pub(crate) async fn runtime_release(
             })
             .collect()
     };
+    // The issuer as recorded now; the runtime refuses it unless it is the
+    // generation and key the step grants.
+    let identity_issuer = match step.identity_grants().next() {
+        Some(_) => Some(
+            crate::identity_issuer::current(&environment)?
+                .context("the environment has no identity issuer")
+                .map_err(refused)?,
+        ),
+        None => None,
+    };
     Ok(RuntimeRelease {
         manifest: content.raw_manifest,
         signature,
@@ -174,6 +184,7 @@ pub(crate) async fn runtime_release(
         replaces,
         sealed,
         rewrap_recipient: None,
+        identity_issuer,
     })
 }
 
@@ -210,6 +221,7 @@ async fn rewrap_package(ctx: &mut Ctx, plan: &Plan, step: &Step) -> Result<Runti
         replaces: None,
         sealed,
         rewrap_recipient: None,
+        identity_issuer: None,
     })
 }
 
