@@ -1101,13 +1101,13 @@ mod tests {
     /// against SoftHSM in CI.
     #[test]
     fn a_value_sealed_to_a_token_key_opens_through_the_token() {
-        let Some((module, token_label)) = crate::pkcs11_provider::next_software_token() else {
+        let Some((module, token_label)) = tenkai_keys::pkcs11::next_software_token() else {
             return;
         };
         let store = crate::runner_key::HardwareStore {
             module,
             token_label,
-            pin: crate::pkcs11_provider::TEST_USER_PIN.into(),
+            pin: tenkai_keys::pkcs11::TEST_USER_PIN.into(),
             key_label: "runner".into(),
         };
         let point = store.open_or_generate_sealing_point().unwrap();

@@ -3119,6 +3119,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tar",
+ "tenkai-keys",
  "tenkai-wire",
  "thiserror",
  "time",
@@ -3199,6 +3200,21 @@ dependencies = [
  "url",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "tenkai-keys"
+version = "0.7.1"
+dependencies = [
+ "base64 0.22.1",
+ "cryptoki",
+ "ring",
+ "sekai-keys",
+ "serde",
+ "serde_json",
+ "tenkai-keys",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

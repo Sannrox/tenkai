@@ -1,163 +1,20 @@
 //! Distribute, rotate, and revoke customer data keys as ordinary releases.
 //!
-//! Release configuration carries wrapped DEKs and a provider endpoint. Plaintext
-//! keys never appear in the document. Preflight checks that every component can
-//! unwrap. Rotation and revocation are the same document with a new wrapping
-//! KEK or a revoked KEK id.
-
-use std::path::PathBuf;
+//! The document type lives in `tenkai-keys` so Tenkai and the products that
+//! consume a release share one type and one adapter set. Tenkai keeps the
+//! preflight: every component can unwrap before the release ships. Rotation and
+//! revocation are the same document with a new wrapping KEK or a revoked KEK id.
 
 use anyhow::{Result, bail};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
-use sekai_keys::{KeyId, KeyProvider, KeyPurpose, ProviderKind, TenantId, UnwrapGrant, WrappedDek};
-use serde::{Deserialize, Serialize};
-
-use crate::pkcs11_provider::Pkcs11KeyProvider;
-
-pub const DOCUMENT_SCHEMA: &str = "tenkai.customer-key-release.v1";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum KeyReleaseIntent {
-    Deploy,
-    Rotate,
-    Revoke,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderEndpoint {
-    pub kind: String,
-    pub token_label: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub module: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DistributedDataKey {
-    pub tenant: String,
-    pub key_id: String,
-    pub kek_id: String,
-    pub purpose: String,
-    pub wrapped: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CustomerKeyRelease {
-    pub schema: String,
-    pub intent: KeyReleaseIntent,
-    pub provider: ProviderEndpoint,
-    pub data_keys: Vec<DistributedDataKey>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revoked_kek_id: Option<String>,
-}
-
-impl CustomerKeyRelease {
-    pub fn deploy(provider: ProviderEndpoint, wrapped: &WrappedDek) -> Result<Self> {
-        Ok(Self {
-            schema: DOCUMENT_SCHEMA.into(),
-            intent: KeyReleaseIntent::Deploy,
-            provider,
-            data_keys: vec![distributed(wrapped)?],
-            revoked_kek_id: None,
-        })
-    }
-
-    pub fn rotate(provider: ProviderEndpoint, wrapped: &WrappedDek) -> Result<Self> {
-        let mut document = Self::deploy(provider, wrapped)?;
-        document.intent = KeyReleaseIntent::Rotate;
-        Ok(document)
-    }
-
-    pub fn revoke(provider: ProviderEndpoint, wrapped: &WrappedDek, kek_id: &str) -> Result<Self> {
-        let mut document = Self::deploy(provider, wrapped)?;
-        document.intent = KeyReleaseIntent::Revoke;
-        document.revoked_kek_id = Some(kek_id.to_string());
-        Ok(document)
-    }
-
-    pub fn to_json(&self) -> Result<String> {
-        refuse_plaintext(self)?;
-        Ok(serde_json::to_string_pretty(self)?)
-    }
-
-    pub fn from_json(raw: &str) -> Result<Self> {
-        let document: Self = serde_json::from_str(raw)?;
-        if document.schema != DOCUMENT_SCHEMA {
-            bail!(
-                "unsupported customer-key release schema {}",
-                document.schema
-            );
-        }
-        refuse_plaintext(&document)?;
-        Ok(document)
-    }
-}
-
-fn distributed(wrapped: &WrappedDek) -> Result<DistributedDataKey> {
-    Ok(DistributedDataKey {
-        tenant: wrapped.tenant_id.as_str().to_string(),
-        key_id: wrapped.dek_id.as_str().to_string(),
-        kek_id: wrapped.kek_id.as_str().to_string(),
-        purpose: purpose_name(wrapped.purpose).into(),
-        wrapped: STANDARD.encode(wrapped.ciphertext()),
-    })
-}
-
-fn parse_purpose(name: &str) -> Result<KeyPurpose> {
-    match name {
-        "store" => Ok(KeyPurpose::Store),
-        "spill" => Ok(KeyPurpose::Spill),
-        "cache" => Ok(KeyPurpose::Cache),
-        "backup" => Ok(KeyPurpose::Backup),
-        "export" => Ok(KeyPurpose::Export),
-        _ => bail!("unknown data-key purpose {name}"),
-    }
-}
-
-fn purpose_name(purpose: KeyPurpose) -> &'static str {
-    match purpose {
-        KeyPurpose::Store => "store",
-        KeyPurpose::Spill => "spill",
-        KeyPurpose::Cache => "cache",
-        KeyPurpose::Backup => "backup",
-        KeyPurpose::Export => "export",
-    }
-}
-
-fn refuse_plaintext(document: &CustomerKeyRelease) -> Result<()> {
-    let encoded = serde_json::to_string(document)?;
-    if encoded.contains("Dek(") || encoded.contains("root.kek") {
-        bail!("customer-key release must not contain plaintext key material");
-    }
-    for key in &document.data_keys {
-        if STANDARD
-            .decode(&key.wrapped)
-            .map(|bytes| bytes.len())
-            .unwrap_or(0)
-            < 13
-        {
-            bail!("wrapped data key {} is truncated", key.key_id);
-        }
-    }
-    if document.provider.kind == "software"
-        || document.provider.kind == "file"
-        || document.provider.kind == "memory"
-    {
-        bail!(
-            "customer-key release refuses lab-only provider {}",
-            document.provider.kind
-        );
-    }
-    Ok(())
-}
+use sekai_keys::{KeyProvider, ProviderKind, TenantId, UnwrapGrant};
+use tenkai_keys::pkcs11::Pkcs11KeyProvider;
+pub use tenkai_keys::release::{
+    CustomerKeyRelease, DOCUMENT_SCHEMA, DistributedDataKey, KeyReleaseIntent, ProviderEndpoint,
+};
 
 /// Preflight: every wrapped key in the release unwraps at this provider.
 pub fn preflight_unwrap(provider: &Pkcs11KeyProvider, document: &CustomerKeyRelease) -> Result<()> {
-    refuse_plaintext(document)?;
+    document.refuse_plaintext()?;
     if document.intent == KeyReleaseIntent::Revoke {
         bail!("revoked customer-key release fails closed");
     }
@@ -174,18 +31,10 @@ pub fn preflight_unwrap(provider: &Pkcs11KeyProvider, document: &CustomerKeyRele
         bail!("customer-key preflight requires a PKCS#11 provider");
     }
     for key in &document.data_keys {
-        let ciphertext = STANDARD.decode(&key.wrapped)?;
-        let purpose = parse_purpose(&key.purpose)?;
-        let wrapped = WrappedDek::new(
-            KeyId::new(&key.kek_id)?,
-            KeyId::new(&key.key_id)?,
-            TenantId::new(&key.tenant)?,
-            purpose,
-            ciphertext,
-        )?;
+        let wrapped = key.wrapped_dek()?;
         let grant = UnwrapGrant {
             tenant_id: TenantId::new(&key.tenant)?,
-            purpose,
+            purpose: wrapped.purpose,
             expires_unix_secs: i64::MAX,
         };
         provider
@@ -198,8 +47,9 @@ pub fn preflight_unwrap(provider: &Pkcs11KeyProvider, document: &CustomerKeyRele
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pkcs11_provider::{TEST_USER_PIN, next_software_token};
-    use sekai_keys::{Dek, RuntimeProfile};
+    use sekai_keys::{Dek, KeyPurpose, RuntimeProfile};
+    use std::path::PathBuf;
+    use tenkai_keys::pkcs11::{TEST_USER_PIN, next_software_token};
 
     fn provider() -> Option<(Pkcs11KeyProvider, String, PathBuf)> {
         let (module, label) = next_software_token()?;

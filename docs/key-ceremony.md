@@ -42,6 +42,15 @@ revocation are the same document: a new wrapping KEK, or a revoked KEK id.
 Preflight checks that every named component can unwrap. A revoked release fails
 closed. This is a migration of on-disk release configuration (GATE:mig).
 
+A delivered product reads that document with the `tenkai-keys` crate, the same
+type Tenkai writes. `CustomerKeyRelease::from_json` parses and checks it.
+`open_provider` opens the provider it names as a `sekai_keys::KeyProvider`;
+the product supplies the PKCS#11 PIN or the KMIP endpoint, which the document
+does not carry. Each `data_keys` entry decodes with `wrapped_dek()` and unwraps
+directly against that provider. Release documents refuse `software`, `file`,
+and `memory`, and a revoked release does not open. Enable only the adapter you
+use: feature `pkcs11` or `kmip`. Pin a tagged Tenkai release.
+
 ## Lab ceremony
 
 ```sh

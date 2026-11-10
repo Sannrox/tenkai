@@ -36,40 +36,8 @@ pub enum ProfileClass {
     Production,
 }
 
-/// Key-provider kinds named in a deploy profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum KeyProviderKind {
-    Software,
-    File,
-    Memory,
-    Pkcs11,
-    Kmip,
-    CloudKms,
-}
-
-impl KeyProviderKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Software => "software",
-            Self::File => "file",
-            Self::Memory => "memory",
-            Self::Pkcs11 => "pkcs11",
-            Self::Kmip => "kmip",
-            Self::CloudKms => "cloud_kms",
-        }
-    }
-
-    pub fn is_lab_only(self) -> bool {
-        matches!(self, Self::Software | Self::File | Self::Memory)
-    }
-}
-
-impl std::fmt::Display for KeyProviderKind {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
+/// Key-provider kinds; shared with the customer-key release in `tenkai-keys`.
+pub use tenkai_keys::KeyProviderKind;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

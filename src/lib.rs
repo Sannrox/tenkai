@@ -221,7 +221,8 @@ pub mod inventory;
 pub mod issuer_auth;
 pub mod key_provider;
 pub mod key_revocation;
-pub mod kmip_provider;
+/// KMIP adapter, now in `tenkai-keys`; this path stays for existing importers.
+pub use tenkai_keys::kmip as kmip_provider;
 pub mod maintenance;
 pub mod management_lifecycle;
 pub mod management_operations;
@@ -245,7 +246,8 @@ pub mod outbound_tls;
 pub mod package_migration;
 pub mod page;
 pub mod pb;
-pub mod pkcs11_provider;
+/// PKCS#11 adapter, now in `tenkai-keys`; this path stays for existing importers.
+pub use tenkai_keys::pkcs11 as pkcs11_provider;
 pub mod plan;
 pub mod plan_approval;
 pub mod plan_priors;
