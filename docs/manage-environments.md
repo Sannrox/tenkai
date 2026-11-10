@@ -220,14 +220,15 @@ of it grants its certificate, and the runtime that runs the step issues it,
 valid for 24 hours. A step also grants the certificate of the release it
 restores on failure.
 
-The runtime renews a `reload = "runtime"` certificate on `helm` itself once
+The runtime renews a `reload = "runtime"` certificate on `helm` or `host` itself once
 two thirds of its lifetime have passed, with no plan or approval
 ([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md) §3). It
 re-issues exactly the grant the old certificate proves, with a fresh key,
 from the issuer it last verified at apply. A certificate from an older
 issuer generation is not renewed: it needs a step after `identity-issuer
-rewrap`. Restart-reload and host certificates are not renewed yet; apply a
-step before they expire.
+rewrap`. Restart-reload certificates are not renewed yet; apply a step
+before they expire. A host certificate installed by an applier older than
+this release is renewed once a step installs it again.
 
 `env add --connectivity <class>` also sets the connectivity class.
 

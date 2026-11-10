@@ -13,6 +13,7 @@
 //! applied-state critical section ([`state::AppliedStateRecord::admit`]) and
 //! its command.
 
+pub mod identity;
 mod policy;
 mod request;
 pub mod sealed;

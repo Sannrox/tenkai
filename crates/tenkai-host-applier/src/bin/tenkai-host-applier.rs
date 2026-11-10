@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};
+use tenkai_host_applier::renew::{self, Renewal};
 use tenkai_host_applier::{Applied, ApplierPaths, apply};
 
 const USAGE: &str = "usage: tenkai-host-applier run <instance> [--config-dir DIR] [--state-dir DIR] [--run-dir DIR]";
@@ -24,16 +25,7 @@ fn main() -> ExitCode {
         _ => {}
     }
     match run() {
-        Ok(applied) => {
-            match &applied {
-                Applied::Result(result) => match serde_json::to_string(result) {
-                    Ok(json) => println!("{json}"),
-                    Err(error) => eprintln!("tenkai-host-applier: {error}"),
-                },
-                Applied::Refused(reason) => eprintln!("tenkai-host-applier: refused: {reason}"),
-            }
-            ExitCode::from(applied.exit_code())
-        }
+        Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("tenkai-host-applier: {error:#}");
             ExitCode::from(2)
@@ -41,7 +33,9 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<Applied> {
+/// Run the spooled step or renewal, report how it ended, and return the
+/// exit code.
+fn run() -> Result<u8> {
     let mut args = std::env::args().skip(1);
     if args.next().as_deref() != Some("run") {
         bail!("{USAGE}");
@@ -60,10 +54,19 @@ fn run() -> Result<Applied> {
             _ => bail!("unknown argument {flag}\n{USAGE}"),
         }
     }
+    // A spooled certificate renewal (ADR 0046 §3) runs no command.
+    if renew::spooled(&paths, &instance) {
+        let renewal = renew::renew(&paths, &instance)?;
+        match &renewal {
+            Renewal::Installed => println!("renewed the workload certificate"),
+            Renewal::Refused(reason) => eprintln!("tenkai-host-applier: refused: {reason}"),
+        }
+        return Ok(renewal.exit_code());
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(apply(&paths, &instance, || {
+    let applied = runtime.block_on(apply(&paths, &instance, || {
         use tokio::signal::unix::{SignalKind, signal};
         let mut terminate = signal(SignalKind::terminate())?;
         let mut interrupt = signal(SignalKind::interrupt())?;
@@ -73,5 +76,10 @@ fn run() -> Result<Applied> {
                 _ = interrupt.recv() => {}
             }
         })
-    }))
+    }))?;
+    match &applied {
+        Applied::Result(result) => println!("{}", serde_json::to_string(result)?),
+        Applied::Refused(reason) => eprintln!("tenkai-host-applier: refused: {reason}"),
+    }
+    Ok(applied.exit_code())
 }
