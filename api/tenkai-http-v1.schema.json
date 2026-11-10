@@ -2583,6 +2583,10 @@
         "id": {
           "type": "string"
         },
+        "identity_issuer": {
+          "$ref": "#/$defs/IssuerStatus",
+          "description": "The workload identity issuer, its requested generation and its\nuploaded candidate (ADR 0046 §2), when any is set. Never a key."
+        },
         "latest_failures": {
           "description": "Latest failed or rolled back attempt per instance (#1054).",
           "items": {
@@ -4054,6 +4058,70 @@
       "required": [
         "file",
         "revoked_keys"
+      ],
+      "type": "object"
+    },
+    "IssuerStatus": {
+      "additionalProperties": false,
+      "description": "The issuer state of an environment for inspection.",
+      "properties": {
+        "candidate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IssuerSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The uploaded candidate, waiting for an approved step."
+        },
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IssuerSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requested": {
+          "description": "The generation `prepare` asked a candidate for.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "IssuerSummary": {
+      "additionalProperties": false,
+      "description": "The issuer as `env inspect` and `status` show it. Never a key.",
+      "properties": {
+        "fingerprint": {
+          "type": "string"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "recipients": {
+          "description": "Recipients the key is wrapped for; empty means it is lost.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "generation",
+        "fingerprint",
+        "recipients"
       ],
       "type": "object"
     },
@@ -7522,6 +7590,39 @@
       "auth": "management",
       "method": "POST",
       "path": "/v1/environments/{environment}/sealed-secrets/rewrap",
+      "request": {
+        "$ref": "#/$defs/SealedRewrapRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/identity-issuer/prepare",
+      "request": {
+        "$ref": "#/$defs/PlanRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/identity-issuer/plan",
+      "request": {
+        "$ref": "#/$defs/PlanRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/identity-issuer/rewrap",
       "request": {
         "$ref": "#/$defs/SealedRewrapRequest"
       },

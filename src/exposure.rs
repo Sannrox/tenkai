@@ -1554,6 +1554,7 @@ document = "sbom.json"
             sealed: Vec::new(),
             restore: None,
             rewrap: None,
+            issuer: None,
         };
         let mut env = crate::environment::environment(&mut ctx, "hub")
             .await
@@ -1688,6 +1689,7 @@ document = "sbom.json"
             sealed: Vec::new(),
             restore: None,
             rewrap: None,
+            issuer: None,
         };
         assert_eq!(plan_gate(&mut ctx, "hub", &[step]).await.unwrap(), None);
         let _ = std::fs::remove_dir_all(root);
@@ -1753,6 +1755,7 @@ document = "sbom.json"
             sealed: Vec::new(),
             restore: None,
             rewrap: None,
+            issuer: None,
         };
         let stale = plan_gate(&mut ctx, "spoke", std::slice::from_ref(&step))
             .await

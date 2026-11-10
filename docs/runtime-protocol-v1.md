@@ -6,7 +6,8 @@ There is no served gRPC `RuntimeService`.
 
 | HTTP | Request | Result |
 | --- | --- | --- |
-| `GET /v1/runtime/environments/{environment}/work` | Bearer token and `x-tenkai-runtime-instance`. No body. | JSON `RuntimeWork` (`environment`, optional `plan`, optional `claim`, optional `approvals`) |
+| `GET /v1/runtime/environments/{environment}/work` | Bearer token and `x-tenkai-runtime-instance`; optional `x-tenkai-runtime-capabilities`. No body. | JSON `RuntimeWork` (`environment`, optional `plan`, optional `claim`, optional `approvals`, optional `issuer_candidate`) |
+| `POST /v1/runtime/environments/{environment}/identity-issuer/candidate` | JSON `IssuerKey` (`generation`, `fingerprint`, `certificate`, `sealed_key`) | JSON `IssuerKey`: the candidate the server keeps ([below](#identity-issuer)); `409` when none was asked for |
 | `POST /v1/runtime/environments/{environment}/complete` | JSON `RuntimeCompletion` (`plan_id`, `generation`, `succeeded`, `detail`, `receipts`) | `204` |
 | `POST /v1/runtime/environments/{environment}/heartbeat` | JSON `RuntimeHeartbeat` (`plan_id`, `generation`) | JSON claim |
 | `POST /v1/runtime/environments/{environment}/release` | JSON `RuntimeReleaseRequest` (`plan_id`, `generation`, `step_id`, optional `restore`). Renews the claim. | JSON `RuntimeRelease` (`manifest`, `signature`, `request`, `entries`) for a built-in runtime ([below](#release-package)); `412` naming why the step has none |
@@ -114,8 +115,9 @@ credential as the bearer
 send `x-tenkai-runtime-version`, which the
 [runner registry](run-tenkai-server.md#runner-registry) shows.
 
-Work pull does not accept supported versions or capabilities and does not
-negotiate. Completion covers the claimed plan in one request, not one proto
+Work pull does not accept supported versions and does not negotiate. The
+only capability is `workload_identity`, named in
+`x-tenkai-runtime-capabilities` ([below](#identity-issuer)). Completion covers the claimed plan in one request, not one proto
 `CompleteStep` per step. Inventory is an admitted facts map, not a proto
 `Observation`.
 
@@ -207,6 +209,37 @@ is handed only to that runtime; any other runtime polls idle. The recipient of a
 re-wrap step may also be the environment's recovery key, so values sealed
 before it was set get a wrap for it.
 `recovered` is omitted when empty, so other steps keep their digest.
+
+### Identity issuer
+
+A built-in runtime with a sealing key names `workload_identity` in
+`x-tenkai-runtime-capabilities` (ADR 0046 §2). A server that predates it
+ignores the header. Only to such a runtime does the server:
+
+- add `issuer_candidate` (`generation`) to idle work while
+  `identity-issuer prepare` waits for a candidate. The runtime generates a CA
+  key, seals it to its own sealing key only, and posts the fingerprint,
+  certificate and sealed key. The server refuses a candidate with any wrap
+  other than the poster's own unrevoked key, so it cannot add a recipient it
+  controls. The first candidate for a generation is kept and returned to
+  every later post, so a runtime whose key lost drops it, and a retry after a
+  crash creates no second one. A candidate whose wrap a revocation dropped is
+  replaced.
+- hand out a plan with an issuer step, and only to a runtime whose key wraps
+  the step's key. An older runtime polls idle instead.
+
+A step with `issuer` names no product, instance or release, and has no
+release package (`412`). Its `issuer.key` is the candidate. The runtime
+verifies the plan against its local approval policy, opens the key, and
+refuses it unless its public half has `issuer.key.fingerprint`. The server
+then records the issuer as a compare-and-set on the previous generation, and
+refuses the completion of a step whose generation is no longer the next. An
+issuer step with `rewrap` wraps the recorded issuer key for
+`issuer.recipient`, whose fingerprint `rewrap.fingerprint` names; its
+receipt carries one wrap with `secret` `identity-issuer` and `key`
+`generation-<n>`. `identity-issuer rewrap` plans this step on its own, apart
+from `secret rewrap`: the runtime that opens the issuer key need not open
+the sealed values. A lost issuer is rotated, not recovered.
 
 ### Host records
 

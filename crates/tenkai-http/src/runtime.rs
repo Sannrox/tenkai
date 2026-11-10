@@ -183,6 +183,30 @@ pub(super) async fn runtime_inventory(
     }
 }
 
+/// A runtime's identity issuer candidate (ADR 0046 §2). Answers with the
+/// candidate the server keeps, which is another runtime's if that came first.
+pub(super) async fn runtime_issuer_candidate(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
+    Json(candidate): Json<tenkai::identity_issuer::IssuerKey>,
+) -> Response {
+    match state
+        .runtime_delivery
+        .upload_issuer_candidate(
+            bearer(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
+            &environment,
+            candidate,
+        )
+        .await
+    {
+        Ok(kept) => Json(kept).into_response(),
+        Err(error) => runtime_delivery_error(error),
+    }
+}
+
 /// The host applier's records a runtime reports (ADR 0048 §2).
 pub(super) async fn runtime_host_records(
     State(state): State<Arc<AppState>>,
@@ -218,6 +242,14 @@ fn runtime_caller<'a>(
             .get("x-tenkai-runtime-version")
             .and_then(|value| value.to_str().ok()),
         certificate: certificate.and_then(|certificate| certificate.0.0.as_deref()),
+        workload_identity: headers
+            .get("x-tenkai-runtime-capabilities")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|capabilities| {
+                capabilities.split(',').any(|capability| {
+                    capability.trim() == tenkai::runtime_delivery::WORKLOAD_IDENTITY_CAPABILITY
+                })
+            }),
     }
 }
 

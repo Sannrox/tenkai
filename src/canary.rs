@@ -372,16 +372,15 @@ mod promotion_lifecycle;
 
 pub(crate) use promotion_lifecycle::guarded_promotion;
 use promotion_lifecycle::{
-    POLICY_DISCOVERY_LOCK_CHANNEL, claim_policy_locks, claim_promotion_lock_with_retry,
-    object_property, policies_for_release, policy_record_id, release_policy_locks,
+    POLICY_DISCOVERY_LOCK_CHANNEL, PromotionLock, claim_policy_locks,
+    claim_promotion_lock_with_retry, fenced_create, object_property, policies_for_release,
+    policy_record_id, release_policy_locks,
 };
 pub use promotion_lifecycle::{
     active_policy, authorize_promotion, configure, confirm_policy_active, set_designated,
     unlock_promotion,
 };
-pub(crate) use promotion_lifecycle::{
-    claim_promotion_lock, confirm_promotion_lock, release_promotion_lock,
-};
+pub(crate) use promotion_lifecycle::{claim_promotion_lock, fenced_put, release_promotion_lock};
 
 mod attempt_lifecycle;
 
@@ -498,6 +497,7 @@ mod tests {
                 sealed: Vec::new(),
                 restore: None,
                 rewrap: None,
+                issuer: None,
             }],
             state,
             gates_skipped: Some(false),

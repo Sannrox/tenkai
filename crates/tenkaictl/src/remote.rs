@@ -305,13 +305,16 @@ pub(crate) async fn run(
             if output == OutputFormat::JsonV1 {
                 return print_machine_result(&crate::output::status_result(&env, rows.len()));
             }
-            if let Ok(report) = client.inspect_environment(&env).await
-                && let Some(hold) = report.delivery_hold
-            {
-                println!(
-                    "{env} held at {} by {}: {}",
-                    hold.held_at, hold.actor, hold.reason
-                );
+            if let Ok(report) = client.inspect_environment(&env).await {
+                if let Some(hold) = report.delivery_hold {
+                    println!(
+                        "{env} held at {} by {}: {}",
+                        hold.held_at, hold.actor, hold.reason
+                    );
+                }
+                if let Some(issuer) = report.identity_issuer {
+                    println!("{}", crate::output::issuer_line(&env, &issuer));
+                }
             }
             if rows.is_empty() {
                 println!("{env} has no channel subscriptions");
@@ -416,6 +419,27 @@ pub(crate) async fn run(
                 Ok(())
             }
         },
+        Command::IdentityIssuer { command } => {
+            let result = match command {
+                crate::args::IdentityIssuerCommand::Prepare { env, generation } => {
+                    client.prepare_identity_issuer(&env, generation).await?
+                }
+                crate::args::IdentityIssuerCommand::Plan { env, generation } => {
+                    client.plan_identity_issuer(&env, generation).await?
+                }
+                crate::args::IdentityIssuerCommand::Rewrap {
+                    env,
+                    recipient,
+                    generation,
+                } => {
+                    client
+                        .rewrap_identity_issuer(&env, &recipient, generation)
+                        .await?
+                }
+            };
+            crate::secret::print_plan(&result);
+            Ok(())
+        }
         Command::Secret { command } => match command {
             crate::args::SecretCommand::Trust { env, fingerprint } => {
                 crate::secret::require_fingerprint(&fingerprint)?;

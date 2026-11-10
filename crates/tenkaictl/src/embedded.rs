@@ -127,6 +127,9 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
         Command::Secret { .. } => anyhow::bail!(
             "sealed secrets and recipient pins need a Tenkai server; run this with --target remote"
         ),
+        Command::IdentityIssuer { .. } => anyhow::bail!(
+            "the identity issuer lives in environment runtimes; run this with --target remote"
+        ),
         Command::Restore { .. }
         | Command::SupportBundle { .. }
         | Command::RestoreDrill { .. }

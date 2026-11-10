@@ -217,6 +217,32 @@ pub(crate) fn print_spec_drift(drift: &tenkai::spec_drift::SpecDriftView) {
     }
 }
 
+/// One `status` line for an environment's identity issuer (ADR 0046 §2).
+pub(crate) fn issuer_line(env: &str, issuer: &tenkai::identity_issuer::IssuerStatus) -> String {
+    let mut line = match &issuer.current {
+        Some(current) if current.recipients.is_empty() => format!(
+            "{env} identity issuer generation {} {} has no recipient left; prepare a new one",
+            current.generation, current.fingerprint
+        ),
+        Some(current) => format!(
+            "{env} identity issuer generation {} {}",
+            current.generation, current.fingerprint
+        ),
+        None => format!("{env} has no identity issuer"),
+    };
+    match (&issuer.candidate, issuer.requested) {
+        (Some(candidate), _) => line.push_str(&format!(
+            "; candidate generation {} {} awaits an approved plan",
+            candidate.generation, candidate.fingerprint
+        )),
+        (None, Some(generation)) => line.push_str(&format!(
+            "; candidate generation {generation} awaits a runtime that names workload_identity"
+        )),
+        (None, None) => {}
+    }
+    line
+}
+
 pub(crate) fn inspect_result(report: &plan::EnvironmentInspectReport) -> CommandResultV1 {
     CommandResultV1::succeeded(CommandName::InspectEnvironment)
         .resource("environment", &report.id)

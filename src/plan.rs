@@ -128,6 +128,25 @@ pub struct Step {
     /// predates it fails approval closed, as for `host`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewrap: Option<RewrapStep>,
+    /// Set only on an environment identity issuer step (ADR 0046 §2), which
+    /// names no product, instance or release. Without `rewrap` it activates
+    /// the candidate key it carries; with `rewrap` it wraps the recorded
+    /// issuer key for that recipient. Omitted when absent, so plan digests
+    /// of every other step are unchanged; a binary that predates it fails
+    /// approval closed, as for `host`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<IssuerStep>,
+}
+
+/// The issuer key an identity issuer step activates or re-wraps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssuerStep {
+    pub key: crate::identity_issuer::IssuerKey,
+    /// On a re-wrap: the wire form of the recipient's sealing public key,
+    /// whose fingerprint the step's `rewrap` names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<String>,
 }
 
 /// The recipient a re-wrap step adds (ADR 0045 §5).
@@ -158,7 +177,14 @@ impl Step {
     /// Whether the environment runtime must verify this step against a local
     /// approval policy before it runs (ADR 0045 §4).
     pub fn requires_local_approval_policy(&self) -> bool {
-        !self.sealed.is_empty()
+        !self.sealed.is_empty() || self.issuer.is_some()
+    }
+
+    /// Whether this step deploys its release. A re-wrap step and an
+    /// identity issuer step deploy nothing, so release checks (compatibility,
+    /// placement, deployment records) skip them.
+    pub fn deploys_release(&self) -> bool {
+        self.rewrap.is_none() && self.issuer.is_none()
     }
 }
 
@@ -793,6 +819,7 @@ mod tests {
                     workdir: "/srv/api".into(),
                 }),
                 rewrap: None,
+                issuer: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,

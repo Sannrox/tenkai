@@ -441,6 +441,7 @@ mod tests {
             sealed: Vec::new(),
             restore: None,
             rewrap: None,
+            issuer: None,
         };
         let mut running = plan::create_from_steps(&mut ctx, "local", vec![step])
             .await
@@ -517,6 +518,7 @@ mod tests {
                     sealed: Vec::new(),
                     restore: None,
                     rewrap: None,
+                    issuer: None,
                 };
                 let old = plan::create_from_steps(&mut ctx, "local", vec![step.clone()])
                     .await

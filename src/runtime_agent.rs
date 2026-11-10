@@ -554,6 +554,11 @@ impl RuntimeClient {
             return Ok(true);
         }
         let work = self.pull().await?;
+        if let Some(request) = &work.issuer_candidate
+            && let Err(error) = self.offer_issuer_candidate(request).await
+        {
+            eprintln!("identity issuer candidate failed (retrying next poll): {error:#}");
+        }
         let approvals = work.approvals;
         let (Some(plan), Some(claim)) = (work.plan, work.claim) else {
             return Ok(false);
@@ -893,7 +898,7 @@ impl RuntimeClient {
     }
 
     async fn pull(&self) -> Result<RuntimeWork> {
-        let response = self
+        let mut request = self
             .client()?
             .get(format!(
                 "{}/v1/runtime/environments/{}/work",
@@ -901,10 +906,70 @@ impl RuntimeClient {
             ))
             .bearer_auth(&self.token)
             .header("x-tenkai-runtime-instance", &self.instance_id)
+            .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"));
+        // A server that predates the header ignores it and offers no issuer
+        // work; one that knows it offers issuer work only with it.
+        if self.workload_identity() {
+            request = request.header(
+                "x-tenkai-runtime-capabilities",
+                crate::runtime_delivery::WORKLOAD_IDENTITY_CAPABILITY,
+            );
+        }
+        decode_response(request.send().await?, "pulling runtime work").await
+    }
+
+    /// Whether this runtime runs identity issuer steps (ADR 0046 §2): only
+    /// the built-in executor with a sealing key opens the issuer key.
+    fn workload_identity(&self) -> bool {
+        matches!(&self.executor, StepExecutor::Builtin(config) if config.sealing_dir.is_some())
+    }
+
+    /// Generate an identity issuer candidate sealed to this runtime's own
+    /// key only, and upload it (ADR 0046 §2). It never seals to a key the
+    /// server names, so a server cannot read the issuer; other runtimes get
+    /// it through approved re-wraps. The key exists unsealed only in this
+    /// call. If another runtime's candidate was kept first, the server
+    /// returns it and this key is dropped; a crash before the upload loses
+    /// only this key, and the next poll generates another.
+    async fn offer_issuer_candidate(
+        &self,
+        request: &crate::identity_issuer::CandidateRequest,
+    ) -> Result<()> {
+        let StepExecutor::Builtin(config) = &self.executor else {
+            bail!("only a built-in runtime generates an issuer candidate");
+        };
+        let dir = config
+            .sealing_dir
+            .as_deref()
+            .context("this runtime has no sealing key")?;
+        let own = crate::sealing_key::SealingKey::open_or_generate(dir)?;
+        let candidate = crate::identity_issuer::generate(
+            &self.environment,
+            request.generation,
+            own.public(),
+            crate::now_millis() / 1000,
+        )?;
+        let response = self
+            .client()?
+            .post(format!(
+                "{}/v1/runtime/environments/{}/identity-issuer/candidate",
+                self.base_url, self.environment
+            ))
+            .bearer_auth(&self.token)
+            .header("x-tenkai-runtime-instance", &self.instance_id)
             .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
+            .json(&candidate)
             .send()
             .await?;
-        decode_response(response, "pulling runtime work").await
+        let kept: crate::identity_issuer::IssuerKey =
+            decode_response(response, "uploading the identity issuer candidate").await?;
+        if kept.fingerprint != candidate.fingerprint {
+            eprintln!(
+                "identity issuer generation {} already has candidate {}; dropped this one",
+                kept.generation, kept.fingerprint
+            );
+        }
+        Ok(())
     }
 
     /// Probe local admitted inventory and POST to the hub (#136).
@@ -1222,8 +1287,9 @@ impl RuntimeClient {
         generation: u64,
         step: &Step,
     ) -> Result<RuntimeStepReceipt> {
-        // A sealed value is never handed to a command or program (ADR 0048 §4).
-        if !step.sealed.is_empty() {
+        // A sealed value is never handed to a command or program (ADR 0048
+        // §4), nor is the identity issuer key (ADR 0046 §2).
+        if !step.sealed.is_empty() || step.issuer.is_some() {
             return Ok(RuntimeStepReceipt {
                 step_id: step.id.clone(),
                 succeeded: false,
@@ -1397,9 +1463,10 @@ fn validate_plan(plan: &Plan, environment: &str) -> Result<()> {
     let mut step_ids = std::collections::HashSet::new();
     anyhow::ensure!(
         plan.steps.iter().all(|step| {
+            // An identity issuer step names no release (ADR 0046 §2).
             !step.id.is_empty()
-                && !step.release_digest.is_empty()
-                && !step.artifact_digest.is_empty()
+                && (step.issuer.is_some()
+                    || (!step.release_digest.is_empty() && !step.artifact_digest.is_empty()))
                 && step_ids.insert(step.id.as_str())
         }),
         "runtime plan contains malformed or duplicate steps"

@@ -20,7 +20,7 @@ use base64::Engine as _;
 use crate::fenced_mutation::{MutationCommand, MutationFence};
 use crate::host_executor::step::{HOST_NOT_RESTORED, HostStepEnd, SpooledRelease};
 use crate::manifest::{self, Manifest};
-use crate::plan::{Action, HostStep, Plan, RewrapStep, SealedStep, Step};
+use crate::plan::{Action, HostStep, IssuerStep, Plan, RewrapStep, SealedStep, Step};
 use crate::plan_approval::ApprovalEnvelope;
 use crate::release_signing::TrustRoots;
 use crate::runtime_agent::RuntimeClient;
@@ -104,6 +104,9 @@ pub(crate) async fn execute_step(
     };
     if let Some(host) = step.host {
         return Ok(receipt(run.host(plan, step, host, approvals).await?));
+    }
+    if let Some(issuer) = &step.issuer {
+        return run.issuer(step, issuer).await;
     }
     if let Some(rewrap) = &step.rewrap {
         return run.rewrap(step, rewrap).await;
@@ -483,6 +486,49 @@ impl Run<'_> {
                 "re-wrapping for {} failed: {error:#}",
                 rewrap.fingerprint
             ))),
+        })
+    }
+
+    /// Run an identity issuer step (ADR 0046 §2): open the key it carries
+    /// and refuse it unless its public half has the approved fingerprint.
+    /// Activation reports only that; a re-wrap also wraps the key for the
+    /// step's recipient. The key never leaves this process unsealed and is
+    /// never named in a receipt.
+    async fn issuer(&self, step: &Step, issuer: &IssuerStep) -> Result<RuntimeStepReceipt> {
+        let opened = tokio::task::spawn_blocking({
+            let config = self.config.clone();
+            let environment = self.client.environment().to_owned();
+            let rewrap = step.rewrap.clone();
+            let issuer = issuer.clone();
+            move || config.run_issuer(&environment, &issuer, rewrap.as_ref())
+        })
+        .await?;
+        let key = &issuer.key;
+        Ok(match opened {
+            Ok(wraps) => RuntimeStepReceipt {
+                step_id: step.id.clone(),
+                succeeded: true,
+                detail: match &step.rewrap {
+                    Some(rewrap) => format!(
+                        "re-wrapped identity issuer generation {} for {}",
+                        key.generation, rewrap.fingerprint
+                    ),
+                    None => format!(
+                        "verified identity issuer generation {} with key {}",
+                        key.generation, key.fingerprint
+                    ),
+                },
+                wraps,
+            },
+            Err(error) => RuntimeStepReceipt {
+                step_id: step.id.clone(),
+                succeeded: false,
+                detail: sanitize_diagnostic_text(&format!(
+                    "identity issuer generation {} refused: {error:#}",
+                    key.generation
+                )),
+                wraps: Vec::new(),
+            },
         })
     }
 
@@ -1002,6 +1048,58 @@ impl BuiltinConfig {
             .collect()
     }
 
+    /// Open the issuer key `issuer` carries with this runtime's sealing key
+    /// and check it against the approved fingerprint; for a re-wrap, wrap
+    /// it for the approved recipient, whose key must have the fingerprint
+    /// the step names.
+    pub fn run_issuer(
+        &self,
+        environment: &str,
+        issuer: &IssuerStep,
+        rewrap: Option<&RewrapStep>,
+    ) -> Result<Vec<crate::sealed_secret::RecipientWrap>> {
+        let dir = self.sealing_dir.as_deref().context(
+            "the step opens the identity issuer key, and this runtime has no sealing key (enroll with --credential-file)",
+        )?;
+        let opener = SealedOpener::load(dir)?;
+        let key = &issuer.key;
+        key.open(environment, &opener)?;
+        let Some(rewrap) = rewrap else {
+            return Ok(Vec::new());
+        };
+        let recipient = crate::sealing_key::SealingPublicKey::from_wire(
+            issuer
+                .recipient
+                .as_deref()
+                .context("the re-wrap step names no recipient key")?,
+        )?;
+        if recipient.fingerprint() != rewrap.fingerprint {
+            bail!(
+                "the step's recipient key is not the approved {}",
+                rewrap.fingerprint
+            );
+        }
+        if key.sealed_key.wraps.len() >= crate::sealed_secret::MAX_WRAPS
+            && !key
+                .sealed_key
+                .wraps
+                .iter()
+                .any(|wrap| wrap.fingerprint == rewrap.fingerprint)
+        {
+            bail!(
+                "the issuer key already has {} recipients; revoke a runtime before adding one",
+                crate::sealed_secret::MAX_WRAPS
+            );
+        }
+        let target = SealedTarget::identity_issuer(environment, key.generation)?;
+        Ok(vec![crate::sealed_secret::RecipientWrap {
+            secret: crate::identity_issuer::WRAP_SECRET.into(),
+            key: key.wrap_key(),
+            digest: key.digest(environment)?,
+            wrap: opener.rewrap(&target, &key.sealed_key, &recipient)?,
+        }])
+    }
+
     /// Refuse a release this runtime must not run with a built-in executor,
     /// naming why. Only Helm and the host applier write sealed values
     /// (ADR 0048 §4). A host
@@ -1270,6 +1368,7 @@ mod tests {
             host: None,
             sealed: Vec::new(),
             rewrap: None,
+            issuer: None,
         };
         Case {
             config: BuiltinConfig {

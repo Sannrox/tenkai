@@ -231,6 +231,7 @@ impl FixtureEnvironmentProjection {
             criticality: None,
             latest_failures: Vec::new(),
             sealed_recovery_warning: None,
+            identity_issuer: None,
         }
     }
 

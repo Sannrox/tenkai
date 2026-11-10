@@ -450,6 +450,7 @@ mod tests {
             sealed: Vec::new(),
             restore: None,
             rewrap: None,
+            issuer: None,
         }
     }
 
