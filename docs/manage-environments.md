@@ -226,8 +226,16 @@ two thirds of its lifetime have passed, with no plan or approval
 re-issues exactly the grant the old certificate proves, with a fresh key,
 from the issuer it last verified at apply. A certificate from an older
 issuer generation is not renewed: it needs a step after `identity-issuer
-rewrap`. Restart-reload certificates are not renewed yet; apply a step
-before they expire. A host certificate installed by an applier older than
+rewrap`.
+
+A `reload = "restart"` certificate on `helm` renews the same way, then
+restarts the release's Deployments, StatefulSets and DaemonSets, which
+roll out under their own update strategy. It falls due up to two hours
+later, by an amount fixed per environment, so replicas of one topology in
+different environments do not restart together. A crash between the new
+certificate and the restart finishes the restart on the next pass without
+issuing again. Restart-reload certificates on `host` are not renewed yet;
+apply a step before they expire. A host certificate installed by an applier older than
 this release is renewed once a step installs it again.
 
 `env add --connectivity <class>` also sets the connectivity class.

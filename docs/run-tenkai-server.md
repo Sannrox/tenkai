@@ -478,7 +478,16 @@ tenkai-runtime
   The runtime keeps the issuer it verified (still sealed) beside its
   sealing key and, about once a minute, renews each `reload = "runtime"`
   certificate past two thirds of its lifetime in place, re-issuing the grant
-  the Secret's certificate proves. A Secret whose `grant.json` the
+  the Secret's certificate proves. A `reload = "restart"` certificate is
+  renewed the same way, marked `tenkai.dev/restart-for` on its Secret, and
+  then the release's Deployments, StatefulSets and DaemonSets (found by
+  Helm's `meta.helm.sh/release-name` annotation) get its digest as the pod
+  template annotation `tenkai.dev/identity-certificate`, which rolls them.
+  A paused Deployment, a StatefulSet or DaemonSet that updates on delete,
+  or a StatefulSet with a rollout partition, is not restarted: the renewal
+  reports it and keeps the restart pending until it can roll.
+  The runtime's cluster credentials need list and patch on those kinds in
+  the environment's namespace. A Secret whose `grant.json` the
   certificate does not prove is logged and left alone.
   Host
   releases get the files under `TENKAI_IDENTITY_DIR`. Other executors and
