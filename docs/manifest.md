@@ -121,7 +121,8 @@ dns_names = ["api-${TENKAI_INSTANCE}.prod.svc"]
   it in every DNS name, so two instances never share one; a literal name is
   refused at publication.
 - `reload` says how the workload picks up a renewed certificate: `runtime`
-  watches its files, `restart` needs a restart. A release that reads the
+  watches its files, and the runtime renews it in place before it expires;
+  `restart` needs a restart. A release that reads the
   certificate through a subPath mount or environment variables does not see
   file updates and declares `restart`.
 - Only software releases on `helm` or `host` take it.

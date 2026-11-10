@@ -253,13 +253,34 @@ pub fn issue(
 /// its key. The host applier calls it before it writes anything. Errors
 /// never quote the key.
 pub fn check_issued(issued: &IssuedIdentity, now_secs: i64) -> Result<()> {
+    let leaf = check_certificate(&issued.grant, &issued.certificate, &issued.ca)?;
+    ensure!(
+        leaf.not_before <= now_secs && now_secs <= leaf.not_after,
+        "cert.pem is not valid now"
+    );
+    // The error never quotes the key.
+    let pair = rcgen::KeyPair::from_pem(&issued.key)
+        .map_err(|_| anyhow::anyhow!("key.pem is not a valid private key"))?;
+    ensure!(
+        rcgen::PublicKeyData::subject_public_key_info(&pair) == leaf.public_key,
+        "key.pem is not the key of cert.pem"
+    );
+    Ok(())
+}
+
+/// What [`check_certificate`] read from a certificate it accepted.
+struct CheckedLeaf {
+    not_before: i64,
+    not_after: i64,
+    /// DER SubjectPublicKeyInfo.
+    public_key: Vec<u8>,
+}
+
+/// Check that `certificate` is signed by `ca`, that `ca` is the issuer
+/// `grant` names, and that its names and key usage are exactly the grant's.
+/// Says nothing about time or the key.
+fn check_certificate(grant: &IdentityGrant, certificate: &str, ca: &str) -> Result<CheckedLeaf> {
     use x509_parser::prelude::*;
-    let IssuedIdentity {
-        grant,
-        certificate,
-        key,
-        ca,
-    } = issued;
     // Exactly one certificate per file: a workload loads ca.pem as its trust
     // bundle, so an appended block would make it trust another issuer.
     let (rest, ca_pem) = parse_x509_pem(ca.as_bytes())
@@ -306,12 +327,6 @@ pub fn check_issued(issued: &IssuedIdentity, now_secs: i64) -> Result<()> {
         uris == [grant.uri.clone()] && dns_names == grant.dns_names,
         "cert.pem names are not the granted ones"
     );
-    let now = ASN1Time::from_timestamp(now_secs)
-        .map_err(|error| anyhow::anyhow!("reading the time: {error}"))?;
-    ensure!(
-        leaf.validity().is_valid_at(now),
-        "cert.pem is not valid now"
-    );
     let usage = leaf
         .extended_key_usage()
         .map_err(|error| anyhow::anyhow!("reading cert.pem key usage: {error}"))?
@@ -334,14 +349,68 @@ pub fn check_issued(issued: &IssuedIdentity, now_secs: i64) -> Result<()> {
         "cert.pem key usage is not the granted {:?} role",
         grant.certificate
     );
-    // The error never quotes the key.
-    let pair = rcgen::KeyPair::from_pem(key)
-        .map_err(|_| anyhow::anyhow!("key.pem is not a valid private key"))?;
-    ensure!(
-        rcgen::PublicKeyData::subject_public_key_info(&pair) == leaf.public_key().raw,
-        "key.pem is not the key of cert.pem"
-    );
-    Ok(())
+    Ok(CheckedLeaf {
+        not_before: leaf.validity().not_before.timestamp(),
+        not_after: leaf.validity().not_after.timestamp(),
+        public_key: leaf.public_key().raw.to_vec(),
+    })
+}
+
+/// A workload certificate a target holds (ADR 0046 §3): the grant recorded
+/// beside it, proven by the certificate the issuer signed for exactly that
+/// grant. Renewal re-issues this grant and nothing wider: an edited
+/// `grant.json` no longer matches the signed certificate and is refused.
+/// `reload` is not in the certificate; it only says how the workload picks
+/// up a certificate, never what one names, and whoever can edit it can
+/// already remove the certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledIdentity {
+    pub instance: String,
+    pub grant: IdentityGrant,
+    /// The certificate the target holds, PEM. Renewal replaces only this
+    /// one: a target changed since it was read is left to the next pass.
+    pub certificate: String,
+    /// Its validity, in Unix seconds.
+    pub not_before: i64,
+    pub not_after: i64,
+}
+
+impl InstalledIdentity {
+    /// Read what the target holds for `instance` of `environment`: the
+    /// certificate, the issuer certificate and the recorded grant. Refuses a
+    /// grant for another instance, or one the certificate does not prove.
+    /// An expired certificate still proves its grant.
+    pub fn read(
+        environment: &str,
+        instance: &str,
+        certificate: &str,
+        ca: &str,
+        grant_json: &[u8],
+    ) -> Result<Self> {
+        let grant: IdentityGrant =
+            serde_json::from_slice(grant_json).context("reading grant.json")?;
+        let uri = format!("tenkai://{environment}/{instance}");
+        ensure!(
+            grant.uri == uri,
+            "grant.json of {instance} grants {}, not {uri}",
+            grant.uri
+        );
+        let leaf = check_certificate(&grant, certificate, ca)
+            .with_context(|| format!("the certificate of {instance} does not prove its grant"))?;
+        Ok(Self {
+            instance: instance.to_owned(),
+            grant,
+            certificate: certificate.to_owned(),
+            not_before: leaf.not_before,
+            not_after: leaf.not_after,
+        })
+    }
+
+    /// Whether renewal is due: two thirds of the lifetime have passed.
+    pub fn renewal_due(&self, now_secs: i64) -> bool {
+        let lifetime = self.not_after.saturating_sub(self.not_before);
+        now_secs >= self.not_before.saturating_add(lifetime / 3 * 2)
+    }
 }
 
 #[cfg(test)]
@@ -445,5 +514,50 @@ mod tests {
         )
         .unwrap();
         assert!(issue(&grant, &appended, key, now).is_err());
+    }
+
+    /// Renewal re-issues only what the signed certificate proves: a
+    /// `grant.json` edited in the target, or moved to another instance, is
+    /// refused, and renewal falls due at two thirds of the lifetime.
+    #[test]
+    fn a_recorded_grant_counts_only_as_far_as_the_certificate_proves_it() {
+        let (issuer_key, key) = issuer();
+        let grant = grant(
+            &section(CertificateRole::Server, &["api.internal"]),
+            "prod",
+            "api",
+            &issuer_key,
+        )
+        .unwrap();
+        let now = crate::now_millis() / 1000;
+        let issued = issue(&grant, &issuer_key, key, now).unwrap();
+        let read = |environment: &str, instance: &str, grant: &IdentityGrant| {
+            InstalledIdentity::read(
+                environment,
+                instance,
+                &issued.certificate,
+                &issued.ca,
+                &serde_json::to_vec(grant).unwrap(),
+            )
+        };
+        let installed = read("prod", "api", &grant).unwrap();
+        assert_eq!(installed.grant, grant);
+
+        let mut wider = grant.clone();
+        wider.dns_names.push("bank.example".into());
+        assert!(read("prod", "api", &wider).is_err());
+        let mut both = grant.clone();
+        both.certificate = CertificateRole::Both;
+        assert!(read("prod", "api", &both).is_err());
+        // Another instance's Secret copied under this instance's name.
+        assert!(read("prod", "web", &grant).is_err());
+
+        // Still proves its grant once expired, so a long outage renews.
+        assert!(!installed.renewal_due(now));
+        let lifetime = installed.not_after - installed.not_before;
+        let due_at = installed.not_before + lifetime / 3 * 2;
+        assert!(!installed.renewal_due(due_at - 1));
+        assert!(installed.renewal_due(due_at));
+        assert!(installed.renewal_due(now + 2 * WORKLOAD_CERTIFICATE_TTL_SECS));
     }
 }

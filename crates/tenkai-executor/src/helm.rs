@@ -114,6 +114,32 @@ impl HelmSoftwareExecutor {
 }
 
 impl SoftwareExecutor for HelmSoftwareExecutor {
+    fn installed_identities(
+        &self,
+        target: &tenkai::software_executor::IdentityTarget<'_>,
+    ) -> Result<Vec<(String, Result<tenkai::workload_identity::InstalledIdentity>)>> {
+        // Without a cluster configuration this runtime applies no Helm
+        // release, so it holds no certificate to renew.
+        let Some(cluster_config) = target.cluster_config_path else {
+            return Ok(Vec::new());
+        };
+        let api = LiveSecrets::connect_existing(cluster_config)?;
+        helm_secrets::installed_identities(&api, target.environment)
+    }
+
+    fn renew_identity(
+        &self,
+        target: &tenkai::software_executor::IdentityTarget<'_>,
+        installed: &tenkai::workload_identity::InstalledIdentity,
+        issued: &tenkai::workload_identity::IssuedIdentity,
+    ) -> Result<()> {
+        let cluster_config = target
+            .cluster_config_path
+            .context("renewing a workload certificate needs a cluster configuration")?;
+        let api = LiveSecrets::connect_existing(cluster_config)?;
+        helm_secrets::renew_identity_secret(&api, target.environment, installed, issued)
+    }
+
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
         self.helm_upgrade(
             request,

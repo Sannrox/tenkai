@@ -634,6 +634,56 @@ pub fn rewrap_step(
     }))
 }
 
+/// The issuer a runtime last verified for an environment, kept beside its
+/// sealing key (ADR 0046 §3) so it can renew certificates while the server
+/// is unreachable. The key inside stays sealed to that runtime.
+fn cached_issuer_path(
+    sealing_dir: &std::path::Path,
+    environment: &str,
+) -> Result<std::path::PathBuf> {
+    crate::ontology::validate_identifier("environment", environment)?;
+    Ok(sealing_dir.join(format!("identity-issuer-{environment}.json")))
+}
+
+/// Keep `issuer`, which an approved step just verified, for renewal. A
+/// later generation replaces an earlier one, never the reverse, also when
+/// two runtime processes share the sealing directory during a restart.
+pub fn cache_verified(
+    sealing_dir: &std::path::Path,
+    environment: &str,
+    issuer: &IssuerKey,
+) -> Result<()> {
+    issuer.check_public()?;
+    let path = cached_issuer_path(sealing_dir, environment)?;
+    let lock = path.with_extension("lock");
+    crate::fenced_mutation::with_mutation_lock(&lock, || {
+        if let Some(cached) = cached_verified(sealing_dir, environment)?
+            && (cached.generation > issuer.generation || &cached == issuer)
+        {
+            return Ok(());
+        }
+        crate::atomic_state::write_file(&path, &serde_json::to_vec_pretty(issuer)?, Some(0o600))
+            .with_context(|| format!("writing {}", path.display()))
+    })?
+}
+
+/// The issuer [`cache_verified`] kept for `environment`, if any.
+pub fn cached_verified(
+    sealing_dir: &std::path::Path,
+    environment: &str,
+) -> Result<Option<IssuerKey>> {
+    let path = cached_issuer_path(sealing_dir, environment)?;
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let issuer: IssuerKey =
+        serde_json::from_slice(&bytes).with_context(|| format!("reading {}", path.display()))?;
+    issuer.check_public()?;
+    Ok(Some(issuer))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,5 +1013,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(candidate(&env_obj(&mut ctx).await).unwrap(), Some(fresh));
+    }
+
+    /// The runtime keeps the newest issuer it verified: a step that still
+    /// carries an older generation does not replace it.
+    #[test]
+    fn the_cached_issuer_never_goes_back_a_generation() {
+        let runtime = Runtime::new("cache");
+        let (first, second) = (runtime.candidate(1), runtime.candidate(2));
+        assert_eq!(cached_verified(&runtime.dir, "prod").unwrap(), None);
+        cache_verified(&runtime.dir, "prod", &second).unwrap();
+        cache_verified(&runtime.dir, "prod", &first).unwrap();
+        assert_eq!(cached_verified(&runtime.dir, "prod").unwrap(), Some(second));
+        assert_eq!(cached_verified(&runtime.dir, "staging").unwrap(), None);
     }
 }

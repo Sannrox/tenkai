@@ -274,6 +274,11 @@ impl From<PathBuf> for StepExecutor {
     }
 }
 
+/// How often a runtime looks for workload certificates to renew. A
+/// certificate is due with a third of its lifetime left, so a minute is
+/// far inside that.
+const RENEWAL_PASS_INTERVAL_MS: i64 = 60_000;
+
 #[derive(Clone)]
 pub struct RuntimeClient {
     base_url: String,
@@ -296,6 +301,10 @@ pub struct RuntimeClient {
     /// Set once the agent switched to a new version of itself: it stops so
     /// the supervisor starts that version.
     restart: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// When the last workload certificate renewal pass ran (Unix millis),
+    /// so a fast poll does not list the target every time. In memory only:
+    /// what is due is read from the target, and a restart just runs a pass.
+    renewal_pass_at: std::sync::Arc<std::sync::atomic::AtomicI64>,
     /// The host preflight config whose checks runner attestation carries.
     preflight: Option<PathBuf>,
     /// Local approval policy and trust roots, installed on this host
@@ -347,6 +356,7 @@ impl RuntimeClient {
             certified: Default::default(),
             home: None,
             restart: Default::default(),
+            renewal_pass_at: Default::default(),
             preflight: None,
             local_policy: None,
         })
@@ -544,6 +554,9 @@ impl RuntimeClient {
         if let Err(error) = self.renew_certificate_if_due().await {
             eprintln!("runner certificate renewal failed (retrying next poll): {error:#}");
         }
+        // Before anything that needs the server, so certificates renew while
+        // it is unreachable (ADR 0046 §3).
+        self.renew_workload_identities().await;
         // Refresh admitted inventory facts before work pull (#136). Failures are
         // visible but non-fatal so temporary probe issues do not stop delivery.
         if let Err(error) = self.report_inventory().await {
@@ -878,6 +891,27 @@ impl RuntimeClient {
             !interval.is_zero(),
             "poll interval must be greater than zero"
         );
+        // Renewal also ticks on its own, so a long plan does not hold
+        // workload certificates past their expiry.
+        let renew = async {
+            let mut tick = tokio::time::interval(Duration::from_millis(
+                RENEWAL_PASS_INTERVAL_MS.unsigned_abs(),
+            ));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                self.renew_workload_identities().await;
+            }
+        };
+        tokio::select! {
+            polled = self.poll(interval) => polled,
+            never = renew => never,
+        }
+    }
+
+    /// Poll for work every `interval`, backing off on failure, until a
+    /// restart is requested.
+    async fn poll(&self, interval: Duration) -> Result<()> {
         let mut consecutive_failures = 0_u32;
         loop {
             let delay = match self.run_once().await {
@@ -916,6 +950,60 @@ impl RuntimeClient {
             );
         }
         decode_response(request.send().await?, "pulling runtime work").await
+    }
+
+    /// Renew the workload certificates of this environment that are due, at
+    /// most once per [`RENEWAL_PASS_INTERVAL_MS`]. Never fails the poll: an
+    /// instance that could not be renewed is logged and retried next pass.
+    async fn renew_workload_identities(&self) {
+        let StepExecutor::Builtin(config) = &self.executor else {
+            return;
+        };
+        // Claim the pass, so the poll and the ticker in [`Self::run`] never
+        // run two at once.
+        let now = crate::now_millis();
+        let last = self
+            .renewal_pass_at
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if (last != 0 && now.saturating_sub(last) < RENEWAL_PASS_INTERVAL_MS)
+            || self
+                .renewal_pass_at
+                .compare_exchange(
+                    last,
+                    now,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_err()
+        {
+            return;
+        }
+        let config = std::sync::Arc::clone(config);
+        let environment = self.environment.clone();
+        let pass = tokio::task::spawn_blocking(move || {
+            crate::runtime_builtin::renew_identities(&config, &environment, now / 1000)
+        })
+        .await;
+        match pass {
+            Ok(Ok(renewals)) => {
+                for renewal in renewals {
+                    match renewal.outcome {
+                        Ok(expires) => eprintln!(
+                            "renewed the workload certificate of {}; it expires at {expires}",
+                            renewal.instance
+                        ),
+                        Err(error) => eprintln!(
+                            "renewing the workload certificate of {} failed (retrying): {error}",
+                            renewal.instance
+                        ),
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                eprintln!("workload certificate renewal failed (retrying): {error:#}")
+            }
+            Err(error) => eprintln!("workload certificate renewal panicked (retrying): {error}"),
+        }
     }
 
     /// Whether this runtime runs identity issuer steps (ADR 0046 §2): only
