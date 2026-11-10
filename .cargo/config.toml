@@ -1,0 +1,6 @@
+# Debug builds keep every async frame of an apply on the test thread's
+# stack, and the deepest apply tests already need about 2 MiB, the default
+# for a spawned thread. Give processes cargo starts room; release binaries
+# and their deployments are unaffected.
+[env]
+RUST_MIN_STACK = "8388608"
