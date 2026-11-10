@@ -281,7 +281,11 @@ install = "true"
     );
     let verified = bundle
         .verify(
-            &TrustRoots::load(&offline_trust).unwrap(),
+            &TrustRoots::load(
+                &offline_trust,
+                tenkai::release_signing::TrustRootKind::Release,
+            )
+            .unwrap(),
             tenkai::ontology::NS,
             "site-c",
             tenkai::now_millis(),

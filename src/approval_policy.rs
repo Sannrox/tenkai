@@ -951,10 +951,16 @@ fn auto_signer_trusted(policy: &ApprovalPolicy, plan: &Plan, roots_path: &Path) 
     let Ok(Some(key_id)) = signer_key_id(policy) else {
         return false;
     };
-    let Ok(roots) = crate::plan_approval::TrustRoots::load(roots_path) else {
+    let Ok(roots) = crate::plan_approval::TrustRoots::load(
+        roots_path,
+        crate::signature_verification::TrustRootKind::PlanApproval,
+    ) else {
         return false;
     };
-    let Ok(signer) = roots.signer(&key_id) else {
+    let Ok(signer) = roots.signer(
+        crate::signature_verification::TrustRootKind::PlanApproval,
+        &key_id,
+    ) else {
         return false;
     };
     !signer.environments.is_empty()
@@ -1349,7 +1355,11 @@ exclude_requester = true
         );
         fs::write(&envelope_path, serde_json::to_vec(&forged).unwrap()).unwrap();
         let trust = write_trust_roots(&dir, &[7_u8; 32]);
-        let mut legacy = crate::plan_approval::TrustRoots::load(&trust).unwrap();
+        let mut legacy = crate::plan_approval::TrustRoots::load(
+            &trust,
+            crate::signature_verification::TrustRootKind::PlanApproval,
+        )
+        .unwrap();
         legacy.signers[0].environments.clear();
         legacy.signers[0].providers.clear();
         fs::write(&trust, toml::to_string(&legacy).unwrap()).unwrap();
@@ -1590,7 +1600,11 @@ exclude_requester = true
         let expired = sign(statement(now.saturating_sub(80_000), now.saturating_sub(1)));
         let request = dir.join("request.json");
         fs::write(&request, serde_json::to_vec(&expired).unwrap()).unwrap();
-        let loaded = crate::plan_approval::TrustRoots::load(&roots).unwrap();
+        let loaded = crate::plan_approval::TrustRoots::load(
+            &roots,
+            crate::signature_verification::TrustRootKind::PlanApproval,
+        )
+        .unwrap();
         crate::plan_approval::collect_envelope(&mut ctx, &plan, &live, &loaded, now)
             .await
             .unwrap();
@@ -1641,7 +1655,11 @@ exclude_requester = true
             statement,
             signature: STANDARD.encode(signature.to_bytes()),
         };
-        let loaded = crate::plan_approval::TrustRoots::load(&roots).unwrap();
+        let loaded = crate::plan_approval::TrustRoots::load(
+            &roots,
+            crate::signature_verification::TrustRootKind::PlanApproval,
+        )
+        .unwrap();
         crate::plan_approval::collect_envelope(&mut ctx, &plan, &envelope, &loaded, now)
             .await
             .unwrap();
@@ -1715,7 +1733,11 @@ exclude_requester = true
             statement,
             signature: STANDARD.encode(signature.to_bytes()),
         };
-        let loaded = crate::plan_approval::TrustRoots::load(&roots).unwrap();
+        let loaded = crate::plan_approval::TrustRoots::load(
+            &roots,
+            crate::signature_verification::TrustRootKind::PlanApproval,
+        )
+        .unwrap();
         crate::plan_approval::collect_envelope(&mut ctx, &plan, &envelope, &loaded, now)
             .await
             .unwrap();
@@ -1804,7 +1826,11 @@ n = 2
         };
         let alice = sign(&alice_key, &alice_kid, "alice");
         let bob = sign(&bob_key, &bob_kid, "bob");
-        let loaded_both = crate::plan_approval::TrustRoots::load(&both).unwrap();
+        let loaded_both = crate::plan_approval::TrustRoots::load(
+            &both,
+            crate::signature_verification::TrustRootKind::PlanApproval,
+        )
+        .unwrap();
         crate::plan_approval::collect_envelope(&mut ctx, &plan, &alice, &loaded_both, now)
             .await
             .unwrap();
@@ -1830,7 +1856,11 @@ n = 2
                 .all(|approval| approval.signed_at == Some(now.saturating_sub(1))),
             "{complete:?}"
         );
-        let loaded_bob = crate::plan_approval::TrustRoots::load(&bob_only).unwrap();
+        let loaded_bob = crate::plan_approval::TrustRoots::load(
+            &bob_only,
+            crate::signature_verification::TrustRootKind::PlanApproval,
+        )
+        .unwrap();
         let partial = crate::plan_approval::approvals_view(
             &mut ctx,
             &plan,

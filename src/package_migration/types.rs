@@ -14,7 +14,6 @@ pub const MIGRATION_API_VERSION: u32 = 1;
 pub const APPROVAL_SCHEMA: &str = "tenkai.package-migration-approval.v1";
 pub(super) const APPROVAL_DOMAIN: &[u8] = b"TENKAI-PACKAGE-MIGRATION-APPROVAL-V1\0";
 pub const APPROVAL_PURPOSE: &str = "execute_package_migration";
-pub(super) const TRUST_ROOT_VERSION: u32 = 1;
 pub(super) const MIGRATION_EXEC_NAMESPACE: &str = "tenkai.package-migration";
 pub(super) const MIGRATION_EXEC_TTL_MS: i64 = 2 * 60 * 60 * 1000;
 
@@ -208,43 +207,10 @@ pub struct MigrationApprovalStatement {
     pub expires_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MigrationApprovalEnvelope {
-    pub schema: String,
-    pub key_id: String,
-    pub statement: MigrationApprovalStatement,
-    pub signature: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ApprovalTrustRoots {
-    pub version: u32,
-    pub signers: Vec<ApprovalTrustedSigner>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ApprovalTrustedSigner {
-    pub key_id: String,
-    pub identity: String,
-    pub public_key: String,
-    /// Unix milliseconds. Absent: validity is not recorded (#812).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(transform = crate::schema_contract::omitted_when_none)]
-    pub not_before: Option<i64>,
-    /// Unix milliseconds. Absent: validity is not recorded (#812).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(transform = crate::schema_contract::omitted_when_none)]
-    pub not_after: Option<i64>,
-}
-
-impl ApprovalTrustedSigner {
-    pub(crate) fn validity(&self) -> crate::signature_verification::SignerValidityWindow {
-        crate::signature_verification::SignerValidityWindow::new(self.not_before, self.not_after)
-    }
-}
+/// A signed package migration approval: the plan-approval envelope over
+/// [`MigrationApprovalStatement`].
+pub type MigrationApprovalEnvelope =
+    crate::plan_approval::ApprovalEnvelope<MigrationApprovalStatement>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -264,7 +230,7 @@ pub struct PackageMigrationApplyRequest {
     pub declaration: MigrationDeclaration,
     pub expected_generation: u64,
     pub approval: MigrationApprovalEnvelope,
-    pub trust_roots: ApprovalTrustRoots,
+    pub trust_roots: crate::signature_verification::TrustRoots,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_receipt_digest: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -277,7 +243,7 @@ pub struct PackageMigrationMutateRequest {
     pub version: u32,
     pub expected_generation: u64,
     pub approval: MigrationApprovalEnvelope,
-    pub trust_roots: ApprovalTrustRoots,
+    pub trust_roots: crate::signature_verification::TrustRoots,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plan_approvals: BTreeMap<String, crate::plan_approval::ApprovalEnvelope>,
 }

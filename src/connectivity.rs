@@ -1935,7 +1935,10 @@ async fn admit_isolated_catalog(
         Ok(envelope) => envelope,
         Err(error) => return cleanup(error),
     };
-    let roots = match crate::release_signing::TrustRoots::load(&trust) {
+    let roots = match crate::release_signing::TrustRoots::load(
+        &trust,
+        crate::signature_verification::TrustRootKind::Release,
+    ) {
         Ok(roots) => roots,
         Err(error) => return cleanup(error),
     };
@@ -2661,6 +2664,7 @@ install = "true"
                 .encode(exporter.verifying_key().to_bytes()),
             not_before: None,
             not_after: None,
+            ..Default::default()
         }];
         if let Some(runtime) = runtime {
             signers.push(TrustedSigner {
@@ -2670,6 +2674,7 @@ install = "true"
                     .encode(runtime.verifying_key().to_bytes()),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             });
         }
         crate::release_signing::TrustRoots {

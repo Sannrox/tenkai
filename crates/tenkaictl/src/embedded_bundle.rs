@@ -30,7 +30,10 @@ pub(crate) async fn run(ctx: &mut Ctx, command: BundleCommand) -> Result<()> {
                 derived_criticality,
             } = *args;
             let signing = offline_bundle_build::load_exporter_key(&signing_key)?;
-            let roots = TrustRoots::load(&trust_roots)?;
+            let roots = TrustRoots::load(
+                &trust_roots,
+                tenkai::release_signing::TrustRootKind::Release,
+            )?;
             let exporter_identity = offline_bundle_build::exporter_identity(&roots, &signing)?;
             let trust_toml = std::fs::read(&trust_roots)
                 .with_context(|| format!("reading public trust roots {}", trust_roots.display()))?;
@@ -112,7 +115,7 @@ pub(crate) async fn run(ctx: &mut Ctx, command: BundleCommand) -> Result<()> {
 /// runs on a host that only holds the archive.
 pub(crate) fn extract_docs(bundle: &Path, trust_roots: &Path, env: &str, out: &Path) -> Result<()> {
     let envelope = tenkai::offline_bundle::BundleEnvelope::load(bundle)?;
-    let roots = TrustRoots::load(trust_roots)?;
+    let roots = TrustRoots::load(trust_roots, tenkai::release_signing::TrustRootKind::Release)?;
     let verified = envelope.verify(&roots, ontology::NS, env, tenkai::now_millis())?;
     let written = tenkai::offline_docs::extract(&verified, out)?;
     println!("wrote offline docs to {}", written.display());

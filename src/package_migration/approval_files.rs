@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 
-use super::types::{
-    ApprovalTrustRoots, MIGRATION_API_VERSION, MigrationApprovalEnvelope, TRUST_ROOT_VERSION,
-};
+use crate::signature_verification::{TrustRootKind, TrustRoots};
+
+use super::types::{MIGRATION_API_VERSION, MigrationApprovalEnvelope};
 
 pub fn require_migration_api_version(version: u32) -> Result<()> {
     if version != MIGRATION_API_VERSION {
@@ -18,28 +18,9 @@ pub fn require_migration_api_version(version: u32) -> Result<()> {
     Ok(())
 }
 
-pub fn load_trust_roots(path: &Path) -> Result<ApprovalTrustRoots> {
-    let roots_raw = std::fs::read_to_string(path).with_context(|| {
-        format!(
-            "reading package migration approval trust roots {}",
-            path.display()
-        )
-    })?;
-    let roots: ApprovalTrustRoots = toml::from_str(&roots_raw).with_context(|| {
-        format!(
-            "parsing package migration approval trust roots {}",
-            path.display()
-        )
-    })?;
-    if roots.version != TRUST_ROOT_VERSION || roots.signers.is_empty() {
-        bail!(
-            "package migration approval trust roots must use version {TRUST_ROOT_VERSION} and contain at least one signer"
-        );
-    }
-    for signer in &roots.signers {
-        signer.validity().validate()?;
-    }
-    Ok(roots)
+/// Load and validate package migration approval trust roots.
+pub fn load_trust_roots(path: &Path) -> Result<TrustRoots> {
+    TrustRoots::load(path, TrustRootKind::PackageMigration)
 }
 
 #[derive(Debug)]
@@ -73,14 +54,10 @@ pub(super) fn validate_plan_approval_filename(plan_id: &str) -> Result<()> {
 impl RemoteApprovalFiles {
     pub fn materialize(
         approval: &MigrationApprovalEnvelope,
-        trust_roots: &ApprovalTrustRoots,
+        trust_roots: &TrustRoots,
         plan_approvals: &BTreeMap<String, crate::plan_approval::ApprovalEnvelope>,
     ) -> Result<Self> {
-        if trust_roots.version != TRUST_ROOT_VERSION || trust_roots.signers.is_empty() {
-            bail!(
-                "package migration approval trust roots must use version {TRUST_ROOT_VERSION} and contain at least one signer"
-            );
-        }
+        trust_roots.validate(TrustRootKind::PackageMigration)?;
         for plan_id in plan_approvals.keys() {
             validate_plan_approval_filename(plan_id)?;
         }
@@ -114,7 +91,7 @@ impl RemoteApprovalFiles {
 
     pub async fn materialize_async(
         approval: MigrationApprovalEnvelope,
-        trust_roots: ApprovalTrustRoots,
+        trust_roots: TrustRoots,
         plan_approvals: BTreeMap<String, crate::plan_approval::ApprovalEnvelope>,
     ) -> Result<Self> {
         tokio::task::spawn_blocking(move || {

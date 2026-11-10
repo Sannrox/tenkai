@@ -20,6 +20,7 @@ fn trust_roots(key_id: &str) -> tenkai::release_signing::TrustRoots {
             public_key: base64::engine::general_purpose::STANDARD.encode(public),
             not_before: None,
             not_after: None,
+            ..Default::default()
         }],
     }
 }

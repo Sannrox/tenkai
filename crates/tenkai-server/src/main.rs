@@ -1335,7 +1335,7 @@ async fn main() -> Result<()> {
                         let exported = tokio::task::spawn_blocking(move || {
                             // Earlier exports may be signed by a rotated key.
                             let rotated = std::env::var_os("TENKAI_AUDIT_TRUST_ROOTS")
-                                .map(|path| tenkai::release_signing::TrustRoots::load(std::path::Path::new(&path)))
+                                .map(|path| tenkai::release_signing::TrustRoots::load(std::path::Path::new(&path), tenkai::release_signing::TrustRootKind::Release))
                                 .transpose()?;
                             tenkai::audit_export::export_next(
                                 &*store,
@@ -1970,7 +1970,12 @@ fn export_settings(tenant_mode: bool) -> Result<Option<Arc<tenkai::exports::Expo
             );
             // Earlier audit exports may be signed by a rotated key.
             let rotated = std::env::var_os("TENKAI_EXPORT_TRUST_ROOTS")
-                .map(|path| tenkai::release_signing::TrustRoots::load(std::path::Path::new(&path)))
+                .map(|path| {
+                    tenkai::release_signing::TrustRoots::load(
+                        std::path::Path::new(&path),
+                        tenkai::release_signing::TrustRootKind::Release,
+                    )
+                })
                 .transpose()?;
             let exports = tenkai::exports::Exports::new(dir.into(), seed.into(), rotated)?;
             // Unset keeps exports for good, as before (#818).

@@ -581,15 +581,18 @@ fn installed_revocations(sources: &TrustSources) -> Option<Revocations> {
     if !path.exists() {
         return None;
     }
-    let verified = crate::release_signing::TrustRoots::load(authorities)
-        .map_err(|error| redacted(&error, authorities))
-        .and_then(|authorities| {
-            let list = crate::key_revocation::RevocationList::load(path)
-                .map_err(|error| redacted(&error, path))?;
-            list.verify(&authorities)
-                .map_err(|error| format!("{} does not verify: {error:#}", file_name(path)))?;
-            Ok(list)
-        });
+    let verified = crate::release_signing::TrustRoots::load(
+        authorities,
+        crate::signature_verification::TrustRootKind::Release,
+    )
+    .map_err(|error| redacted(&error, authorities))
+    .and_then(|authorities| {
+        let list = crate::key_revocation::RevocationList::load(path)
+            .map_err(|error| redacted(&error, path))?;
+        list.verify(&authorities)
+            .map_err(|error| format!("{} does not verify: {error:#}", file_name(path)))?;
+        Ok(list)
+    });
     let installed_at = std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .ok()

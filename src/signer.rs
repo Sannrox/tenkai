@@ -1235,6 +1235,7 @@ mod tests {
                 public_key: STANDARD.encode(signer.public_key()),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         }
     }

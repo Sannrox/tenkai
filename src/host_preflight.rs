@@ -525,7 +525,10 @@ pub fn require_passing(
     if evidence.schema != PREFLIGHT_SCHEMA || evidence.statement.environment != environment {
         bail!("stored host preflight is not a {PREFLIGHT_SCHEMA} result for {environment}");
     }
-    let signer = roots.signer(&evidence.key_id)?;
+    let signer = roots.signer(
+        crate::signature_verification::TrustRootKind::PlanApproval,
+        &evidence.key_id,
+    )?;
     if signer.providers != [PREFLIGHT_PROVIDER]
         || !signer.environments.iter().any(|scope| scope == environment)
     {

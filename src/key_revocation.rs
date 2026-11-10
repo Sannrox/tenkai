@@ -210,7 +210,13 @@ pub fn configured() -> Result<Option<(PathBuf, TrustRoots)>> {
     let roots = std::env::var_os(REVOCATION_TRUST_ROOTS_ENV).map(PathBuf::from);
     match (installed, roots) {
         (None, None) => Ok(None),
-        (Some(installed), Some(roots)) => Ok(Some((installed, TrustRoots::load(&roots)?))),
+        (Some(installed), Some(roots)) => Ok(Some((
+            installed,
+            TrustRoots::load(
+                &roots,
+                crate::signature_verification::TrustRootKind::Release,
+            )?,
+        ))),
         _ => bail!("{REVOCATIONS_ENV} and {REVOCATION_TRUST_ROOTS_ENV} must be set together"),
     }
 }
@@ -522,7 +528,9 @@ mod tests {
         let installed = dir.join("key-revocations.json");
         install(&list(&dir, 1, &[&OLD]), &authorities, &installed).unwrap();
 
-        overlap.validate().unwrap();
+        overlap
+            .validate(crate::signature_verification::TrustRootKind::Release)
+            .unwrap();
         let error = old_bundle
             .verify(&overlap, "tenant-1", "site-1", 2_000)
             .unwrap_err();

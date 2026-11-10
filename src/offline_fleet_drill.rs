@@ -315,6 +315,7 @@ fn isolated_trust_roots(exporter: &SigningKey, runtime: &SigningKey) -> TrustRoo
                     .encode(exporter.verifying_key().to_bytes()),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             },
             TrustedSigner {
                 key_id: crate::signature_verification::key_id(&runtime.verifying_key().to_bytes()),
@@ -323,6 +324,7 @@ fn isolated_trust_roots(exporter: &SigningKey, runtime: &SigningKey) -> TrustRoo
                     .encode(runtime.verifying_key().to_bytes()),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             },
         ],
     }

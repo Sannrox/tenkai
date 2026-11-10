@@ -4,6 +4,7 @@ use super::super::approval_files::validate_plan_approval_filename;
 use super::super::types::record_catalog_id;
 use super::super::*;
 use super::helpers::{digest, publish_pins};
+use crate::signature_verification::{TrustRoots, TrustedSigner};
 
 #[tokio::test]
 async fn partitions_keep_separate_records_for_the_same_migration_name() {
@@ -85,16 +86,7 @@ fn remote_api_version_and_unknown_fields_fail_closed() {
             },
             signature: "c2ln".into(),
         },
-        &ApprovalTrustRoots {
-            version: 1,
-            signers: vec![ApprovalTrustedSigner {
-                key_id: "k".into(),
-                identity: "approver".into(),
-                public_key: "cA==".into(),
-                not_before: None,
-                not_after: None,
-            }],
-        },
+        &approver_roots(),
         &BTreeMap::from([(
             "../escape".into(),
             crate::plan_approval::ApprovalEnvelope {
@@ -136,20 +128,26 @@ async fn remote_approval_files_materialize_on_the_blocking_pool() {
             },
             signature: "c2ln".into(),
         },
-        ApprovalTrustRoots {
-            version: 1,
-            signers: vec![ApprovalTrustedSigner {
-                key_id: "k".into(),
-                identity: "approver".into(),
-                public_key: "cA==".into(),
-                not_before: None,
-                not_after: None,
-            }],
-        },
+        approver_roots(),
         BTreeMap::new(),
     )
     .await
     .unwrap();
     assert!(files.approval.is_file(), "{:?}", files.approval);
     assert!(files.trust_roots.is_file(), "{:?}", files.trust_roots);
+}
+
+/// Well-formed migration approval trust roots with one approver.
+fn approver_roots() -> TrustRoots {
+    let public = ed25519_dalek::SigningKey::from_bytes(&[5; 32])
+        .verifying_key()
+        .to_bytes();
+    TrustRoots {
+        version: 1,
+        signers: vec![TrustedSigner::new(
+            crate::signature_verification::key_id(&public),
+            "approver",
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, public),
+        )],
+    }
 }

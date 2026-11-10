@@ -33,7 +33,7 @@ use crate::management_lifecycle::{
 };
 use crate::observed_runtime::EnvironmentRuntimeReport;
 use crate::package_migration::{
-    self, ApprovalTrustRoots, MigrationAuthorization, MigrationPage, PackageMigrationApplyRequest,
+    self, MigrationAuthorization, MigrationPage, PackageMigrationApplyRequest,
     PackageMigrationMutateRequest, PackageMigrationPreviewRequest, PackageMigrationResult,
     RemoteApprovalFiles,
 };
@@ -42,6 +42,7 @@ use crate::plan::{EnvironmentInspectReport, EnvironmentListEntry, FleetStatusRep
 use crate::providers::TerminalOutcomeProjection;
 use crate::reconciler::TickReport;
 use crate::runtime_delivery::ReconcilePort;
+use crate::signature_verification::TrustRoots;
 use crate::storage::{AuditRecord, OperationalStore};
 use crate::tenant_environment::{
     TenantEnvironmentError, TenantEnvironmentFuture, TenantEnvironmentOperations,
@@ -148,7 +149,7 @@ pub struct ManagementOperations {
     store: Arc<dyn OperationalStore>,
     tenant_store: Option<Arc<dyn TenantOperationalStore>>,
     tenant_environments: Option<TenantEnvironmentOperations>,
-    package_migration_trust_roots: Option<ApprovalTrustRoots>,
+    package_migration_trust_roots: Option<TrustRoots>,
     release_trust_roots: Option<std::path::PathBuf>,
     environment_grants: std::collections::HashMap<String, String>,
     /// `(token digest, environment)` of each configured static runtime
@@ -167,7 +168,7 @@ impl ManagementOperations {
         reconciler: Arc<dyn ReconcilePort>,
         store: Arc<dyn OperationalStore>,
         tenant_store: Option<Arc<dyn TenantOperationalStore>>,
-        package_migration_trust_roots: Option<ApprovalTrustRoots>,
+        package_migration_trust_roots: Option<TrustRoots>,
         release_trust_roots: Option<std::path::PathBuf>,
         environment_grants: std::collections::HashMap<String, String>,
     ) -> Self {
@@ -435,8 +436,11 @@ impl ManagementOperations {
                 request.operation
             )));
         }
-        let trust_roots = crate::release_signing::TrustRoots::load(&settings.trust_roots)
-            .map_err(|error| ManagementError::Unavailable(format!("{error:#}")))?;
+        let trust_roots = crate::release_signing::TrustRoots::load(
+            &settings.trust_roots,
+            crate::signature_verification::TrustRootKind::Release,
+        )
+        .map_err(|error| ManagementError::Unavailable(format!("{error:#}")))?;
         let actor = &context.audit_principal();
         self.audit(actor, "offline.import.requested")?;
         let mut ctx = self.application_ctx()?;
@@ -851,8 +855,11 @@ impl ManagementOperations {
         let Some(path) = std::env::var_os(crate::plan_approval::TRUST_ROOTS_ENV) else {
             return Ok(view);
         };
-        let roots = crate::plan_approval::TrustRoots::load(std::path::Path::new(&path))
-            .map_err(|error| ManagementError::Unavailable(format!("{error:#}")))?;
+        let roots = crate::plan_approval::TrustRoots::load(
+            std::path::Path::new(&path),
+            crate::signature_verification::TrustRootKind::PlanApproval,
+        )
+        .map_err(|error| ManagementError::Unavailable(format!("{error:#}")))?;
         Ok(view.with_eligible(&roots, &stored.environment, Some(context.principal_id())))
     }
 
@@ -933,7 +940,7 @@ impl ManagementOperations {
     pub async fn install_model_evaluation_trust(
         &self,
         credential: &CredentialMaterial,
-        roots: crate::model_release_evidence::EvaluationTrustRoots,
+        roots: TrustRoots,
     ) -> Result<(), ManagementError> {
         let context = self.authenticate(credential)?;
         self.refuse_agent(&context, "model_evaluation.trust")?;
@@ -1510,8 +1517,11 @@ impl ManagementOperations {
                 "remote publication requires server-configured release trust roots".into(),
             )
         })?;
-        let trusted_roots = crate::release_signing::TrustRoots::load(release_trust_roots)
-            .map_err(|error| ManagementError::Internal(error.to_string()))?;
+        let trusted_roots = crate::release_signing::TrustRoots::load(
+            release_trust_roots,
+            crate::signature_verification::TrustRootKind::Release,
+        )
+        .map_err(|error| ManagementError::Internal(error.to_string()))?;
         let files = management_lifecycle::RemotePublishFiles::materialize(
             &request.manifest,
             &request.signature,
@@ -2390,8 +2400,11 @@ impl ManagementOperations {
             .into_iter()
             .next()
             .ok_or_else(|| ManagementError::BadRequest("missing approval evidence".into()))?;
-        let roots = crate::plan_approval::TrustRoots::load(&files.trust_roots)
-            .map_err(map_plan_lifecycle_error)?;
+        let roots = crate::plan_approval::TrustRoots::load(
+            &files.trust_roots,
+            crate::signature_verification::TrustRootKind::PlanApproval,
+        )
+        .map_err(map_plan_lifecycle_error)?;
         crate::plan_approval::collect_envelope(&mut ctx, &stored, &envelope, &roots, now)
             .await
             .map_err(map_plan_lifecycle_error)?;
@@ -2751,7 +2764,7 @@ impl ManagementOperations {
 
     fn require_matching_migration_trust_roots(
         &self,
-        request_roots: &ApprovalTrustRoots,
+        request_roots: &TrustRoots,
     ) -> Result<(), ManagementError> {
         let configured = self.package_migration_trust_roots.as_ref().ok_or_else(|| {
             ManagementError::Forbidden(

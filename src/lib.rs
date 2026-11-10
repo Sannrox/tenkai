@@ -140,7 +140,9 @@
 //!   adapters retain transactional enqueue ownership.
 //! - `signature_verification` hides shared signed-format framing, digest
 //!   grammar, key-id derivation, and Ed25519 verification while each domain
-//!   module retains its own statement shape and policy rules. Enterprise JWT
+//!   module retains its own statement shape and policy rules. It also owns the one
+//!   trust-roots type every signed format pins its signers with, re-exported
+//!   from `release_signing` and `plan_approval`. Enterprise JWT
 //!   assertion verification also uses this seam for public-key decode and
 //!   strict signature checks.
 //! - `terminal_outcome` classifies embedded and runtime execution evidence in

@@ -614,6 +614,7 @@ mod tests {
                 public_key: STANDARD.encode(key.verifying_key().to_bytes()),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         }
     }

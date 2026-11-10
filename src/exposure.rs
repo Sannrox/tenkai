@@ -2141,6 +2141,7 @@ document = "sbom.json"
                 ),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         }
     }

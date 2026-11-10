@@ -113,7 +113,10 @@ pub fn admit(evidence: &Evidence<'_>, product: &str, version: &str) -> Result<Ad
     validate(&manifest, product, version)?;
     let (digest, contents) = signed_digests(&raw)?;
     let envelope = SignatureEnvelope::load(evidence.signature)?;
-    let roots = TrustRoots::load(evidence.trust_roots)?;
+    let roots = TrustRoots::load(
+        evidence.trust_roots,
+        crate::signature_verification::TrustRootKind::Release,
+    )?;
     verify_release(&envelope, &roots, &digest, &contents)
         .context("verifying the family release manifest signature")?;
     Ok(Admitted {

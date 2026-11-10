@@ -60,7 +60,7 @@ pub fn load_release_roots(path: &Path) -> Result<TrustRoots> {
     let roots: TrustRoots =
         toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     roots
-        .validate()
+        .validate(crate::signature_verification::TrustRootKind::Release)
         .with_context(|| format!("validating {}", path.display()))?;
     Ok(roots)
 }

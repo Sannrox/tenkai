@@ -153,6 +153,192 @@ impl SignerValidityWindow {
     }
 }
 
+/// The one trust-roots file version every kind uses.
+pub const TRUST_ROOT_VERSION: u32 = 1;
+
+/// What a trust-roots file pins signers for. Each kind has its own file,
+/// label and signing domain; the shape and the structural checks are shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustRootKind {
+    Release,
+    PlanApproval,
+    PackageMigration,
+    ModelEvaluation,
+}
+
+impl TrustRootKind {
+    /// How errors name the kind, such as `plan approval`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::PlanApproval => "plan approval",
+            Self::PackageMigration => "package migration approval",
+            Self::ModelEvaluation => "model evaluation",
+        }
+    }
+
+    /// Model evaluation signers are keys only; every other kind names who
+    /// holds each key.
+    fn names_signers(self) -> bool {
+        !matches!(self, Self::ModelEvaluation)
+    }
+}
+
+/// Signer keys an operator pins for one [`TrustRootKind`], as read from its
+/// TOML file or a request body.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct TrustRoots {
+    pub version: u32,
+    pub signers: Vec<TrustedSigner>,
+}
+
+/// One pinned Ed25519 signer key.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedSigner {
+    /// `sha256:<hex>` of the public key.
+    pub key_id: String,
+    /// Who holds the key. Empty only for model evaluation signers.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub identity: String,
+    /// Standard base64 of the 32-byte Ed25519 public key.
+    pub public_key: String,
+    /// Plan approval only: environments this signer may approve for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<String>,
+    /// Plan approval only: approval policy providers it may sign for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
+    /// Plan approval only: approver groups it counts toward.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+    /// Unix milliseconds. Absent: validity is not recorded (#812).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub not_before: Option<i64>,
+    /// Unix milliseconds. Absent: validity is not recorded (#812).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub not_after: Option<i64>,
+}
+
+impl TrustedSigner {
+    /// An unscoped signer with no recorded validity window.
+    pub fn new(
+        key_id: impl Into<String>,
+        identity: impl Into<String>,
+        public_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            key_id: key_id.into(),
+            identity: identity.into(),
+            public_key: public_key.into(),
+            environments: Vec::new(),
+            providers: Vec::new(),
+            groups: Vec::new(),
+            not_before: None,
+            not_after: None,
+        }
+    }
+
+    pub(crate) fn validity(&self) -> SignerValidityWindow {
+        SignerValidityWindow::new(self.not_before, self.not_after)
+    }
+
+    fn scoped(&self) -> bool {
+        !(self.environments.is_empty() && self.providers.is_empty() && self.groups.is_empty())
+    }
+}
+
+impl TrustRoots {
+    /// Read and [`validate`](Self::validate) a `kind` trust-roots TOML file.
+    pub fn load(path: &std::path::Path, kind: TrustRootKind) -> Result<Self> {
+        let label = kind.label();
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {label} trust roots {}", path.display()))?;
+        let roots: Self = toml::from_str(&raw)
+            .with_context(|| format!("parsing {label} trust roots {}", path.display()))?;
+        roots.validate(kind)?;
+        Ok(roots)
+    }
+
+    /// The structural checks every kind shares: version, at least one
+    /// signer, well-formed and unique keys, well-formed windows, and
+    /// unique named identities. Scopes are refused outside plan approval,
+    /// whose own scope rules apply on top. Revocation is checked when a
+    /// key verifies, not here, so a file keeps loading until rollover.
+    pub fn validate(&self, kind: TrustRootKind) -> Result<()> {
+        let label = kind.label();
+        if self.version != TRUST_ROOT_VERSION {
+            bail!(
+                "unsupported {label} trust-root version {}; expected {TRUST_ROOT_VERSION}",
+                self.version
+            );
+        }
+        if self.signers.is_empty() {
+            bail!("{label} trust roots contain no signers");
+        }
+        let mut key_ids = std::collections::BTreeSet::new();
+        let mut identities = std::collections::BTreeSet::new();
+        for signer in &self.signers {
+            validate_key_id(&format!("{label} signer key id"), &signer.key_id)?;
+            if !key_ids.insert(&signer.key_id) {
+                bail!(
+                    "{label} trust roots contain duplicate key id {}",
+                    signer.key_id
+                );
+            }
+            if kind.names_signers() || !signer.identity.is_empty() {
+                validate_signer_text("trusted signer identity", &signer.identity)?;
+                if !identities.insert(&signer.identity) {
+                    bail!(
+                        "{label} trust roots contain duplicate signer identity {}",
+                        signer.identity
+                    );
+                }
+            }
+            well_formed_key(
+                &format!("{label} public key"),
+                &signer.public_key,
+                &signer.key_id,
+            )?;
+            signer.validity().validate()?;
+            if kind == TrustRootKind::PlanApproval {
+                crate::plan_approval::check_signer_scopes(signer)?;
+            } else if signer.scoped() {
+                bail!(
+                    "{label} signer {} has environments, providers or groups; only plan approval signers are scoped",
+                    signer.key_id
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The `kind` signer with `key_id`, whatever its validity window.
+    pub(crate) fn signer(&self, kind: TrustRootKind, key_id: &str) -> Result<&TrustedSigner> {
+        self.signers
+            .iter()
+            .find(|signer| signer.key_id == key_id)
+            .with_context(|| format!("{} signer {key_id} is not trusted", kind.label()))
+    }
+}
+
+/// Non-empty, trimmed, at most 512 bytes, no NUL: a signer identity or
+/// scope as trust roots and approval statements carry it.
+pub(crate) fn validate_signer_text(name: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() || value != value.trim() || value.len() > 512 || value.contains('\0')
+    {
+        bail!("{name} is empty, non-canonical, or too long");
+    }
+    Ok(())
+}
+
 /// Key to verify a signature with now: well formed and not revoked
 /// ([`crate::key_revocation`]).
 pub(crate) fn trusted_key(
@@ -320,5 +506,52 @@ mod tests {
 
         validate_key_id("key", &format!("sha256:{hex}")).unwrap();
         assert!(validate_key_id("key", &hex).is_err());
+    }
+
+    /// The four trust-root files that existed before they shared one type,
+    /// in the shapes operators have on disk, each with a second signer.
+    #[test]
+    fn existing_trust_root_files_still_load() {
+        let signer = |seed: u8| {
+            let public = SigningKey::from_bytes(&[seed; 32])
+                .verifying_key()
+                .to_bytes();
+            (key_id(&public), STANDARD.encode(public))
+        };
+        let ((a_id, a_key), (b_id, b_key)) = (signer(3), signer(4));
+        let release = format!(
+            "version = 1\n[[signers]]\nkey_id = \"{a_id}\"\nidentity = \"release@example.com\"\npublic_key = \"{a_key}\"\nnot_before = 1\n[[signers]]\nkey_id = \"{b_id}\"\nidentity = \"ci@example.com\"\npublic_key = \"{b_key}\"\n"
+        );
+        let plan = format!(
+            "version = 1\n[[signers]]\nkey_id = \"{a_id}\"\nidentity = \"alice\"\npublic_key = \"{a_key}\"\nenvironments = [\"prod\"]\nproviders = [\"builtin-auto\"]\n[[signers]]\nkey_id = \"{b_id}\"\nidentity = \"bob\"\npublic_key = \"{b_key}\"\ngroups = [\"ops\"]\n"
+        );
+        let evaluation = format!(
+            "version = 1\n[[signers]]\nkey_id = \"{a_id}\"\npublic_key = \"{a_key}\"\n[[signers]]\nkey_id = \"{b_id}\"\npublic_key = \"{b_key}\"\nnot_after = 9\n"
+        );
+        for (kind, raw) in [
+            (TrustRootKind::Release, &release),
+            (TrustRootKind::PackageMigration, &release),
+            (TrustRootKind::PlanApproval, &plan),
+            (TrustRootKind::ModelEvaluation, &evaluation),
+        ] {
+            let roots: TrustRoots = toml::from_str(raw).unwrap();
+            roots.validate(kind).unwrap();
+            assert_eq!(
+                toml::to_string(&roots)
+                    .unwrap()
+                    .parse::<toml::Table>()
+                    .unwrap(),
+                raw.parse::<toml::Table>().unwrap()
+            );
+        }
+        let plan: TrustRoots = toml::from_str(&plan).unwrap();
+        let error = plan.validate(TrustRootKind::Release).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only plan approval signers are scoped")
+        );
+        let evaluation: TrustRoots = toml::from_str(&evaluation).unwrap();
+        assert!(evaluation.validate(TrustRootKind::Release).is_err());
     }
 }
