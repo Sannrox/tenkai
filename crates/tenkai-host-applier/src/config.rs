@@ -118,7 +118,7 @@ pub fn load_trust(paths: &ApplierPaths) -> Result<HostTrust> {
         toml::from_str(&read_trusted(&release_path)?)
             .with_context(|| format!("parsing {}", release_path.display()))?;
     release_roots
-        .validate()
+        .validate(tenkai::release_signing::TrustRootKind::Release)
         .with_context(|| format!("validating {}", release_path.display()))?;
     let policy_path = paths.config_dir.join(HOST_APPROVAL_POLICY_FILE);
     let policy = HostApprovalPolicy::parse(&read_trusted(&policy_path)?)
@@ -138,7 +138,7 @@ pub fn load_trust(paths: &ApplierPaths) -> Result<HostTrust> {
                 toml::from_str(&read_trusted(&authorities)?)
                     .with_context(|| format!("parsing {}", authorities.display()))?;
             roots
-                .validate()
+                .validate(tenkai::release_signing::TrustRootKind::Release)
                 .with_context(|| format!("validating {}", authorities.display()))?;
             tenkai::key_revocation::load_installed(&revocations, &roots)?;
         }

@@ -10,8 +10,11 @@ use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 
+pub use crate::signature_verification::{
+    TRUST_ROOT_VERSION, TrustRootKind, TrustRoots, TrustedSigner,
+};
+
 pub const ENVELOPE_SCHEMA: &str = "tenkai.release-signature.v1";
-pub const TRUST_ROOT_VERSION: u32 = 1;
 pub const SIGNATURE_ALGORITHM: &str = "ed25519";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -40,51 +43,6 @@ pub struct Provenance {
     pub built_at_unix_ms: i64,
     #[serde(default, deserialize_with = "deserialize_unique_materials")]
     pub materials: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[schemars(rename = "ReleaseTrustRoots")]
-pub struct TrustRoots {
-    pub version: u32,
-    pub signers: Vec<TrustedSigner>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[schemars(rename = "ReleaseTrustedSigner")]
-pub struct TrustedSigner {
-    pub key_id: String,
-    pub identity: String,
-    pub public_key: String,
-    /// Unix milliseconds. Absent: validity is not recorded (#812).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(transform = crate::schema_contract::omitted_when_none)]
-    pub not_before: Option<i64>,
-    /// Unix milliseconds. Absent: validity is not recorded (#812).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(transform = crate::schema_contract::omitted_when_none)]
-    pub not_after: Option<i64>,
-}
-
-impl TrustedSigner {
-    pub fn new(
-        key_id: impl Into<String>,
-        identity: impl Into<String>,
-        public_key: impl Into<String>,
-    ) -> Self {
-        Self {
-            key_id: key_id.into(),
-            identity: identity.into(),
-            public_key: public_key.into(),
-            not_before: None,
-            not_after: None,
-        }
-    }
-
-    pub(crate) fn validity(&self) -> crate::signature_verification::SignerValidityWindow {
-        crate::signature_verification::SignerValidityWindow::new(self.not_before, self.not_after)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -191,7 +149,7 @@ impl SignatureEnvelope {
     /// [`Self::authenticate`] against an explicit verifier clock `now_ms`.
     pub fn authenticate_at(&self, roots: &TrustRoots, now_ms: i64) -> Result<ResolvedSigner> {
         self.validate()?;
-        roots.validate()?;
+        roots.validate(TrustRootKind::Release)?;
         let signer = roots.resolve_signed_at(&self.key_id, self.signed_at_ms(), now_ms)?;
         crate::signature_verification::verify_strict(
             &signer.verifying_key,
@@ -253,56 +211,8 @@ impl Provenance {
     }
 }
 
+/// Release-signer resolution over the shared trust roots.
 impl TrustRoots {
-    pub fn load(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading release trust roots {}", path.display()))?;
-        let roots: Self = toml::from_str(&raw)
-            .with_context(|| format!("parsing release trust roots {}", path.display()))?;
-        roots.validate()?;
-        Ok(roots)
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        if self.version != TRUST_ROOT_VERSION {
-            bail!(
-                "unsupported release trust-root version {}; expected {TRUST_ROOT_VERSION}",
-                self.version
-            );
-        }
-        if self.signers.is_empty() {
-            bail!("release trust roots contain no signers");
-        }
-        let mut key_ids = std::collections::BTreeSet::new();
-        let mut identities = std::collections::BTreeSet::new();
-        for signer in &self.signers {
-            crate::signature_verification::validate_key_id(
-                "release signer key id",
-                &signer.key_id,
-            )?;
-            validate_text("trusted signer identity", &signer.identity, 256)?;
-            if !key_ids.insert(&signer.key_id) {
-                bail!(
-                    "release trust roots contain duplicate key id {}",
-                    signer.key_id
-                );
-            }
-            if !identities.insert(&signer.identity) {
-                bail!(
-                    "release trust roots contain duplicate signer identity {}",
-                    signer.identity
-                );
-            }
-            crate::signature_verification::well_formed_key(
-                "trusted signer public_key",
-                &signer.public_key,
-                &signer.key_id,
-            )?;
-            signer.validity().validate()?;
-        }
-        Ok(())
-    }
-
     /// Resolve a signer for a live admission: the validity window is checked
     /// at the verifier's clock. Revocation applies at now.
     pub fn resolve(&self, key_id: &str) -> Result<ResolvedSigner> {
@@ -313,7 +223,7 @@ impl TrustRoots {
     /// artifact uses [`Self::resolve_signed_at`], which also refuses a signed
     /// time in the future.
     pub fn resolve_at(&self, key_id: &str, at_ms: i64) -> Result<ResolvedSigner> {
-        let signer = self.signer(key_id)?;
+        let signer = self.signer(TrustRootKind::Release, key_id)?;
         signer.validity().check(&signer.identity, at_ms)?;
         Self::resolved(signer)
     }
@@ -328,7 +238,7 @@ impl TrustRoots {
         signed_at_ms: i64,
         now_ms: i64,
     ) -> Result<ResolvedSigner> {
-        let signer = self.signer(key_id)?;
+        let signer = self.signer(TrustRootKind::Release, key_id)?;
         signer
             .validity()
             .check_signed_at(&signer.identity, signed_at_ms, now_ms)?;
@@ -340,14 +250,7 @@ impl TrustRoots {
     /// time. Once those bytes are parsed, the caller must check the window
     /// with [`Self::resolve_signed_at`].
     pub(crate) fn resolve_unwindowed(&self, key_id: &str) -> Result<ResolvedSigner> {
-        Self::resolved(self.signer(key_id)?)
-    }
-
-    fn signer(&self, key_id: &str) -> Result<&TrustedSigner> {
-        self.signers
-            .iter()
-            .find(|signer| signer.key_id == key_id)
-            .with_context(|| format!("signer {key_id} is not trusted"))
+        Self::resolved(self.signer(TrustRootKind::Release, key_id)?)
     }
 
     fn resolved(signer: &TrustedSigner) -> Result<ResolvedSigner> {
@@ -355,7 +258,7 @@ impl TrustRoots {
             identity: signer.identity.clone(),
             key_id: signer.key_id.clone(),
             verifying_key: crate::signature_verification::trusted_key(
-                "trusted signer public_key",
+                "release public key",
                 &signer.public_key,
                 &signer.key_id,
             )?,
@@ -474,9 +377,12 @@ mod tests {
                 public_key: STANDARD.encode(public_key),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
-        roots.validate().unwrap();
+        roots
+            .validate(crate::signature_verification::TrustRootKind::Release)
+            .unwrap();
         let signer = roots.resolve(&key_id(&public_key)).unwrap();
         assert_eq!(signer.identity, "release@example.com");
     }
@@ -526,6 +432,7 @@ mod tests {
                 public_key: STANDARD.encode(public_key),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         let mut envelope = SignatureEnvelope {
@@ -563,9 +470,14 @@ mod tests {
                 public_key: STANDARD.encode(identity_point),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
-        assert!(roots.validate().is_err());
+        assert!(
+            roots
+                .validate(crate::signature_verification::TrustRootKind::Release)
+                .is_err()
+        );
     }
 
     #[test]
@@ -580,6 +492,7 @@ mod tests {
                 public_key: STANDARD.encode(public_key),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         let mut envelope = SignatureEnvelope {
@@ -618,6 +531,7 @@ mod tests {
                 public_key: STANDARD.encode(trusted_public_key),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         let mut envelope = SignatureEnvelope {
@@ -648,7 +562,9 @@ mod tests {
             STANDARD.encode(public_key)
         );
         let roots: TrustRoots = toml::from_str(&raw).unwrap();
-        roots.validate().unwrap();
+        roots
+            .validate(crate::signature_verification::TrustRootKind::Release)
+            .unwrap();
         assert!(roots.signers[0].not_before.is_none());
         assert!(roots.signers[0].not_after.is_none());
         let mut envelope = SignatureEnvelope {

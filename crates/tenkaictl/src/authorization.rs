@@ -73,7 +73,7 @@ pub(crate) fn load_remote_migration_authorization(
     approval_trust_roots: Option<PathBuf>,
 ) -> Result<(
     package_migration::MigrationApprovalEnvelope,
-    package_migration::ApprovalTrustRoots,
+    tenkai::release_signing::TrustRoots,
     std::collections::BTreeMap<String, tenkai::plan_approval::ApprovalEnvelope>,
 )> {
     let approval = approval.ok_or_else(|| {

@@ -17,7 +17,10 @@ pub(crate) fn install_hosts(
     platform: Option<&str>,
 ) -> Result<()> {
     let envelope = offline_bundle::BundleEnvelope::load(bundle)?;
-    let roots = release_signing::TrustRoots::load(trust_roots)?;
+    let roots = release_signing::TrustRoots::load(
+        trust_roots,
+        tenkai::release_signing::TrustRootKind::Release,
+    )?;
     let platform = match platform {
         Some(platform) => platform.to_string(),
         None => offline_host_binaries::detect_platform()?.to_string(),
@@ -105,7 +108,10 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: UpgradeCommand) -> Resul
             seed_registry,
         } => {
             let envelope = offline_bundle::BundleEnvelope::load(&bundle)?;
-            let roots = release_signing::TrustRoots::load(&trust_roots)?;
+            let roots = release_signing::TrustRoots::load(
+                &trust_roots,
+                tenkai::release_signing::TrustRootKind::Release,
+            )?;
             let spec = connectivity::UpgradeSpec {
                 name,
                 product,
@@ -132,7 +138,10 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: UpgradeCommand) -> Resul
             trust_roots,
         } => {
             let envelope = offline_bundle::BundleEnvelope::load(&bundle)?;
-            let roots = release_signing::TrustRoots::load(&trust_roots)?;
+            let roots = release_signing::TrustRoots::load(
+                &trust_roots,
+                tenkai::release_signing::TrustRootKind::Release,
+            )?;
             let record = connectivity::bind_isolated_bundle(
                 ctx,
                 &name,
@@ -153,7 +162,10 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: UpgradeCommand) -> Resul
         } => {
             let bundle_envelope = offline_bundle::BundleEnvelope::load(&bundle)?;
             let receipt_envelope = offline_bundle::ReceiptEnvelope::load(&receipt)?;
-            let roots = release_signing::TrustRoots::load(&trust_roots)?;
+            let roots = release_signing::TrustRoots::load(
+                &trust_roots,
+                tenkai::release_signing::TrustRootKind::Release,
+            )?;
             let record = connectivity::import_isolated_receipt(
                 ctx,
                 &name,

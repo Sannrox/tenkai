@@ -733,6 +733,7 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
                 public_key: STANDARD.encode(public),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         let mut ctx = Ctx::embedded(dir.join("tenkai.db")).unwrap();
@@ -810,6 +811,7 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
                 public_key: STANDARD.encode(public),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         let mut ctx = Ctx::embedded(dir.join("tenkai.db")).unwrap();

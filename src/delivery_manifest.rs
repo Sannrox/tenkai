@@ -190,7 +190,11 @@ install = "true"
         crate::dev_sign::sign_release(&keys, &product.join("tenkai.toml"), &signature, &trust)
             .unwrap();
         let envelope = SignatureEnvelope::load(&signature).unwrap();
-        let roots = TrustRoots::load(&trust).unwrap();
+        let roots = TrustRoots::load(
+            &trust,
+            crate::signature_verification::TrustRootKind::Release,
+        )
+        .unwrap();
         admit_signed_release(
             &envelope,
             &roots,

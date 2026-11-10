@@ -364,7 +364,7 @@ impl BundleEnvelope {
         {
             bail!("offline bundle is outside its validity interval");
         }
-        roots.validate()?;
+        roots.validate(crate::signature_verification::TrustRootKind::Release)?;
         // The exporter must have been valid when it issued the bundle
         // (ADR 0042); the bundle's own expiry bounds freshness above.
         let signer =
@@ -1426,7 +1426,7 @@ impl ReceiptEnvelope {
         {
             bail!("offline receipt completion time is invalid");
         }
-        roots.validate()?;
+        roots.validate(crate::signature_verification::TrustRootKind::Release)?;
         let signer = roots.resolve_signed_at(
             &self.key_id,
             self.statement.completed_at_unix_ms,
@@ -1564,6 +1564,7 @@ mod tests {
                 public_key: STANDARD.encode(key.verifying_key().to_bytes()),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         }
     }
@@ -1793,6 +1794,7 @@ mod tests {
                 public_key: STANDARD.encode(exporter.verifying_key().to_bytes()),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         let mut archive = bundle(&exporter);
@@ -1839,6 +1841,7 @@ mod tests {
                 public_key: STANDARD.encode(runtime.verifying_key().to_bytes()),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         let scope = ReceiptTrustScope {

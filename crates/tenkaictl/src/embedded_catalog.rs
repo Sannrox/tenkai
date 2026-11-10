@@ -92,7 +92,10 @@ pub(crate) async fn run(
                 env,
             } => {
                 let envelope = tenkai::offline_bundle::BundleEnvelope::load(&bundle)?;
-                let roots = tenkai::release_signing::TrustRoots::load(&trust_roots)?;
+                let roots = tenkai::release_signing::TrustRoots::load(
+                    &trust_roots,
+                    tenkai::release_signing::TrustRootKind::Release,
+                )?;
                 let verified = tenkai::exposure::verify_envelope_for_import(
                     &envelope,
                     &roots,
@@ -140,7 +143,10 @@ pub(crate) async fn run(
                 trust_roots,
             } => {
                 let envelope = tenkai::criticality::ReceivedEnvelope::load(&envelope)?;
-                let roots = tenkai::release_signing::TrustRoots::load(&trust_roots)?;
+                let roots = tenkai::release_signing::TrustRoots::load(
+                    &trust_roots,
+                    tenkai::release_signing::TrustRootKind::Release,
+                )?;
                 let applied = tenkai::criticality_store::import_envelope(
                     ctx,
                     &envelope,
@@ -175,7 +181,10 @@ pub(crate) async fn run(
                     .into_iter()
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("missing approval evidence"))?;
-                let roots = tenkai::plan_approval::TrustRoots::load(&approval_trust_roots)?;
+                let roots = tenkai::plan_approval::TrustRoots::load(
+                    &approval_trust_roots,
+                    tenkai::plan_approval::TrustRootKind::PlanApproval,
+                )?;
                 tenkai::plan_approval::collect_envelope(ctx, &stored, &envelope, &roots, now)
                     .await?;
                 let actor = crate::authorization::embedded_management_actor().ok();
@@ -241,8 +250,10 @@ pub(crate) async fn run(
         Command::EvalEvidence { command } => match command {
             EvalEvidenceCommand::Trust { trust_roots } => {
                 let actor = embedded_management_actor()?;
-                let roots =
-                    tenkai::model_release_evidence::EvaluationTrustRoots::load(&trust_roots)?;
+                let roots = tenkai::release_signing::TrustRoots::load(
+                    &trust_roots,
+                    tenkai::release_signing::TrustRootKind::ModelEvaluation,
+                )?;
                 tenkai::model_release_evidence::install_evaluation_trust_roots(ctx, &actor, &roots)
                     .await?;
                 println!(

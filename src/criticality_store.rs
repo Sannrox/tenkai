@@ -308,7 +308,10 @@ pub fn configured_trust_roots() -> Result<Option<TrustRoots>> {
     else {
         return Ok(None);
     };
-    Ok(Some(TrustRoots::load(&path)?))
+    Ok(Some(TrustRoots::load(
+        &path,
+        crate::signature_verification::TrustRootKind::Release,
+    )?))
 }
 
 /// Verify `criticality/derived.json` from a verified bundle and check it

@@ -41,10 +41,14 @@ struct Applier {
 
 impl Applier {
     fn trust(&self) -> Result<HostTrust> {
-        let approvers = tenkai::plan_approval::TrustRoots::load(&self.root.join("approvers.toml"))?;
+        let approvers = tenkai::plan_approval::TrustRoots::load(
+            &self.root.join("approvers.toml"),
+            tenkai::plan_approval::TrustRootKind::PlanApproval,
+        )?;
         Ok(HostTrust {
             release_roots: tenkai::release_signing::TrustRoots::load(
                 &self.root.join("release-trust.toml"),
+                tenkai::release_signing::TrustRootKind::Release,
             )?,
             policy: HostApprovalPolicy {
                 version: 1,
@@ -212,7 +216,11 @@ async fn approve(ctx: &mut Ctx, root: &Path, plan: &plan::Plan) {
         3600,
     )
     .unwrap();
-    let roots = tenkai::plan_approval::TrustRoots::load(&approvers).unwrap();
+    let roots = tenkai::plan_approval::TrustRoots::load(
+        &approvers,
+        tenkai::plan_approval::TrustRootKind::PlanApproval,
+    )
+    .unwrap();
     for envelope in tenkai::plan_approval::load_envelopes(&approval).unwrap() {
         tenkai::plan_approval::collect_envelope(ctx, plan, &envelope, &roots, tenkai::now_millis())
             .await
@@ -293,8 +301,11 @@ async fn rig(label: &str) -> Rig {
     let config = tenkai::runtime_builtin::BuiltinConfig {
         executors: tenkai::software_executor::SoftwareExecutors::default()
             .with_host(Arc::new(host)),
-        release_roots: tenkai::release_signing::TrustRoots::load(&root.join("release-trust.toml"))
-            .unwrap(),
+        release_roots: tenkai::release_signing::TrustRoots::load(
+            &root.join("release-trust.toml"),
+            tenkai::release_signing::TrustRootKind::Release,
+        )
+        .unwrap(),
         cluster_config: None,
         secret_dir: None,
         sealing_dir: None,

@@ -304,7 +304,10 @@ pub(crate) fn sign_digests(
     write_text_owner_only(signature_out, &serde_json::to_string_pretty(&envelope)?)?;
 
     // Fail closed: envelope must verify against the trust roots we just wrote.
-    let roots = ReleaseTrustRoots::load(trust_roots_out)?;
+    let roots = ReleaseTrustRoots::load(
+        trust_roots_out,
+        crate::signature_verification::TrustRootKind::Release,
+    )?;
     verify_release(&envelope, &roots, m_digest, a_digest)?;
 
     Ok(WrittenPaths {
@@ -478,7 +481,7 @@ pub fn sign_migration_approval(
         issued_at: now,
         expires_at,
     };
-    let bytes = crate::package_migration::canonical_approval_bytes(&statement)?;
+    let bytes = crate::plan_approval::SignedApproval::canonical_bytes(&statement)?;
     let signature = signing_key.sign(&bytes);
     let envelope = crate::package_migration::MigrationApprovalEnvelope {
         schema: crate::package_migration::APPROVAL_SCHEMA.into(),
@@ -758,7 +761,7 @@ inputs = ["manifests"]
         assert!(body.contains(crate::package_migration::APPROVAL_PURPOSE));
         let envelope: crate::package_migration::MigrationApprovalEnvelope =
             serde_json::from_str(&body).unwrap();
-        crate::package_migration::canonical_approval_bytes(&envelope.statement).unwrap();
+        crate::plan_approval::SignedApproval::canonical_bytes(&envelope.statement).unwrap();
         crate::package_migration::verify_approval_envelope(
             &identity,
             "drill",

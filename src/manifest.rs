@@ -1608,6 +1608,7 @@ max_startup_seconds = 30
                 public_key: base64::engine::general_purpose::STANDARD.encode(public_key),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         let artifact = "3".repeat(64);

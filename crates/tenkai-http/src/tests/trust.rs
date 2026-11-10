@@ -37,9 +37,9 @@ async fn trust_posture_grades_certificates_for_fleet_readers() {
     let migration_roots = dir.join("migration-trust.toml");
     std::fs::write(
         &migration_roots,
-        toml::to_string(&tenkai::package_migration::ApprovalTrustRoots {
+        toml::to_string(&tenkai::release_signing::TrustRoots {
             version: 1,
-            signers: vec![tenkai::package_migration::ApprovalTrustedSigner {
+            signers: vec![tenkai::release_signing::TrustedSigner {
                 key_id: tenkai::release_signing::key_id(&public),
                 identity: "migration-approver".into(),
                 public_key: {
@@ -48,6 +48,7 @@ async fn trust_posture_grades_certificates_for_fleet_readers() {
                 },
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         })
         .unwrap(),

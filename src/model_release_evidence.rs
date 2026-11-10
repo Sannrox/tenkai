@@ -25,8 +25,11 @@ use crate::pb::sekai::Object;
 use crate::providers::{
     EvidenceBinding, PROVIDER_CONTRACT_VERSION, ProviderEvent, enqueue_optional_event,
 };
+#[cfg(test)]
+use crate::signature_verification::{TRUST_ROOT_VERSION, TrustedSigner};
 use crate::signature_verification::{
-    decode_exact, key_id, push_len_prefixed, validate_key_id, validate_prefixed_digest,
+    TrustRootKind, TrustRoots, decode_exact, key_id, push_len_prefixed, validate_key_id,
+    validate_prefixed_digest,
 };
 
 pub const RUNTIME_EVIDENCE_SCHEMA: &str = "tenkai.model_runtime_evidence.v1";
@@ -40,7 +43,6 @@ pub(crate) const EVALUATION_EVIDENCE_KIND: &str = "tenkai.model_evaluation_evide
 pub(crate) const EVALUATION_TRUST_KIND: &str = "tenkai.model_evaluation_trust";
 const EVALUATION_DOMAIN: &[u8] = b"TENKAI-MODEL-EVALUATION-V1\0";
 const EVALUATION_TRUST_ID: &str = "tenkai:model-evaluation-trust";
-const EVALUATION_TRUST_VERSION: u32 = 1;
 const MAX_ENDPOINT_BYTES: usize = 512;
 #[cfg(test)]
 const FIXTURE_SEED: [u8; 32] = [17; 32];
@@ -290,77 +292,6 @@ fn evaluation_record_id(
     ))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct EvaluationTrustRoots {
-    pub version: u32,
-    pub signers: Vec<EvaluationTrustedSigner>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct EvaluationTrustedSigner {
-    pub key_id: String,
-    pub public_key: String,
-    /// Unix milliseconds. Absent: validity is not recorded (#812).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(transform = crate::schema_contract::omitted_when_none)]
-    pub not_before: Option<i64>,
-    /// Unix milliseconds. Absent: validity is not recorded (#812).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(transform = crate::schema_contract::omitted_when_none)]
-    pub not_after: Option<i64>,
-}
-
-impl EvaluationTrustedSigner {
-    pub(crate) fn validity(&self) -> crate::signature_verification::SignerValidityWindow {
-        crate::signature_verification::SignerValidityWindow::new(self.not_before, self.not_after)
-    }
-}
-
-impl EvaluationTrustRoots {
-    pub fn load(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading model evaluation trust roots {}", path.display()))?;
-        let roots: Self = toml::from_str(&raw)
-            .with_context(|| format!("parsing model evaluation trust roots {}", path.display()))?;
-        roots.validate()?;
-        Ok(roots)
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        if self.version != EVALUATION_TRUST_VERSION {
-            bail!(
-                "unsupported model evaluation trust-root version {}; expected {EVALUATION_TRUST_VERSION}",
-                self.version
-            );
-        }
-        if self.signers.is_empty() {
-            bail!("model evaluation trust roots contain no signers");
-        }
-        let mut key_ids = std::collections::BTreeSet::new();
-        for signer in &self.signers {
-            crate::signature_verification::validate_key_id(
-                "model evaluation signer key id",
-                &signer.key_id,
-            )?;
-            if !key_ids.insert(&signer.key_id) {
-                bail!(
-                    "model evaluation trust roots contain duplicate key id {}",
-                    signer.key_id
-                );
-            }
-            crate::signature_verification::well_formed_key(
-                "model evaluation public key",
-                &signer.public_key,
-                &signer.key_id,
-            )?;
-            signer.validity().validate()?;
-        }
-        Ok(())
-    }
-}
-
 fn canonical_evaluation_bytes(evidence: &ModelEvaluationEvidence) -> Result<Vec<u8>> {
     evidence.validate_statement()?;
     let mut bytes = EVALUATION_DOMAIN.to_vec();
@@ -400,14 +331,10 @@ fn sign_evaluation(evidence: &mut ModelEvaluationEvidence, signing_key: &Signing
 
 fn verify_evaluation_signature(
     evidence: &ModelEvaluationEvidence,
-    roots: &EvaluationTrustRoots,
+    roots: &TrustRoots,
 ) -> Result<()> {
-    roots.validate()?;
-    let signer = roots
-        .signers
-        .iter()
-        .find(|signer| signer.key_id == evidence.signer.key_id)
-        .context("model evaluation signer is not currently trusted")?;
+    roots.validate(TrustRootKind::ModelEvaluation)?;
+    let signer = roots.signer(TrustRootKind::ModelEvaluation, &evidence.signer.key_id)?;
     // Checked at the evidence's signed observation time (ADR 0042); its
     // own expiry bounds freshness at admission.
     signer.validity().check_signed_at(
@@ -428,7 +355,7 @@ fn verify_evaluation_signature(
     )
 }
 
-async fn load_evaluation_trust_roots(ctx: &mut Ctx) -> Result<Option<EvaluationTrustRoots>> {
+async fn load_evaluation_trust_roots(ctx: &mut Ctx) -> Result<Option<TrustRoots>> {
     let Some(record) = ctx.get(EVALUATION_TRUST_ID).await? else {
         return Ok(None);
     };
@@ -439,8 +366,8 @@ async fn load_evaluation_trust_roots(ctx: &mut Ctx) -> Result<Option<EvaluationT
         .properties
         .get("roots")
         .context("model evaluation trust object is missing roots")?;
-    let roots: EvaluationTrustRoots = serde_json::from_str(raw)?;
-    roots.validate()?;
+    let roots: TrustRoots = serde_json::from_str(raw)?;
+    roots.validate(crate::signature_verification::TrustRootKind::ModelEvaluation)?;
     Ok(Some(roots))
 }
 
@@ -448,12 +375,12 @@ async fn load_evaluation_trust_roots(ctx: &mut Ctx) -> Result<Option<EvaluationT
 pub async fn install_evaluation_trust_roots(
     ctx: &mut Ctx,
     actor: &AuthenticatedRequestContext,
-    roots: &EvaluationTrustRoots,
+    roots: &TrustRoots,
 ) -> Result<()> {
     actor
         .require_delivery_capability(DeliveryCapability::Management)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    roots.validate()?;
+    roots.validate(crate::signature_verification::TrustRootKind::ModelEvaluation)?;
     let now = crate::now_millis();
     let record = Object {
         id: EVALUATION_TRUST_ID.into(),
@@ -479,13 +406,14 @@ pub async fn install_evaluation_trust_roots(
 async fn ensure_fixture_evaluation_trust(ctx: &mut Ctx) -> Result<SigningKey> {
     let signing_key = SigningKey::from_bytes(&FIXTURE_SEED);
     let public = signing_key.verifying_key().to_bytes();
-    let roots = EvaluationTrustRoots {
-        version: EVALUATION_TRUST_VERSION,
-        signers: vec![EvaluationTrustedSigner {
+    let roots = TrustRoots {
+        version: TRUST_ROOT_VERSION,
+        signers: vec![TrustedSigner {
             key_id: key_id(&public),
             public_key: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, public),
             not_before: None,
             not_after: None,
+            ..Default::default()
         }],
     };
     let actor = crate::auth_context::test_management_context("eval-trust-fixture");
@@ -1518,9 +1446,9 @@ uninstall = "true"
         let mut ctx = published_ctx(&root, "qwen-ingest", "1.0.0").await;
         let signing_key = SigningKey::from_bytes(&[23u8; 32]);
         let public = signing_key.verifying_key().to_bytes();
-        let roots = EvaluationTrustRoots {
-            version: EVALUATION_TRUST_VERSION,
-            signers: vec![EvaluationTrustedSigner {
+        let roots = TrustRoots {
+            version: TRUST_ROOT_VERSION,
+            signers: vec![TrustedSigner {
                 key_id: crate::signature_verification::key_id(&public),
                 public_key: base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
@@ -1528,11 +1456,12 @@ uninstall = "true"
                 ),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         let trust_path = root.join("eval-trust.toml");
         std::fs::write(&trust_path, toml::to_string(&roots).unwrap()).unwrap();
-        let loaded_roots = EvaluationTrustRoots::load(&trust_path).unwrap();
+        let loaded_roots = TrustRoots::load(&trust_path, TrustRootKind::ModelEvaluation).unwrap();
         let actor = crate::auth_context::test_management_context("model-eval-ingest");
         install_evaluation_trust_roots(&mut ctx, &actor, &loaded_roots)
             .await
@@ -1590,9 +1519,9 @@ uninstall = "true"
         crate::ontology::register(&mut ctx).await.unwrap();
         let signing_key = SigningKey::from_bytes(&[23u8; 32]);
         let public = signing_key.verifying_key().to_bytes();
-        let roots = EvaluationTrustRoots {
-            version: EVALUATION_TRUST_VERSION,
-            signers: vec![EvaluationTrustedSigner {
+        let roots = TrustRoots {
+            version: TRUST_ROOT_VERSION,
+            signers: vec![TrustedSigner {
                 key_id: crate::signature_verification::key_id(&public),
                 public_key: base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
@@ -1600,6 +1529,7 @@ uninstall = "true"
                 ),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         let publisher = crate::auth_context::AuthenticatedRequestContextBuilder::new(

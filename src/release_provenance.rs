@@ -261,7 +261,7 @@ impl ProvenanceEnvelope {
     }
 
     pub fn verify_issuer(&self, roots: &TrustRoots) -> Result<()> {
-        roots.validate()?;
+        roots.validate(crate::signature_verification::TrustRootKind::Release)?;
         let signer = roots
             .resolve_signed_at(
                 &self.issuer_key_id,
@@ -347,7 +347,7 @@ pub fn load_all(
                 "release provenance requires --provenance-trust-roots for issuer authentication"
             )
         })?;
-        let roots = TrustRoots::load(path)?;
+        let roots = TrustRoots::load(path, crate::signature_verification::TrustRootKind::Release)?;
         for envelope in &envelopes {
             envelope.verify_issuer(&roots)?;
         }
@@ -488,6 +488,7 @@ mod tests {
                     .encode(signing_key.verifying_key().to_bytes()),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
         assert!(envelope.verify_issuer(&roots).is_ok());
@@ -517,6 +518,7 @@ mod tests {
                     .encode(signing_key.verifying_key().to_bytes()),
                 not_before: None,
                 not_after: None,
+                ..Default::default()
             }],
         };
 

@@ -49,10 +49,14 @@ impl Applier {
     /// Root-owned trust in the real applier: the dev release key, and the
     /// dev approver as the host approval policy's only signer.
     fn trust(&self) -> Result<HostTrust> {
-        let approvers = crate::plan_approval::TrustRoots::load(&self.root.join("approvers.toml"))?;
+        let approvers = crate::plan_approval::TrustRoots::load(
+            &self.root.join("approvers.toml"),
+            crate::signature_verification::TrustRootKind::PlanApproval,
+        )?;
         Ok(HostTrust {
             release_roots: crate::release_signing::TrustRoots::load(
                 &self.root.join("release-trust.toml"),
+                crate::signature_verification::TrustRootKind::Release,
             )?,
             policy: HostApprovalPolicy {
                 version: 1,

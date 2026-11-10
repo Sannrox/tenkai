@@ -1109,7 +1109,7 @@ fn sha256_digest(bytes: &[u8]) -> String {
 fn parse_trust_roots(bytes: &[u8]) -> Result<TrustRoots> {
     let raw = std::str::from_utf8(bytes).context("public trust roots must be UTF-8 TOML")?;
     let roots: TrustRoots = toml::from_str(raw).context("parsing public trust roots")?;
-    roots.validate()?;
+    roots.validate(crate::signature_verification::TrustRootKind::Release)?;
     Ok(roots)
 }
 

@@ -64,7 +64,10 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: RemediateCommand) -> Res
             trust_roots,
         } => {
             let notice = RecallNotice::load(&notice)?;
-            let authorities = TrustRoots::load(&trust_roots)?;
+            let authorities = TrustRoots::load(
+                &trust_roots,
+                tenkai::release_signing::TrustRootKind::Release,
+            )?;
             let report = recall_notice::import(ctx, &actor, &notice, &authorities).await?;
             println!(
                 "imported recall notice for {} ({} recalled, {} already recalled, {} missing)",
