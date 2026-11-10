@@ -989,7 +989,12 @@ impl BuiltinConfig {
         if let Err(error) = crate::identity_issuer::cache_verified(dir, environment, &issuer) {
             eprintln!("keeping the identity issuer for renewal failed: {error:#}");
         }
-        crate::workload_identity::issue(grant, &issuer, key, crate::now_millis() / 1000).map(Some)
+        let now_secs = crate::now_millis() / 1000;
+        // The host applier installs the granted issuer alone.
+        if manifest.deploy.executor == Some(SoftwareExecutorKind::Host) {
+            return crate::workload_identity::issue(grant, &issuer, key, now_secs).map(Some);
+        }
+        issue_with_bundle(dir, environment, grant, &issuer, key, now_secs).map(Some)
     }
 
     /// Check the server's sealed values against the plan step, which the
@@ -1145,6 +1150,13 @@ impl BuiltinConfig {
         let opener = SealedOpener::load(dir)?;
         let key = &issuer.key;
         key.open(environment, &opener)?;
+        // A rotation step's key is one this runtime verified: every bundle
+        // it issues beside the current issuer carries it (ADR 0046 §7).
+        // Not optional: the step must not report success with the bundles
+        // left behind.
+        if issuer.phase.is_some() {
+            crate::identity_issuer::cache_trusted(dir, environment, key)?;
+        }
         let Some(rewrap) = rewrap else {
             return Ok(Vec::new());
         };
@@ -1420,6 +1432,9 @@ pub fn renew_identities(
     let mut renewals = Vec::new();
     let mut certificates = Vec::new();
     let mut unreadable = Vec::new();
+    // A certificate whose bundle a rotation changed is renewed now, without
+    // the restart spread: peers must trust the next issuer before it issues.
+    let trust = expected_trust(dir, environment);
     for adapter in config.executors.adapters() {
         // Restarts a crashed pass left part-way finish first.
         match adapter.resume_identity_restarts(&target) {
@@ -1451,10 +1466,12 @@ pub fn renew_identities(
                 }
             };
             certificates.push(HeldCertificate::of(&identity));
-            if !renewal_due(&identity, environment, now_secs) {
+            if !renewal_due(&identity, environment, now_secs)
+                && !bundle_stale(&identity, trust.as_ref())
+            {
                 continue;
             }
-            let outcome = renew_one(dir, environment, &identity, now_secs)
+            let outcome = renew_one(dir, environment, &identity, now_secs, true)
                 .and_then(|issued| {
                     adapter.renew_identity(&target, &identity, &issued)?;
                     Ok(now_secs + crate::workload_identity::WORKLOAD_CERTIFICATE_TTL_SECS)
@@ -1602,7 +1619,8 @@ fn renew_host(
     identity: &crate::host_executor::InstalledHostIdentity,
     now_secs: i64,
 ) -> Result<i64> {
-    let issued = renew_one(dir, environment, &identity.installed, now_secs)?;
+    // The host applier installs the granted issuer alone.
+    let issued = renew_one(dir, environment, &identity.installed, now_secs, false)?;
     tokio::runtime::Handle::try_current()
         .context("renewing a host certificate needs the agent's runtime")?
         .block_on(host.renew_identity(identity, &issued))?;
@@ -1615,6 +1633,7 @@ fn renew_one(
     environment: &str,
     identity: &crate::workload_identity::InstalledIdentity,
     now_secs: i64,
+    bundle: bool,
 ) -> Result<crate::workload_identity::IssuedIdentity> {
     let issuer = crate::identity_issuer::cached_verified(dir, environment)?.context(
         "this runtime has verified no identity issuer yet; it renews once it applies a step that grants a certificate",
@@ -1628,7 +1647,59 @@ fn renew_one(
         );
     }
     let key = issuer.open(environment, &SealedOpener::load(dir)?)?;
-    crate::workload_identity::issue(grant, &issuer, key, now_secs)
+    if !bundle {
+        return crate::workload_identity::issue(grant, &issuer, key, now_secs);
+    }
+    issue_with_bundle(dir, environment, grant, &issuer, key, now_secs)
+}
+
+/// Issue `grant` from `issuer` with the trust bundle of the issuers this
+/// runtime verified for a rotation. An unreadable cache fails the issuance,
+/// so a renewal never replaces a bundle with a smaller one.
+fn issue_with_bundle(
+    dir: &Path,
+    environment: &str,
+    grant: &crate::workload_identity::IdentityGrant,
+    issuer: &crate::identity_issuer::IssuerKey,
+    key: rcgen::KeyPair,
+    now_secs: i64,
+) -> Result<crate::workload_identity::IssuedIdentity> {
+    let trusted = crate::identity_issuer::trust_bundle(dir, environment, issuer)
+        .context("reading the trusted identity issuers")?;
+    let certificates: Vec<&str> = trusted
+        .iter()
+        .map(|trusted| trusted.certificate.as_str())
+        .collect();
+    crate::workload_identity::issue_trusting(grant, issuer, key, &certificates, now_secs)
+}
+
+/// The trust bundle certificates of the issuing issuer should carry, as
+/// fingerprints with the issuer first, and the issuer's generation. None
+/// while this runtime has verified no issuer or cannot read its cache; a
+/// due renewal then fails visibly instead.
+fn expected_trust(dir: &Path, environment: &str) -> Option<(u64, Vec<String>)> {
+    let issuer = crate::identity_issuer::cached_verified(dir, environment).ok()??;
+    let trusted = crate::identity_issuer::trust_bundle(dir, environment, &issuer).ok()?;
+    let fingerprints = std::iter::once(issuer.fingerprint)
+        .chain(trusted.into_iter().map(|trusted| trusted.fingerprint))
+        .collect();
+    Some((issuer.generation, fingerprints))
+}
+
+/// Whether `identity`, issued by the issuing issuer, lacks an issuer its
+/// trust bundle should carry: a rotation added one. A bundle that holds
+/// more is left alone, so two runtimes that know different issuers never
+/// take turns re-issuing it.
+fn bundle_stale(
+    identity: &crate::workload_identity::InstalledIdentity,
+    expected: Option<&(u64, Vec<String>)>,
+) -> bool {
+    expected.is_some_and(|(generation, trust)| {
+        identity.grant.issuer_generation == *generation
+            && trust
+                .iter()
+                .any(|fingerprint| !identity.trust.contains(fingerprint))
+    })
 }
 
 #[cfg(test)]
@@ -2450,6 +2521,71 @@ mod tests {
         assert_eq!(status.expires_at, report.not_after);
         let failure = status.renewal_failure.unwrap();
         assert!(failure.contains("verified no identity issuer"), "{failure}");
+    }
+
+    /// An approved add step puts the next issuer in every bundle: the next
+    /// renewal pass re-issues a restart-reload certificate at once, with
+    /// the issuing issuer first and the next one after it, and only once.
+    #[test]
+    fn an_added_issuer_reaches_every_bundle_on_the_next_pass() {
+        let mut case = identity_case();
+        let verified = case
+            .config
+            .verify(
+                case.release.clone(),
+                ENVIRONMENT,
+                &Expected::target(&case.step),
+            )
+            .unwrap();
+        let issued = verified.request.identity.unwrap();
+        let held = std::sync::Arc::new(HeldIdentities::default());
+        held.0.lock().unwrap().push(issued.clone());
+        case.config.executors = SoftwareExecutors::with_default(held.clone());
+        let now = crate::now_millis() / 1000;
+        assert!(
+            renew_identities(&case.config, ENVIRONMENT, now)
+                .unwrap()
+                .renewals
+                .is_empty()
+        );
+
+        let dir = case.config.sealing_dir.clone().unwrap();
+        let public = crate::sealing_key::SealingKey::open_or_generate(&dir)
+            .unwrap()
+            .public()
+            .clone();
+        let next = crate::identity_issuer::generate(ENVIRONMENT, 2, &public, now).unwrap();
+        let add = IssuerStep {
+            key: next.clone(),
+            recipient: None,
+            phase: Some(crate::identity_issuer::RotationPhase::Add),
+        };
+        case.config.run_issuer(ENVIRONMENT, &add, None).unwrap();
+
+        let renewed = renew_identities(&case.config, ENVIRONMENT, now)
+            .unwrap()
+            .renewals;
+        renewed[0].outcome.as_ref().unwrap();
+        let bundled = held.0.lock().unwrap()[0].clone();
+        assert_eq!(bundled.grant, issued.grant);
+        let installed = crate::workload_identity::InstalledIdentity::read(
+            ENVIRONMENT,
+            "api",
+            &bundled.certificate,
+            &bundled.ca,
+            &serde_json::to_vec(&bundled.grant).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            installed.trust,
+            [issued.grant.issuer_fingerprint.clone(), next.fingerprint]
+        );
+        assert!(
+            renew_identities(&case.config, ENVIRONMENT, now)
+                .unwrap()
+                .renewals
+                .is_empty()
+        );
     }
 
     /// A restart-reload certificate falls due later by its environment's

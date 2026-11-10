@@ -270,6 +270,10 @@ fn runtime_caller<'a>(
             tenkai::runtime_delivery::WORKLOAD_IDENTITY_CAPABILITY,
         ),
         peer_grants: names_capability(headers, tenkai::runtime_delivery::PEER_GRANTS_CAPABILITY),
+        issuer_rotation: names_capability(
+            headers,
+            tenkai::runtime_delivery::ISSUER_ROTATION_CAPABILITY,
+        ),
     }
 }
 

@@ -212,7 +212,7 @@ impl HostSealedValues {
                     key: identity.key.clone(),
                     ca: identity.ca.clone(),
                 };
-                crate::workload_identity::check_issued(&issued, crate::now_millis() / 1000)?;
+                crate::workload_identity::check_issued_alone(&issued, crate::now_millis() / 1000)?;
                 Ok(Some(issued))
             }
             (None, Some(_)) => {

@@ -4109,6 +4109,28 @@
             }
           ]
         },
+        "next": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IssuerSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The next issuer an add step recorded, waiting for the issue step."
+        },
+        "previous": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IssuerSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The issuer the last issue step replaced, still trusted."
+        },
         "requested": {
           "description": "The generation `prepare` asked a candidate for.",
           "format": "uint64",
