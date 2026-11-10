@@ -485,7 +485,8 @@ impl HostExecutor {
     /// the lease is claimed belongs to a holder that died or lost the lease;
     /// stopping it fences that holder out even though the unit outlived the
     /// process that started it. A unit is attributed by the applier's
-    /// started record, else by its spooled request.
+    /// started record, else by its spooled request or renewal; a stopped
+    /// renewal is asked for again on the next pass.
     pub async fn stop_environment_units(&self, environment: &str) -> Result<Vec<String>> {
         let mut stale = Vec::new();
         for instance in self.units.running().await? {
@@ -505,8 +506,22 @@ impl HostExecutor {
         {
             return Some(started.environment);
         }
-        let request = self.spool_dir.join(instance).join(REQUEST_FILE);
-        let bytes = read_bounded(&request, crate::host_apply::MAX_REQUEST_BYTES).ok()??;
+        let spooled = self.spool_dir.join(instance);
+        if let Ok(Some(bytes)) = read_bounded(
+            &spooled.join(crate::host_apply::identity::RENEWAL_FILE),
+            crate::host_apply::identity::MAX_RENEWAL_BYTES,
+        ) {
+            return Some(
+                crate::host_apply::identity::HostIdentityRenewal::parse(&bytes)
+                    .ok()?
+                    .environment,
+            );
+        }
+        let bytes = read_bounded(
+            &spooled.join(REQUEST_FILE),
+            crate::host_apply::MAX_REQUEST_BYTES,
+        )
+        .ok()??;
         Some(HostApplyRequest::parse(&bytes).ok()?.plan.environment)
     }
 
@@ -647,6 +662,8 @@ fn copy_input(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+mod identity;
 pub(crate) mod step;
+pub use identity::InstalledHostIdentity;
 #[cfg(test)]
 mod tests;

@@ -13,6 +13,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, Stat};
+use tenkai::host_apply::identity::{HostIdentityRenewal, MAX_RENEWAL_BYTES, RENEWAL_FILE};
 use tenkai::host_apply::sealed::{HostSealedValues, MAX_SEALED_BYTES, SEALED_FILE};
 use tenkai::host_apply::{ARTIFACTS_DIR, HostApplyRequest, MAX_REQUEST_BYTES, REQUEST_FILE};
 
@@ -107,34 +108,87 @@ impl SpooledRequest {
     /// are none. They are read into memory only, never copied, and only from
     /// memory-backed storage: a value on a disk would outlive the step.
     pub fn read_sealed(&self) -> Result<Option<HostSealedValues>> {
-        match rustix::fs::statat(
-            self.instance_fd.as_fd(),
-            SEALED_FILE,
-            AtFlags::SYMLINK_NOFOLLOW,
-        ) {
-            Err(rustix::io::Errno::NOENT) => return Ok(None),
-            Err(error) => return Err(error).context("reading the spooled sealed values"),
-            Ok(_) => {}
-        }
-        let (file, _mode, size) = open_regular_at(self.instance_fd.as_fd(), SEALED_FILE)
-            .context("opening the spooled sealed values")?;
-        let fs = rustix::fs::fstatfs(&file)?;
-        #[allow(clippy::unnecessary_cast)]
-        if !tenkai::host_apply::sealed::is_memory_backed(fs.f_type as i64) {
-            bail!(
-                "the spooled sealed values are on persistent storage; the spool must be memory-backed (tmpfs)"
-            );
-        }
-        if size > MAX_SEALED_BYTES {
-            bail!("the spooled sealed values exceed {MAX_SEALED_BYTES} bytes");
-        }
-        let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(size as usize));
-        file.take(size.saturating_add(1)).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 != size {
-            bail!("{SEALED_FILE} changed size while it was read");
-        }
-        HostSealedValues::parse(&bytes).map(Some)
+        read_sealed_at(self.instance_fd.as_fd())
     }
+}
+
+/// A spooled workload certificate renewal: the document and the sealed
+/// values carrying the new certificate and key.
+#[derive(Debug)]
+pub struct SpooledRenewal {
+    pub renewal: HostIdentityRenewal,
+    pub sealed: HostSealedValues,
+}
+
+/// Whether `<spool>/<instance>` holds a renewal rather than a step.
+pub fn is_renewal(spool: &Path, instance: &str) -> Result<bool> {
+    tenkai::host_apply::validate_instance_name(instance)?;
+    let instance_fd = open_spooled(spool, instance)?;
+    match rustix::fs::statat(instance_fd.as_fd(), RENEWAL_FILE, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::NOENT) => Ok(false),
+        Err(error) => Err(error).context("reading the spooled renewal"),
+        Ok(_) => Ok(true),
+    }
+}
+
+/// Read `<spool>/<instance>/renewal.json` and its sealed values. Neither is
+/// copied: the document is checked against root-owned records, and the
+/// values are held in memory until they are written.
+pub fn read_renewal(spool: &Path, instance: &str) -> Result<SpooledRenewal> {
+    tenkai::host_apply::validate_instance_name(instance)?;
+    let instance_fd = open_spooled(spool, instance)?;
+    let (file, _mode, size) =
+        open_regular_at(instance_fd.as_fd(), RENEWAL_FILE).context("opening the renewal")?;
+    if size > MAX_RENEWAL_BYTES {
+        bail!("the renewal exceeds {MAX_RENEWAL_BYTES} bytes");
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.take(size.saturating_add(1)).read_to_end(&mut bytes)?;
+    let renewal = HostIdentityRenewal::parse(&bytes)?;
+    if renewal.instance_key() != instance {
+        bail!("the renewal is not the one spooled as {instance}");
+    }
+    let sealed =
+        read_sealed_at(instance_fd.as_fd())?.context("the renewal carries no certificate")?;
+    Ok(SpooledRenewal { renewal, sealed })
+}
+
+fn open_spooled(spool: &Path, instance: &str) -> Result<OwnedFd> {
+    let spool_fd = rustix::fs::open(
+        spool,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .with_context(|| format!("opening spool directory {}", spool.display()))?;
+    open_dir_at(spool_fd.as_fd(), instance)
+        .with_context(|| format!("opening spooled instance {instance}"))
+}
+
+/// The sealed values in a spooled instance directory, or `None`.
+fn read_sealed_at(instance_fd: BorrowedFd<'_>) -> Result<Option<HostSealedValues>> {
+    match rustix::fs::statat(instance_fd, SEALED_FILE, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(error).context("reading the spooled sealed values"),
+        Ok(_) => {}
+    }
+    let (file, _mode, size) =
+        open_regular_at(instance_fd, SEALED_FILE).context("opening the spooled sealed values")?;
+    let fs = rustix::fs::fstatfs(&file)?;
+    #[allow(clippy::unnecessary_cast)]
+    if !tenkai::host_apply::sealed::is_memory_backed(fs.f_type as i64) {
+        bail!(
+            "the spooled sealed values are on persistent storage; the spool must be memory-backed (tmpfs)"
+        );
+    }
+    if size > MAX_SEALED_BYTES {
+        bail!("the spooled sealed values exceed {MAX_SEALED_BYTES} bytes");
+    }
+    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(size as usize));
+    file.take(size.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != size {
+        bail!("{SEALED_FILE} changed size while it was read");
+    }
+    HostSealedValues::parse(&bytes).map(Some)
 }
 
 struct Budget {

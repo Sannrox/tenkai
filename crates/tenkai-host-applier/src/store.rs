@@ -14,6 +14,9 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tenkai::host_apply::identity::{
+    HostIdentityRecord, IDENTITY_RECORD_SCHEMA, identity_record_path,
+};
 use tenkai::host_apply::state::{
     AppliedStateRecord, HostApplyOutcome, HostApplyRefused, HostApplyResult, HostApplyStarted,
     REFUSED_FILE, REFUSED_SCHEMA, RESULT_FILE, STARTED_FILE, instance_dir, record_path,
@@ -226,8 +229,59 @@ fn write_result(paths: &ApplierPaths, result: &HostApplyResult) -> Result<()> {
     )
 }
 
+/// The workload certificate recorded for `instance` in `environment`, if
+/// one was installed. Read under the product lock to decide a renewal.
+pub fn identity_record(
+    paths: &ApplierPaths,
+    environment: &str,
+    instance: &str,
+) -> Result<Option<HostIdentityRecord>> {
+    let path = identity_record_path(&paths.state_dir, environment, instance);
+    let record = read_json::<HostIdentityRecord>(&path)?;
+    if let Some(record) = &record
+        && (record.schema != IDENTITY_RECORD_SCHEMA
+            || record.environment != environment
+            || record.instance != instance)
+    {
+        anyhow::bail!(
+            "{} is not the record of {instance} in {environment}",
+            path.display()
+        );
+    }
+    Ok(record)
+}
+
+/// Record the workload certificate just installed, for renewal to read.
+/// Written after the certificate itself, under the product lock.
+pub fn write_identity_record(paths: &ApplierPaths, record: &HostIdentityRecord) -> Result<()> {
+    write_json(
+        paths,
+        &identity_record_path(&paths.state_dir, &record.environment, &record.instance),
+        record,
+    )
+}
+
+/// Forget the workload certificate of `instance`: a step installed a
+/// release without one, or removed it.
+pub fn remove_identity_record(
+    paths: &ApplierPaths,
+    environment: &str,
+    instance: &str,
+) -> Result<()> {
+    let path = identity_record_path(&paths.state_dir, environment, instance);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
 /// Take the exclusive per-product lock, waiting for a running step.
-fn lock_product(paths: &ApplierPaths, environment: &str, product: &str) -> Result<OwnedFd> {
+pub(crate) fn lock_product(
+    paths: &ApplierPaths,
+    environment: &str,
+    product: &str,
+) -> Result<OwnedFd> {
     let dir = paths.run_dir.join("locks");
     create_dirs(&dir)?;
     let path = dir.join(format!("{}.lock", product_key(environment, product)));

@@ -1402,11 +1402,7 @@ pub fn renew_identities(
                     continue;
                 }
             };
-            // A restart-reload workload reads its certificate once; it
-            // renews with a rolling restart, not in place.
-            if identity.grant.reload != crate::workload_identity::Reload::Runtime
-                || !identity.renewal_due(now_secs)
-            {
+            if !renews_in_place(&identity, now_secs) {
                 continue;
             }
             let outcome = renew_one(dir, environment, &identity, now_secs)
@@ -1421,6 +1417,24 @@ pub fn renew_identities(
             });
         }
     }
+    if let Ok(host) = config.executors.host() {
+        match host.installed_identities(environment) {
+            Ok(installed) => {
+                for (instance, identity) in installed {
+                    let outcome = match identity {
+                        Err(error) => Err(error),
+                        Ok(identity) if !renews_in_place(&identity.installed, now_secs) => continue,
+                        Ok(identity) => renew_host(host, dir, environment, &identity, now_secs),
+                    };
+                    renewals.push(Renewal {
+                        instance,
+                        outcome: outcome.map_err(|error| format!("{error:#}")),
+                    });
+                }
+            }
+            Err(error) => unreadable.push(format!("host: {error:#}")),
+        }
+    }
     if !unreadable.is_empty() {
         bail!(
             "reading workload certificates of {environment}: {}",
@@ -1428,6 +1442,29 @@ pub fn renew_identities(
         );
     }
     Ok(renewals)
+}
+
+/// Whether `identity` is due and renews in place. A restart-reload
+/// workload reads its certificate once; it renews with a rolling restart.
+fn renews_in_place(identity: &crate::workload_identity::InstalledIdentity, now_secs: i64) -> bool {
+    identity.grant.reload == crate::workload_identity::Reload::Runtime
+        && identity.renewal_due(now_secs)
+}
+
+/// Renew a host certificate through the applier unit, waiting for it on
+/// this blocking pool thread of the agent's runtime.
+fn renew_host(
+    host: &crate::host_executor::HostExecutor,
+    dir: &Path,
+    environment: &str,
+    identity: &crate::host_executor::InstalledHostIdentity,
+    now_secs: i64,
+) -> Result<i64> {
+    let issued = renew_one(dir, environment, &identity.installed, now_secs)?;
+    tokio::runtime::Handle::try_current()
+        .context("renewing a host certificate needs the agent's runtime")?
+        .block_on(host.renew_identity(identity, &issued))?;
+    Ok(now_secs + crate::workload_identity::WORKLOAD_CERTIFICATE_TTL_SECS)
 }
 
 /// Re-issue `identity`'s recorded grant from the cached issuer.

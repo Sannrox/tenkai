@@ -13,6 +13,7 @@ mod apply;
 pub mod config;
 pub mod copy;
 pub mod fence;
+pub mod renew;
 pub mod run;
 pub mod secrets;
 pub mod store;

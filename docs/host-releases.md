@@ -102,6 +102,19 @@ readable. A health step
 issues nothing; its command gets `TENKAI_IDENTITY_DIR` for the set its
 install wrote.
 
+The applier also records the certificate it installed, without the key, in
+`/var/lib/tenkai-host/identities/<key>.json`; an install of a release
+without a certificate, or an uninstall, removes the record. The runtime
+reads it to renew a `reload = "runtime"` certificate past two thirds of its
+lifetime ([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md)
+§3). It spools `renewal.json` and the new certificate and key, with no
+request or approvals, and starts the same unit. Under the product lock the
+applier installs it only while the product is installed, the record still
+holds the certificate the renewal replaces, and the new certificate proves
+exactly the recorded grant, is valid now and matches its key. Otherwise it
+records the refusal in `refused.json`, and the runtime retries on a later
+pass. A renewal never writes a result or advances the generation.
+
 The applier kills the command's process group when its own timeout fires
 (`timeout_seconds`) and when the unit is stopped (`systemctl stop` sends it
 SIGTERM). Nothing the command starts outlives the step: the applier is the

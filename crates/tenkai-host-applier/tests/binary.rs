@@ -299,3 +299,56 @@ fn processes_a_finished_command_left_behind_are_stopped_before_the_step_ends() {
         assert!(!alive(&pid), "the {name} process outlived the step");
     }
 }
+
+/// An install of a release without a certificate forgets the recorded one
+/// only once it succeeded: after a failure the workload may still run with
+/// it, and renewal must still find it.
+#[test]
+fn a_certificate_record_is_forgotten_only_after_a_successful_step() {
+    use tenkai::host_apply::identity::{HostIdentityRecord, IDENTITY_RECORD_SCHEMA};
+    use tenkai::workload_identity::{CertificateRole, IdentityGrant, Reload};
+    let host = host();
+    let record = HostIdentityRecord {
+        schema: IDENTITY_RECORD_SCHEMA.into(),
+        environment: "edge".into(),
+        product: "k3s".into(),
+        instance: "k3s".into(),
+        grant: IdentityGrant {
+            uri: "tenkai://edge/k3s".into(),
+            dns_names: Vec::new(),
+            certificate: CertificateRole::Client,
+            reload: Reload::Runtime,
+            issuer_generation: 1,
+            issuer_fingerprint: "sha256:00".into(),
+        },
+        certificate: "cert".into(),
+        ca: "ca".into(),
+    };
+    tenkai_host_applier::store::write_identity_record(&host.paths, &record).unwrap();
+    let recorded = || {
+        tenkai_host_applier::store::identity_record(&host.paths, "edge", "k3s")
+            .unwrap()
+            .is_some()
+    };
+
+    let failing = host.release_with("1.0.0", ["exit 3", "true", "true"]);
+    let (instance, _) = host.spool(install(&failing, 0));
+    assert_eq!(
+        applier(&host, &instance).output().unwrap().status.code(),
+        Some(1)
+    );
+    assert!(recorded());
+
+    let release = host.release_with("1.0.1", ["true", "true", "true"]);
+    let mut step = install(&release, 1);
+    step.from = Some("1.0.0");
+    let (instance, _) = host.spool(step);
+    let output = applier(&host, &instance).output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!recorded());
+}

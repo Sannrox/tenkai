@@ -42,18 +42,28 @@ const GENERATION_PREFIX: &str = "gen-";
 /// to, which its command receives as `TENKAI_SECRETS_DIR` or
 /// `TENKAI_IDENTITY_DIR`.
 pub fn instance_dir(paths: &ApplierPaths, tree: &str, step: &VerifiedHostStep) -> Result<PathBuf> {
-    let instance = if step.product_instance.is_empty() {
+    target_dir(paths, tree, &step.environment, step_instance(step))
+}
+
+/// The instance a step writes for: its product instance, else its product.
+pub fn step_instance(step: &VerifiedHostStep) -> &str {
+    if step.product_instance.is_empty() {
         &step.product
     } else {
         &step.product_instance
-    };
-    tenkai::ontology::validate_identifier("environment", &step.environment)?;
+    }
+}
+
+/// `<state_dir>/<tree>/<environment>/<instance>`, each segment validated.
+fn target_dir(
+    paths: &ApplierPaths,
+    tree: &str,
+    environment: &str,
+    instance: &str,
+) -> Result<PathBuf> {
+    tenkai::ontology::validate_identifier("environment", environment)?;
     tenkai::ontology::validate_identifier("instance", instance)?;
-    Ok(paths
-        .state_dir
-        .join(tree)
-        .join(&step.environment)
-        .join(instance))
+    Ok(paths.state_dir.join(tree).join(environment).join(instance))
 }
 
 /// Write `secrets` for `step` and return their directory.
@@ -62,7 +72,7 @@ pub fn write(
     step: &VerifiedHostStep,
     secrets: &[BoundSecret],
 ) -> Result<PathBuf> {
-    let dir = owned_dir(paths, SECRETS, step)?;
+    let dir = owned_dir(paths, SECRETS, &step.environment, step_instance(step))?;
     for secret in secrets {
         tenkai::ontology::validate_identifier("secret name", &secret.secret)?;
         tenkai::ontology::validate_identifier("secret key", &secret.key)?;
@@ -74,14 +84,16 @@ pub fn write(
     Ok(dir)
 }
 
-/// Write `issued`, the workload certificate of `step`, and return the path
-/// of its [`CURRENT_LINK`].
+/// Write `issued`, the workload certificate of `instance` in `environment`,
+/// and return the path of its [`CURRENT_LINK`]. A step writes it under its
+/// product lock, and so does a renewal.
 pub fn write_identity(
     paths: &ApplierPaths,
-    step: &VerifiedHostStep,
+    environment: &str,
+    instance: &str,
     issued: &tenkai::workload_identity::IssuedIdentity,
 ) -> Result<PathBuf> {
-    let dir = owned_dir(paths, IDENTITY, step)?;
+    let dir = owned_dir(paths, IDENTITY, environment, instance)?;
     write_generation(&dir, &issued.files()?)
 }
 
@@ -157,10 +169,15 @@ fn write_generation(dir: &Path, files: &[(&str, impl AsRef<[u8]>)]) -> Result<Pa
 
 /// The instance directory of `step` in `tree`, created marked as Tenkai's
 /// if it is missing, and refused if someone else created it.
-fn owned_dir(paths: &ApplierPaths, tree: &str, step: &VerifiedHostStep) -> Result<PathBuf> {
-    let dir = instance_dir(paths, tree, step)?;
+fn owned_dir(
+    paths: &ApplierPaths,
+    tree: &str,
+    environment: &str,
+    instance: &str,
+) -> Result<PathBuf> {
+    let dir = target_dir(paths, tree, environment, instance)?;
     let base = paths.state_dir.join(tree);
-    let environment = base.join(&step.environment);
+    let environment = base.join(environment);
     for parent in [&base, &environment] {
         ensure_dir(parent)?;
     }

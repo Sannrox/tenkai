@@ -31,6 +31,7 @@ fn main() -> ExitCode {
                     Err(error) => eprintln!("tenkai-host-applier: {error}"),
                 },
                 Applied::Refused(reason) => eprintln!("tenkai-host-applier: refused: {reason}"),
+                Applied::Renewed => println!("renewed the workload certificate"),
             }
             ExitCode::from(applied.exit_code())
         }
