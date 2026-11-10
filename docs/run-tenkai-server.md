@@ -475,6 +475,11 @@ tenkai-runtime
   workload. A step also grants its restore release's certificate, so a
   failed upgrade puts the previous release back with its own names.
   Removing a release deletes the Secret with the instance's other Secrets.
+  The runtime keeps the issuer it verified (still sealed) beside its
+  sealing key and, about once a minute, renews each `reload = "runtime"`
+  certificate past two thirds of its lifetime in place, re-issuing the grant
+  the Secret's certificate proves. A Secret whose `grant.json` the
+  certificate does not prove is logged and left alone.
   Host
   releases get the files under `TENKAI_IDENTITY_DIR`. Other executors and
   the server's own apply refuse these steps.

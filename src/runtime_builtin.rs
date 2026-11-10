@@ -976,6 +976,11 @@ impl BuiltinConfig {
             "the step issues a workload certificate, and this runtime has no sealing key (enroll with --credential-file)",
         )?;
         let key = issuer.open(environment, &SealedOpener::load(dir)?)?;
+        // Kept for renewal without the server. Optional: a failed write
+        // only delays renewal until the next step that grants one.
+        if let Err(error) = crate::identity_issuer::cache_verified(dir, environment, &issuer) {
+            eprintln!("keeping the identity issuer for renewal failed: {error:#}");
+        }
         crate::workload_identity::issue(grant, &issuer, key, crate::now_millis() / 1000).map(Some)
     }
 
@@ -1349,6 +1354,104 @@ fn remove_tree(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// One certificate renewal attempt: the instance and either the new
+/// certificate's expiry (Unix seconds) or why it was not renewed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Renewal {
+    pub instance: String,
+    pub outcome: std::result::Result<i64, String>,
+}
+
+/// Renew every workload certificate of `environment` that is due
+/// (ADR 0046 §3). Needs no plan, approval or server: each adapter lists what
+/// its target holds, and a due certificate is re-issued for exactly its
+/// recorded grant from the issuer this runtime last verified. Idempotent:
+/// a crash before the write leaves the old certificate due, and one after
+/// leaves a fresh one that is not. An adapter that cannot be read fails the
+/// pass; other adapters still run.
+pub fn renew_identities(
+    config: &BuiltinConfig,
+    environment: &str,
+    now_secs: i64,
+) -> Result<Vec<Renewal>> {
+    let Some(dir) = config.sealing_dir.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let target = crate::software_executor::IdentityTarget {
+        environment,
+        cluster_config_path: config.cluster_config.as_deref(),
+    };
+    let mut renewals = Vec::new();
+    let mut unreadable = Vec::new();
+    for adapter in config.executors.adapters() {
+        let installed = match adapter.installed_identities(&target) {
+            Ok(installed) => installed,
+            Err(error) => {
+                unreadable.push(format!("{error:#}"));
+                continue;
+            }
+        };
+        for (instance, identity) in installed {
+            let identity = match identity {
+                Ok(identity) => identity,
+                Err(error) => {
+                    renewals.push(Renewal {
+                        instance,
+                        outcome: Err(format!("{error:#}")),
+                    });
+                    continue;
+                }
+            };
+            // A restart-reload workload reads its certificate once; it
+            // renews with a rolling restart, not in place.
+            if identity.grant.reload != crate::workload_identity::Reload::Runtime
+                || !identity.renewal_due(now_secs)
+            {
+                continue;
+            }
+            let outcome = renew_one(dir, environment, &identity, now_secs)
+                .and_then(|issued| {
+                    adapter.renew_identity(&target, &identity, &issued)?;
+                    Ok(now_secs + crate::workload_identity::WORKLOAD_CERTIFICATE_TTL_SECS)
+                })
+                .map_err(|error| format!("{error:#}"));
+            renewals.push(Renewal {
+                instance: identity.instance,
+                outcome,
+            });
+        }
+    }
+    if !unreadable.is_empty() {
+        bail!(
+            "reading workload certificates of {environment}: {}",
+            unreadable.join("; ")
+        );
+    }
+    Ok(renewals)
+}
+
+/// Re-issue `identity`'s recorded grant from the cached issuer.
+fn renew_one(
+    dir: &Path,
+    environment: &str,
+    identity: &crate::workload_identity::InstalledIdentity,
+    now_secs: i64,
+) -> Result<crate::workload_identity::IssuedIdentity> {
+    let issuer = crate::identity_issuer::cached_verified(dir, environment)?.context(
+        "this runtime has verified no identity issuer yet; it renews once it applies a step that grants a certificate",
+    )?;
+    let grant = &identity.grant;
+    if grant.issuer_generation != issuer.generation {
+        bail!(
+            "the certificate was issued by issuer generation {}, and this runtime holds generation {}; it needs a new approved issuance",
+            grant.issuer_generation,
+            issuer.generation
+        );
+    }
+    let key = issuer.open(environment, &SealedOpener::load(dir)?)?;
+    crate::workload_identity::issue(grant, &issuer, key, now_secs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1467,9 +1570,13 @@ mod tests {
     /// [`case`] for a release that asks for a server certificate, with an
     /// issuer sealed to this runtime and the grant the planner computes.
     fn identity_case() -> Case {
-        let mut case = case(
-            "\n[deploy.identity]\ncertificate = \"server\"\nreload = \"restart\"\ndns_names = [\"api.prod.svc\"]\n",
-        );
+        identity_case_reloading("restart")
+    }
+
+    fn identity_case_reloading(reload: &str) -> Case {
+        let mut case = case(&format!(
+            "\n[deploy.identity]\ncertificate = \"server\"\nreload = \"{reload}\"\ndns_names = [\"api.prod.svc\"]\n",
+        ));
         let sealing = case.root.join("sealing");
         std::fs::create_dir_all(&sealing).unwrap();
         let public = crate::sealing_key::SealingKey::open_or_generate(&sealing)
@@ -1950,5 +2057,139 @@ mod tests {
         keyless.config.sealing_dir = None;
         let refused = refusal(&keyless, keyless.release.clone());
         assert!(refused.contains("no sealing key"), "{refused}");
+    }
+
+    /// Workload certificates held in memory, read back the way an adapter
+    /// reads its target: through the certificate that proves each grant.
+    #[derive(Default)]
+    struct HeldIdentities(std::sync::Mutex<Vec<crate::workload_identity::IssuedIdentity>>);
+
+    impl crate::software_executor::SoftwareExecutor for HeldIdentities {
+        fn apply(&self, _: &crate::software_executor::SoftwareApplyRequest) -> Result<()> {
+            unreachable!("renewal applies nothing")
+        }
+        fn remove(&self, _: &crate::software_executor::SoftwareApplyRequest) -> Result<()> {
+            unreachable!("renewal removes nothing")
+        }
+        fn observe(
+            &self,
+            _: &crate::software_executor::SoftwareApplyRequest,
+        ) -> Result<crate::software_executor::SoftwareObserveStatus> {
+            unreachable!("renewal observes nothing")
+        }
+        fn installed_identities(
+            &self,
+            target: &crate::software_executor::IdentityTarget<'_>,
+        ) -> Result<Vec<(String, Result<crate::workload_identity::InstalledIdentity>)>> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|issued| {
+                    let read = crate::workload_identity::InstalledIdentity::read(
+                        target.environment,
+                        "api",
+                        &issued.certificate,
+                        &issued.ca,
+                        &serde_json::to_vec(&issued.grant).unwrap(),
+                    );
+                    ("api".to_owned(), read)
+                })
+                .collect())
+        }
+        fn renew_identity(
+            &self,
+            _: &crate::software_executor::IdentityTarget<'_>,
+            installed: &crate::workload_identity::InstalledIdentity,
+            issued: &crate::workload_identity::IssuedIdentity,
+        ) -> Result<()> {
+            let mut held = self.0.lock().unwrap();
+            assert_eq!(held[0].certificate, installed.certificate);
+            *held = vec![issued.clone()];
+            Ok(())
+        }
+    }
+
+    /// Renewal re-issues the recorded grant from the issuer the runtime
+    /// verified at apply, once two thirds of the lifetime have passed, and
+    /// only once: a pass after a restart finds the fresh certificate.
+    #[test]
+    fn the_runtime_renews_a_due_certificate_once_without_a_step() {
+        let mut case = identity_case_reloading("runtime");
+        let verified = case
+            .config
+            .verify(
+                case.release.clone(),
+                ENVIRONMENT,
+                &Expected::target(&case.step),
+            )
+            .unwrap();
+        let first = verified.request.identity.unwrap();
+        let held = std::sync::Arc::new(HeldIdentities::default());
+        held.0.lock().unwrap().push(first.clone());
+        case.config.executors = SoftwareExecutors::with_default(held.clone());
+        let now = crate::now_millis() / 1000;
+
+        assert!(
+            renew_identities(&case.config, ENVIRONMENT, now + 3600)
+                .unwrap()
+                .is_empty()
+        );
+        let due = now + 17 * 3600;
+        let renewed = renew_identities(&case.config, ENVIRONMENT, due).unwrap();
+        assert_eq!(renewed.len(), 1);
+        assert_eq!(renewed[0].instance, "api");
+        renewed[0].outcome.as_ref().unwrap();
+        let second = held.0.lock().unwrap()[0].clone();
+        assert_eq!(second.grant, first.grant);
+        assert_ne!(second.certificate, first.certificate);
+        assert_ne!(*second.key, *first.key);
+        crate::workload_identity::check_issued(&second, due).unwrap();
+        assert!(
+            renew_identities(&case.config, ENVIRONMENT, due)
+                .unwrap()
+                .is_empty()
+        );
+
+        // A restarted runtime that never verified this issuer refuses, by name.
+        std::fs::remove_file(
+            case.config
+                .sealing_dir
+                .as_ref()
+                .unwrap()
+                .join(format!("identity-issuer-{ENVIRONMENT}.json")),
+        )
+        .unwrap();
+        let later = due + 17 * 3600;
+        let refused = renew_identities(&case.config, ENVIRONMENT, later).unwrap();
+        let error = refused[0].outcome.as_ref().unwrap_err();
+        assert!(error.contains("verified no identity issuer"), "{error}");
+    }
+
+    /// A restart-reload workload is not rewritten in place.
+    #[test]
+    fn a_restart_reload_certificate_is_not_renewed_in_place() {
+        let mut case = identity_case();
+        let verified = case
+            .config
+            .verify(
+                case.release.clone(),
+                ENVIRONMENT,
+                &Expected::target(&case.step),
+            )
+            .unwrap();
+        let held = std::sync::Arc::new(HeldIdentities::default());
+        held.0
+            .lock()
+            .unwrap()
+            .push(verified.request.identity.unwrap());
+        case.config.executors = SoftwareExecutors::with_default(held);
+        let due = crate::now_millis() / 1000 + 17 * 3600;
+        assert!(
+            renew_identities(&case.config, ENVIRONMENT, due)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

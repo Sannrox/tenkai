@@ -268,6 +268,13 @@ impl std::fmt::Display for TargetUnavailable {
 
 impl std::error::Error for TargetUnavailable {}
 
+/// Where an adapter's workload certificates live for renewal: the
+/// environment, and the cluster configuration a Kubernetes adapter uses.
+pub struct IdentityTarget<'a> {
+    pub environment: &'a str,
+    pub cluster_config_path: Option<&'a Path>,
+}
+
 /// Pluggable software apply path. Tenkai never hard-depends on a cluster.
 pub trait SoftwareExecutor: Send + Sync {
     /// Checks, before anything changes, that the target this adapter writes
@@ -315,6 +322,35 @@ pub trait SoftwareExecutor: Send + Sync {
     ) -> Result<()> {
         let _ = stop;
         self.remove(request)
+    }
+    /// Workload certificates this adapter wrote in `target`'s environment,
+    /// each named by its instance (or the entry's own name when it names
+    /// none) with the grant it proves (ADR 0046 §3). An entry that proves no
+    /// grant carries its error, so one edited entry neither blocks the others
+    /// nor drops out of sight. An `Err` means the target could not be read.
+    /// Default: it writes none.
+    fn installed_identities(
+        &self,
+        target: &IdentityTarget<'_>,
+    ) -> Result<Vec<(String, Result<crate::workload_identity::InstalledIdentity>)>> {
+        let _ = target;
+        Ok(Vec::new())
+    }
+    /// Replace `installed`, as [`Self::installed_identities`] read it, with
+    /// `issued` in place, with nothing restarted. Refuses when the target no
+    /// longer holds exactly `installed`: an apply or a removal since the read
+    /// wins, and renewal never creates a certificate.
+    fn renew_identity(
+        &self,
+        target: &IdentityTarget<'_>,
+        installed: &crate::workload_identity::InstalledIdentity,
+        issued: &crate::workload_identity::IssuedIdentity,
+    ) -> Result<()> {
+        let _ = (target, issued);
+        anyhow::bail!(
+            "this executor holds no workload certificate for {}",
+            installed.instance
+        )
     }
     /// Whether this adapter deploys from admitted environment-mirror refs.
     fn consumes_admitted_artifact_pulls(&self) -> bool {
@@ -691,6 +727,21 @@ impl Default for SoftwareExecutors {
 }
 
 impl SoftwareExecutors {
+    /// Every adapter this process has, each once.
+    pub fn adapters(&self) -> Vec<Arc<dyn SoftwareExecutor>> {
+        let mut adapters: Vec<Arc<dyn SoftwareExecutor>> = Vec::new();
+        for adapter in self
+            .default
+            .iter()
+            .chain(self.declared.iter().map(|(_, adapter)| adapter))
+        {
+            if !adapters.iter().any(|seen| Arc::ptr_eq(seen, adapter)) {
+                adapters.push(Arc::clone(adapter));
+            }
+        }
+        adapters
+    }
+
     /// This process's executors: the `TENKAI_SOFTWARE_EXECUTOR` default,
     /// every adapter the host installed (`tenkai_executor::install()`), and
     /// the host executor `TENKAI_HOST_SPOOL_DIR` configures. A host executor

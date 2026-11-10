@@ -207,15 +207,27 @@ tenkaictl --target remote identity-issuer rewrap prod --recipient sha256:<hex> -
   An issuer plan whose key no unrevoked runtime holds, or one made before
   the issuer rotated past it, is blocked when the next runtime polls, so it
   does not hold up later plans. Plan it again.
-- An environment without a separate runtime cannot hold the key; its plans
-  with an issuer step are refused.
+- An environment without a separate runtime cannot issue workload
+  certificates. The server never holds the issuing key, so it refuses plans
+  that activate an issuer or issue a certificate, and the refusal says to
+  enroll an environment runtime. There is no setting that lets the server's
+  host issue them ([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md) §8).
 
 A release that declares [`[deploy.identity]`](manifest.md#workload-identity)
 needs a current issuer: planning it without one fails and names
 `identity-issuer prepare`. Each install, upgrade, rollback and restart step
 of it grants its certificate, and the runtime that runs the step issues it,
 valid for 24 hours. A step also grants the certificate of the release it
-restores on failure. Renewal before expiry is not automatic yet.
+restores on failure.
+
+The runtime renews a `reload = "runtime"` certificate on `helm` itself once
+two thirds of its lifetime have passed, with no plan or approval
+([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md) §3). It
+re-issues exactly the grant the old certificate proves, with a fresh key,
+from the issuer it last verified at apply. A certificate from an older
+issuer generation is not renewed: it needs a step after `identity-issuer
+rewrap`. Restart-reload and host certificates are not renewed yet; apply a
+step before they expire.
 
 `env add --connectivity <class>` also sets the connectivity class.
 

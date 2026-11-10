@@ -205,8 +205,42 @@ pub(crate) fn write_identity(api: &dyn SecretApi, request: &SoftwareApplyRequest
     let Some(issued) = &request.identity else {
         return Ok(());
     };
-    let namespace = &request.environment;
-    let instance = request.instance_name();
+    write_identity_secret(
+        api,
+        &request.environment,
+        request.instance_name(),
+        issued,
+        None,
+    )
+}
+
+/// Replace `installed`'s Secret with the renewed `issued`, only while it
+/// still holds the certificate renewal read: an apply or a removal since
+/// the read wins, and a missing Secret is not created.
+pub(crate) fn renew_identity_secret(
+    api: &dyn SecretApi,
+    namespace: &str,
+    installed: &tenkai::workload_identity::InstalledIdentity,
+    issued: &tenkai::workload_identity::IssuedIdentity,
+) -> Result<()> {
+    write_identity_secret(
+        api,
+        namespace,
+        &installed.instance,
+        issued,
+        Some(&installed.certificate),
+    )
+}
+
+/// Write `issued` into `instance`'s stable Secret in `namespace`. With
+/// `replacing`, the Secret must exist and hold exactly that certificate.
+fn write_identity_secret(
+    api: &dyn SecretApi,
+    namespace: &str,
+    instance: &str,
+    issued: &tenkai::workload_identity::IssuedIdentity,
+    replacing: Option<&str>,
+) -> Result<()> {
     require_dns_label("instance", instance)?;
     let name = identity_secret_name(instance);
     let existing = api.get(namespace, &name)?;
@@ -216,6 +250,17 @@ pub(crate) fn write_identity(api: &dyn SecretApi, request: &SoftwareApplyRequest
         bail!(
             "Secret {name} in {namespace} exists and is not Tenkai's; Tenkai never writes over it"
         );
+    }
+    if let Some(certificate) = replacing {
+        let held = existing
+            .as_ref()
+            .and_then(|secret| secret.data.as_ref())
+            .and_then(|data| data.get(tenkai::workload_identity::CERTIFICATE_FILE));
+        if held.map(|bytes| bytes.0.as_slice()) != Some(certificate.as_bytes()) {
+            bail!(
+                "Secret {name} in {namespace} changed since renewal read it; the next pass reads it again"
+            );
+        }
     }
     let mut secret = Secret {
         metadata: ObjectMeta {
@@ -257,6 +302,58 @@ pub(crate) fn write_identity(api: &dyn SecretApi, request: &SoftwareApplyRequest
         value.0.zeroize();
     }
     written
+}
+
+/// The workload certificates Tenkai's identity Secrets in `environment`
+/// hold, each with the grant it records (ADR 0046 §3). A Secret whose
+/// certificate does not prove its recorded grant fails the read, naming it.
+pub(crate) fn installed_identities(
+    api: &dyn SecretApi,
+    environment: &str,
+) -> Result<Vec<(String, Result<tenkai::workload_identity::InstalledIdentity>)>> {
+    let selector = format!("{OWNER_LABEL}={OWNER},{IDENTITY_LABEL}=true");
+    Ok(api
+        .list(environment, &selector)?
+        .into_iter()
+        .map(|secret| {
+            let name = secret.metadata.name.clone().unwrap_or_default();
+            let instance = secret
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(INSTANCE_LABEL))
+                .cloned();
+            let installed = installed_identity(environment, &name, instance.as_deref(), secret);
+            (instance.unwrap_or(name), installed)
+        })
+        .collect())
+}
+
+/// The identity one listed Secret proves, if it is the one Tenkai writes.
+fn installed_identity(
+    environment: &str,
+    name: &str,
+    instance: Option<&str>,
+    secret: Secret,
+) -> Result<tenkai::workload_identity::InstalledIdentity> {
+    use tenkai::workload_identity::{CA_FILE, CERTIFICATE_FILE, GRANT_FILE, InstalledIdentity};
+    let instance = instance.with_context(|| format!("identity Secret {name} names no instance"))?;
+    if !owns_identity(&secret, instance) || name != identity_secret_name(instance) {
+        bail!("identity Secret {name} is not the one Tenkai writes for {instance}");
+    }
+    let data = secret.data.unwrap_or_default();
+    let text = |file: &str| {
+        data.get(file)
+            .map(|bytes| bytes.0.as_slice())
+            .with_context(|| format!("identity Secret {name} has no {file}"))
+    };
+    InstalledIdentity::read(
+        environment,
+        instance,
+        std::str::from_utf8(text(CERTIFICATE_FILE)?)?,
+        std::str::from_utf8(text(CA_FILE)?)?,
+        text(GRANT_FILE)?,
+    )
 }
 
 fn is_identity(secret: &Secret) -> bool {
@@ -604,6 +701,70 @@ mod tests {
                 "tenkai.identity.generation=3"
             ]
         );
+    }
+
+    /// A certificate issued for `api` in `prod` by a fresh issuer.
+    fn genuine_identity() -> tenkai::workload_identity::IssuedIdentity {
+        use tenkai::workload_identity::{CertificateRole, IdentitySection, Reload};
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-helm-identity-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let public = tenkai::sealing_key::SealingKey::open_or_generate(&dir)
+            .unwrap()
+            .public()
+            .clone();
+        let now = tenkai::now_millis() / 1000;
+        let issuer = tenkai::identity_issuer::generate("prod", 1, &public, now).unwrap();
+        let key = issuer
+            .open(
+                "prod",
+                &tenkai::sealed_secret::SealedOpener::load(&dir).unwrap(),
+            )
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let section = IdentitySection {
+            certificate: CertificateRole::Server,
+            reload: Reload::Runtime,
+            dns_names: vec!["api.prod.svc".into()],
+        };
+        let grant = tenkai::workload_identity::grant(&section, "prod", "api", &issuer).unwrap();
+        tenkai::workload_identity::issue(&grant, &issuer, key, now).unwrap()
+    }
+
+    /// Renewal reads back the Secret apply wrote, and refuses one whose
+    /// grant was edited in the namespace without hiding the others.
+    #[test]
+    fn renewal_reads_the_grant_an_identity_secret_proves() {
+        let api = Memory::default();
+        let issued = genuine_identity();
+        write_identity_secret(&api, "prod", "api", &issued, None).unwrap();
+        let mut web = issued.clone();
+        web.grant.dns_names.push("bank.example".into());
+        write_identity_secret(&api, "prod", "web", &web, None).unwrap();
+
+        let mut found = installed_identities(&api, "prod").unwrap();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        let [(api_name, api_found), (web_name, web_found)] = found.as_slice() else {
+            panic!("two identity Secrets");
+        };
+        assert_eq!((api_name.as_str(), web_name.as_str()), ("api", "web"));
+        let installed = api_found.as_ref().unwrap();
+        assert_eq!(installed.grant, issued.grant);
+        assert!(web_found.is_err());
+
+        // An apply that wrote a new certificate after the read wins.
+        let renewed = genuine_identity();
+        let applied = genuine_identity();
+        write_identity_secret(&api, "prod", "api", &applied, None).unwrap();
+        let refused = renew_identity_secret(&api, "prod", installed, &renewed).unwrap_err();
+        assert!(refused.to_string().contains("changed since"), "{refused}");
+        // A removed Secret is not brought back.
+        api.delete("prod", "api-tenkai-identity").unwrap();
+        renew_identity_secret(&api, "prod", installed, &renewed).unwrap_err();
+        assert!(api.get("prod", "api-tenkai-identity").unwrap().is_none());
     }
 
     #[test]

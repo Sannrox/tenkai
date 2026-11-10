@@ -121,7 +121,8 @@ dns_names = ["api-${TENKAI_INSTANCE}.prod.svc"]
   it in every DNS name, so two instances never share one; a literal name is
   refused at publication.
 - `reload` says how the workload picks up a renewed certificate: `runtime`
-  watches its files, `restart` needs a restart. A release that reads the
+  watches its files, and the runtime renews it in place before it expires;
+  `restart` needs a restart. A release that reads the
   certificate through a subPath mount or environment variables does not see
   file updates and declares `restart`.
 - Only software releases on `helm` or `host` take it.
@@ -130,7 +131,8 @@ Planning grants the names to the step, so approving the plan approves them.
 The environment's runtime issues a fresh key and certificate from the
 [identity issuer](manage-environments.md#identity-issuer) and refuses names
 the plan step grants but the signed manifest does not. The private key is
-generated on the runtime and never reaches the server. Older binaries refuse
+generated on the runtime and never reaches the server, so an environment
+without a separate runtime cannot apply the release. Older binaries refuse
 a manifest that declares the table.
 
 ## Config schema

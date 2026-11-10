@@ -1,7 +1,7 @@
 # ADR 0046: Workload identity and peer policy from dependency bindings
 
 - Status: Accepted
-- Date: 2026-11-06 (revised 2026-11-07)
+- Date: 2026-11-06 (revised 2026-11-07; §8 revised 2026-11-10)
 - Issue: [#1023](https://github.com/Sannrox/tenkai/issues/1023)
 - Owner: Tenkai maintainers
 - Amends: [ADR 0016](0016-same-version-remediation.md) (restart on certificate renewal)
@@ -223,11 +223,12 @@ process, with no separate runtime. There the issuing key would sit on the
 server's host, which is the case ADR 0045 calls out for sealed values.
 
 An environment without a separate runtime refuses plans that issue
-identities, naming the reason, unless the environment explicitly records
-`identity_issuer = "server-host"`. Setting it is a governed, audited change,
-and `env inspect`, `status` and the dependency view show it. With it,
-issuance and renewal run on the server's host and protect the store, backups
-and the API, but not the host. The documentation must say so.
+identities or activate an issuer, and the refusal says to enroll an
+environment runtime. There is no opt-in for the server's host: the server
+holds no private key for sealed values either (ADR 0045), and issuing from
+it would need a key that every server replica can open, a second trust
+surface with its own availability design. An environment that needs
+workload identities runs a runtime.
 
 ## Out of scope
 
@@ -293,5 +294,7 @@ and the API, but not the host. The documentation must say so.
 - **Require every product to reload certificates while running.** Rejected:
   many products read their certificate only at start. Excluding them would
   leave the suites that most need mutual TLS without it.
-- **Issue silently from the server's host when no runtime exists.** Rejected
-  as the default: it breaks the threat model without anyone deciding to.
+- **Issue from the server's host when no runtime exists.** Rejected, also
+  as an explicit opt-in: it breaks the threat model, and a key that every
+  server replica can open is a second trust surface. Enrolling a runtime is
+  the smaller step.
