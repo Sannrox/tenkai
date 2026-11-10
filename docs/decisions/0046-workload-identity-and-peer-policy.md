@@ -1,6 +1,6 @@
 # ADR 0046: Workload identity and peer policy from dependency bindings
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-06 (revised 2026-11-07)
 - Issue: [#1023](https://github.com/Sannrox/tenkai/issues/1023)
 - Owner: Tenkai maintainers
