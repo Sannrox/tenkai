@@ -409,7 +409,6 @@ pub async fn set_channel_health_gates(
     let owner = format!("health-gates:{product}/{channel}:{}", crate::now_millis());
     let lock = crate::canary::claim_promotion_lock(ctx, product, channel, &owner).await?;
     let result = async {
-        crate::canary::confirm_promotion_lock(ctx, &lock).await?;
         let id = channel_id(product, channel);
         let mut object = ctx
             .get(&id)
@@ -419,7 +418,7 @@ pub async fn set_channel_health_gates(
             CHANNEL_HEALTH_GATES_PROPERTY.into(),
             serde_json::to_string(spec)?,
         );
-        ctx.put(object).await?;
+        crate::canary::fenced_put(ctx, std::slice::from_ref(&lock), object).await?;
         Ok(())
     }
     .await;

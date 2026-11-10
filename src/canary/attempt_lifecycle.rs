@@ -149,7 +149,7 @@ pub(crate) async fn begin_attempt(
         if policies.is_empty() {
             Ok(None)
         } else {
-            persist_attempt(ctx, plan, gates_skipped, policies).await
+            persist_attempt(ctx, plan, gates_skipped, policies, &locks).await
         }
     }
     .await;
@@ -216,6 +216,7 @@ async fn persist_attempt(
     plan: &Plan,
     gates_skipped: bool,
     policies: Vec<ActiveCanaryPolicy>,
+    locks: &[PromotionLock],
 ) -> Result<Option<String>> {
     let snapshot = CanaryAttemptSnapshot { policies };
     let started_at = snapshot
@@ -244,13 +245,9 @@ async fn persist_attempt(
             created: started_at,
             updated: started_at,
         };
-        match ctx.create_once(object).await {
-            Ok(_) => {
-                link_attempt_to_policies(ctx, &id, &snapshot.policies).await?;
-                return Ok(Some(id));
-            }
-            Err(status) if crate::client::is_unique_conflict(&status) => {}
-            Err(status) => return Err(status.into()),
+        if fenced_create(ctx, locks, object).await?.is_some() {
+            link_attempt_to_policies(ctx, &id, &snapshot.policies).await?;
+            return Ok(Some(id));
         }
     }
     bail!("could not allocate canary attempt for plan {}", plan.id)
@@ -333,6 +330,7 @@ pub(crate) async fn finish_attempt(
         attempt_id,
         abandon_nonterminal,
         completed_outcomes,
+        &locks,
     )
     .await;
     let unlock = release_policy_locks(ctx, &locks).await;
@@ -406,6 +404,7 @@ async fn finish_attempt_locked(
     attempt_id: &str,
     abandon_nonterminal: bool,
     completed_outcomes: Option<&[Outcome]>,
+    locks: &[PromotionLock],
 ) -> Result<()> {
     let plan = crate::plan::load(ctx, plan_id).await?;
     let mut attempt = ctx
@@ -413,7 +412,11 @@ async fn finish_attempt_locked(
         .await?
         .with_context(|| format!("canary attempt {attempt_id} not found"))?;
     match object_property(&attempt, "status")? {
-        "ready" => return finalize_pending_attempts(ctx, plan_id).await.map(|_| ()),
+        "ready" => {
+            return finalize_pending_attempts(ctx, plan_id, locks)
+                .await
+                .map(|_| ());
+        }
         "complete" | "abandoned" => return Ok(()),
         "pending" => {}
         status => bail!("canary attempt {attempt_id} has invalid status {status}"),
@@ -429,7 +432,7 @@ async fn finish_attempt_locked(
             .properties
             .insert("status".into(), "abandoned".into());
         attempt.updated = crate::now_millis().max(attempt.created);
-        ctx.put(attempt).await?;
+        fenced_put(ctx, locks, attempt).await?;
         return Ok(());
     }
     if matches!(plan.state, PlanState::Computed | PlanState::Running) {
@@ -452,8 +455,8 @@ async fn finish_attempt_locked(
         crate::now_millis().max(attempt.created).to_string(),
     );
     attempt.updated = crate::now_millis().max(attempt.created);
-    ctx.put(attempt).await?;
-    finalize_pending_attempts(ctx, plan_id).await?;
+    fenced_put(ctx, locks, attempt).await?;
+    finalize_pending_attempts(ctx, plan_id, locks).await?;
     Ok(())
 }
 
@@ -478,7 +481,7 @@ pub async fn repair_pending(
         crate::now_millis()
     );
     let locks = claim_policy_locks(ctx, &policies, &owner).await?;
-    let result = repair_pending_locked(ctx, actor, plan_id).await;
+    let result = repair_pending_locked(ctx, actor, plan_id, &locks).await;
     let unlock = release_policy_locks(ctx, &locks).await;
     match (result, unlock) {
         (Ok(repaired), Ok(())) => Ok(repaired),
@@ -494,12 +497,17 @@ async fn repair_pending_locked(
     ctx: &mut Ctx,
     actor: &AuthenticatedRequestContext,
     plan_id: &str,
+    locks: &[PromotionLock],
 ) -> Result<usize> {
     super::promotion_lifecycle::require_management(actor)?;
-    finalize_pending_attempts(ctx, plan_id).await
+    finalize_pending_attempts(ctx, plan_id, locks).await
 }
 
-async fn finalize_pending_attempts(ctx: &mut Ctx, plan_id: &str) -> Result<usize> {
+async fn finalize_pending_attempts(
+    ctx: &mut Ctx,
+    plan_id: &str,
+    locks: &[PromotionLock],
+) -> Result<usize> {
     let mut stored_plan = crate::plan::load(ctx, plan_id).await?;
     let deployments = ctx.linked(plan_id, REL_PART_OF_PLAN, "in").await?;
     let attempts = ctx
@@ -544,7 +552,7 @@ async fn finalize_pending_attempts(ctx: &mut Ctx, plan_id: &str) -> Result<usize
                 .properties
                 .insert("status".into(), "abandoned".into());
             attempt.updated = crate::now_millis().max(attempt.created);
-            ctx.put(attempt).await?;
+            fenced_put(ctx, locks, attempt).await?;
             repaired += 1;
             continue;
         }
@@ -567,7 +575,7 @@ async fn finalize_pending_attempts(ctx: &mut Ctx, plan_id: &str) -> Result<usize
                 crate::now_millis().max(attempt.created).to_string(),
             );
             attempt.updated = crate::now_millis().max(attempt.created);
-            attempt = ctx.put(attempt).await?;
+            attempt = fenced_put(ctx, locks, attempt).await?;
         }
         if attempt.properties.get("status").map(String::as_str) != Some("ready") {
             continue;
@@ -623,6 +631,7 @@ async fn finalize_pending_attempts(ctx: &mut Ctx, plan_id: &str) -> Result<usize
             &snapshot.policies,
             execution_started_at,
             &attempt_id,
+            locks,
         )
         .await?;
         attempt
@@ -632,12 +641,13 @@ async fn finalize_pending_attempts(ctx: &mut Ctx, plan_id: &str) -> Result<usize
             .properties
             .insert("plan_state".into(), plan.state.to_string());
         attempt.updated = crate::now_millis().max(attempt.created);
-        ctx.put(attempt).await?;
+        fenced_put(ctx, locks, attempt).await?;
         repaired += 1;
     }
     Ok(repaired)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn record_plan_outcomes(
     ctx: &mut Ctx,
     plan: &Plan,
@@ -646,6 +656,7 @@ async fn record_plan_outcomes(
     policies: &[ActiveCanaryPolicy],
     attempt_started_at: i64,
     attempt_id: &str,
+    locks: &[PromotionLock],
 ) -> Result<()> {
     let deployments = ctx.linked(&plan.id, REL_PART_OF_PLAN, "in").await?;
     for outcome in outcomes {
@@ -779,19 +790,14 @@ async fn record_plan_outcomes(
                     created: recorded_at,
                     updated: recorded_at,
                 };
-                match ctx.create_once(object).await {
-                    Ok(_) => {
-                        persisted_id = Some(id);
-                        break;
-                    }
-                    Err(status) if crate::client::is_unique_conflict(&status) => {
-                        let existing = ctx.get(&id).await?.context("canary outcome disappeared")?;
-                        if object_property(&existing, "outcome")? == serialized {
-                            persisted_id = Some(id);
-                            break;
-                        }
-                    }
-                    Err(status) => return Err(status.into()),
+                if fenced_create(ctx, locks, object).await?.is_some() {
+                    persisted_id = Some(id);
+                    break;
+                }
+                let existing = ctx.get(&id).await?.context("canary outcome disappeared")?;
+                if object_property(&existing, "outcome")? == serialized {
+                    persisted_id = Some(id);
+                    break;
                 }
             }
             let id = persisted_id.with_context(|| {
@@ -946,11 +952,16 @@ mod tests {
             credential_runway: None,
         };
 
-        let attempt_id =
-            persist_attempt(&mut ctx, &plan, false, vec![first.clone(), second.clone()])
-                .await
-                .unwrap()
-                .unwrap();
+        let attempt_id = persist_attempt(
+            &mut ctx,
+            &plan,
+            false,
+            vec![first.clone(), second.clone()],
+            &[],
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         let first_linked = ctx
             .linked(&policy_record_id(&first), REL_ATTEMPT_FOR_POLICY, "in")

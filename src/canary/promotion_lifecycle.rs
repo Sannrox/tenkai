@@ -37,10 +37,20 @@ fn designation_id(environment: &str) -> String {
 }
 
 pub(super) const POLICY_DISCOVERY_LOCK_CHANNEL: &str = "_policy-index";
-const RELEASED_PROMOTION_LOCK_OWNER: &str = "released";
 const REL_ACTIVE_PROMOTION_LOCK: &str = "active_promotion_lock";
+/// Generic lease namespace for promotion and policy-update serialization.
+const PROMOTION_LEASE_NAMESPACE: &str = "tenkai/promotion";
+/// Promotion critical sections are a few catalog round trips, and each
+/// write is preceded by a refresh; a crashed holder frees the lock once
+/// this lapses.
+const PROMOTION_LEASE_TTL_MS: i64 = 120_000;
 
-fn promotion_lock_id(product: &str, target_channel: &str) -> String {
+fn promotion_lease_key(product: &str, target_channel: &str) -> String {
+    format!("{product}:{target_channel}")
+}
+
+/// Object and self-link a server from before the lease holds the lock with.
+fn pre_lease_lock_id(product: &str, target_channel: &str) -> String {
     format!("tenkai:promotion-lock:v2:{product}:{target_channel}")
 }
 
@@ -48,12 +58,19 @@ fn legacy_promotion_lock_id(product: &str, target_channel: &str) -> String {
     format!("tenkai:promotion-lock:{product}:{target_channel}")
 }
 
+/// Marks the pre-lease lock object as held by a lease holder, so a later
+/// lease holder can tell a crashed one apart from a pre-lease server.
+const LEASE_OWNER_PREFIX: &str = "lease:";
+
+/// A held promotion lease, plus the pre-lease link it holds alongside.
+#[derive(Debug)]
 pub(crate) struct PromotionLock {
-    id: String,
-    owner: String,
+    key: String,
+    link_object: String,
+    fencing_token: String,
 }
 
-fn promotion_lock_link(lock_id: &str) -> Link {
+fn pre_lease_lock_link(lock_id: &str) -> Link {
     Link {
         id: format!("{lock_id}--{REL_ACTIVE_PROMOTION_LOCK}--{lock_id}"),
         from_id: lock_id.into(),
@@ -63,61 +80,267 @@ fn promotion_lock_link(lock_id: &str) -> Link {
     }
 }
 
+async fn pre_lease_link_held(ctx: &mut Ctx, id: &str) -> Result<bool> {
+    let active = pre_lease_lock_link(id).id;
+    Ok(ctx
+        .links(id, REL_ACTIVE_PROMOTION_LOCK)
+        .await?
+        .iter()
+        .any(|link| link.id == active))
+}
+
+/// Also hold the pre-lease self-link while holding the lease.
+///
+/// Rolling-deploy window only; the next release drops it. A server from
+/// before the lease claims through this link and cannot see the lease, so
+/// a lease holder takes the link too, then stamps the lock object with its
+/// lease token. A link already present is adopted only when its object
+/// names the previous lease's token and the link was created before that
+/// lease ended: it was left by that holder, and holding the lease now
+/// proves the holder is gone. A pre-lease server stamps its own owner right
+/// after linking, so its link never passes both checks. Any other link
+/// waits.
+///
+/// Residual, rolling-deploy window only: a crash between linking and
+/// stamping over a pre-lease owner, or a holder that stalls longer than a
+/// lease inside [`release_promotion_lock`], needs `canary unlock`.
+async fn hold_pre_lease_link(
+    ctx: &mut Ctx,
+    lock: &PromotionLock,
+    previous: Option<&crate::pb::sekai::Lease>,
+    product: &str,
+    target_channel: &str,
+) -> Result<()> {
+    let now = crate::now_millis();
+    let fresh = Object {
+        id: lock.link_object.clone(),
+        kind: KIND_PROMOTION_LOCK.into(),
+        name: format!("{product}/{target_channel} promotion lock"),
+        namespace: NS.into(),
+        external_id: String::new(),
+        // Born owned, so a crash before the stamp below stays adoptable.
+        properties: HashMap::from([(
+            "owner".into(),
+            format!("{LEASE_OWNER_PREFIX}{}", lock.fencing_token),
+        )]),
+        created: now,
+        updated: now,
+    };
+    match ctx.create_once(fresh).await {
+        Ok(_) => {}
+        Err(status) if crate::client::is_unique_conflict(&status) => {}
+        Err(status) => return Err(status.into()),
+    }
+    match ctx
+        .create_link_once(pre_lease_lock_link(&lock.link_object))
+        .await
+    {
+        Ok(_) => {}
+        Err(status) if crate::client::is_unique_conflict(&status) => {
+            let owner = ctx
+                .get(&lock.link_object)
+                .await?
+                .and_then(|object| object.properties.get("owner").cloned());
+            let active = pre_lease_lock_link(&lock.link_object).id;
+            let links = ctx
+                .links(&lock.link_object, REL_ACTIVE_PROMOTION_LOCK)
+                .await?;
+            let left_by_previous_holder = previous.is_some_and(|previous| {
+                let end = if previous.status == "active" {
+                    previous.expires_at_ms
+                } else {
+                    previous.released_at_ms
+                };
+                owner.as_deref() == Some(&format!("{LEASE_OWNER_PREFIX}{}", previous.fencing_token))
+                    && links
+                        .iter()
+                        .any(|link| link.id == active && link.created < end)
+            });
+            if !left_by_previous_holder {
+                return Err(busy(product, target_channel));
+            }
+        }
+        Err(status) => return Err(status.into()),
+    }
+    let mut object = ctx
+        .get(&lock.link_object)
+        .await?
+        .with_context(|| format!("promotion lock {} vanished", lock.link_object))?;
+    object.properties.insert(
+        "owner".into(),
+        format!("{LEASE_OWNER_PREFIX}{}", lock.fencing_token),
+    );
+    object.updated = crate::now_millis().max(object.created);
+    fenced_put(ctx, std::slice::from_ref(lock), object).await?;
+    Ok(())
+}
+
+/// Write `object` only while every lock in `locks` is held.
+///
+/// The first lock is checked in the write's own transaction; the others
+/// are refreshed in the same catalog transaction where the backend can.
+/// With no locks (an attempt that names no policy) the write is plain.
+pub(crate) async fn fenced_put(
+    ctx: &mut Ctx,
+    locks: &[PromotionLock],
+    object: Object,
+) -> Result<Object> {
+    let Some((guard, others)) = locks.split_first() else {
+        return ctx.put(object).await;
+    };
+    // A guarded update needs the object to exist; create it fenced first.
+    if ctx.get(&object.id).await?.is_none()
+        && let Some(created) = fenced_create(ctx, locks, object.clone()).await?
+    {
+        return Ok(created);
+    }
+    if others.is_empty() {
+        return ctx
+            .guarded_update(
+                object,
+                PROMOTION_LEASE_NAMESPACE,
+                &guard.key,
+                &guard.fencing_token,
+            )
+            .await;
+    }
+    // The guard lease is left out of the refreshes so its expiry is not
+    // stamped onto `object`.
+    let refreshes = others
+        .iter()
+        .map(|lock| crate::storage::LeaseRefresh {
+            namespace: PROMOTION_LEASE_NAMESPACE.into(),
+            key: lock.key.clone(),
+            fencing_token: lock.fencing_token.clone(),
+            ttl_ms: PROMOTION_LEASE_TTL_MS,
+            extend: true,
+        })
+        .collect();
+    let (_, object) = ctx
+        .refresh_leases_and_guarded_put(
+            refreshes,
+            object,
+            PROMOTION_LEASE_NAMESPACE,
+            &guard.key,
+            &guard.fencing_token,
+        )
+        .await?;
+    Ok(object)
+}
+
+/// Create `object` only while every lock in `locks` is held. `None` when
+/// an object with that id already exists.
+pub(crate) async fn fenced_create(
+    ctx: &mut Ctx,
+    locks: &[PromotionLock],
+    object: Object,
+) -> Result<Option<Object>> {
+    let Some((guard, others)) = locks.split_first() else {
+        return match ctx.create_once(object).await {
+            Ok(object) => Ok(Some(object)),
+            Err(status) if crate::client::is_unique_conflict(&status) => Ok(None),
+            Err(status) => Err(status.into()),
+        };
+    };
+    for lock in others {
+        confirm_promotion_lock(ctx, lock).await?;
+    }
+    let id = object.id.clone();
+    match ctx
+        .guarded_create(
+            object,
+            PROMOTION_LEASE_NAMESPACE,
+            &guard.key,
+            &guard.fencing_token,
+        )
+        .await
+    {
+        Ok(object) => Ok(Some(object)),
+        Err(error) => {
+            confirm_promotion_lock(ctx, guard).await?;
+            if ctx.get(&id).await?.is_some() {
+                Ok(None)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+fn busy(product: &str, target_channel: &str) -> anyhow::Error {
+    anyhow::anyhow!("promotion or policy update already in progress for {product}/{target_channel}")
+}
+
+/// Claim the promotion lease for `product`/`target_channel`.
+///
+/// An expired holder is taken over, so a crashed promotion frees the lock
+/// on its own. Fails with "already in progress" while a live holder exists.
 pub(crate) async fn claim_promotion_lock(
     ctx: &mut Ctx,
     product: &str,
     target_channel: &str,
     owner: &str,
 ) -> Result<PromotionLock> {
+    claim_promotion_lock_for(ctx, product, target_channel, owner, PROMOTION_LEASE_TTL_MS).await
+}
+
+async fn claim_promotion_lock_for(
+    ctx: &mut Ctx,
+    product: &str,
+    target_channel: &str,
+    owner: &str,
+    ttl_ms: i64,
+) -> Result<PromotionLock> {
     crate::ontology::require_canary_schema(ctx).await?;
-    let now = crate::now_millis();
     if ctx
         .get(&legacy_promotion_lock_id(product, target_channel))
         .await?
         .is_some()
     {
-        bail!(
-            "legacy promotion or policy update already in progress for {product}/{target_channel}"
-        );
+        return Err(busy(product, target_channel));
     }
-    let lock = PromotionLock {
-        id: promotion_lock_id(product, target_channel),
-        owner: owner.into(),
-    };
-    let mut object = Object {
-        id: lock.id.clone(),
-        kind: KIND_PROMOTION_LOCK.into(),
-        name: format!("{product}/{target_channel} promotion lock"),
-        namespace: NS.into(),
-        external_id: String::new(),
-        properties: HashMap::from([("owner".into(), RELEASED_PROMOTION_LOCK_OWNER.into())]),
-        created: now,
-        updated: now,
-    };
-    if ctx.get(&lock.id).await?.is_none() {
-        match ctx.create_once(object.clone()).await {
-            Ok(_) => {}
-            Err(status) if crate::client::is_unique_conflict(&status) => {}
-            Err(status) => return Err(status.into()),
-        }
-    }
-    match ctx.create_link_once(promotion_lock_link(&lock.id)).await {
-        Ok(_) => {
-            object.properties.insert("owner".into(), lock.owner.clone());
-            object.updated = crate::now_millis();
-            if let Err(error) = ctx.put(object).await {
-                let _ = ctx
-                    .unlink(&lock.id, &lock.id, REL_ACTIVE_PROMOTION_LOCK)
-                    .await;
-                return Err(error);
+    let key = promotion_lease_key(product, target_channel);
+    let previous = ctx.get_lease(PROMOTION_LEASE_NAMESPACE, &key).await?;
+    let lease = match ctx
+        .acquire_lease(PROMOTION_LEASE_NAMESPACE, &key, owner, ttl_ms)
+        .await
+    {
+        Ok(lease) => lease,
+        Err(crate::client::LeaseError::AlreadyExists) => {
+            let existing = ctx
+                .get_lease(PROMOTION_LEASE_NAMESPACE, &key)
+                .await?
+                .ok_or_else(|| busy(product, target_channel))?;
+            if existing.status != "active" || existing.expires_at_ms > crate::now_millis() {
+                return Err(busy(product, target_channel));
             }
-            Ok(lock)
+            ctx.takeover_expired_lease(
+                PROMOTION_LEASE_NAMESPACE,
+                &key,
+                owner,
+                &existing.fencing_token,
+                existing.expires_at_ms,
+                ttl_ms,
+            )
+            .await
+            .map_err(|_| busy(product, target_channel))?
         }
-        Err(status) if crate::client::is_unique_conflict(&status) => {
-            bail!("promotion or policy update already in progress for {product}/{target_channel}")
-        }
-        Err(status) => Err(status.into()),
+        Err(error) => return Err(error.into()),
+    };
+    let lock = PromotionLock {
+        key,
+        link_object: pre_lease_lock_id(product, target_channel),
+        fencing_token: lease.fencing_token,
+    };
+    if let Err(error) =
+        hold_pre_lease_link(ctx, &lock, previous.as_ref(), product, target_channel).await
+    {
+        let _ = ctx
+            .release_lease(PROMOTION_LEASE_NAMESPACE, &lock.key, &lock.fencing_token)
+            .await;
+        return Err(error);
     }
+    Ok(lock)
 }
 
 pub(super) async fn claim_promotion_lock_with_retry(
@@ -142,26 +365,27 @@ pub(super) async fn claim_promotion_lock_with_retry(
     unreachable!("bounded lock retry loop always returns")
 }
 
+/// Fail unless `lock` is still the live lease holder, and extend it.
+///
+/// Call it right before each protected write.
 pub(crate) async fn confirm_promotion_lock(ctx: &mut Ctx, lock: &PromotionLock) -> Result<()> {
-    let object = ctx
-        .get(&lock.id)
-        .await?
-        .with_context(|| format!("promotion lock {} was lost", lock.id))?;
-    if !ctx
-        .links(&lock.id, REL_ACTIVE_PROMOTION_LOCK)
-        .await?
-        .iter()
-        .any(|link| link.to_id == lock.id)
-        || object.properties.get("owner") != Some(&lock.owner)
-    {
-        bail!(
+    ctx.refresh_lease(
+        PROMOTION_LEASE_NAMESPACE,
+        &lock.key,
+        &lock.fencing_token,
+        PROMOTION_LEASE_TTL_MS,
+    )
+    .await
+    .with_context(|| {
+        format!(
             "promotion lock {} is no longer owned by this operation",
-            lock.id
-        );
-    }
+            lock.key
+        )
+    })?;
     Ok(())
 }
 
+/// Operator escape hatch: free a promotion lock without waiting for expiry.
 pub async fn unlock_promotion(
     ctx: &mut Ctx,
     actor: &AuthenticatedRequestContext,
@@ -173,52 +397,71 @@ pub async fn unlock_promotion(
     if target_channel != POLICY_DISCOVERY_LOCK_CHANNEL {
         validate_identifier("channel", target_channel)?;
     }
-    let id = promotion_lock_id(product, target_channel);
-    let active_link = promotion_lock_link(&id);
-    if !ctx
-        .links(&id, REL_ACTIVE_PROMOTION_LOCK)
-        .await?
-        .iter()
-        .any(|link| link.id == active_link.id)
+    let mut removed = false;
+    let key = promotion_lease_key(product, target_channel);
+    // An expired lease needs nothing: the next claim takes it over.
+    if let Some(lease) = ctx.get_lease(PROMOTION_LEASE_NAMESPACE, &key).await?
+        && lease.status == "active"
+        && lease.expires_at_ms > crate::now_millis()
     {
-        let legacy_id = legacy_promotion_lock_id(product, target_channel);
-        if ctx.get(&legacy_id).await?.is_some() {
-            ctx.delete(&legacy_id).await?;
-            return Ok(format!(
-                "legacy promotion lock removed for {product}/{target_channel}"
-            ));
-        }
-        return Ok(format!(
-            "no promotion lock exists for {product}/{target_channel}"
-        ));
+        ctx.release_lease(PROMOTION_LEASE_NAMESPACE, &key, &lease.fencing_token)
+            .await?;
+        removed = true;
     }
-    if let Some(mut object) = ctx.get(&id).await? {
-        object
-            .properties
-            .insert("owner".into(), RELEASED_PROMOTION_LOCK_OWNER.into());
-        object.updated = crate::now_millis();
-        ctx.put(object).await?;
+    let id = pre_lease_lock_id(product, target_channel);
+    if pre_lease_link_held(ctx, &id).await? {
+        ctx.unlink(&id, &id, REL_ACTIVE_PROMOTION_LOCK).await?;
+        removed = true;
     }
-    ctx.unlink(&id, &id, REL_ACTIVE_PROMOTION_LOCK).await?;
-    Ok(format!(
-        "promotion lock removed for {product}/{target_channel}"
-    ))
+    let legacy_id = legacy_promotion_lock_id(product, target_channel);
+    if ctx.get(&legacy_id).await?.is_some() {
+        ctx.delete(&legacy_id).await?;
+        removed = true;
+    }
+    Ok(if removed {
+        format!("promotion lock removed for {product}/{target_channel}")
+    } else {
+        format!("no promotion lock exists for {product}/{target_channel}")
+    })
 }
 
+/// Release `lock`: the pre-lease link while the lease is still ours, then
+/// the lease. A lapsed or taken-over lease leaves nothing to release.
 pub(crate) async fn release_promotion_lock(ctx: &mut Ctx, lock: &PromotionLock) -> Result<()> {
-    if let Some(object) = ctx.get(&lock.id).await?
-        && object.properties.get("owner") == Some(&lock.owner)
+    // A lapsed holder leaves the link: the next holder adopts it. The
+    // owner is read after the refresh, so only a holder that stalls longer
+    // than a lease between these two calls and the unlink could remove a
+    // successor's link (rolling-deploy window only).
+    let ours = format!("{LEASE_OWNER_PREFIX}{}", lock.fencing_token);
+    if confirm_promotion_lock(ctx, lock).await.is_ok()
+        && ctx
+            .get(&lock.link_object)
+            .await?
+            .is_some_and(|object| object.properties.get("owner") == Some(&ours))
     {
-        let mut object = object;
-        object
-            .properties
-            .insert("owner".into(), RELEASED_PROMOTION_LOCK_OWNER.into());
-        object.updated = crate::now_millis();
-        ctx.put(object).await?;
-        ctx.unlink(&lock.id, &lock.id, REL_ACTIVE_PROMOTION_LOCK)
-            .await?;
+        ctx.unlink(
+            &lock.link_object,
+            &lock.link_object,
+            REL_ACTIVE_PROMOTION_LOCK,
+        )
+        .await?;
     }
-    Ok(())
+    match ctx
+        .release_lease(PROMOTION_LEASE_NAMESPACE, &lock.key, &lock.fencing_token)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) => match ctx.get_lease(PROMOTION_LEASE_NAMESPACE, &lock.key).await? {
+            Some(lease)
+                if lease.status == "active"
+                    && lease.fencing_token == lock.fencing_token
+                    && lease.expires_at_ms > crate::now_millis() =>
+            {
+                Err(error)
+            }
+            _ => Ok(()),
+        },
+    }
 }
 
 pub(super) async fn claim_policy_locks(
@@ -458,10 +701,13 @@ pub async fn configure(
             };
         }
     };
-    let result = configure_locked(ctx, spec, target_channel, cohort, reactivate, &target).await;
-    let mut unlock_error = release_promotion_lock(ctx, &target).await.err();
-    if let Err(error) = release_promotion_lock(ctx, &discovery).await {
-        unlock_error.get_or_insert(error);
+    let locks = [target, discovery];
+    let result = configure_locked(ctx, spec, target_channel, cohort, reactivate, &locks).await;
+    let mut unlock_error = None;
+    for lock in &locks {
+        if let Err(error) = release_promotion_lock(ctx, lock).await {
+            unlock_error.get_or_insert(error);
+        }
     }
     match (result, unlock_error) {
         (Ok(policy), None) => Ok(policy),
@@ -479,7 +725,7 @@ async fn configure_locked(
     target_channel: &str,
     cohort: Vec<String>,
     reactivate: bool,
-    lock: &PromotionLock,
+    locks: &[PromotionLock],
 ) -> Result<ActiveCanaryPolicy> {
     let (product, version) = spec
         .split_once('@')
@@ -548,8 +794,9 @@ async fn configure_locked(
         created: activated_at,
         updated: activated_at,
     };
-    confirm_promotion_lock(ctx, lock).await?;
-    ctx.create_once(object).await?;
+    if fenced_create(ctx, locks, object).await?.is_none() {
+        bail!("canary policy {record_id} already exists");
+    }
     ctx.link(&record_id, &release_id, REL_GOVERNS_RELEASE)
         .await?;
     let pointer = Object {
@@ -569,8 +816,7 @@ async fn configure_locked(
             .map_or(activated_at, |pointer| pointer.created),
         updated: activated_at,
     };
-    confirm_promotion_lock(ctx, lock).await?;
-    ctx.put(pointer).await?;
+    fenced_put(ctx, locks, pointer).await?;
     Ok(active)
 }
 
@@ -733,7 +979,10 @@ pub(crate) async fn guarded_promotion<T, F>(
     promote: F,
 ) -> Result<T>
 where
-    F: for<'a> FnOnce(&'a mut Ctx) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>,
+    F: for<'a> FnOnce(
+        &'a mut Ctx,
+        &'a PromotionLock,
+    ) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>,
 {
     require_publish(actor)?;
     let lock = claim_promotion_lock(ctx, product, target_channel, owner).await?;
@@ -744,7 +993,7 @@ where
             confirm_policy_active(ctx, expected).await?;
         }
         confirm_promotion_lock(ctx, &lock).await?;
-        promote(ctx).await
+        promote(ctx, &lock).await
     }
     .await;
     let unlock = release_promotion_lock(ctx, &lock).await;
@@ -755,5 +1004,168 @@ where
             Err(error.context(format!("releasing promotion lock also failed: {unlock}")))
         }
         (Ok(_), Err(error)) => Err(error.context("releasing promotion lock failed")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn canary_ctx(label: &str) -> (Ctx, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-promotion-lock-{label}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        (ctx, root)
+    }
+
+    /// What a server from before the lease does to claim the lock.
+    async fn pre_lease_server_claims(ctx: &mut Ctx) -> bool {
+        let id = pre_lease_lock_id("app", "stable");
+        ctx.create_link_once(pre_lease_lock_link(&id)).await.is_ok()
+    }
+
+    fn channel_head(release: &str) -> Object {
+        let now = crate::now_millis();
+        Object {
+            id: "tenkai:channel:app:stable".into(),
+            kind: KIND_CHANNEL.into(),
+            name: "app/stable".into(),
+            namespace: NS.into(),
+            external_id: String::new(),
+            properties: HashMap::from([("current_release".into(), release.into())]),
+            created: now,
+            updated: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_crashed_promotion_holder_is_recovered_by_expiry() {
+        let (mut ctx, root) = canary_ctx("expiry").await;
+        // Holder A "crashes": it never releases.
+        let crashed = claim_promotion_lock_for(&mut ctx, "app", "stable", "holder-a", 50)
+            .await
+            .unwrap();
+        let live = claim_promotion_lock(&mut ctx, "app", "stable", "holder-b")
+            .await
+            .unwrap_err();
+        assert!(live.to_string().contains("already in progress"), "{live:#}");
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        // B takes over the lease and adopts the link A left behind.
+        let next = claim_promotion_lock(&mut ctx, "app", "stable", "holder-b")
+            .await
+            .unwrap();
+        fenced_put(&mut ctx, std::slice::from_ref(&next), channel_head("b"))
+            .await
+            .unwrap();
+
+        // A resumes: its writes are refused and its release frees nothing.
+        assert!(
+            fenced_put(&mut ctx, std::slice::from_ref(&crashed), channel_head("a"))
+                .await
+                .is_err()
+        );
+        release_promotion_lock(&mut ctx, &crashed).await.unwrap();
+        assert!(!pre_lease_server_claims(&mut ctx).await);
+        let head = ctx.get("tenkai:channel:app:stable").await.unwrap().unwrap();
+        assert_eq!(head.properties["current_release"], "b");
+
+        release_promotion_lock(&mut ctx, &next).await.unwrap();
+        assert!(pre_lease_server_claims(&mut ctx).await);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_lease_holder_also_blocks_a_pre_lease_server() {
+        let (mut ctx, root) = canary_ctx("dual").await;
+        let lock = claim_promotion_lock(&mut ctx, "app", "stable", "new-server")
+            .await
+            .unwrap();
+        assert!(!pre_lease_server_claims(&mut ctx).await);
+        release_promotion_lock(&mut ctx, &lock).await.unwrap();
+        assert!(pre_lease_server_claims(&mut ctx).await);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_pre_lease_server_mid_claim_is_not_adopted() {
+        let (mut ctx, root) = canary_ctx("mid-claim").await;
+        let lock = claim_promotion_lock(&mut ctx, "app", "stable", "new-a")
+            .await
+            .unwrap();
+        release_promotion_lock(&mut ctx, &lock).await.unwrap();
+        // A pre-lease server links; its owner is not stamped yet, so the
+        // object still names the released lease holder.
+        assert!(pre_lease_server_claims(&mut ctx).await);
+        let refused = claim_promotion_lock(&mut ctx, "app", "stable", "new-b")
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("already in progress"),
+            "{refused:#}"
+        );
+        // The refused claim's own lease does not make the link adoptable.
+        assert!(
+            claim_promotion_lock(&mut ctx, "app", "stable", "new-c")
+                .await
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_pre_lease_holder_keeps_the_lock_until_unlocked() {
+        let (mut ctx, root) = canary_ctx("rolling").await;
+        // A server from before the lease holds the link with no lease token.
+        let id = pre_lease_lock_id("app", "stable");
+        let now = crate::now_millis();
+        ctx.create_once(Object {
+            id: id.clone(),
+            kind: KIND_PROMOTION_LOCK.into(),
+            name: "app/stable promotion lock".into(),
+            namespace: NS.into(),
+            external_id: String::new(),
+            properties: HashMap::from([("owner".into(), "old-server".into())]),
+            created: now,
+            updated: now,
+        })
+        .await
+        .unwrap();
+        ctx.create_link_once(pre_lease_lock_link(&id))
+            .await
+            .unwrap();
+
+        let refused = claim_promotion_lock(&mut ctx, "app", "stable", "new-server")
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("already in progress"),
+            "{refused:#}"
+        );
+        // The refused claim gave its lease back, so it blocks nobody.
+        assert!(
+            ctx.get_lease(
+                PROMOTION_LEASE_NAMESPACE,
+                &promotion_lease_key("app", "stable")
+            )
+            .await
+            .unwrap()
+            .is_none_or(|lease| lease.status != "active")
+        );
+
+        let operator = crate::auth_context::test_management_context("operator");
+        unlock_promotion(&mut ctx, &operator, "app", "stable")
+            .await
+            .unwrap();
+        let lock = claim_promotion_lock(&mut ctx, "app", "stable", "new-server")
+            .await
+            .unwrap();
+        release_promotion_lock(&mut ctx, &lock).await.unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

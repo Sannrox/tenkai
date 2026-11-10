@@ -888,7 +888,7 @@ async fn promote_inner(
     let promoted_release = rid.clone();
     let replaceable_heads = replaceable_heads.map(|heads| heads.to_vec());
     let hold_actor = actor.principal_id().to_string();
-    crate::canary::guarded_promotion(ctx, actor, &name, &version, &channel, &owner, move |ctx| {
+    crate::canary::guarded_promotion(ctx, actor, &name, &version, &channel, &owner, move |ctx, lock| {
         Box::pin(async move {
             let Some(release) = ctx.get(&promoted_release).await? else {
                 anyhow::bail!("release {promotion_name}@{promotion_version} is not published");
@@ -967,7 +967,7 @@ async fn promote_inner(
                 }
             }
             ctx.link(&cid, &promoted_release, REL_PROMOTES).await?;
-            ctx.put(channel_head).await?;
+            crate::canary::fenced_put(ctx, std::slice::from_ref(lock), channel_head).await?;
             Ok::<_, anyhow::Error>(format!(
                 "promoted {promotion_name}@{promotion_version} to channel {promotion_channel}"
             ))
