@@ -24,6 +24,9 @@ pub const WORKLOAD_CERTIFICATE_TTL_SECS: i64 = 24 * 60 * 60;
 pub const CERTIFICATE_FILE: &str = "cert.pem";
 pub const KEY_FILE: &str = "key.pem";
 pub const CA_FILE: &str = "ca.pem";
+/// Most issuer certificates one trust bundle holds: the issuing one and,
+/// during a rotation (ADR 0046 §7), the next or the previous one.
+pub const MAX_BUNDLE_ISSUERS: usize = 4;
 /// The grant the certificate was issued for, recorded beside it so renewal
 /// re-issues exactly that grant without the server.
 pub const GRANT_FILE: &str = "grant.json";
@@ -183,7 +186,8 @@ pub struct IssuedIdentity {
     pub grant: IdentityGrant,
     pub certificate: String,
     pub key: zeroize::Zeroizing<String>,
-    /// The issuer certificate: the trust bundle.
+    /// The trust bundle: the issuer certificate first, then each other
+    /// issuer the runtime verified for a rotation (ADR 0046 §7).
     pub ca: String,
 }
 
@@ -215,11 +219,25 @@ impl IssuedIdentity {
 }
 
 /// Issue a fresh key and certificate for `grant` from `issuer`, whose key
-/// `issuer_key` opened. Refuses an issuer other than the granted one.
+/// `issuer_key` opened, with a trust bundle of that issuer alone. Refuses
+/// an issuer other than the granted one.
 pub fn issue(
     grant: &IdentityGrant,
     issuer: &IssuerKey,
     issuer_key: rcgen::KeyPair,
+    now_secs: i64,
+) -> Result<IssuedIdentity> {
+    issue_trusting(grant, issuer, issuer_key, &[], now_secs)
+}
+
+/// [`issue`], with `trusted` issuer certificates after the issuer's in the
+/// trust bundle (ADR 0046 §7). The caller passes only issuers it verified
+/// through an approved step, never ones the server names.
+pub fn issue_trusting(
+    grant: &IdentityGrant,
+    issuer: &IssuerKey,
+    issuer_key: rcgen::KeyPair,
+    trusted: &[&str],
     now_secs: i64,
 ) -> Result<IssuedIdentity> {
     ensure!(
@@ -231,6 +249,16 @@ pub fn issue(
         grant.issuer_generation,
         grant.issuer_fingerprint
     );
+    // Each member must be one certificate, so nothing rides into the
+    // bundle beside a verified issuer.
+    for certificate in std::iter::once(issuer.certificate.as_str()).chain(trusted.iter().copied()) {
+        let (rest, _) = x509_parser::pem::parse_x509_pem(certificate.as_bytes())
+            .map_err(|error| anyhow::anyhow!("reading an issuer certificate: {error}"))?;
+        ensure!(
+            rest.iter().all(u8::is_ascii_whitespace),
+            "an issuer certificate holds more than one certificate"
+        );
+    }
     let signer = rcgen::Issuer::from_ca_cert_pem(&issuer.certificate, issuer_key)
         .context("loading the identity issuer")?;
     let key = rcgen::KeyPair::generate()?;
@@ -271,13 +299,38 @@ pub fn issue(
         grant: grant.clone(),
         certificate,
         key: key.serialize_pem().into(),
-        ca: issuer.certificate.clone(),
+        ca: std::iter::once(issuer.certificate.as_str())
+            .chain(
+                trusted
+                    .iter()
+                    .copied()
+                    .filter(|certificate| *certificate != issuer.certificate),
+            )
+            .map(|certificate| certificate.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
     };
     // The issuer certificate came from the server: every target gets only
-    // what passes the check the host applier runs, so an appended
-    // certificate never reaches a trust bundle.
+    // what passes the check the host applier runs, so a bundle holding
+    // anything but issuer certificates never reaches a target.
     check_issued(&issued, now_secs)?;
     Ok(issued)
+}
+
+/// [`check_issued`] for the host applier, which reads what it installs from
+/// a spool: `ca` must be the granted issuer alone, since nothing the
+/// applier verifies binds another issuer to an approval.
+pub fn check_issued_alone(issued: &IssuedIdentity, now_secs: i64) -> Result<()> {
+    check_issued(issued, now_secs)?;
+    ensure!(
+        check_certificate(&issued.grant, &issued.certificate, &issued.ca)?
+            .trust
+            .len()
+            == 1,
+        "ca.pem holds more than the granted issuer"
+    );
+    Ok(())
 }
 
 /// Check, where the files are written, that the certificate is signed by
@@ -307,29 +360,54 @@ struct CheckedLeaf {
     not_after: i64,
     /// DER SubjectPublicKeyInfo.
     public_key: Vec<u8>,
+    /// Fingerprints of the bundle's issuers, in file order.
+    trust: Vec<String>,
 }
 
-/// Check that `certificate` is signed by `ca`, that `ca` is the issuer
-/// `grant` names, and that its names and key usage are exactly the grant's.
-/// Says nothing about time or the key.
+/// Check that `certificate` is signed by the first certificate of `ca`,
+/// that it is the issuer `grant` names, and that the certificate's names
+/// and key usage are exactly the grant's. The rest of `ca` may only be
+/// other issuer certificates, at most [`MAX_BUNDLE_ISSUERS`] in all: a
+/// workload loads ca.pem as its trust bundle. Says nothing about time or
+/// the key.
 fn check_certificate(grant: &IdentityGrant, certificate: &str, ca: &str) -> Result<CheckedLeaf> {
     use x509_parser::prelude::*;
-    // Exactly one certificate per file: a workload loads ca.pem as its trust
-    // bundle, so an appended block would make it trust another issuer.
-    let (rest, ca_pem) = parse_x509_pem(ca.as_bytes())
-        .map_err(|error| anyhow::anyhow!("reading ca.pem: {error}"))?;
+    let mut blocks = Vec::new();
+    let mut rest = ca.as_bytes();
+    while !rest.iter().all(u8::is_ascii_whitespace) {
+        ensure!(
+            blocks.len() < MAX_BUNDLE_ISSUERS,
+            "ca.pem holds more than {MAX_BUNDLE_ISSUERS} issuer certificates"
+        );
+        let (after, pem) =
+            parse_x509_pem(rest).map_err(|error| anyhow::anyhow!("reading ca.pem: {error}"))?;
+        rest = after;
+        blocks.push(pem);
+    }
+    let mut trust = Vec::new();
+    for pem in &blocks {
+        let issuer = pem
+            .parse_x509()
+            .map_err(|error| anyhow::anyhow!("parsing ca.pem: {error}"))?;
+        ensure!(
+            issuer.is_ca(),
+            "ca.pem holds a certificate that is not an issuer"
+        );
+        let fingerprint = crate::sealing_key::fingerprint(issuer.public_key().raw);
+        ensure!(
+            !trust.contains(&fingerprint),
+            "ca.pem holds issuer {fingerprint} twice"
+        );
+        trust.push(fingerprint);
+    }
     ensure!(
-        rest.iter().all(u8::is_ascii_whitespace),
-        "ca.pem holds more than the issuer certificate"
-    );
-    let ca_cert = ca_pem
-        .parse_x509()
-        .map_err(|error| anyhow::anyhow!("parsing ca.pem: {error}"))?;
-    ensure!(
-        crate::sealing_key::fingerprint(ca_cert.public_key().raw) == grant.issuer_fingerprint,
-        "ca.pem is not the granted issuer {}",
+        trust.first() == Some(&grant.issuer_fingerprint),
+        "ca.pem does not start with the granted issuer {}",
         grant.issuer_fingerprint
     );
+    let ca_cert = blocks[0]
+        .parse_x509()
+        .map_err(|error| anyhow::anyhow!("parsing ca.pem: {error}"))?;
     let (rest, leaf_pem) = parse_x509_pem(certificate.as_bytes())
         .map_err(|error| anyhow::anyhow!("reading cert.pem: {error}"))?;
     ensure!(
@@ -386,6 +464,7 @@ fn check_certificate(grant: &IdentityGrant, certificate: &str, ca: &str) -> Resu
         not_before: leaf.validity().not_before.timestamp(),
         not_after: leaf.validity().not_after.timestamp(),
         public_key: leaf.public_key().raw.to_vec(),
+        trust,
     })
 }
 
@@ -406,6 +485,9 @@ pub struct InstalledIdentity {
     /// Its validity, in Unix seconds.
     pub not_before: i64,
     pub not_after: i64,
+    /// Fingerprints of the issuers its trust bundle holds, the granted
+    /// issuer first (ADR 0046 §7).
+    pub trust: Vec<String>,
 }
 
 impl InstalledIdentity {
@@ -436,6 +518,7 @@ impl InstalledIdentity {
             certificate: certificate.to_owned(),
             not_before: leaf.not_before,
             not_after: leaf.not_after,
+            trust: leaf.trust,
         })
     }
 
@@ -531,11 +614,26 @@ mod tests {
         let mut client = issued.clone();
         client.grant.certificate = CertificateRole::Both;
         assert!(refused(&client, now).contains("key usage"));
-        // Another issuer appended to the trust bundle.
+        // A leaf appended to the trust bundle.
+        let mut leaf = issued.clone();
+        leaf.ca = format!("{}{}", issued.ca, issued.certificate);
+        assert!(refused(&leaf, now).contains("not an issuer"));
+        // Another issuer ahead of the granted one.
         let (other, _) = issuer();
+        let mut swapped = issued.clone();
+        swapped.ca = format!("{}{}", other.certificate, issued.ca);
+        assert!(refused(&swapped, now).contains("does not start with"));
+        // Another issuer after it, which only a runtime may install.
+        let (next, _) = issuer();
         let mut bundle = issued.clone();
-        bundle.ca = format!("{}{}", issued.ca, other.certificate);
-        assert!(refused(&bundle, now).contains("more than the issuer"));
+        bundle.ca = format!("{}{}", issued.ca, next.certificate);
+        check_issued(&bundle, now).unwrap();
+        let error = format!("{:#}", check_issued_alone(&bundle, now).unwrap_err());
+        assert!(error.contains("more than the granted issuer"), "{error}");
+        // The same issuer twice.
+        let mut twice = issued.clone();
+        twice.ca = format!("{}{}", issued.ca, issued.ca);
+        assert!(refused(&twice, now).contains("twice"));
         // The runtime refuses to issue from such a bundle at all.
         let (mut appended, key) = issuer();
         appended.certificate = format!("{}{}", appended.certificate, other.certificate);
@@ -547,6 +645,37 @@ mod tests {
         )
         .unwrap();
         assert!(issue(&grant, &appended, key, now).is_err());
+    }
+
+    #[test]
+    fn a_rotation_bundle_trusts_the_other_issuers_after_the_granted_one() {
+        let (issuer_key, key) = issuer();
+        let (next, _) = issuer();
+        let grant = grant(
+            &section(CertificateRole::Server, &["api.internal"]),
+            "prod",
+            "api",
+            &issuer_key,
+        )
+        .unwrap();
+        let now = crate::now_millis() / 1000;
+        let issued = issue_trusting(
+            &grant,
+            &issuer_key,
+            key,
+            &[&next.certificate, &issuer_key.certificate],
+            now,
+        )
+        .unwrap();
+        let checked = check_certificate(&grant, &issued.certificate, &issued.ca).unwrap();
+        assert_eq!(checked.trust, [issuer_key.fingerprint, next.fingerprint]);
+
+        // No more issuers than a rotation needs.
+        let mut crowded = issued.clone();
+        for _ in 0..MAX_BUNDLE_ISSUERS {
+            crowded.ca.push_str(&issuer().0.certificate);
+        }
+        assert!(format!("{:#}", check_issued(&crowded, now).unwrap_err()).contains("more than"));
     }
 
     /// Renewal re-issues only what the signed certificate proves: a

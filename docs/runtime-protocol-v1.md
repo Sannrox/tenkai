@@ -242,6 +242,19 @@ receipt carries one wrap with `secret` `identity-issuer` and `key`
 from `secret rewrap`: the runtime that opens the issuer key need not open
 the sealed values. A lost issuer is rotated, not recovered.
 
+Rotating an existing issuer (ADR 0046 §7) adds `issuer.phase` to the step:
+`add` records `issuer.key` as the next issuer, and `issue` makes the next
+issuer current and keeps the replaced one as the previous issuer. Each is a
+compare-and-set, and a replay changes nothing. The runtime keeps each key it
+opens for an `add` or `issue` step, and every certificate it issues for a
+Helm target carries the issuer one generation before and after the issuing
+one in its trust bundle (`ca.pem`), after the issuing issuer. A certificate
+whose bundle lacks one of them is renewed on the next pass. The host applier
+accepts only the granted issuer in `ca.pem`. `phase` is omitted on the first
+issuer's step and on a re-wrap, so they keep their digest. The server hands
+a plan with a phase only to a runtime that also names `issuer_rotation`; an
+older one, which cannot decode the field, polls idle.
+
 A step with `identity` grants a workload certificate: `uri`, `dns_names`,
 `certificate`, `reload`, `issuer_generation` and `issuer_fingerprint`, and
 `peers` when its bindings give it any: `servers` (contract to the provider

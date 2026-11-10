@@ -196,6 +196,16 @@ tenkaictl --target remote identity-issuer rewrap prod --recipient sha256:<hex> -
   like any plan. The runtime that runs it refuses a key with any other
   fingerprint, and the server records the issuer only if its generation is
   the next one, so a stale plan fails and the issuer stays.
+- With an issuer already current, rotation takes approved steps, so no
+  valid peer fails (ADR 0046 §7). The first `plan` after `prepare` builds
+  the **add** step: the runtime that runs it records the candidate as the
+  next issuer, and its next renewal pass re-issues each `helm` certificate
+  it renews with a trust bundle (`ca.pem`) holding the current issuer first
+  and the next one after it, without waiting for the restart spread.
+  `status` shows the next issuer. The **issue** step, which makes the next
+  issuer current once every instance has taken up the bundle, is not
+  available yet: `plan` refuses while a next issuer waits. `host`
+  certificates keep the issuer alone.
 - `rewrap` wraps the issuer key for one more recipient: another runtime's
   key or the recovery key. Run it after activation; until then only the
   generating runtime can open the issuer. A runtime enrolled later can use

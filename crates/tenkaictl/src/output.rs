@@ -258,6 +258,18 @@ pub(crate) fn issuer_line(env: &str, issuer: &tenkai::identity_issuer::IssuerSta
         )),
         (None, None) => {}
     }
+    if let Some(next) = &issuer.next {
+        line.push_str(&format!(
+            "; next generation {} {} is trusted and awaits an approved issue step",
+            next.generation, next.fingerprint
+        ));
+    }
+    if let Some(previous) = &issuer.previous {
+        line.push_str(&format!(
+            "; previous generation {} {} is still trusted",
+            previous.generation, previous.fingerprint
+        ));
+    }
     line
 }
 

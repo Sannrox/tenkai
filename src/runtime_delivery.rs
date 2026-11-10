@@ -1050,12 +1050,18 @@ pub struct RuntimeCaller<'a> {
     /// grants that name peers (ADR 0046 §5), which an older runtime refuses
     /// to decode.
     pub peer_grants: bool,
+    /// The agent named the `issuer_rotation` capability: it runs issuer
+    /// steps with a rotation phase (ADR 0046 §7), which an older runtime
+    /// refuses to decode.
+    pub issuer_rotation: bool,
 }
 
 /// The capability a runtime names to be offered identity issuer work.
 pub const WORKLOAD_IDENTITY_CAPABILITY: &str = "workload_identity";
 /// The capability a runtime names to be offered grants with peers.
 pub const PEER_GRANTS_CAPABILITY: &str = "peer_grants";
+/// The capability a runtime names to be offered issuer rotation steps.
+pub const ISSUER_ROTATION_CAPABILITY: &str = "issuer_rotation";
 
 impl<'a> From<Option<&'a str>> for RuntimeCaller<'a> {
     fn from(instance: Option<&'a str>) -> Self {
@@ -1291,6 +1297,15 @@ impl RuntimeDeliveryOperations {
         let names_peers =
             |step: &crate::plan::Step| step.identity_grants().any(|grant| !grant.peers.is_empty());
         if !caller.peer_grants && plan.steps.iter().any(names_peers) {
+            return self.idle_after_lapsed(environment, &plan.id).await;
+        }
+        // Likewise for an issuer step with a rotation phase.
+        let rotates = |step: &crate::plan::Step| {
+            step.issuer
+                .as_ref()
+                .is_some_and(|issuer| issuer.phase.is_some())
+        };
+        if !caller.issuer_rotation && plan.steps.iter().any(rotates) {
             return self.idle_after_lapsed(environment, &plan.id).await;
         }
         // A re-wrap step or a removal deploys nothing, so it needs no
@@ -3295,6 +3310,7 @@ mod tests {
                 certificate: Some(certificate),
                 workload_identity: false,
                 peer_grants: false,
+                issuer_rotation: false,
             };
             operations.admit(None, &caller, environment)
         };
@@ -3342,6 +3358,7 @@ mod tests {
                         certificate,
                         workload_identity: false,
                         peer_grants: false,
+                        issuer_rotation: false,
                     },
                     "prod",
                     &request,
@@ -3522,6 +3539,7 @@ mod tests {
                             certificate,
                             workload_identity: false,
                             peer_grants: false,
+                            issuer_rotation: false,
                         },
                         "prod",
                         &request,
@@ -3606,6 +3624,7 @@ mod tests {
                         certificate,
                         workload_identity: false,
                         peer_grants: false,
+                        issuer_rotation: false,
                     },
                     "prod",
                     RuntimeInventoryReport {
@@ -3900,6 +3919,7 @@ mod tests {
             instance: Some("instance-a"),
             workload_identity: true,
             peer_grants: true,
+            issuer_rotation: true,
             ..RuntimeCaller::default()
         };
         // The static runtime holds no wrap of the issuer key.
@@ -3989,6 +4009,7 @@ mod tests {
             instance: Some("instance-b"),
             workload_identity: true,
             peer_grants: true,
+            issuer_rotation: true,
             ..RuntimeCaller::default()
         };
         for caller in [RuntimeCaller::from(Some("instance-b")), capable] {
@@ -4056,6 +4077,15 @@ mod tests {
 
     /// A replay of an applied issuer completion is accepted after a later
     /// rotation; a completion not yet applied is still checked as stale.
+    /// Run the issue step of a rotation whose add step was recorded.
+    async fn issue_next(ctx: &mut Ctx) {
+        let env_obj = crate::environment::environment(ctx, "prod").await.unwrap();
+        let issue = crate::identity_issuer::issue_step(&env_obj).unwrap();
+        crate::identity_issuer::record_activated(ctx, "prod", &[&issue])
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn an_applied_issuer_completion_replays_after_a_rotation() {
         let (_, port) = operations();
@@ -4097,6 +4127,9 @@ mod tests {
             crate::identity_issuer::record_activated(&mut ctx, "prod", &[&step])
                 .await
                 .unwrap();
+            if generation == 2 {
+                issue_next(&mut ctx).await;
+            }
             for state in [
                 crate::plan::PlanState::Running,
                 crate::plan::PlanState::Succeeded,
@@ -4187,6 +4220,9 @@ mod tests {
             crate::identity_issuer::record_activated(&mut ctx, "prod", &[&step])
                 .await
                 .unwrap();
+            if generation == 2 {
+                issue_next(&mut ctx).await;
+            }
         }
         let stale = stale.unwrap();
         port.plan.set(stale.clone()).unwrap();
@@ -4467,6 +4503,7 @@ mod tests {
                     certificate: None,
                     workload_identity: false,
                     peer_grants: false,
+                    issuer_rotation: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -4582,6 +4619,7 @@ mod tests {
                     certificate: None,
                     workload_identity: false,
                     peer_grants: false,
+                    issuer_rotation: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -4618,6 +4656,7 @@ mod tests {
                     certificate: None,
                     workload_identity: false,
                     peer_grants: false,
+                    issuer_rotation: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {

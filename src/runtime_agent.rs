@@ -952,9 +952,10 @@ impl RuntimeClient {
             request = request.header(
                 "x-tenkai-runtime-capabilities",
                 format!(
-                    "{},{}",
+                    "{},{},{}",
                     crate::runtime_delivery::WORKLOAD_IDENTITY_CAPABILITY,
-                    crate::runtime_delivery::PEER_GRANTS_CAPABILITY
+                    crate::runtime_delivery::PEER_GRANTS_CAPABILITY,
+                    crate::runtime_delivery::ISSUER_ROTATION_CAPABILITY
                 ),
             );
         }

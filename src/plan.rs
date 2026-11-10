@@ -159,6 +159,11 @@ pub struct IssuerStep {
     /// whose fingerprint the step's `rewrap` names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient: Option<String>,
+    /// The rotation step an activation is (ADR 0046 §7). Absent on the
+    /// first issuer's activation and on a re-wrap, so their plan digests
+    /// are unchanged; a binary that predates it fails approval closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<crate::identity_issuer::RotationPhase>,
 }
 
 /// The recipient a re-wrap step adds (ADR 0045 §5).
