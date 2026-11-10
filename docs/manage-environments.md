@@ -368,6 +368,30 @@ satisfying version is refused. Unbinding a required contract on an installed
 dependent is refused. The dependency document names the provider instance;
 changing a binding re-renders the dependent.
 
+A binding is also the only peer authorization
+([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md) §5). When
+the dependent or the provider holds a
+[workload certificate](manifest.md#workload-identity), its step's grant names
+the other side, and the document carries it: in `servers` the provider
+identity it accepts for each contract it requires, and in `callers` the
+identities allowed to call each contract it provides. A unique provider without a binding counts
+as bound; an instance with no edge is never a caller. The runtime refuses a
+document whose peers differ from the approved step's, so a server cannot add
+a peer. A provider admits a new caller before that caller deploys. A caller
+that is rebound, removed, or upgraded away keeps its old provider's grant
+for the rest of that plan, so it is never refused while it moves; the next
+plan withdraws it. Host releases are not re-rendered for a binding change;
+one picks up its peers on its next deploy, and its old provider keeps
+admitting it until then. A rollback or restore never withdraws a caller.
+Any plan with a step that needs a provider that does not admit it yet, and
+is not admitted by an earlier step of that plan, is refused. This catches a
+rollback, restart or migration, which changes only its own instance, and a
+host provider, which is not re-rendered; deploy the provider with the
+binding first. `status` and
+`env dependencies` mark
+such an edge `granted`. The product enforces it: Tenkai cannot see whether
+it checks the peer.
+
 ## Facts and constraints
 
 Facts describe an environment; constraints decide which releases the planner

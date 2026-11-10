@@ -143,6 +143,9 @@ names stay. Docker copies the file to
 `/etc/tenkai/dependencies.json` in each container. Host apply writes
 `tenkai-dependencies.json` next to `request.json` in the spool instance
 directory. Executors never write the document into signed release content.
+An instance with a workload certificate always gets one, naming its peers
+even when it requires nothing, so a withdrawn peer is overwritten
+([manage environments](manage-environments.md#dependency-bindings)).
 
 ## Native Kubernetes enablement
 

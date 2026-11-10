@@ -218,6 +218,7 @@ pub(crate) async fn step_identity(
     env: &str,
     release: &str,
     instance: &str,
+    peers: &crate::workload_identity::Peers,
 ) -> Result<Option<crate::workload_identity::IdentityGrant>> {
     let Some(section) = readable_manifest(ctx, release)
         .await?
@@ -234,7 +235,123 @@ pub(crate) async fn step_identity(
         !issuer.sealed_key.wraps.is_empty(),
         "{release} asks for a workload certificate, and no runtime of {env} holds the identity issuer key; rotate in a new issuer"
     );
-    crate::workload_identity::grant(&section, env, instance, &issuer).map(Some)
+    let mut grant = crate::workload_identity::grant(&section, env, instance, &issuer)?;
+    grant.peers = peers.clone();
+    Ok(Some(grant))
+}
+
+/// The peers `instance` may accept once `release` runs on it, with every
+/// other instance as `deployed` has it (ADR 0046 §5). The release's own
+/// requirements decide its servers, so a rollback or a restore gets the
+/// peers of the release it puts back. It keeps every caller the instance
+/// last admitted: only a convergence plan withdraws one, once that caller
+/// has moved.
+async fn release_peers(
+    ctx: &mut Ctx,
+    env: &str,
+    env_obj: &crate::pb::sekai::Object,
+    mut deployed: BTreeMap<String, crate::dependency_document::DeployedRelease>,
+    instance: &str,
+    release: &str,
+) -> Result<crate::workload_identity::Peers> {
+    let profile = crate::dependency_document::stored_profile_by_id(ctx, release).await?;
+    match (profile, split_release_id(release)) {
+        (Some(profile), Some((product, version))) => {
+            deployed.insert(
+                instance.to_string(),
+                crate::dependency_document::DeployedRelease::of(product, version, profile),
+            );
+        }
+        _ => {
+            deployed.remove(instance);
+        }
+    }
+    let bindings =
+        crate::environment_bindings::EnvironmentBindings::from_properties(&env_obj.properties);
+    let mut peers = peer_graph(ctx, env, &deployed, &bindings)
+        .await?
+        .remove(instance)
+        .unwrap_or_default();
+    let applied = crate::dependency_document::applied_peers(env_obj, instance);
+    for (contract, callers) in applied.clients {
+        peers.clients.entry(contract).or_default().extend(callers);
+    }
+    Ok(peers)
+}
+
+/// Refuse a plan in which a step's grant names a provider with a workload
+/// certificate that does not admit it for that contract yet: neither an
+/// earlier step of this plan nor the provider's applied grant names the
+/// caller (ADR 0046 §5). It covers every plan kind, so a rollback, restart
+/// or migration never moves a caller onto a provider that would refuse it,
+/// nor does a convergence plan when the provider gets no step of its own.
+async fn refuse_unadmitted_callers(ctx: &mut Ctx, env: &str, steps: &[Step]) -> Result<()> {
+    let env_obj = crate::environment::environment(ctx, env).await?;
+    let prefix = crate::workload_identity::uri(env, "");
+    // A restore runs at its step's place too, so its grant is checked the
+    // same way.
+    let mut grants = Vec::new();
+    for (index, step) in steps.iter().enumerate() {
+        for grant in [&step.identity, &step.restore_identity]
+            .into_iter()
+            .flatten()
+        {
+            grants.push((index, step, grant));
+        }
+    }
+    for (index, step, grant) in grants {
+        let instance = step.instance_name();
+        let caller = crate::workload_identity::uri(env, instance);
+        for (contract, server) in &grant.peers.servers {
+            let Some(provider) = server.strip_prefix(&prefix) else {
+                continue;
+            };
+            let earlier = steps[..index].iter().rev().find(|earlier| {
+                earlier.instance_name() == provider && earlier.delivers_dependencies()
+            });
+            let admitting = match earlier {
+                Some(earlier) => earlier.identity.as_ref().map(|grant| grant.peers.clone()),
+                None => {
+                    let Some(version) = env_obj.properties.get(&format!("deployed.{provider}"))
+                    else {
+                        continue;
+                    };
+                    let release = deployed_release_id(&env_obj.properties, provider, version);
+                    let certified = readable_manifest(ctx, &release)
+                        .await?
+                        .is_some_and(|manifest| manifest.deploy.identity.is_some());
+                    certified.then(|| crate::dependency_document::applied_peers(&env_obj, provider))
+                }
+            };
+            let Some(admitting) = admitting else {
+                continue;
+            };
+            if !admitting
+                .clients
+                .get(contract)
+                .is_some_and(|callers| callers.contains(&caller))
+            {
+                bail!(
+                    "{instance} needs {provider} to admit it for {contract}, and {provider} does not yet; deploy {provider} with this binding first"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`release_peers`] against the deployed set as it stands, for a step that
+/// changes no other instance: a rollback, a restart or a package migration
+/// pin, and their restores.
+pub(crate) async fn current_peers(
+    ctx: &mut Ctx,
+    env: &str,
+    env_obj: &crate::pb::sekai::Object,
+    instance: &str,
+    release: &str,
+) -> Result<crate::workload_identity::Peers> {
+    let deployed = crate::dependency_document::deployed_set(ctx, env_obj).await?;
+    release_peers(ctx, env, env_obj, deployed, instance, release).await
 }
 
 /// The executor the stored manifest of `release` declares.
@@ -1160,7 +1277,7 @@ async fn compute_snapshot_with_policy(
     }
     let bindings =
         crate::environment_bindings::EnvironmentBindings::from_properties(&env_obj.properties);
-    schedule_dependency_rerenders(
+    let (remaining_deployed, peers) = schedule_dependency_rerenders(
         ctx,
         env,
         &mut pending,
@@ -1170,6 +1287,17 @@ async fn compute_snapshot_with_policy(
         &host_products,
     )
     .await?;
+    // Only a provider whose step carries a workload certificate admits
+    // callers; the others need no admission order.
+    let mut certified = BTreeSet::new();
+    for entry in &pending {
+        if readable_manifest(ctx, &entry.release.release_id)
+            .await?
+            .is_some_and(|manifest| manifest.deploy.identity.is_some())
+        {
+            certified.insert(entry.instance_name().to_string());
+        }
+    }
     let pending_actions = pending
         .iter()
         .map(|entry| (entry.instance_name(), entry.action))
@@ -1179,6 +1307,28 @@ async fn compute_snapshot_with_policy(
         &target_profiles,
         &installed_profiles,
         &bindings,
+        |provider, dependent| {
+            let caller = crate::workload_identity::uri(env, dependent);
+            let applied = crate::dependency_document::applied_peers(&env_obj, provider);
+            certified.contains(provider)
+                && peers.get(provider).is_some_and(|granted| {
+                    granted.clients.iter().any(|(contract, callers)| {
+                        callers.contains(&caller)
+                            && !applied
+                                .clients
+                                .get(contract)
+                                .is_some_and(|admitted| admitted.contains(&caller))
+                    })
+                })
+        },
+        |provider, dependent, contract| {
+            crate::dependency_document::applied_peers(&env_obj, provider)
+                .clients
+                .get(contract)
+                .is_some_and(|callers| {
+                    callers.contains(&crate::workload_identity::uri(env, dependent))
+                })
+        },
     )?;
     // Enforce model_runtime ↔ routing_config rollout order (see docs). The
     // runtime agent's own release always runs last: switching restarts the
@@ -1256,24 +1406,64 @@ async fn compute_snapshot_with_policy(
         &contract_order.target_edges,
         &contract_order.installed_edges,
         &contract_order.overlay_edges,
+        &contract_order.admits_first,
     )?;
     // A removal issues nothing; every other step grants its target's
-    // certificate and its restore release's.
+    // certificate and its restore release's. A restore runs when its step
+    // fails, after the steps before it and before those after it, so its
+    // peers come from that state.
+    let mut reached = crate::dependency_document::deployed_set(ctx, &env_obj).await?;
     let mut identities = Vec::with_capacity(pending.len());
     for entry in &pending {
+        let instance = entry.instance_name();
         identities.push(if entry.action == Action::Remove {
             (None, None)
         } else {
-            let instance = entry.instance_name();
+            let peers = peers.get(instance).cloned().unwrap_or_default();
             let restore = match &entry.restore {
-                Some(pin) => step_identity(ctx, &env_obj, env, &pin.release_id, instance).await?,
+                Some(pin) => {
+                    let restore_peers = release_peers(
+                        ctx,
+                        env,
+                        &env_obj,
+                        reached.clone(),
+                        instance,
+                        &pin.release_id,
+                    )
+                    .await?;
+                    step_identity(
+                        ctx,
+                        &env_obj,
+                        env,
+                        &pin.release_id,
+                        instance,
+                        &restore_peers,
+                    )
+                    .await?
+                }
                 None => None,
             };
             (
-                step_identity(ctx, &env_obj, env, &entry.release.release_id, instance).await?,
+                step_identity(
+                    ctx,
+                    &env_obj,
+                    env,
+                    &entry.release.release_id,
+                    instance,
+                    &peers,
+                )
+                .await?,
                 restore,
             )
         });
+        match remaining_deployed.get(instance) {
+            Some(release) if entry.action != Action::Remove => {
+                reached.insert(instance.to_string(), release.clone());
+            }
+            _ => {
+                reached.remove(instance);
+            }
+        }
     }
     let steps = pending
         .into_iter()
@@ -1706,11 +1896,69 @@ struct ContractPlanOrder {
     target_edges: Vec<ContractEdge>,
     installed_edges: Vec<ContractEdge>,
     overlay_edges: Vec<ContractEdge>,
+    /// (provider, dependent) pairs where the provider admits the dependent
+    /// for the first time, so it runs first whatever the actions.
+    admits_first: BTreeSet<(String, String)>,
 }
 
 type PendingEntry = PendingChange;
 
-/// Same-version Restart of remaining dependents whose providers change (ADR 0043 §6).
+/// Digest-bound contract versions `instance`'s deployed release observed.
+async fn observed_for(
+    ctx: &mut Ctx,
+    env: &str,
+    env_obj: &crate::pb::sekai::Object,
+    instance: &str,
+) -> Result<BTreeMap<String, String>> {
+    match crate::dependency_document::instance_release_digest(ctx, env_obj, instance).await? {
+        Some(digest) => {
+            crate::software_compatibility::observed_contract_versions(ctx, env, &digest).await
+        }
+        None => Ok(BTreeMap::new()),
+    }
+}
+
+/// The peers each instance of `deployed` may accept (ADR 0046 §5), from the
+/// dependency documents its bindings give. Each document uses the contract
+/// versions its own release observed, as delivery renders it. An instance
+/// whose document cannot be made has no edges; its plan fails elsewhere.
+async fn peer_graph(
+    ctx: &mut Ctx,
+    env: &str,
+    deployed: &BTreeMap<String, crate::dependency_document::DeployedRelease>,
+    bindings: &crate::environment_bindings::EnvironmentBindings,
+) -> Result<BTreeMap<String, crate::workload_identity::Peers>> {
+    let mut documents = BTreeMap::new();
+    for (instance, release) in deployed {
+        let product = if release.product.is_empty() {
+            instance
+        } else {
+            &release.product
+        };
+        let id = release_id(product, &release.version);
+        let observed = match crate::dependency_document::stored_release_digest(ctx, &id).await? {
+            Some(digest) => {
+                crate::software_compatibility::observed_contract_versions(ctx, env, &digest).await?
+            }
+            None => BTreeMap::new(),
+        };
+        if let Ok(Some(document)) = crate::dependency_document::document_for_bound(
+            instance,
+            &release.profile,
+            deployed,
+            bindings,
+            &observed,
+        ) {
+            documents.insert(instance.clone(), document);
+        }
+    }
+    Ok(crate::dependency_document::peer_graph(env, &documents))
+}
+
+/// Same-version Restart of remaining dependents whose providers change (ADR
+/// 0043 §6), and of instances with a workload certificate whose peers change
+/// (ADR 0046 §5). Returns the deployed set once the plan applied, and the
+/// peers of every instance in it.
 async fn schedule_dependency_rerenders(
     ctx: &mut Ctx,
     env: &str,
@@ -1719,7 +1967,10 @@ async fn schedule_dependency_rerenders(
     target_profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
     env_obj: &crate::pb::sekai::Object,
     host_products: &std::collections::HashSet<String>,
-) -> Result<()> {
+) -> Result<(
+    BTreeMap<String, crate::dependency_document::DeployedRelease>,
+    BTreeMap<String, crate::workload_identity::Peers>,
+)> {
     let bindings =
         crate::environment_bindings::EnvironmentBindings::from_properties(&env_obj.properties);
     let pending_actions: Vec<(&str, Action)> = pending
@@ -1754,99 +2005,193 @@ async fn schedule_dependency_rerenders(
             );
         }
     }
+    // A new named instance has no deployed record yet; its pending change
+    // names its catalog product.
+    let pending_products: BTreeMap<&str, &str> = pending
+        .iter()
+        .map(|entry| (entry.instance_name(), entry.product.as_str()))
+        .collect();
     for (instance, profile) in &remaining {
         if let Some(version) = remaining_versions.get(instance) {
             remaining_deployed.insert(
                 instance.clone(),
                 crate::dependency_document::DeployedRelease {
-                    product: product_for_instance(&env_obj.properties, instance),
+                    product: match pending_products.get(instance.as_str()) {
+                        Some(product) => (*product).to_string(),
+                        None => product_for_instance(&env_obj.properties, instance),
+                    },
                     version: version.clone(),
                     profile: profile.clone(),
                 },
             );
         }
     }
+    let mut current_peers = peer_graph(ctx, env, &current_deployed, &bindings).await?;
+    let mut remaining_peers = peer_graph(ctx, env, &remaining_deployed, &bindings).await?;
     let pending_instances: BTreeSet<String> = pending
         .iter()
         .map(|entry| entry.instance_name().to_string())
         .collect();
     let mut extra = Vec::new();
-    for (instance, profile) in installed_profiles {
-        let product = product_for_instance(&env_obj.properties, instance);
-        if pending_instances.contains(instance) || host_products.contains(&product) {
-            continue;
-        }
-        let Some(version) = env_obj.properties.get(&format!("deployed.{instance}")) else {
-            continue;
-        };
-        let observed =
-            match crate::dependency_document::instance_release_digest(ctx, env_obj, instance)
-                .await?
-            {
-                Some(digest) => {
-                    crate::software_compatibility::observed_contract_versions(ctx, env, &digest)
-                        .await?
-                }
-                None => BTreeMap::new(),
-            };
-        // Ambiguous current must not share a plan with Restart: apply
-        // preflight still sees both providers. After the extra provider is
-        // gone, a later plan Restarts because applied != unique remaining.
-        let current = match crate::dependency_document::document_for_bound(
-            instance,
-            profile,
-            &current_deployed,
-            &bindings,
-            &observed,
-        ) {
-            Ok(document) => document,
-            Err(_) => continue,
-        };
-        let result = match remaining.get(instance) {
-            Some(remaining_profile) => {
-                match crate::dependency_document::document_for_bound(
-                    instance,
-                    remaining_profile,
-                    &remaining_deployed,
-                    &bindings,
-                    &observed,
-                ) {
-                    Ok(document) => document,
-                    Err(_) => continue,
-                }
+    // The second pass runs only when a provider keeps a caller that steps in
+    // this plan; it drops restarts that retention made unnecessary.
+    for retaining in [false, true] {
+        if retaining {
+            let stepping: BTreeSet<&str> = pending_instances
+                .iter()
+                .map(String::as_str)
+                .chain(
+                    extra
+                        .iter()
+                        .map(|change: &PendingChange| change.instance.as_str()),
+                )
+                .collect();
+            let kept = retain_unmoved_callers(env, env_obj, &stepping, &mut remaining_peers);
+            retain_unmoved_callers(env, env_obj, &stepping, &mut current_peers);
+            if !kept {
+                break;
             }
-            None => None,
-        };
-        let result_digest = match &result {
-            Some(document) => document.digest()?,
-            None => String::new(),
-        };
-        let applied = crate::dependency_document::applied_digest(env_obj, instance);
-        let changed = current != result || (!result_digest.is_empty() && result_digest != applied);
-        if !changed {
-            continue;
+            extra.clear();
         }
-        let release = deployed_release_id(&env_obj.properties, instance, version);
-        let Some(manifest) = readable_manifest(ctx, &release).await? else {
-            continue;
-        };
-        if manifest.deploy.executor == Some(crate::software_executor::SoftwareExecutorKind::Host) {
-            continue;
+        for (instance, profile) in installed_profiles {
+            let product = product_for_instance(&env_obj.properties, instance);
+            if pending_instances.contains(instance) || host_products.contains(&product) {
+                continue;
+            }
+            let Some(version) = env_obj.properties.get(&format!("deployed.{instance}")) else {
+                continue;
+            };
+            let observed = observed_for(ctx, env, env_obj, instance).await?;
+            let release = deployed_release_id(&env_obj.properties, instance, version);
+            let Some(manifest) = readable_manifest(ctx, &release).await? else {
+                continue;
+            };
+            // Only an instance with a certificate has peers in its document.
+            let peers = |graph: &'_ BTreeMap<String, crate::workload_identity::Peers>| {
+                manifest
+                    .deploy
+                    .identity
+                    .as_ref()
+                    .map(|_| graph.get(instance).cloned().unwrap_or_default())
+            };
+            // Ambiguous current must not share a plan with Restart: apply
+            // preflight still sees both providers. After the extra provider is
+            // gone, a later plan Restarts because applied != unique remaining.
+            let current = match crate::dependency_document::document_for_bound(
+                instance,
+                profile,
+                &current_deployed,
+                &bindings,
+                &observed,
+            ) {
+                Ok(document) => crate::dependency_document::DependencyDocument::with_peers(
+                    document,
+                    peers(&current_peers).as_ref(),
+                ),
+                Err(_) => continue,
+            };
+            let result = match remaining.get(instance) {
+                Some(remaining_profile) => {
+                    match crate::dependency_document::document_for_bound(
+                        instance,
+                        remaining_profile,
+                        &remaining_deployed,
+                        &bindings,
+                        &observed,
+                    ) {
+                        Ok(document) => crate::dependency_document::DependencyDocument::with_peers(
+                            document,
+                            peers(&remaining_peers).as_ref(),
+                        ),
+                        Err(_) => continue,
+                    }
+                }
+                None => None,
+            };
+            let result_digest = match &result {
+                Some(document) => document.digest()?,
+                None => String::new(),
+            };
+            let applied = crate::dependency_document::applied_digest(env_obj, instance);
+            let changed =
+                current != result || (!result_digest.is_empty() && result_digest != applied);
+            if !changed {
+                continue;
+            }
+            if manifest.deploy.executor
+                == Some(crate::software_executor::SoftwareExecutorKind::Host)
+            {
+                continue;
+            }
+            let target = pin_release(ctx, &release, env).await?;
+            extra.push(PendingChange {
+                instance: instance.clone(),
+                product,
+                action: Action::Restart,
+                from: Some(version.clone()),
+                to: version.clone(),
+                release: target,
+                restore: None,
+                kind: manifest.product.kind,
+            });
         }
-        let target = pin_release(ctx, &release, env).await?;
-        extra.push(PendingChange {
-            instance: instance.clone(),
-            product,
-            action: Action::Restart,
-            from: Some(version.clone()),
-            to: version.clone(),
-            release: target,
-            restore: None,
-            kind: manifest.product.kind,
-        });
     }
     pending.extend(extra);
-    Ok(())
+    Ok((remaining_deployed, remaining_peers))
+}
+
+/// Keep in each provider's grant the callers it last admitted that have not
+/// moved off it yet, so a caller rebound or removed keeps its access until it
+/// has moved; a later plan withdraws them (ADR 0046 §5). A caller has not
+/// moved while it runs a step in this plan (`stepping`), or while its own
+/// applied grant still names the provider: a host instance, which is never
+/// re-rendered for a binding change, or a dependent held on an ambiguous
+/// provider. Returns whether any caller was kept.
+fn retain_unmoved_callers(
+    env: &str,
+    env_obj: &crate::pb::sekai::Object,
+    stepping: &BTreeSet<&str>,
+    graph: &mut BTreeMap<String, crate::workload_identity::Peers>,
+) -> bool {
+    let uri = |instance: &str| crate::workload_identity::uri(env, instance);
+    let stepping: BTreeSet<String> = stepping.iter().map(|instance| uri(instance)).collect();
+    let applied: BTreeMap<String, crate::workload_identity::Peers> = env_obj
+        .properties
+        .keys()
+        .filter_map(|key| key.strip_prefix(crate::dependency_document::APPLIED_PEERS_PREFIX))
+        .map(|instance| {
+            (
+                uri(instance),
+                crate::dependency_document::applied_peers(env_obj, instance),
+            )
+        })
+        .collect();
+    let mut kept = false;
+    let prefix = uri("");
+    for (provider, grant) in &applied {
+        let Some(instance) = provider.strip_prefix(&prefix) else {
+            continue;
+        };
+        let unmoved = |contract: &String, caller: &String| {
+            stepping.contains(caller)
+                || applied
+                    .get(caller)
+                    .and_then(|peers| peers.servers.get(contract))
+                    .is_some_and(|server| server == provider)
+        };
+        for (contract, callers) in &grant.clients {
+            for caller in callers.iter().filter(|caller| unmoved(contract, caller)) {
+                kept |= graph
+                    .entry(instance.to_string())
+                    .or_default()
+                    .clients
+                    .entry(contract.clone())
+                    .or_default()
+                    .insert(caller.clone());
+            }
+        }
+    }
+    kept
 }
 
 #[cfg(test)]
@@ -1855,19 +2200,34 @@ fn contract_plan_order(
     target_profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
     installed_profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
 ) -> Result<ContractPlanOrder> {
+    let bindings = crate::environment_bindings::EnvironmentBindings::default();
+    let installed = cross_release_contract_edges(installed_profiles, &bindings);
     contract_plan_order_bound(
         pending,
         target_profiles,
         installed_profiles,
-        &crate::environment_bindings::EnvironmentBindings::default(),
+        &bindings,
+        |provider, dependent| {
+            !installed
+                .iter()
+                .any(|(p, d, _)| p == provider && d == dependent)
+        },
+        |_, _, _| false,
     )
 }
 
+/// Rank `pending` by its contract edges. `new_grant(provider, dependent)`
+/// says whether the provider's grant in this plan admits the dependent for
+/// the first time; such a provider restarts before the dependent deploys.
+/// `admits(provider, dependent, contract)` says whether the provider already
+/// admits the dependent for that contract.
 fn contract_plan_order_bound(
     pending: &[(&str, Action)],
     target_profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
     installed_profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
     bindings: &crate::environment_bindings::EnvironmentBindings,
+    new_grant: impl Fn(&str, &str) -> bool,
+    admits: impl Fn(&str, &str, &str) -> bool,
 ) -> Result<ContractPlanOrder> {
     let target_edges = cross_release_contract_edges(target_profiles, bindings);
     let installed_edges = cross_release_contract_edges(installed_profiles, bindings);
@@ -1883,7 +2243,16 @@ fn contract_plan_order_bound(
     refuse_mixed_direction_edges(pending, &installed_edges)?;
     let actions: BTreeMap<&str, Action> = pending.iter().copied().collect();
     let members: BTreeSet<&str> = actions.keys().copied().collect();
+    // Whatever its action, a provider step that admits a caller for the
+    // first time runs before that caller's step. A plan that also needs the
+    // reverse order is refused as inverted.
+    let grants_new_caller = |provider: &str, provider_action, dependent: &str, dependent_action| {
+        provider_action != Action::Remove
+            && dependent_action != Action::Remove
+            && new_grant(provider, dependent)
+    };
     let mut precede = Vec::new();
+    let mut admits_first = BTreeSet::new();
     for (provider, dependent, _) in &overlay_edges {
         let Some(&provider_action) = actions.get(provider.as_str()) else {
             continue;
@@ -1891,7 +2260,18 @@ fn contract_plan_order_bound(
         let Some(&dependent_action) = actions.get(dependent.as_str()) else {
             continue;
         };
-        if dependent_action == Action::Restart && !reverse_contract_action(provider_action) {
+        // A restarted dependent follows its provider, as does a caller its
+        // provider admits for the first time.
+        let restarted = dependent_action == Action::Restart || provider_action == Action::Restart;
+        let admits = grants_new_caller(provider, provider_action, dependent, dependent_action);
+        if admits {
+            admits_first.insert((provider.clone(), dependent.clone()));
+        }
+        if admits
+            || (restarted
+                && !reverse_contract_action(provider_action)
+                && !reverse_contract_action(dependent_action))
+        {
             precede.push((provider.as_str(), dependent.as_str()));
         }
     }
@@ -1907,13 +2287,27 @@ fn contract_plan_order_bound(
         }
         precede.push((provider.as_str(), dependent.as_str()));
     }
-    for (provider, dependent, _) in &installed_edges {
+    for (provider, dependent, contract) in &installed_edges {
         let Some(&provider_action) = actions.get(provider.as_str()) else {
             continue;
         };
         let Some(&dependent_action) = actions.get(dependent.as_str()) else {
             continue;
         };
+        if grants_new_caller(provider, provider_action, dependent, dependent_action) {
+            // Ordered provider first above. When the running dependent still
+            // uses this provider, and both go back a version, the dependent
+            // must also go first: no order satisfies both.
+            if reverse_contract_action(provider_action)
+                && reverse_contract_action(dependent_action)
+                && admits(provider, dependent, contract)
+            {
+                bail!(
+                    "{provider} must admit {dependent} for a new contract before {dependent} downgrades, and {dependent} must downgrade before {provider} drops {contract}; downgrade through an intermediate release"
+                );
+            }
+            continue;
+        }
         if provider_action == Action::Restart || dependent_action == Action::Restart {
             if reverse_contract_action(provider_action) && dependent_action == Action::Restart {
                 precede.push((provider.as_str(), dependent.as_str()));
@@ -1938,6 +2332,7 @@ fn contract_plan_order_bound(
         target_edges,
         installed_edges,
         overlay_edges,
+        admits_first,
     })
 }
 
@@ -1949,6 +2344,7 @@ fn refuse_inverted_contract_order(
     target_edges: &[ContractEdge],
     installed_edges: &[ContractEdge],
     overlay_edges: &[ContractEdge],
+    admits_first: &BTreeSet<(String, String)>,
 ) -> Result<()> {
     let index: BTreeMap<&str, usize> = ordered
         .iter()
@@ -1975,7 +2371,9 @@ fn refuse_inverted_contract_order(
             {
                 continue;
             }
-            if reverse && dependent_index > provider_index {
+            // A provider admitting a new caller runs first instead.
+            let admits = admits_first.contains(&(provider.clone(), dependent.clone()));
+            if reverse && !admits && dependent_index > provider_index {
                 bail!(
                     "plan requirement {contract} is inverted: {dependent} must precede {provider} when removing or downgrading"
                 );
@@ -1985,6 +2383,14 @@ fn refuse_inverted_contract_order(
                     "plan requirement {contract} is inverted: {provider} must precede {dependent} in this plan"
                 );
             }
+        }
+    }
+    for (provider, dependent) in admits_first {
+        if let (Some(provider_index), Some(dependent_index)) =
+            (index.get(provider.as_str()), index.get(dependent.as_str()))
+            && provider_index > dependent_index
+        {
+            bail!("{provider} must admit {dependent} before {dependent} runs in this plan");
         }
     }
     for (provider, dependent, contract) in target_edges
@@ -2158,6 +2564,7 @@ async fn create_with_content(
         require_same_executor(ctx, executors, step).await?;
         admit_step_overlay_schema(ctx, env, step).await?;
     }
+    refuse_unadmitted_callers(ctx, env, &steps).await?;
     let mut plan = assemble_plan(env, inputs, &mut steps, recalled_recovery_reason)?;
     // Optional advisory priors (default off). Never hard-block or change steps.
     if let Ok(inspect) = inspect_environment(ctx, env).await {
@@ -2299,9 +2706,13 @@ pub(super) async fn rollback_step_with_recovery(
     } else {
         instance.to_string()
     };
-    let identity = step_identity(ctx, &env_obj, env, &target.release_id, instance).await?;
+    let peers = current_peers(ctx, env, &env_obj, instance, &target.release_id).await?;
+    let identity = step_identity(ctx, &env_obj, env, &target.release_id, instance, &peers).await?;
     let restore_identity = match &restore {
-        Some(pin) => step_identity(ctx, &env_obj, env, &pin.release_id, instance).await?,
+        Some(pin) => {
+            let peers = current_peers(ctx, env, &env_obj, instance, &pin.release_id).await?;
+            step_identity(ctx, &env_obj, env, &pin.release_id, instance, &peers).await?
+        }
         None => None,
     };
     Ok(Step {
@@ -2351,7 +2762,8 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
     } else {
         instance.to_string()
     };
-    let identity = step_identity(ctx, &env_obj, env, &target.release_id, instance).await?;
+    let peers = current_peers(ctx, env, &env_obj, instance, &target.release_id).await?;
+    let identity = step_identity(ctx, &env_obj, env, &target.release_id, instance, &peers).await?;
     Ok(Step {
         id: format!("{}:restart:{instance}", env_id(env)),
         order: 0,
@@ -2683,13 +3095,172 @@ mod tests {
         );
         let mut bindings = crate::environment_bindings::EnvironmentBindings::default();
         bindings.insert("app", "database", "db-a");
-        let bound = contract_plan_order_bound(pending, &profiles, &profiles, &bindings)
-            .unwrap()
-            .ranks;
+        let bound = contract_plan_order_bound(
+            pending,
+            &profiles,
+            &profiles,
+            &bindings,
+            |_, _| false,
+            |_, _, _| false,
+        )
+        .unwrap()
+        .ranks;
         assert!(
             bound["db-a"] < bound["app"],
             "bound provider precedes its dependent: {bound:?}"
         );
+    }
+
+    #[test]
+    fn a_provider_restarted_for_a_new_caller_precedes_its_install() {
+        let installed = BTreeMap::from([(
+            "database".into(),
+            test_profile(&[], &[("database", "1.0.0")]),
+        )]);
+        let target = BTreeMap::from([("app".into(), test_profile(&[("database", "1.0.0")], &[]))]);
+        let ranks = contract_plan_order(
+            &[("app", Action::Install), ("database", Action::Restart)],
+            &target,
+            &installed,
+        )
+        .unwrap()
+        .ranks;
+        assert!(ranks["database"] < ranks["app"], "{ranks:?}");
+    }
+
+    #[test]
+    fn a_provider_restarted_for_a_new_caller_precedes_its_downgrade() {
+        let installed = BTreeMap::from([
+            ("app".into(), test_profile(&[], &[])),
+            (
+                "database".into(),
+                test_profile(&[], &[("database", "1.0.0")]),
+            ),
+        ]);
+        let target = BTreeMap::from([("app".into(), test_profile(&[("database", "1.0.0")], &[]))]);
+        let ranks = contract_plan_order(
+            &[("app", Action::Downgrade), ("database", Action::Restart)],
+            &target,
+            &installed,
+        )
+        .unwrap()
+        .ranks;
+        assert!(ranks["database"] < ranks["app"], "{ranks:?}");
+    }
+
+    #[test]
+    fn a_rebound_provider_admits_a_downgrading_caller_first() {
+        let profiles = BTreeMap::from([
+            ("app".into(), test_profile(&[("database", "1.0.0")], &[])),
+            ("db-a".into(), test_profile(&[], &[("database", "1.0.0")])),
+            ("db-b".into(), test_profile(&[], &[("database", "1.0.0")])),
+        ]);
+        let mut bindings = crate::environment_bindings::EnvironmentBindings::default();
+        bindings.insert("app", "database", "db-b");
+        let ranks = contract_plan_order_bound(
+            &[("app", Action::Downgrade), ("db-b", Action::Restart)],
+            &profiles,
+            &profiles,
+            &bindings,
+            |provider, dependent| provider == "db-b" && dependent == "app",
+            |_, _, _| false,
+        )
+        .unwrap()
+        .ranks;
+        assert!(ranks["db-b"] < ranks["app"], "{ranks:?}");
+    }
+
+    #[test]
+    fn a_downgrading_provider_admits_a_new_caller_first() {
+        let installed = BTreeMap::from([
+            ("app".into(), test_profile(&[], &[])),
+            (
+                "database".into(),
+                test_profile(&[], &[("database", "1.0.0")]),
+            ),
+        ]);
+        let target = BTreeMap::from([
+            ("app".into(), test_profile(&[("database", "1.0.0")], &[])),
+            (
+                "database".into(),
+                test_profile(&[], &[("database", "1.0.0")]),
+            ),
+        ]);
+        let ranks = contract_plan_order_bound(
+            &[("app", Action::Downgrade), ("database", Action::Downgrade)],
+            &target,
+            &installed,
+            &crate::environment_bindings::EnvironmentBindings::default(),
+            |provider, dependent| provider == "database" && dependent == "app",
+            |_, _, _| false,
+        )
+        .unwrap()
+        .ranks;
+        assert!(ranks["database"] < ranks["app"], "{ranks:?}");
+    }
+
+    #[test]
+    fn a_rebound_caller_and_provider_downgrading_together_pass_validation() {
+        let profiles = BTreeMap::from([
+            ("app".into(), test_profile(&[("database", "1.0.0")], &[])),
+            ("db-a".into(), test_profile(&[], &[("database", "1.0.0")])),
+            ("db-b".into(), test_profile(&[], &[("database", "1.0.0")])),
+        ]);
+        let mut bindings = crate::environment_bindings::EnvironmentBindings::default();
+        bindings.insert("app", "database", "db-b");
+        let pending = [("app", Action::Downgrade), ("db-b", Action::Downgrade)];
+        let order = contract_plan_order_bound(
+            &pending,
+            &profiles,
+            &profiles,
+            &bindings,
+            |provider, dependent| provider == "db-b" && dependent == "app",
+            |_, _, _| false,
+        )
+        .unwrap();
+        assert!(
+            order.ranks["db-b"] < order.ranks["app"],
+            "{:?}",
+            order.ranks
+        );
+        refuse_inverted_contract_order(
+            &[("db-b", Action::Downgrade), ("app", Action::Downgrade)],
+            &order.target_edges,
+            &order.installed_edges,
+            &order.overlay_edges,
+            &order.admits_first,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn admitting_a_new_contract_while_both_downgrade_is_refused() {
+        let installed = BTreeMap::from([
+            ("app".into(), test_profile(&[("database", "2.0.0")], &[])),
+            ("db".into(), test_profile(&[], &[("database", "2.0.0")])),
+        ]);
+        let target = BTreeMap::from([
+            (
+                "app".into(),
+                test_profile(&[("database", "1.0.0"), ("queue", "1.0.0")], &[]),
+            ),
+            (
+                "db".into(),
+                test_profile(&[], &[("database", "1.0.0"), ("queue", "1.0.0")]),
+            ),
+        ]);
+        let err = contract_plan_order_bound(
+            &[("app", Action::Downgrade), ("db", Action::Downgrade)],
+            &target,
+            &installed,
+            &crate::environment_bindings::EnvironmentBindings::default(),
+            |provider, dependent| provider == "db" && dependent == "app",
+            |_, _, contract| contract == "database",
+        )
+        .map(|_| ())
+        .expect_err("refused")
+        .to_string();
+        assert!(err.contains("intermediate release"), "{err}");
     }
 
     #[test]
@@ -3029,6 +3600,7 @@ mod tests {
             &edges,
             &[],
             &[],
+            &BTreeSet::new(),
         )
         .unwrap_err()
         .to_string();
@@ -3656,6 +4228,228 @@ mod tests {
         let rebound_plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         assert_ne!(planned.content_id, rebound_plan.content_id);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Peers come only from bindings (ADR 0046 §5): rebinding moves the
+    /// grant on both sides in one plan, and an instance without an edge is
+    /// never an allowed caller.
+    #[tokio::test]
+    async fn rebinding_grants_the_new_provider_and_revokes_the_old_one_next_plan() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-peers-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        let pin = "a".repeat(40);
+        let identity = "[deploy.identity]\ncertificate = \"both\"\nreload = \"restart\"\n";
+        let mut raws = BTreeMap::new();
+        for (product, contracts) in [
+            (
+                "app",
+                "[compatibility.components.app.requires]\ndatabase = \"1.0.0\"\n",
+            ),
+            (
+                "db-a",
+                "[compatibility.components.db-a.provides]\ndatabase = \"1.0.0\"\n",
+            ),
+            (
+                "db-b",
+                "[compatibility.components.db-b.provides]\ndatabase = \"1.0.0\"\n",
+            ),
+        ] {
+            let raw =
+                publish_compat_release(&mut ctx, &root, product, &format!("{contracts}{identity}"))
+                    .await;
+            raws.insert(product, raw);
+        }
+        let actor = crate::auth_context::test_management_context("env-peers");
+        for (product, raw) in &raws {
+            crate::catalog::promote(&mut ctx, &actor, &format!("{product}@1.0.0"), "stable")
+                .await
+                .unwrap();
+            subscribe(&mut ctx, "local", product, "stable")
+                .await
+                .unwrap();
+            let database = BTreeMap::from([("database".into(), "1.0.0".into())]);
+            let (requires, provides) = if *product == "app" {
+                (database, BTreeMap::new())
+            } else {
+                (BTreeMap::new(), database)
+            };
+            crate::software_compatibility::record_evidence(
+                &mut ctx,
+                "local",
+                compat_evidence(
+                    crate::manifest::digest(raw),
+                    product,
+                    &pin,
+                    requires,
+                    provides,
+                    BTreeMap::new(),
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        let sealing = root.join("sealing");
+        std::fs::create_dir_all(&sealing).unwrap();
+        let public = crate::sealing_key::SealingKey::open_or_generate(&sealing)
+            .unwrap()
+            .public()
+            .clone();
+        let issuer =
+            crate::identity_issuer::generate("local", 1, &public, crate::now_millis() / 1000)
+                .unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.insert(
+            "identity_issuer".into(),
+            serde_json::to_string(&issuer).unwrap(),
+        );
+        ctx.put(env).await.unwrap();
+        for product in ["db-a", "db-b"] {
+            crate::environment::reconcile_deployment(&mut ctx, "local", product, Some("1.0.0"))
+                .await
+                .unwrap();
+        }
+        crate::environment_bindings::bind(&mut ctx, "local", "app", "database", "db-a")
+            .await
+            .unwrap();
+        crate::environment::reconcile_deployment(&mut ctx, "local", "app", Some("1.0.0"))
+            .await
+            .unwrap();
+
+        // Apply a plan the way a runtime completion records it.
+        async fn applied(ctx: &mut Ctx, plan: &Plan) {
+            let mut env = crate::environment::environment(ctx, "local").await.unwrap();
+            crate::environment::update_runtime_deployments_object(
+                ctx,
+                &mut env,
+                &plan.steps,
+                crate::now_millis(),
+            )
+            .await
+            .unwrap();
+            ctx.put(env).await.unwrap();
+        }
+        fn peers(plan: &Plan) -> BTreeMap<String, crate::workload_identity::Peers> {
+            plan.steps
+                .iter()
+                .map(|step| {
+                    let peers = step.granted_peers().cloned().unwrap_or_default();
+                    (step.instance_name().to_string(), peers)
+                })
+                .collect()
+        }
+        let uri = |instance: &str| crate::workload_identity::uri("local", instance);
+        let serves = |contract: &str, instance: &str| {
+            BTreeMap::from([(contract.to_string(), uri(instance))])
+        };
+        let calls = |contract: &str, instance: &str| {
+            BTreeMap::from([(contract.to_string(), BTreeSet::from([uri(instance)]))])
+        };
+
+        let first = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert_eq!(
+            peers(&first),
+            BTreeMap::from([
+                (
+                    "app".to_string(),
+                    crate::workload_identity::Peers {
+                        servers: serves("database", "db-a"),
+                        clients: BTreeMap::new(),
+                    }
+                ),
+                (
+                    "db-a".to_string(),
+                    crate::workload_identity::Peers {
+                        servers: BTreeMap::new(),
+                        clients: calls("database", "app"),
+                    }
+                ),
+                // A certificate holder always gets a document; db-b has no
+                // edge, so it names no caller.
+                (
+                    "db-b".to_string(),
+                    crate::workload_identity::Peers::default()
+                ),
+            ]),
+            "{first:?}"
+        );
+        applied(&mut ctx, &first).await;
+        let view = crate::environment_dependencies::for_environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert!(
+            view.to_text().contains("db-a@1.0.0 (1.0.0) granted"),
+            "{}",
+            view.to_text()
+        );
+        let settled = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert!(settled.steps.is_empty(), "{settled:?}");
+
+        crate::environment_bindings::bind(&mut ctx, "local", "app", "database", "db-b")
+            .await
+            .unwrap();
+        // Alone, a restart would move app onto db-b before db-b admits it.
+        let restart = crate::plan::restart_step(&mut ctx, "local", "app")
+            .await
+            .unwrap();
+        let refused = crate::plan::create_from_steps(&mut ctx, "local", vec![restart])
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("needs db-b to admit it"),
+            "{refused:#}"
+        );
+        let rebound = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert_eq!(
+            peers(&rebound),
+            BTreeMap::from([
+                (
+                    "app".to_string(),
+                    crate::workload_identity::Peers {
+                        servers: serves("database", "db-b"),
+                        clients: BTreeMap::new(),
+                    }
+                ),
+                // db-a keeps admitting app while app switches.
+                (
+                    "db-b".to_string(),
+                    crate::workload_identity::Peers {
+                        servers: BTreeMap::new(),
+                        clients: calls("database", "app"),
+                    }
+                ),
+            ]),
+            "{rebound:?}"
+        );
+        // A restore or rollback of db-a never withdraws the moving caller.
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        let restored = current_peers(&mut ctx, "local", &env, "db-a", "tenkai:release:db-a@1.0.0")
+            .await
+            .unwrap();
+        assert_eq!(restored.clients, calls("database", "app"));
+        applied(&mut ctx, &rebound).await;
+        let revoked = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert_eq!(
+            peers(&revoked),
+            BTreeMap::from([(
+                "db-a".to_string(),
+                crate::workload_identity::Peers::default()
+            )]),
+            "{revoked:?}"
+        );
+        applied(&mut ctx, &revoked).await;
+        let settled = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert!(settled.steps.is_empty(), "{settled:?}");
     }
 
     #[tokio::test]

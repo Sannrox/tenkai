@@ -116,8 +116,8 @@ send `x-tenkai-runtime-version`, which the
 [runner registry](run-tenkai-server.md#runner-registry) shows.
 
 Work pull does not accept supported versions and does not negotiate. The
-only capability is `workload_identity`, named in
-`x-tenkai-runtime-capabilities` ([below](#identity-issuer)). Completion covers the claimed plan in one request, not one proto
+capabilities are `workload_identity` and `peer_grants`, named
+comma-separated in `x-tenkai-runtime-capabilities` ([below](#identity-issuer)). Completion covers the claimed plan in one request, not one proto
 `CompleteStep` per step. Inventory is an admitted facts map, not a proto
 `Observation`.
 
@@ -242,7 +242,14 @@ from `secret rewrap`: the runtime that opens the issuer key need not open
 the sealed values. A lost issuer is rotated, not recovered.
 
 A step with `identity` grants a workload certificate: `uri`, `dns_names`,
-`certificate`, `reload`, `issuer_generation` and `issuer_fingerprint`.
+`certificate`, `reload`, `issuer_generation` and `issuer_fingerprint`, and
+`peers` when its bindings give it any: `servers` (contract to the provider
+identity it accepts) and `clients` (contract to the dependent identities it
+accepts). The release package's dependency document must name exactly those
+peers, or the runtime refuses the step; a grant without peers also
+accepts no document. The server hands a plan whose grant
+names peers only to a runtime that also names `peer_grants`, since an older
+one cannot decode the field.
 `restore_identity` grants the restore release's in the same shape, used
 only when the step fails and the runtime restores. The plan digest covers
 both. The server hands such a plan only to a runtime that

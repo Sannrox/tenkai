@@ -5221,6 +5221,10 @@
             "contract": {
               "type": "string"
             },
+            "granted": {
+              "description": "The edge is a peer grant (ADR 0046 §5): the dependent or the\nprovider holds a workload certificate, so its peer document\nnames the other side. Tenkai cannot see whether the product\nenforces it.",
+              "type": "boolean"
+            },
             "instance": {
               "type": "string"
             },
