@@ -228,6 +228,18 @@ from the issuer it last verified at apply. A certificate from an older
 issuer generation is not renewed: it needs a step after `identity-issuer
 rewrap`.
 
+The runtime audits each renewal, and each change in why one fails, in
+`identity-renewals-<environment>.jsonl` beside its sealing key (the latest
+4096 entries), and reports every certificate with its last attempt once the
+server is reachable. `status` then shows an instance whose certificate is in
+its last sixth as near expiry:
+
+```text
+  certificate near expiry, expires 2026-11-11T08:00:00Z: renewal failed: ...
+```
+
+A renewed certificate clears it at the next report.
+
 A `reload = "restart"` certificate on `helm` renews the same way, then
 restarts the release's Deployments, StatefulSets and DaemonSets, which
 roll out under their own update strategy. It falls due up to two hours

@@ -191,6 +191,24 @@ pub(crate) fn status_result(env: &str, rows: usize) -> CommandResultV1 {
         .counts(None, Some(rows))
 }
 
+/// The status line of a workload certificate near expiry (ADR 0046 §3),
+/// naming its expiry and why renewal has not cleared it.
+pub(crate) fn certificate_line(
+    certificate: &tenkai::certificate_reports::CertificateStatus,
+) -> Option<String> {
+    if !certificate.near_expiry {
+        return None;
+    }
+    let reason = certificate.renewal_failure.as_deref().map_or_else(
+        || "not renewed yet".to_owned(),
+        |reason| format!("renewal failed: {reason}"),
+    );
+    Some(format!(
+        "  certificate near expiry, expires {}: {reason}",
+        format_attempt_time(certificate.expires_at.saturating_mul(1000))
+    ))
+}
+
 pub(crate) fn print_spec_drift(drift: &tenkai::spec_drift::SpecDriftView) {
     if drift.status == tenkai::spec_drift::SPEC_DRIFT_UNKNOWN {
         return;

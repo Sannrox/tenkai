@@ -1370,26 +1370,55 @@ pub struct Renewal {
     pub outcome: std::result::Result<i64, String>,
 }
 
+/// The validity of a certificate a target held when a pass read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldCertificate {
+    pub instance: String,
+    pub not_before: i64,
+    pub not_after: i64,
+}
+
+impl HeldCertificate {
+    fn of(identity: &crate::workload_identity::InstalledIdentity) -> Self {
+        Self {
+            instance: identity.instance.clone(),
+            not_before: identity.not_before,
+            not_after: identity.not_after,
+        }
+    }
+}
+
+/// What one renewal pass did, and the certificates it found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenewalPass {
+    pub renewals: Vec<Renewal>,
+    /// Every certificate that proved its grant, as read before renewal.
+    pub certificates: Vec<HeldCertificate>,
+    /// Why a target could not be read; its certificates are left out.
+    pub unreadable: Vec<String>,
+}
+
 /// Renew every workload certificate of `environment` that is due
 /// (ADR 0046 §3). Needs no plan, approval or server: each adapter lists what
 /// its target holds, and a due certificate is re-issued for exactly its
 /// recorded grant from the issuer this runtime last verified. Idempotent:
 /// a crash before the write leaves the old certificate due, and one after
-/// leaves a fresh one that is not. An adapter that cannot be read fails the
-/// pass; other adapters still run.
+/// leaves a fresh one that is not. An adapter that cannot be read is named
+/// in [`RenewalPass::unreadable`]; other adapters still run.
 pub fn renew_identities(
     config: &BuiltinConfig,
     environment: &str,
     now_secs: i64,
-) -> Result<Vec<Renewal>> {
+) -> Result<RenewalPass> {
     let Some(dir) = config.sealing_dir.as_deref() else {
-        return Ok(Vec::new());
+        return Ok(RenewalPass::default());
     };
     let target = crate::software_executor::IdentityTarget {
         environment,
         cluster_config_path: config.cluster_config.as_deref(),
     };
     let mut renewals = Vec::new();
+    let mut certificates = Vec::new();
     let mut unreadable = Vec::new();
     for adapter in config.executors.adapters() {
         // Restarts a crashed pass left part-way finish first.
@@ -1421,6 +1450,7 @@ pub fn renew_identities(
                     continue;
                 }
             };
+            certificates.push(HeldCertificate::of(&identity));
             if !renewal_due(&identity, environment, now_secs) {
                 continue;
             }
@@ -1440,6 +1470,9 @@ pub fn renew_identities(
         match host.installed_identities(environment) {
             Ok(installed) => {
                 for (instance, identity) in installed {
+                    if let Ok(identity) = &identity {
+                        certificates.push(HeldCertificate::of(&identity.installed));
+                    }
                     let outcome = match identity {
                         Err(error) => Err(error),
                         // The applier renews in place only; a host
@@ -1462,13 +1495,74 @@ pub fn renew_identities(
             Err(error) => unreadable.push(format!("host: {error:#}")),
         }
     }
-    if !unreadable.is_empty() {
-        bail!(
-            "reading workload certificates of {environment}: {}",
-            unreadable.join("; ")
-        );
+    Ok(RenewalPass {
+        renewals,
+        certificates,
+        unreadable,
+    })
+}
+
+/// One renewal pass of `environment` (ADR 0046 §3): renew what is due, log
+/// and audit each attempt, and return the certificate state to report.
+/// Failing to audit is logged; it never stops renewal.
+pub fn renew_and_audit(
+    config: &BuiltinConfig,
+    environment: &str,
+    now_secs: i64,
+) -> Result<Vec<crate::certificate_reports::CertificateReport>> {
+    use crate::certificate_reports::{
+        CERTIFICATE_REPORT_SCHEMA, CertificateReport, RenewalEvent, RenewalOutcome,
+    };
+    let pass = renew_identities(config, environment, now_secs)?;
+    for unreadable in &pass.unreadable {
+        eprintln!("reading workload certificates of {environment} failed (retrying): {unreadable}");
     }
-    Ok(renewals)
+    let mut attempts = Vec::new();
+    for renewal in pass.renewals {
+        let outcome = match renewal.outcome {
+            Ok(not_after) => {
+                eprintln!(
+                    "renewed the workload certificate of {}; it expires at {not_after}",
+                    renewal.instance
+                );
+                RenewalOutcome::Renewed { not_after }
+            }
+            Err(reason) => {
+                eprintln!(
+                    "renewing the workload certificate of {} failed (retrying): {reason}",
+                    renewal.instance
+                );
+                RenewalOutcome::Failed { reason }
+            }
+        };
+        attempts.push(RenewalEvent {
+            at: now_secs,
+            instance: renewal.instance,
+            outcome,
+        });
+    }
+    let Some(dir) = config.sealing_dir.as_deref() else {
+        return Ok(Vec::new());
+    };
+    if let Err(error) = crate::renewal_audit::record(dir, environment, attempts) {
+        eprintln!("auditing workload certificate renewals failed: {error:#}");
+    }
+    let last = crate::renewal_audit::last(dir, environment).unwrap_or_else(|error| {
+        eprintln!("reading the workload certificate renewal audit failed: {error:#}");
+        Default::default()
+    });
+    Ok(pass
+        .certificates
+        .into_iter()
+        .map(|held| CertificateReport {
+            schema: CERTIFICATE_REPORT_SCHEMA.into(),
+            environment: environment.into(),
+            last_renewal: last.get(&held.instance).cloned(),
+            instance: held.instance,
+            not_before: held.not_before,
+            not_after: held.not_after,
+        })
+        .collect())
 }
 
 /// Whether `identity` is due. A restart-reload workload falls due up to a
@@ -2258,10 +2352,13 @@ mod tests {
         assert!(
             renew_identities(&case.config, ENVIRONMENT, now + 3600)
                 .unwrap()
+                .renewals
                 .is_empty()
         );
         let due = now + 17 * 3600;
-        let renewed = renew_identities(&case.config, ENVIRONMENT, due).unwrap();
+        let renewed = renew_identities(&case.config, ENVIRONMENT, due)
+            .unwrap()
+            .renewals;
         assert_eq!(renewed.len(), 1);
         assert_eq!(renewed[0].instance, "api");
         renewed[0].outcome.as_ref().unwrap();
@@ -2273,6 +2370,7 @@ mod tests {
         assert!(
             renew_identities(&case.config, ENVIRONMENT, due)
                 .unwrap()
+                .renewals
                 .is_empty()
         );
 
@@ -2286,9 +2384,72 @@ mod tests {
         )
         .unwrap();
         let later = due + 17 * 3600;
-        let refused = renew_identities(&case.config, ENVIRONMENT, later).unwrap();
+        let refused = renew_identities(&case.config, ENVIRONMENT, later)
+            .unwrap()
+            .renewals;
         let error = refused[0].outcome.as_ref().unwrap_err();
         assert!(error.contains("verified no identity issuer"), "{error}");
+    }
+
+    /// Each pass audits its attempts on the runtime and reports every
+    /// certificate with the last one: a renewal, then a failure that
+    /// repeats every pass audited once and shown near expiry.
+    #[test]
+    fn renewal_is_audited_on_the_runtime_and_reported() {
+        let mut case = identity_case_reloading("runtime");
+        let verified = case
+            .config
+            .verify(
+                case.release.clone(),
+                ENVIRONMENT,
+                &Expected::target(&case.step),
+            )
+            .unwrap();
+        let held = std::sync::Arc::new(HeldIdentities::default());
+        held.0
+            .lock()
+            .unwrap()
+            .push(verified.request.identity.unwrap());
+        case.config.executors = SoftwareExecutors::with_default(held.clone());
+        let dir = case.config.sealing_dir.clone().unwrap();
+        let due = crate::now_millis() / 1000 + 17 * 3600;
+
+        let [report] = renew_and_audit(&case.config, ENVIRONMENT, due)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let renewed_until = match &report.last_renewal.as_ref().unwrap().outcome {
+            crate::certificate_reports::RenewalOutcome::Renewed { not_after } => *not_after,
+            other => panic!("renewed: {other:?}"),
+        };
+        // The next pass reports the certificate it wrote.
+        let [report] = renew_and_audit(&case.config, ENVIRONMENT, due + 60)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert!(report.not_after >= renewed_until - 60);
+        assert!(!report.status(due + 60).near_expiry);
+
+        // Without the issuer, renewal fails every pass; the audit keeps one
+        // entry, and the report names the failure once near expiry.
+        std::fs::remove_file(dir.join(format!("identity-issuer-{ENVIRONMENT}.json"))).unwrap();
+        let late = report.not_after - 3 * 3600;
+        renew_and_audit(&case.config, ENVIRONMENT, late).unwrap();
+        let [report] = renew_and_audit(&case.config, ENVIRONMENT, late + 60)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            crate::renewal_audit::entries(&dir, ENVIRONMENT)
+                .unwrap()
+                .len(),
+            2
+        );
+        let status = report.status(late + 60);
+        assert!(status.near_expiry);
+        assert_eq!(status.expires_at, report.not_after);
+        let failure = status.renewal_failure.unwrap();
+        assert!(failure.contains("verified no identity issuer"), "{failure}");
     }
 
     /// A restart-reload certificate falls due later by its environment's
@@ -2325,9 +2486,12 @@ mod tests {
         assert!(
             renew_identities(&case.config, ENVIRONMENT, due - 1)
                 .unwrap()
+                .renewals
                 .is_empty()
         );
-        let renewed = renew_identities(&case.config, ENVIRONMENT, due).unwrap();
+        let renewed = renew_identities(&case.config, ENVIRONMENT, due)
+            .unwrap()
+            .renewals;
         renewed[0].outcome.as_ref().unwrap();
         assert_ne!(held.0.lock().unwrap()[0].certificate, issued.certificate);
     }

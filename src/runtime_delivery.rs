@@ -985,6 +985,20 @@ pub struct RuntimeHostRecordsResponse {
     pub stored: Vec<String>,
 }
 
+/// The workload certificates a runtime's targets hold, each with the last
+/// renewal attempt it audited (ADR 0046 §3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeCertificatesReport {
+    pub certificates: Vec<crate::certificate_reports::CertificateReport>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RuntimeCertificatesResponse {
+    /// Instances whose report was further on than the stored one.
+    pub stored: Vec<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeDeliveryError {
     #[error("missing bearer token")]
@@ -1845,6 +1859,29 @@ impl RuntimeDeliveryOperations {
             .await
             .map_err(|error| RuntimeDeliveryError::InvalidRequest(format!("{error:#}")))?;
         Ok(RuntimeHostRecordsResponse { stored })
+    }
+
+    /// Admit the workload certificate state a runtime reports for its
+    /// environment (ADR 0046 §3), which `status` shows.
+    pub async fn report_certificates(
+        &self,
+        token: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
+        environment: &str,
+        report: &RuntimeCertificatesReport,
+    ) -> Result<RuntimeCertificatesResponse, RuntimeDeliveryError> {
+        let caller = caller.into();
+        let identity = self.admit_work(token, &caller, environment).await?;
+        self.note_activity(&identity, environment, caller.version, Activity::Inventory);
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "environment state unavailable".into(),
+            ));
+        };
+        let stored = crate::certificate_reports::admit(&mut ctx, environment, &report.certificates)
+            .await
+            .map_err(|error| RuntimeDeliveryError::InvalidRequest(format!("{error:#}")))?;
+        Ok(RuntimeCertificatesResponse { stored })
     }
 
     pub async fn report_inventory(

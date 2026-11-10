@@ -1536,6 +1536,11 @@ pub struct StatusRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub spec_drift: Option<crate::spec_drift::SpecDriftView>,
+    /// The instance's workload certificate, as its runtime last reported
+    /// it (ADR 0046 §3). Omitted when none was reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub certificate: Option<crate::certificate_reports::CertificateStatus>,
 }
 
 /// Unmet contract named by a dependency hold.
@@ -1965,6 +1970,8 @@ pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
 
 async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<StatusRow>> {
     let subscriptions = list_subscriptions(ctx, env_obj).await?;
+    let certificates = crate::certificate_reports::reported(ctx, &env_obj.name).await?;
+    let now_secs = crate::now_millis() / 1000;
     let mut rows = Vec::new();
     for sub in subscriptions {
         let product = sub.product;
@@ -2049,6 +2056,9 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             delivery_hold,
             dependency_hold,
             spec_drift: spec_drift_from_object(env_obj, &applied_key),
+            certificate: certificates
+                .get(&applied_key)
+                .map(|report| report.status(now_secs)),
         });
     }
     rows.sort_by(|a, b| {
@@ -4117,6 +4127,7 @@ mod tests {
             overlay_stale: false,
             delivery_hold: None,
             spec_drift: None,
+            certificate: None,
             dependency_hold: Some(StatusDependencyHold {
                 release_id: "tenkai:release:app@1.0.0".into(),
                 contracts: vec![UnmetContract {
