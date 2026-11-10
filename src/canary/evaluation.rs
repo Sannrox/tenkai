@@ -446,6 +446,7 @@ mod tests {
             sealed: Vec::new(),
             restore: None,
             rewrap: None,
+            issuer: None,
         }];
         let content_id = plan_content_id(environment, created_at, &steps);
         let id = plan_id(environment, created_at, &content_id);

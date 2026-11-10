@@ -1680,6 +1680,11 @@ pub struct EnvironmentInspectReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub sealed_recovery_warning: Option<String>,
+    /// The workload identity issuer, its requested generation and its
+    /// uploaded candidate (ADR 0046 §2), when any is set. Never a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub identity_issuer: Option<crate::identity_issuer::IssuerStatus>,
 }
 
 /// Inspect copy of declared/derived criticality. Lives here so this module
@@ -2183,6 +2188,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             criticality,
             latest_failures: Vec::new(),
             sealed_recovery_warning: None,
+            identity_issuer: None,
         });
     }
     Ok(fleet_status_from_inspects(reports))
@@ -2253,6 +2259,8 @@ async fn inspect_environment_base(
     let latest_failures = crate::deployment_history::latest_failures(ctx, env).await?;
     let sealed_recovery_warning =
         crate::sealed_secret::list_from_object(&env_obj, false)?.recovery_warning();
+    let identity_issuer =
+        Some(crate::identity_issuer::status(&env_obj)?).filter(|status| !status.is_empty());
     Ok(EnvironmentInspectReport {
         name: env_obj.name,
         id: env_obj.id,
@@ -2283,6 +2291,7 @@ async fn inspect_environment_base(
         criticality,
         latest_failures,
         sealed_recovery_warning,
+        identity_issuer,
     })
 }
 
@@ -4564,6 +4573,7 @@ mod tests {
                 sealed: Vec::new(),
                 restore: None,
                 rewrap: None,
+                issuer: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,
@@ -4804,6 +4814,7 @@ mod tests {
                 sealed: Vec::new(),
                 restore: None,
                 rewrap: None,
+                issuer: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,
@@ -4931,6 +4942,7 @@ mod tests {
                 sealed: Vec::new(),
                 restore: None,
                 rewrap: None,
+                issuer: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,

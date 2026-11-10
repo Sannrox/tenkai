@@ -81,20 +81,30 @@ inside the environment's runtimes. The server stores the issuer's public
 certificate and the key sealed to the environment's recipients exactly like a
 sealed value (ADR 0045 §1), never the key itself.
 
-- **Creation and rotation are plan steps.** A step names the issuer's public
-  key fingerprint and is approved like any other step. The runtime that
-  claims it verifies the plan itself (ADR 0045 §4), generates the key, and
-  submits the sealed key and the public certificate. A runtime only ever
+- **Creation and rotation are plan steps over a prepared candidate.** A
+  step cannot name the fingerprint of a key that does not exist yet, so the
+  key is generated first: on request, a runtime generates a candidate key,
+  seals it to its own sealing key only, and submits the sealed key, the
+  public certificate and the fingerprint. That needs no approval, because a
+  candidate is unused until a step names it. The step then names the
+  candidate's fingerprint and is approved like any other step. The runtime
+  that claims it verifies the plan itself (ADR 0045 §4), opens the key, and
+  refuses it unless its fingerprint is the approved one. A runtime only ever
   issues from a key whose fingerprint matches the latest approved issuer
   step. A key the server supplies is therefore useless to it: the server
-  cannot get its own key approved without the approvers' keys.
+  cannot get its own key approved without the approvers' keys. Sealing to
+  the generating runtime alone keeps the server from naming a recipient it
+  controls; other runtimes and the recovery key get the key through the
+  approved re-wrap step below.
 - **One issuer per generation.** The issuer record carries a generation, and
   the server accepts a new issuer only as a compare-and-set on the previous
-  generation, in the same transaction that records the step outcome. Two
-  runtimes that race to create the first issuer produce one record; the loser
-  discards its key and adopts the winner's through its wrap.
+  generation, under the environment lease before it records the step
+  outcome. Two runtimes that race to submit the first candidate produce one
+  record; the loser discards its key and receives the winner's through a
+  re-wrap.
 - **New runtimes** receive the issuing key through the approved re-wrap step
-  of ADR 0045 §5. A runtime with no wrap for the current issuer refuses to
+  of ADR 0045 §5, planned on its own: the runtime that opens the issuing key
+  need not open the sealed values. A runtime with no wrap for the current issuer refuses to
   issue with a named, retryable reason.
 - **Losing every recipient** loses the issuing key. A new runtime cannot
   recreate it silently: creating a replacement is the same approved step,

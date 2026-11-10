@@ -759,6 +759,7 @@ mod tests {
                 workdir: "/tmp".into(),
             }),
             rewrap: None,
+            issuer: None,
         }
     }
 

@@ -174,6 +174,42 @@ and only for `helm` releases: an immutable Secret named
 chart as `tenkai.secrets.<secret>.name`
 ([built-in executors](run-tenkai-server.md)). Host targets follow (#1125).
 
+#### Identity issuer
+
+An environment has at most one workload identity issuer (ADR 0046 §2). Its
+key exists unsealed only in the environment's runtimes; the server keeps its
+CA certificate and the key sealed to the runtimes and the recovery key.
+Creating and rotating it takes two steps:
+
+```sh
+tenkaictl --target remote identity-issuer prepare prod --generation 13
+tenkaictl --target remote env inspect prod
+tenkaictl --target remote identity-issuer plan prod --generation 13
+tenkaictl --target remote identity-issuer rewrap prod --recipient sha256:<hex> --generation 14
+```
+
+- `prepare` asks for a candidate of the next generation. A runtime that
+  names `workload_identity` generates it on its next poll, seals it to its
+  own key only, and uploads its fingerprint, certificate and sealed key.
+  `env inspect` (`identity_issuer`) and `status` show the candidate.
+- `plan` builds one step that names the candidate's fingerprint. Approve it
+  like any plan. The runtime that runs it refuses a key with any other
+  fingerprint, and the server records the issuer only if its generation is
+  the next one, so a stale plan fails and the issuer stays.
+- `rewrap` wraps the issuer key for one more recipient: another runtime's
+  key or the recovery key. Run it after activation; until then only the
+  generating runtime can open the issuer. A runtime enrolled later can use
+  the issuer only after that plan is approved. It is separate from
+  `secret rewrap`, since the runtime that opens the issuer need not open the
+  sealed values.
+- Revoking a runtime drops its wrap. An issuer with no wrap left is lost:
+  `status` says so, and a new one is prepared, planned and rotated in.
+  An issuer plan whose key no unrevoked runtime holds, or one made before
+  the issuer rotated past it, is blocked when the next runtime polls, so it
+  does not hold up later plans. Plan it again.
+- An environment without a separate runtime cannot hold the key; its plans
+  with an issuer step are refused.
+
 `env add --connectivity <class>` also sets the connectivity class.
 
 ### Criticality

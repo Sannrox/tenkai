@@ -392,6 +392,7 @@ fn partition_local_inspect(name: &str) -> EnvironmentInspectReport {
         criticality: None,
         latest_failures: Vec::new(),
         sealed_recovery_warning: None,
+        identity_issuer: None,
     }
 }
 
@@ -784,6 +785,7 @@ mod tests {
             criticality: None,
             latest_failures: Vec::new(),
             sealed_recovery_warning: None,
+            identity_issuer: None,
         }
     }
 

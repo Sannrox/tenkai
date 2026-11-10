@@ -488,6 +488,7 @@ mod tests {
             criticality: None,
             latest_failures: Vec::new(),
             sealed_recovery_warning: None,
+            identity_issuer: None,
         };
         let behind = EnvironmentInspectReport {
             name: "beta".into(),
@@ -534,6 +535,7 @@ mod tests {
             criticality: None,
             latest_failures: Vec::new(),
             sealed_recovery_warning: None,
+            identity_issuer: None,
         };
         let unhealthy = EnvironmentInspectReport {
             name: "gamma".into(),
@@ -580,6 +582,7 @@ mod tests {
             criticality: None,
             latest_failures: Vec::new(),
             sealed_recovery_warning: None,
+            identity_issuer: None,
         };
         let empty = EnvironmentInspectReport {
             name: "delta".into(),
@@ -612,6 +615,7 @@ mod tests {
             criticality: None,
             latest_failures: Vec::new(),
             sealed_recovery_warning: None,
+            identity_issuer: None,
         };
         let report = fleet_status_from_inspects(vec![behind, empty, unhealthy, current]);
         assert_eq!(report.environment_count, 4);
@@ -684,6 +688,7 @@ mod tests {
             criticality: None,
             latest_failures: Vec::new(),
             sealed_recovery_warning: None,
+            identity_issuer: None,
         };
         let report = fleet_status_from_inspects(vec![stale]);
         assert_eq!(report.environments[0].posture, "behind");

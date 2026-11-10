@@ -185,6 +185,7 @@ mod tests {
                             .into(),
                 }],
                 rewrap: None,
+                issuer: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,

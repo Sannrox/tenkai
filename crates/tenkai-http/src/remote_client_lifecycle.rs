@@ -514,6 +514,74 @@ impl RemoteClient {
         .await
     }
 
+    /// Ask `environment`'s runtimes for an identity issuer candidate of the
+    /// next generation (ADR 0046 §2).
+    pub async fn prepare_identity_issuer(
+        &self,
+        environment: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.identity_issuer(environment, "prepare", expected_generation)
+            .await
+    }
+
+    /// Ask for a plan that activates `environment`'s uploaded identity
+    /// issuer candidate (ADR 0046 §2).
+    pub async fn plan_identity_issuer(
+        &self,
+        environment: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.identity_issuer(environment, "plan", expected_generation)
+            .await
+    }
+
+    /// Ask for a plan that wraps `environment`'s identity issuer key for the
+    /// recipient key `recipient` (ADR 0046 §2).
+    pub async fn rewrap_identity_issuer(
+        &self,
+        environment: &str,
+        recipient: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/identity-issuer/rewrap"),
+            Some(&tenkai::management_lifecycle::SealedRewrapRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Plan
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                recipient: recipient.to_string(),
+                recovered: Default::default(),
+            }),
+        )
+        .await
+    }
+
+    async fn identity_issuer(
+        &self,
+        environment: &str,
+        action: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/identity-issuer/{action}"),
+            Some(&tenkai::management_lifecycle::PlanRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Plan
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+            }),
+        )
+        .await
+    }
+
     /// Sealed keys of `environment`. `with_sealed` also returns each
     /// value's ciphertext and wraps, which `secret recover` opens offline.
     pub async fn list_sealed_secrets(

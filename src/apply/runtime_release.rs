@@ -40,6 +40,12 @@ pub(crate) async fn runtime_release(
             step.id
         )));
     }
+    if step.issuer.is_some() {
+        return Err(refused(anyhow!(
+            "step {} is an identity issuer step and has no release",
+            step.id
+        )));
+    }
     if step.rewrap.is_some() {
         if restore {
             return Err(refused(anyhow!(

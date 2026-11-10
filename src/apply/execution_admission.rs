@@ -111,6 +111,14 @@ pub(super) async fn admit(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
             step.id
         );
     }
+    // The issuing key exists unsealed only inside runtimes (ADR 0046 §8).
+    if let Some(step) = plan.steps.iter().find(|step| step.issuer.is_some()) {
+        anyhow::bail!(
+            "plan {} step {} activates an identity issuer; only an environment runtime that names workload_identity runs it",
+            plan.id,
+            step.id
+        );
+    }
     inspect(ctx, plan)
         .await?
         .map_err(|rejection| anyhow::anyhow!("plan {} {rejection}", plan.id))
@@ -310,6 +318,7 @@ mod tests {
                 sealed: Vec::new(),
                 restore: None,
                 rewrap: None,
+                issuer: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,
@@ -538,6 +547,7 @@ mod tests {
                 sealed: Vec::new(),
                 restore: None,
                 rewrap: None,
+                issuer: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,
