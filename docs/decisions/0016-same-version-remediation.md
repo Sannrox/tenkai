@@ -87,3 +87,13 @@ rejected.
 stores but cannot open, delivered by the environment runtime through a plan.
 A sealed value's digest joins the configuration digest, so rotation emits the
 same Restart as an overlay change. Plain secret overlays remain rejected.
+
+## Amendment (2026-11-10)
+
+[ADR 0046](0046-workload-identity-and-peer-policy.md) §3 allows one restart
+that is not an approved plan: when a runtime renews a workload certificate
+for a release with `reload = "restart"`, it finishes with a rolling restart of
+the same version and configuration, honouring `min_available`. The restart
+only loads trust an approved plan already granted and is recorded as an
+attempt. Every other restart remains an approved plan, and restarts on a
+timer remain rejected.
