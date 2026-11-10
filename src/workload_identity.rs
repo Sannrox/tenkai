@@ -8,6 +8,8 @@
 //! issues a fresh key and certificate with [`issue`]. The target receives
 //! [`IssuedIdentity::files`]; the server never sees the key.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +73,36 @@ pub struct IdentityGrant {
     /// The issuer generation and key fingerprint that sign it.
     pub issuer_generation: u64,
     pub issuer_fingerprint: String,
+    /// The peers the dependency bindings allow (ADR 0046 §5). Omitted when
+    /// there are none, so a grant without peers keeps its digest.
+    #[serde(default, skip_serializing_if = "Peers::is_empty")]
+    pub peers: Peers,
+}
+
+/// Which identities one instance may accept, per contract, as the plan's
+/// bindings give them (ADR 0046 §5). It names identities only: no keys,
+/// secrets or endpoints.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Peers {
+    /// Contract the instance requires → the provider it accepts as server.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub servers: BTreeMap<String, String>,
+    /// Contract the instance provides → the dependents it accepts as clients.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub clients: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Peers {
+    pub fn is_empty(&self) -> bool {
+        self.servers.is_empty() && self.clients.is_empty()
+    }
+}
+
+/// The identity of `instance` in `environment`: the URI its certificate
+/// carries.
+pub fn uri(environment: &str, instance: &str) -> String {
+    format!("tenkai://{environment}/{instance}")
 }
 
 /// Check `[deploy.identity]` at publish and at the runtime. A release that
@@ -114,12 +146,13 @@ pub fn grant(
     dns_names.sort();
     dns_names.dedup();
     Ok(IdentityGrant {
-        uri: format!("tenkai://{environment}/{instance}"),
+        uri: uri(environment, instance),
         dns_names,
         certificate: section.certificate,
         reload: section.reload,
         issuer_generation: issuer.generation,
         issuer_fingerprint: issuer.fingerprint.clone(),
+        peers: Peers::default(),
     })
 }
 

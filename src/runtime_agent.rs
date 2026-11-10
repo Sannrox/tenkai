@@ -946,7 +946,11 @@ impl RuntimeClient {
         if self.workload_identity() {
             request = request.header(
                 "x-tenkai-runtime-capabilities",
-                crate::runtime_delivery::WORKLOAD_IDENTITY_CAPABILITY,
+                format!(
+                    "{},{}",
+                    crate::runtime_delivery::WORKLOAD_IDENTITY_CAPABILITY,
+                    crate::runtime_delivery::PEER_GRANTS_CAPABILITY
+                ),
             );
         }
         decode_response(request.send().await?, "pulling runtime work").await

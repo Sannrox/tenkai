@@ -672,6 +672,7 @@ mod tests {
                 reload: Reload::Runtime,
                 issuer_generation: 3,
                 issuer_fingerprint: "sha256:cc".into(),
+                peers: Default::default(),
             },
             certificate: certificate.into(),
             key: zeroize::Zeroizing::new("key".into()),

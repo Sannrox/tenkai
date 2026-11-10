@@ -1,7 +1,7 @@
 # ADR 0046: Workload identity and peer policy from dependency bindings
 
 - Status: Accepted
-- Date: 2026-11-06 (revised 2026-11-07; §8 revised 2026-11-10)
+- Date: 2026-11-06 (revised 2026-11-07; §5 and §8 revised 2026-11-10)
 - Issue: [#1023](https://github.com/Sannrox/tenkai/issues/1023)
 - Owner: Tenkai maintainers
 - Amends: [ADR 0016](0016-same-version-remediation.md) (restart on certificate renewal)
@@ -188,8 +188,10 @@ The dependency document (ADR 0043 §6) gains, for each contract, the
 provider's identity, and for each instance, the identities allowed to call
 it. It still carries no keys, secrets or endpoints. The document is part of
 the plan the runtime verifies, so a server cannot add a peer the approved
-bindings do not contain. Changing a binding re-renders both sides in the same
-plan, so a withdrawn binding withdraws its grant.
+bindings do not contain. Changing a binding grants the new edge on both sides
+in the same plan. A provider keeps admitting a caller that is rebound or
+removed until that caller has moved, so the plan never refuses a running
+caller; the next plan withdraws the stale grant.
 
 ### 6. Products enforce, Tenkai does not proxy
 

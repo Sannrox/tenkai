@@ -353,6 +353,17 @@ pub async fn reconcile_deployment(
         }
         _ => Vec::new(),
     };
+    // Confirming the release already recorded keeps the peers it was
+    // granted; a different or no release has no known grant.
+    let unchanged = deployed.is_some()
+        && object
+            .properties
+            .get(&format!("deployed.{product}"))
+            .map(String::as_str)
+            == deployed;
+    let kept_peers = unchanged
+        .then(|| crate::dependency_document::applied_peers(&object, product))
+        .filter(|peers| !peers.is_empty());
     update_reconciled_deployment_object(
         ctx,
         &mut object,
@@ -363,6 +374,7 @@ pub async fn reconcile_deployment(
         observed_at,
     )
     .await?;
+    crate::dependency_document::stamp(ctx, &mut object, product, kept_peers.as_ref()).await?;
     ctx.put_with_provider_events(object, &provider_events, &feedback)
         .await?;
     Ok(match deployed {
@@ -409,7 +421,6 @@ async fn update_reconciled_deployment_object(
         .insert(format!("deployment_health.{key}"), "healthy".into());
     object.properties.remove(&format!("deployment_error.{key}"));
     stamp_applied_overlays(object, product, instance, sealed);
-    crate::dependency_document::stamp(ctx, object, key).await?;
     object.properties.remove(&format!("deployed_prev.{key}"));
     for prefix in [
         "deployment_unknown_plan.",
@@ -458,6 +469,15 @@ pub(crate) async fn update_runtime_deployments_object(
             observed_at,
         )
         .await?;
+        if step.delivers_dependencies() {
+            crate::dependency_document::stamp(
+                ctx,
+                object,
+                step.instance_name(),
+                step.granted_peers(),
+            )
+            .await?;
+        }
         // As server execution records it, so a runtime-run component rolls
         // back to the version it replaced (#685). A same-version step (a
         // restart) replaced nothing and keeps the version recorded before.
@@ -523,7 +543,9 @@ pub(crate) async fn record_deployed(
         .insert(format!("deployment_health.{key}"), "healthy".into());
     object.properties.remove(&format!("deployment_error.{key}"));
     stamp_applied_overlays(&mut object, product, instance, Some(&step.sealed));
-    crate::dependency_document::stamp(ctx, &mut object, key).await?;
+    if step.delivers_dependencies() {
+        crate::dependency_document::stamp(ctx, &mut object, key, step.granted_peers()).await?;
+    }
     object.updated = crate::now_millis();
     guarded_update(ctx, lease, object).await
 }
@@ -726,20 +748,26 @@ pub(crate) async fn record_deployment_observation(
         }
         if observation.status == "succeeded" {
             match observation.transition {
-                DeploymentTransition::Deployed { .. } | DeploymentTransition::Refreshed => {
+                DeploymentTransition::Deployed { .. } | DeploymentTransition::Refreshed
+                    if observation.step.delivers_dependencies() =>
+                {
                     crate::dependency_document::stamp(
                         ctx,
                         environment,
                         observation.step.instance_name(),
+                        observation.step.granted_peers(),
                     )
                     .await?;
                 }
                 DeploymentTransition::Removed { .. } => {
-                    environment.properties.remove(&format!(
-                        "{}{}",
+                    for prefix in [
                         crate::dependency_document::APPLIED_PROPERTY_PREFIX,
-                        observation.step.instance_name()
-                    ));
+                        crate::dependency_document::APPLIED_PEERS_PREFIX,
+                    ] {
+                        environment
+                            .properties
+                            .remove(&format!("{prefix}{}", observation.step.instance_name()));
+                    }
                 }
                 _ => {}
             }
@@ -975,6 +1003,7 @@ fn transition_deployment(
                 "deployment_health",
                 "deployment_error",
                 "applied_dependencies",
+                "applied_peers",
                 "applied_config",
                 "applied_spec",
                 "spec_drift",

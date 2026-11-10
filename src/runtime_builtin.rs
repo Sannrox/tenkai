@@ -910,6 +910,10 @@ impl BuiltinConfig {
         request.remove_owned_secrets = true;
         request.identity =
             self.workload_identity(&manifest, release.identity_issuer, environment, expected)?;
+        crate::dependency_document::check_peers(
+            &request.dependency_document,
+            expected.identity.map(|grant| &grant.peers),
+        )?;
         let replaced_executor = match release.replaces {
             None => None,
             Some(replaced) => Some(match replaced.executor {
@@ -961,8 +965,12 @@ impl BuiltinConfig {
             ),
         };
         let issuer = issuer.context("the server sent no identity issuer for the step")?;
-        let computed =
-            crate::workload_identity::grant(section, environment, expected.instance, &issuer)?;
+        // Peers come from the approved bindings, not the manifest; the
+        // dependency document is checked against them.
+        let computed = crate::workload_identity::IdentityGrant {
+            peers: grant.peers.clone(),
+            ..crate::workload_identity::grant(section, environment, expected.instance, &issuer)?
+        };
         if &computed != grant {
             bail!(
                 "the plan step's workload certificate grant ({}, {:?}) is not what the signed manifest gives ({}, {:?}) with the identity issuer the server sent",
@@ -1491,6 +1499,8 @@ fn renew_one(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use super::*;
     use crate::host_apply::fixture::{HostFixture, key, sign_release_with};
     use crate::runtime_delivery::RuntimeReleaseEntry;
@@ -1632,6 +1642,12 @@ mod tests {
             Some(crate::workload_identity::grant(&section, ENVIRONMENT, "api", &issuer).unwrap());
         case.config.sealing_dir = Some(sealing);
         case.release.identity_issuer = Some(issuer);
+        // A step with a grant always delivers a document, here with no peers.
+        case.release.request.dependency_document = crate::dependency_document::json_with_peers(
+            "",
+            &crate::workload_identity::Peers::default(),
+        )
+        .unwrap();
         case
     }
 
@@ -1655,6 +1671,37 @@ mod tests {
         let error = refusal(&case, case.release.clone());
         assert!(
             error.contains("is not what the signed manifest gives"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_dependency_document_with_a_peer_the_approved_bindings_lack_is_refused() {
+        let mut case = identity_case();
+        let caller = crate::workload_identity::uri(ENVIRONMENT, "app");
+        case.step.identity.as_mut().unwrap().peers.clients =
+            BTreeMap::from([("database".into(), BTreeSet::from([caller.clone()]))]);
+        let document = |callers: &[&str]| {
+            serde_json::json!({
+                "version": 1,
+                "contracts": {},
+                "callers": { "database": callers },
+            })
+            .to_string()
+        };
+        let mut release = case.release.clone();
+        release.request.dependency_document = document(&[&caller]);
+        case.config
+            .verify(release, ENVIRONMENT, &Expected::target(&case.step))
+            .unwrap();
+
+        // The server adds a caller no approved binding gives.
+        let mut release = case.release.clone();
+        let intruder = crate::workload_identity::uri(ENVIRONMENT, "intruder");
+        release.request.dependency_document = document(&[&caller, &intruder]);
+        let error = refusal(&case, release);
+        assert!(
+            error.contains("names peers the plan step does not grant"),
             "{error}"
         );
     }
