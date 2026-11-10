@@ -459,11 +459,11 @@ mod tests {
     /// against SoftHSM in CI.
     #[test]
     fn a_revocation_list_signed_with_a_token_key_verifies() {
-        let Some((module, token)) = crate::pkcs11_provider::next_software_token() else {
+        let Some((module, token)) = tenkai_keys::pkcs11::next_software_token() else {
             return;
         };
         let pin = temp_dir().join("pin");
-        std::fs::write(&pin, crate::pkcs11_provider::TEST_USER_PIN).unwrap();
+        std::fs::write(&pin, tenkai_keys::pkcs11::TEST_USER_PIN).unwrap();
         {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&pin, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -471,7 +471,7 @@ mod tests {
         let minted = crate::signer::Pkcs11Signer::provision(
             &module,
             &token,
-            crate::pkcs11_provider::TEST_USER_PIN,
+            tenkai_keys::pkcs11::TEST_USER_PIN,
             "revocation-authority",
         )
         .unwrap();

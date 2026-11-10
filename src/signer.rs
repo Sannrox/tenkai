@@ -527,13 +527,13 @@ pub struct Pkcs11Signer {
     key_id: String,
     token_label: String,
     key_label: String,
-    _claim: crate::pkcs11_provider::TokenClaim,
+    _claim: tenkai_keys::pkcs11::TokenClaim,
 }
 
 impl Pkcs11Signer {
     fn from_session(
         session: Session,
-        claim: crate::pkcs11_provider::TokenClaim,
+        claim: tenkai_keys::pkcs11::TokenClaim,
         token_label: &str,
         key_label: &str,
         private: ObjectHandle,
@@ -763,16 +763,16 @@ fn connect(
     token_label: &str,
     pin: &str,
     key_label: &str,
-) -> Result<(Session, crate::pkcs11_provider::TokenClaim)> {
+) -> Result<(Session, tenkai_keys::pkcs11::TokenClaim)> {
     validate_token_field("token label", token_label)?;
     // Claimed per key, so families with different keys on one token never
     // refuse each other.
     let purpose = format!("signer:{key_label}");
-    let claim = crate::pkcs11_provider::claim_token_for(module, token_label, &purpose)
+    let claim = tenkai_keys::pkcs11::claim_token_for(module, token_label, &purpose)
         .map_err(|_| anyhow::anyhow!("PKCS#11 token {token_label} is already in use"))?;
-    let pkcs11 = crate::pkcs11_provider::load_pkcs11(module)
+    let pkcs11 = tenkai_keys::pkcs11::load_pkcs11(module)
         .map_err(|_| anyhow::anyhow!("loading PKCS#11 module {}", module.display()))?;
-    let slot = crate::pkcs11_provider::slot_with_label(&pkcs11, token_label)
+    let slot = tenkai_keys::pkcs11::slot_with_label(&pkcs11, token_label)
         .map_err(|_| anyhow::anyhow!("PKCS#11 token {token_label} was not found"))?;
     let session = pkcs11
         .open_rw_session(slot)
@@ -1119,7 +1119,6 @@ mod tests {
     }
     use super::*;
     use crate::key_provider::{KeyProviderKind, KeyProviderSection, SignerSection};
-    use crate::pkcs11_provider::{Pkcs11KeyProvider, TEST_USER_PIN, next_software_token};
     use crate::release_signing::{
         Provenance, ReleaseStatement, TRUST_ROOT_VERSION, TrustRoots, TrustedSigner, verify_release,
     };
@@ -1128,6 +1127,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::OpenOptionsExt as _;
+    use tenkai_keys::pkcs11::{Pkcs11KeyProvider, TEST_USER_PIN, next_software_token};
 
     fn production(kind: SignerKind) -> DeployProfile {
         DeployProfile {

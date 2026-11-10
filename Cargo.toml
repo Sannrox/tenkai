@@ -14,6 +14,7 @@ description = "Local-first, constraint-based delivery control plane backed by se
 
 [dependencies]
 tenkai-wire = { path = "crates/tenkai-wire", version = "0.7.1" }
+tenkai-keys = { path = "crates/tenkai-keys", version = "0.7.1", features = ["kmip", "pkcs11"] }
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "tls-ring", "tls-webpki-roots"] }
 tonic-prost = { version = "0.14", default-features = false }
 prost = { version = "0.14", default-features = false, features = ["derive", "std"] }
@@ -66,6 +67,7 @@ default = []
 test-support = []
 
 [dev-dependencies]
+tenkai-keys = { path = "crates/tenkai-keys", features = ["test-support"] }
 tokio = { version = "1", default-features = false, features = ["test-util"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 tower = { version = "0.5", features = ["util"] }

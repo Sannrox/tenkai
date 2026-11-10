@@ -44,7 +44,10 @@ struct ProviderInner {
     dek_revoked: HashSet<String>,
 }
 
-pub(crate) struct TokenClaim {
+/// In-process claim on one (module, token, purpose). Tenkai's signer and runner
+/// keys take claims through the same table, so a token is never driven by two
+/// owners in one process.
+pub struct TokenClaim {
     key: String,
 }
 
@@ -65,7 +68,7 @@ pub(crate) fn claim_token(module: &Path, token_label: &str) -> Result<TokenClaim
     claim_token_for(module, token_label, "key-provider")
 }
 
-pub(crate) fn claim_token_for(
+pub fn claim_token_for(
     module: &Path,
     token_label: &str,
     purpose: &str,
@@ -600,7 +603,8 @@ fn random_bytes<const N: usize>() -> Result<[u8; N], KeyError> {
     Ok(bytes)
 }
 
-pub(crate) fn load_pkcs11(module: &Path) -> Result<Pkcs11, KeyError> {
+/// Load and initialize a PKCS#11 module once per process.
+pub fn load_pkcs11(module: &Path) -> Result<Pkcs11, KeyError> {
     static LIBRARY: OnceLock<Mutex<HashMap<PathBuf, Pkcs11>>> = OnceLock::new();
     let key = std::fs::canonicalize(module).unwrap_or_else(|_| module.to_path_buf());
     let mut guard = LIBRARY
@@ -619,7 +623,8 @@ pub(crate) fn load_pkcs11(module: &Path) -> Result<Pkcs11, KeyError> {
     Ok(pkcs11)
 }
 
-pub(crate) fn slot_with_label(pkcs11: &Pkcs11, token_label: &str) -> Result<Slot, KeyError> {
+/// Find the slot whose token carries `token_label`.
+pub fn slot_with_label(pkcs11: &Pkcs11, token_label: &str) -> Result<Slot, KeyError> {
     let slots = pkcs11
         .get_slots_with_token()
         .map_err(|_| KeyError::WrapFailed)?;
@@ -649,12 +654,13 @@ pub fn software_token_module() -> Option<PathBuf> {
         .find(|path| path.exists())
 }
 
-#[cfg(test)]
-pub(crate) const TEST_USER_PIN: &str = "1234";
-#[cfg(test)]
+/// User PIN of every token in the software-token pool.
+#[cfg(feature = "test-support")]
+pub const TEST_USER_PIN: &str = "1234";
+#[cfg(feature = "test-support")]
 const TEST_SO_PIN: &str = "1234";
 
-#[cfg(test)]
+#[cfg(feature = "test-support")]
 fn softhsm_conf() -> &'static PathBuf {
     static CONF: OnceLock<PathBuf> = OnceLock::new();
     CONF.get_or_init(|| {
@@ -677,15 +683,17 @@ fn softhsm_conf() -> &'static PathBuf {
     })
 }
 
-#[cfg(test)]
+#[cfg(feature = "test-support")]
 struct SoftwareTokenPool {
     module: PathBuf,
     labels: Vec<String>,
     next: usize,
 }
 
-#[cfg(test)]
-pub(crate) fn next_software_token() -> Option<(PathBuf, String)> {
+/// Next fresh software token `(module, label)` from a per-process pool, or
+/// `None` when no software-token module is installed (required in CI).
+#[cfg(feature = "test-support")]
+pub fn next_software_token() -> Option<(PathBuf, String)> {
     use std::process::Command;
     static POOL: OnceLock<Mutex<SoftwareTokenPool>> = OnceLock::new();
     let mut pool = POOL

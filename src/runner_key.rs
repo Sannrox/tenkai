@@ -657,9 +657,9 @@ fn connect(
     mint: bool,
     role: P256Role,
 ) -> Result<(Session, ObjectHandle, Vec<u8>)> {
-    let pkcs11 = crate::pkcs11_provider::load_pkcs11(&store.module)
+    let pkcs11 = tenkai_keys::pkcs11::load_pkcs11(&store.module)
         .map_err(|_| anyhow::anyhow!("loading PKCS#11 module {}", store.module.display()))?;
-    let slot = crate::pkcs11_provider::slot_with_label(&pkcs11, &store.token_label)
+    let slot = tenkai_keys::pkcs11::slot_with_label(&pkcs11, &store.token_label)
         .map_err(|_| anyhow::anyhow!("PKCS#11 token {} was not found", store.token_label))?;
     let session = pkcs11
         .open_rw_session(slot)
@@ -948,14 +948,14 @@ mod tests {
 
     #[test]
     fn a_hardware_key_cannot_be_read_out_of_the_store() {
-        let Some((module, token_label)) = crate::pkcs11_provider::next_software_token() else {
+        let Some((module, token_label)) = tenkai_keys::pkcs11::next_software_token() else {
             return;
         };
         let dir = temp_dir();
         let store = HardwareStore {
             module,
             token_label,
-            pin: crate::pkcs11_provider::TEST_USER_PIN.into(),
+            pin: tenkai_keys::pkcs11::TEST_USER_PIN.into(),
             key_label: format!("runner-{}", uuid::Uuid::new_v4().simple()),
         };
         let key = RunnerKey::open_or_generate_with(&dir, Some(&store)).unwrap();
