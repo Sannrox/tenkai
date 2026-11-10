@@ -88,15 +88,18 @@ pub(crate) enum EnvCommand {
         #[arg(long)]
         generation: Option<u64>,
     },
-    /// Remove a product from an environment's desired state. A deployed host
-    /// release is uninstalled by the next approved plan; other deployed
-    /// releases are refused.
+    /// Remove a product from an environment's desired state. The next
+    /// approved plan removes its deployed release. Refused while another
+    /// subscribed instance depends on it.
     Unsubscribe {
         env: String,
         product: String,
         /// Named instance of the product. Defaults to the product name.
         #[arg(long)]
         instance: Option<String>,
+        /// The recorded version to remove; required while one is recorded.
+        #[arg(long)]
+        version: Option<String>,
         /// Current fencing generation; required with --target remote.
         #[arg(long)]
         generation: Option<u64>,

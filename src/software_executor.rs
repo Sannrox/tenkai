@@ -299,6 +299,17 @@ pub trait SoftwareExecutor: Send + Sync {
         let _ = stop;
         self.restart(request)
     }
+    /// `remove` under an apply lease, stopping like
+    /// [`Self::apply_until_stopped`]. A removal stopped part-way is retried by
+    /// the next approved plan. Default ignores `stop`.
+    fn remove_until_stopped(
+        &self,
+        request: &SoftwareApplyRequest,
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        let _ = stop;
+        self.remove(request)
+    }
     /// Whether this adapter deploys from admitted environment-mirror refs.
     fn consumes_admitted_artifact_pulls(&self) -> bool {
         false

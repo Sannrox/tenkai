@@ -177,9 +177,11 @@ envelopes, which work delivery carries for every plan with a host step.
 Its restore pin has no package (`412`): host releases are never restored
 automatically. A removal's package is the installed release, admitted as
 the server admits a removal: a recalled release can still be removed, and
-neither compatibility nor placement is checked. Only host releases are
-removed by a plan, so a removal of any other release has no package
-(`412`).
+neither compatibility nor placement is checked. The runtime removes it
+through the release's executor, or its `deploy.uninstall` for a `shell`
+release (ADR 0049). A runtime asks for a non-host removal's package with
+`removal: true`; without it the server answers `412`, because an older
+runtime would install the release instead of removing it.
 
 ### Re-wrap steps
 

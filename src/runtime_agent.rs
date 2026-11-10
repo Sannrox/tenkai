@@ -1134,6 +1134,9 @@ impl RuntimeClient {
                 generation,
                 step_id: step.id.clone(),
                 restore,
+                removal: !restore
+                    && step.action == crate::plan::Action::Remove
+                    && step.host.is_none(),
             })
             .send()
             .await?;

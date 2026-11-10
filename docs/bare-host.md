@@ -226,7 +226,8 @@ and never restores a failed one on its own
   apply. The step is a downgrade, so it needs the `rollback` or `downgrade`
   approvals the host approval policy requires.
 - **Uninstall:** `tenkaictl --target remote env unsubscribe edge cluster
-  --generation <generation>`, then plan, approve, and apply. The `uninstall`
+  --version <version> --generation <generation>`, then plan, approve, and
+  apply. The `uninstall`
   command removes the kubeconfig first, then the cluster and all its state,
   including everything running in it. In-cluster releases of the environment
   fail closed from then on.

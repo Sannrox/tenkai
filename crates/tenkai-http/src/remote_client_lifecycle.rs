@@ -204,6 +204,7 @@ impl RemoteClient {
         product: &str,
         expected_generation: u64,
         instance: Option<&str>,
+        expected_version: Option<&str>,
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::DELETE,
@@ -217,6 +218,7 @@ impl RemoteClient {
                 expected_generation,
                 product: product.to_string(),
                 instance: instance.map(str::to_string),
+                expected_version: expected_version.map(str::to_string),
             }),
         )
         .await

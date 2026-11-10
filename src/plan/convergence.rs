@@ -115,9 +115,45 @@ fn failed_target_is_held(
 }
 
 fn product_of_release_id(id: &str) -> Option<&str> {
+    split_release_id(id).map(|(product, _)| product)
+}
+
+/// The product and version a catalog release id names.
+pub(crate) fn split_release_id(id: &str) -> Option<(&str, &str)> {
     id.strip_prefix("tenkai:release:")
         .and_then(|spec| spec.split_once('@'))
-        .map(|(product, _)| product)
+}
+
+/// Refuse a plan removal of `release` that nothing could carry out
+/// (ADR 0049 §1): a release that is not a software product, or a `shell`
+/// release without `deploy.uninstall`. Unsubscribing and planning both ask.
+pub(crate) fn require_removable(
+    executors: &crate::software_executor::SoftwareExecutors,
+    release: &str,
+    manifest: &crate::manifest::Manifest,
+) -> Result<()> {
+    use crate::software_executor::SoftwareExecutorKind;
+    if manifest.product.kind.policy().target() != crate::product_kind::ProductTarget::Software {
+        bail!("{release} is not a software release; a plan removes only software releases");
+    }
+    let shell = match manifest.deploy.executor {
+        Some(SoftwareExecutorKind::Shell) => true,
+        // The process default executor, when one is configured.
+        None => matches!(executors.resolve(None), Ok(None)),
+        Some(_) => false,
+    };
+    if shell
+        && manifest
+            .deploy
+            .uninstall
+            .as_deref()
+            .is_none_or(|command| command.trim().is_empty())
+    {
+        bail!(
+            "{release} runs on the shell executor and declares no deploy.uninstall, so nothing can remove it"
+        );
+    }
+    Ok(())
 }
 
 fn deployed_release_id(
@@ -142,7 +178,7 @@ fn product_for_instance(
 }
 
 /// The stored manifest of a catalog release.
-async fn stored_release_manifest(
+pub(crate) async fn stored_release_manifest(
     ctx: &mut Ctx,
     release: &str,
 ) -> Result<crate::manifest::Manifest> {
@@ -208,6 +244,73 @@ async fn require_same_executor(
     )
 }
 
+/// The removal of `release` from `instance` of `env` when a plan step its
+/// own executor runs removes it (ADR 0049). `None` for a host release, which
+/// is removed from the applier's record, and for a release a plan does not
+/// remove: one that is missing, unreadable, or not a software product.
+async fn removal_of(
+    ctx: &mut Ctx,
+    env: &str,
+    instance: &str,
+    release: &str,
+    deployed: bool,
+) -> Result<Option<PendingChange>> {
+    let Some(manifest) = readable_manifest(ctx, release).await? else {
+        return Ok(None);
+    };
+    if manifest.deploy.executor == Some(crate::software_executor::SoftwareExecutorKind::Host)
+        || manifest.product.kind.policy().target() != crate::product_kind::ProductTarget::Software
+    {
+        return Ok(None);
+    }
+    let Some((product, version)) = split_release_id(release) else {
+        return Ok(None);
+    };
+    // A recalled release can still be removed, as a host release can.
+    let target = pin_release_for_recovery(ctx, release, env).await?;
+    Ok(Some(PendingChange {
+        product: product.to_string(),
+        instance: instance.to_string(),
+        action: Action::Remove,
+        // A retried removal starts from nothing recorded deployed; admission
+        // holds it to the recorded failed target instead.
+        from: deployed.then(|| version.to_string()),
+        to: version.to_string(),
+        release: target,
+        restore: None,
+        kind: manifest.product.kind,
+    }))
+}
+
+/// Whether the failure recorded as `failed_target.{instance}` is this
+/// instance's. A runtime completion of an older server keyed it by product,
+/// so a named instance's failure could sit under the product's name: the
+/// recorded plan's failing step says whose it is. Without that plan the key
+/// is taken as recorded.
+async fn failed_on_instance(
+    ctx: &mut Ctx,
+    env_obj: &crate::pb::sekai::Object,
+    instance: &str,
+    release: &str,
+) -> Result<bool> {
+    let Some(plan_id) = env_obj
+        .properties
+        .get(&format!("failed_target_plan.{instance}"))
+    else {
+        return Ok(true);
+    };
+    if ctx.get(plan_id).await?.is_none() {
+        return Ok(true);
+    }
+    let plan = crate::plan::load(ctx, plan_id).await?;
+    let mut steps = plan
+        .steps
+        .iter()
+        .filter(|step| step.release_id == release)
+        .peekable();
+    Ok(steps.peek().is_none() || steps.any(|step| step.instance_name() == instance))
+}
+
 /// Bind each step of a `host` release to the root-side applier's record for
 /// its product (ADR 0041 section 2). The step installs its target from the
 /// release the record holds, at the record's generation; both are part of
@@ -238,11 +341,10 @@ async fn bind_host_steps(
             continue;
         };
         if manifest.deploy.executor != Some(crate::software_executor::SoftwareExecutorKind::Host) {
+            // Its own executor removes it, on the server or the runtime
+            // (ADR 0049 §1).
             if step.action == Action::Remove {
-                bail!(
-                    "{} is not a host release; only host releases are removed by a plan",
-                    step.release_id
-                );
+                require_removable(executors, &step.release_id, &manifest)?;
             }
             bound.push(step);
             continue;
@@ -827,6 +929,41 @@ async fn compute_snapshot_with_policy(
             .get(&format!("deployment_health.{instance}"))
             .is_some_and(|health| health == "unknown")
     };
+    // A software product of any other executor the environment no longer
+    // subscribes to is removed by an approved step its own executor runs
+    // (ADR 0049): the deployed release, or the target of a failed step when
+    // nothing is deployed.
+    for (key, version) in &env_obj.properties {
+        let Some(instance) = key.strip_prefix("deployed.") else {
+            continue;
+        };
+        if instances.contains(instance) {
+            continue;
+        }
+        let release = deployed_release_id(&env_obj.properties, instance, version);
+        if let Some(change) = Box::pin(removal_of(ctx, env, instance, &release, true)).await? {
+            pending.push(change);
+        }
+    }
+    for (key, release) in &env_obj.properties {
+        let Some(instance) = key.strip_prefix("failed_target.") else {
+            continue;
+        };
+        // Whatever its health: a failed install whose cleanup failed or
+        // never ran may have left the release behind, and removing one that
+        // is gone already finds nothing to do.
+        if instances.contains(instance)
+            || env_obj
+                .properties
+                .contains_key(&format!("deployed.{instance}"))
+            || !Box::pin(failed_on_instance(ctx, &env_obj, instance, release)).await?
+        {
+            continue;
+        }
+        if let Some(change) = Box::pin(removal_of(ctx, env, instance, release, false)).await? {
+            pending.push(change);
+        }
+    }
     for (key, value) in &env_obj.properties {
         // The deployed release, or the target of a failed step that left
         // the deployment unknown. Property suffixes are instance names.
@@ -901,6 +1038,9 @@ async fn compute_snapshot_with_policy(
                 // nothing, and its signature and integrity are still checked.
                 let target =
                     pin_release_for_recovery(ctx, &release_id(&product, &version), env).await?;
+                // Sorted as a host release: it comes down after the releases
+                // that may run in its cluster.
+                host_products.insert(product.clone());
                 pending.push(PendingChange {
                     product,
                     instance,
@@ -965,6 +1105,20 @@ async fn compute_snapshot_with_policy(
             installed_profiles.insert(instance.to_string(), profile);
         }
     }
+    // A removal retried after its step left the deployment unknown has no
+    // deployed release; its target's profile keeps its edges, so its
+    // providers still come down after it.
+    for entry in &pending {
+        if entry.action != Action::Remove || installed_profiles.contains_key(entry.instance_name())
+        {
+            continue;
+        }
+        if let Some(manifest) = readable_manifest(ctx, &entry.release.release_id).await?
+            && let Some(profile) = manifest.compatibility
+        {
+            installed_profiles.insert(entry.instance_name().to_string(), profile);
+        }
+    }
     let bindings =
         crate::environment_bindings::EnvironmentBindings::from_properties(&env_obj.properties);
     schedule_dependency_rerenders(
@@ -1013,7 +1167,11 @@ async fn compute_snapshot_with_policy(
         .collect();
     pending.sort_by(|a, b| {
         let agent = |product: &str| product == crate::runtime_self_upgrade::SELF_PRODUCT;
-        let not_host = |product: &String| !host_products.contains(product);
+        // Host releases come up first and go down last: a host removal
+        // follows the removals of releases that may run in its cluster.
+        let host_late = |entry: &PendingChange| {
+            host_products.contains(&entry.product) == (entry.action == Action::Remove)
+        };
         // Removals run after in-cluster work so a host cluster can come
         // down last. A remaining dependent's re-render after losing a
         // provider must follow that reverse step (ADR 0043 §6).
@@ -1036,7 +1194,7 @@ async fn compute_snapshot_with_policy(
         agent(&a.product)
             .cmp(&agent(&b.product))
             .then_with(|| band(a.instance_name(), a.action).cmp(&band(b.instance_name(), b.action)))
-            .then_with(|| not_host(&a.product).cmp(&not_host(&b.product)))
+            .then_with(|| host_late(a).cmp(&host_late(b)))
             .then_with(|| {
                 model_routing_rollout_rank(a.kind, a.action)
                     .cmp(&model_routing_rollout_rank(b.kind, b.action))
@@ -2907,6 +3065,68 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn a_retried_removal_still_removes_the_dependent_before_its_provider() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-removal-retry-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        let pin = "a".repeat(40);
+        for (product, contract) in [
+            ("db", "provides]\ndatabase = \"1.0.0\""),
+            ("web", "requires]\ndatabase = \"1.0.0\""),
+        ] {
+            let dir = root.join(product);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("tenkai.toml"),
+                format!(
+                    "[product]\nname = \"{product}\"\nversion = \"1.0.0\"\n[deploy]\ninstall = \"true\"\nuninstall = \"true\"\n[compatibility]\nversion = 1\nmax_evidence_age_ms = 60000\n[compatibility.components.{product}.pin]\nkind = \"revision\"\nvalue = \"{pin}\"\n[compatibility.components.{product}.{contract}\n"
+                ),
+            )
+            .unwrap();
+            crate::catalog::publish(
+                &mut ctx,
+                &dir.join("tenkai.toml"),
+                &crate::catalog::PublishOptions {
+                    allow_unsigned_development: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // Both unsubscribed; web's removal failed and left it unknown.
+        crate::environment::reconcile_deployment(&mut ctx, "local", "db", Some("1.0.0"))
+            .await
+            .unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.insert(
+            "failed_target.web".into(),
+            "tenkai:release:web@1.0.0".into(),
+        );
+        env.properties
+            .insert("deployment_health.web".into(), "unknown".into());
+        ctx.put(env).await.unwrap();
+
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+
+        let order: Vec<_> = plan
+            .steps
+            .iter()
+            .map(|step| (step.action, step.product.as_str()))
+            .collect();
+        assert_eq!(order, [(Action::Remove, "web"), (Action::Remove, "db")]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     async fn publish_compat_release(
         ctx: &mut Ctx,
         root: &std::path::Path,
@@ -3102,6 +3322,9 @@ mod tests {
             held_at
         );
 
+        // The provider is subscribed and deployed; a deployment nothing
+        // subscribes to would be removed instead (ADR 0049).
+        subscribe(&mut ctx, "local", "db", "stable").await.unwrap();
         crate::environment::reconcile_deployment(&mut ctx, "local", "db", Some("1.0.0"))
             .await
             .unwrap();

@@ -171,7 +171,16 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
         if step.host.is_some() {
             continue;
         }
+        // A removal that failed left the deployment unknown; its retry
+        // removes exactly the recorded failed target (ADR 0049).
+        let retried_removal = step.action == Action::Remove
+            && step.from.is_none()
+            && environment
+                .properties
+                .get(&format!("failed_target.{instance}"))
+                == Some(&step.release_id);
         if step.action != Action::Rollback
+            && !retried_removal
             && environment
                 .properties
                 .get(&format!("deployment_health.{instance}"))

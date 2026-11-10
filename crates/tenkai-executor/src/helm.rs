@@ -129,7 +129,9 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
             .arg(request.instance_name())
             .arg("--namespace")
             .arg(&request.environment)
-            .arg("--wait");
+            .arg("--wait")
+            // A removal retried after a crash finds the release gone.
+            .arg("--ignore-not-found");
         run_captured_command(
             &mut command,
             SoftwareDeployPhase::Remove,

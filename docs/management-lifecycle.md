@@ -41,7 +41,7 @@ call it before the Catalog, planner, or apply core.
 | `promote` | Catalog-wide | `POST /v1/channels/{channel}/promote` | Implemented (#394) |
 | `recall` | Catalog-wide | `POST /v1/releases/{release}/recall` | Implemented (#394) |
 | `subscribe` | Environment | `POST /v1/environments/{environment}/subscriptions` | Implemented (#394). Optional `instance` defaults to the product ([#1014](https://github.com/Sannrox/tenkai/issues/1014)) |
-| `unsubscribe` | Environment | `DELETE /v1/environments/{environment}/subscriptions/{product}` | Implemented ([#969](https://github.com/Sannrox/tenkai/issues/969)); host releases only. Optional `instance` defaults to the product (#1014) |
+| `unsubscribe` | Environment | `DELETE /v1/environments/{environment}/subscriptions/{product}` | Implemented ([#969](https://github.com/Sannrox/tenkai/issues/969)). The next approved plan removes the instance (ADR 0049). Optional `instance` defaults to the product (#1014); `expected_version` names the recorded version and is required while one is recorded |
 | `plan` | Environment | `POST /v1/environments/{environment}/plans` | Implemented ([#395](https://github.com/Sannrox/tenkai/issues/395)) |
 | `approve` | Environment | `POST /v1/plans/{plan_id}/approve` | Implemented (#395) |
 | `apply` | Environment | `POST /v1/plans/{plan_id}/apply` | Implemented (#395) |

@@ -498,7 +498,7 @@ pub struct SubscribeRequest {
 
 /// `DELETE /v1/environments/{environment}/subscriptions/{product}`: remove
 /// a product from the environment's desired state; the next approved plan
-/// uninstalls a host release.
+/// removes what is recorded for it (ADR 0049).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UnsubscribeRequest {
@@ -511,6 +511,11 @@ pub struct UnsubscribeRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub instance: Option<String>,
+    /// The version of the instance's recorded release the caller means to
+    /// remove. Required while one is recorded; refused when another is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub expected_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

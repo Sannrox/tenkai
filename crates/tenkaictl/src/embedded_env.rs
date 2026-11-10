@@ -158,6 +158,7 @@ pub(crate) async fn run(
             env,
             product,
             instance,
+            version,
             ..
         } => {
             println!(
@@ -167,6 +168,7 @@ pub(crate) async fn run(
                     &env,
                     &product,
                     instance.as_deref(),
+                    version.as_deref(),
                     &tenkai::software_executor::SoftwareExecutors::try_from_process()?,
                     |_| Ok(()),
                 )
