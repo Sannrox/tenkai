@@ -233,5 +233,38 @@ async fn a_builtin_runtime_applies_releases_it_trusts_and_refuses_others() {
         "1.0.0"
     );
 
+    // Unsubscribing removes it: the runtime runs the release's uninstall.
+    tenkai::environment::unsubscribe(
+        &mut ctx,
+        "prod",
+        "api",
+        Some("1.0.0"),
+        &tenkai::software_executor::SoftwareExecutors::default(),
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    let removed = plan::create(&mut ctx, "prod").await.unwrap();
+    let output = poll(&root, &url, Some(&trusted));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let removed = plan::load(&mut ctx, &removed.id).await.unwrap();
+    assert_eq!(
+        removed.state,
+        PlanState::Succeeded,
+        "{}",
+        removed.status_detail
+    );
+    assert!(!marks.join("1.0.0").exists(), "uninstall ran");
+    let environment = ctx
+        .get(&tenkai::ontology::env_id("prod"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(environment.properties.get("deployed.api"), None);
+
     let _ = std::fs::remove_dir_all(root);
 }

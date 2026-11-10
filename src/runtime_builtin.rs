@@ -70,7 +70,8 @@ pub fn load_release_roots(path: &Path) -> Result<TrustRoots> {
 /// the outgoing release; the executor or the shell `deploy.install` runs, then
 /// `deploy.health`. A failed restart re-applies the current pin. A failed
 /// activation runs failed-apply cleanup when the release declares
-/// `deploy.uninstall`, then restores the release the step replaced.
+/// `deploy.uninstall`, then restores the release the step replaced. A
+/// removal removes the release once and is never restored.
 ///
 /// A host step instead goes to this host's applier once, with `approvals`,
 /// and is never cleaned up or restored ([`Run::host`]).
@@ -145,6 +146,11 @@ pub(crate) async fn execute_step(
         )));
     }
 
+    // A removal runs the release's own executor, or its `deploy.uninstall`,
+    // and is never restored (ADR 0049).
+    if step.action == Action::Remove {
+        return Ok(receipt(run.remove(&target, false).await?));
+    }
     if step.action == Action::Rollback
         && let Some(outgoing) = &restore
         && outgoing
@@ -565,16 +571,17 @@ impl Run<'_> {
                 if !self.client.heartbeat(self.plan_id, self.generation).await? {
                     bail!("runtime claim was fenced");
                 }
-                // Removal cannot be stopped part-way; the claim is still
-                // renewed while it runs, and a lost claim is reported after.
+                // The claim is renewed while the removal runs; losing it
+                // stops an adapter that can stop, and a lost claim is
+                // reported after.
                 Ok(run_claimed(self.client, self.plan_id, self.generation, {
                     let executor = executor.clone();
                     let request = release.request.clone();
-                    move |_stop| {
+                    move |stop| {
                         if failed_apply {
                             executor.cleanup_failed_apply(&request)
                         } else {
-                            executor.remove(&request)
+                            executor.remove_until_stopped(&request, stop)
                         }
                     }
                 })

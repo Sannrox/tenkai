@@ -497,9 +497,7 @@ mod tests {
         from: &str,
         to: &str,
     ) -> Plan {
-        use crate::ontology::plan_id;
-        use crate::plan::{Action, DesiredStateInput, PLAN_FORMAT_VERSION, ReleasePin, Step};
-        use sha2::{Digest as _, Sha256};
+        use crate::plan::{Action, DesiredStateInput, ReleasePin, Step};
 
         let inputs = vec![DesiredStateInput {
             product: "api".into(),
@@ -514,7 +512,7 @@ mod tests {
             deployed_version: Some(from.into()),
             providers: Default::default(),
         }];
-        let mut steps = vec![Step {
+        let steps = vec![Step {
             id: String::new(),
             order: 0,
             product: "api".into(),
@@ -536,6 +534,21 @@ mod tests {
             }),
             rewrap: None,
         }];
+        sealed_test_plan(env, created_at, state, inputs, steps)
+    }
+
+    /// A stored-shape plan of `steps`, its ids derived from its content.
+    fn sealed_test_plan(
+        env: &str,
+        created_at: i64,
+        state: PlanState,
+        inputs: Vec<crate::plan::DesiredStateInput>,
+        mut steps: Vec<crate::plan::Step>,
+    ) -> Plan {
+        use crate::ontology::plan_id;
+        use crate::plan::PLAN_FORMAT_VERSION;
+        use sha2::{Digest as _, Sha256};
+
         let mut normalized = steps.clone();
         for step in &mut normalized {
             step.id.clear();
@@ -548,7 +561,9 @@ mod tests {
             )
         );
         let id = plan_id(env, created_at, &content_id);
-        steps[0].id = format!("{id}:step:0");
+        for (index, step) in steps.iter_mut().enumerate() {
+            step.id = format!("{id}:step:{index}");
+        }
         Plan {
             format_version: PLAN_FORMAT_VERSION,
             id,
@@ -565,6 +580,28 @@ mod tests {
             recalled_recovery_reason: None,
             credential_runway: None,
         }
+    }
+
+    /// A plan removing `api` `version`, which nothing subscribes to.
+    fn test_removal_plan(env: &str, created_at: i64, version: &str) -> Plan {
+        let step = crate::plan::Step {
+            id: String::new(),
+            order: 0,
+            product: "api".into(),
+            instance: String::new(),
+            action: crate::plan::Action::Remove,
+            from: Some(version.into()),
+            to: version.into(),
+            release_id: format!("tenkai:release:api@{version}"),
+            release_digest: "target-digest".into(),
+            artifact_digest: "target-artifact-digest".into(),
+            workdir: "/srv/api".into(),
+            host: None,
+            sealed: Vec::new(),
+            restore: None,
+            rewrap: None,
+        };
+        sealed_test_plan(env, created_at, PlanState::Computed, Vec::new(), vec![step])
     }
 
     fn test_empty_plan(env: &str, created_at: i64, state: PlanState) -> Plan {
@@ -644,6 +681,99 @@ mod tests {
                 .to_string()
                 .contains("required")
         );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn a_failed_runtime_removal_leaves_the_deployment_unknown() {
+        let (database, mut ctx) = registered_ctx("runtime-failed-removal", &["env-a"]).await;
+        let removal = test_removal_plan("env-a", 100, "1.0.0");
+        plan::store(&mut ctx, &removal).await.unwrap();
+        let mut environment = crate::environment::environment(&mut ctx, "env-a")
+            .await
+            .unwrap();
+        environment
+            .properties
+            .insert("deployed.api".into(), removal.steps[0].to.clone());
+        ctx.put(environment).await.unwrap();
+
+        crate::runtime_delivery::complete_runtime_work(
+            &mut ctx,
+            "env-a",
+            &RuntimeCompletion {
+                plan_id: removal.id.clone(),
+                generation: 1,
+                succeeded: false,
+                detail: "runtime fixture".into(),
+                receipts: vec![RuntimeStepReceipt {
+                    step_id: removal.steps[0].id.clone(),
+                    succeeded: false,
+                    detail: "uninstall failed half way".into(),
+                    wraps: Vec::new(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let environment = crate::environment::environment(&mut ctx, "env-a")
+            .await
+            .unwrap();
+        assert_eq!(environment.properties.get("deployed.api"), None);
+        assert_eq!(
+            environment
+                .properties
+                .get("deployment_health.api")
+                .map(String::as_str),
+            Some("unknown")
+        );
+        assert_eq!(
+            environment.properties.get("failed_target.api"),
+            Some(&removal.steps[0].release_id)
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn a_skipped_runtime_removal_keeps_the_deployment() {
+        let (database, mut ctx) = registered_ctx("runtime-skipped-removal", &["env-a"]).await;
+        let removal = test_removal_plan("env-a", 100, "1.0.0");
+        plan::store(&mut ctx, &removal).await.unwrap();
+        let mut environment = crate::environment::environment(&mut ctx, "env-a")
+            .await
+            .unwrap();
+        environment
+            .properties
+            .insert("deployed.api".into(), removal.steps[0].to.clone());
+        ctx.put(environment).await.unwrap();
+
+        crate::runtime_delivery::complete_runtime_work(
+            &mut ctx,
+            "env-a",
+            &RuntimeCompletion {
+                plan_id: removal.id.clone(),
+                generation: 1,
+                succeeded: false,
+                detail: "runtime fixture".into(),
+                receipts: vec![RuntimeStepReceipt {
+                    step_id: removal.steps[0].id.clone(),
+                    succeeded: false,
+                    detail: "not executed after an earlier step failed".into(),
+                    wraps: Vec::new(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let environment = crate::environment::environment(&mut ctx, "env-a")
+            .await
+            .unwrap();
+        assert_eq!(
+            environment.properties.get("deployed.api"),
+            Some(&removal.steps[0].to)
+        );
+        assert_eq!(environment.properties.get("deployment_health.api"), None);
         let _ = std::fs::remove_file(&database);
     }
 

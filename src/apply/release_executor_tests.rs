@@ -11,13 +11,14 @@ use crate::software_executor::{
 use super::{ExecutionAuthorization, ExecutionOptions, Outcome, StepOutcomeStatus};
 
 /// Records what it applied as `product@version` and every call it got,
-/// refuses versions in `fail`, and reports its target missing while
-/// `target_missing` is set.
+/// refuses versions in `fail`, fails the next removal while `fail_remove`
+/// is set, and reports its target missing while `target_missing` is set.
 #[derive(Default)]
 struct Recorder {
     applied: Mutex<Vec<String>>,
     calls: Mutex<Vec<String>>,
     fail: Mutex<Vec<String>>,
+    fail_remove: Mutex<bool>,
     target_missing: Mutex<bool>,
 }
 
@@ -61,6 +62,9 @@ impl SoftwareExecutor for Recorder {
     fn remove(&self, request: &SoftwareApplyRequest) -> anyhow::Result<()> {
         let key = format!("{}@{}", request.product, request.version);
         self.calls.lock().unwrap().push(format!("remove {key}"));
+        if std::mem::take(&mut *self.fail_remove.lock().unwrap()) {
+            anyhow::bail!("recorder refused removing {key}");
+        }
         self.applied.lock().unwrap().retain(|entry| entry != &key);
         Ok(())
     }
@@ -355,4 +359,316 @@ async fn a_declared_executor_that_is_not_installed_fails_closed() {
         assert!(default.calls().is_empty(), "{declared} fell back");
         assert_eq!(fixture.deployed("api").await, None);
     }
+}
+
+async fn unsubscribe(
+    fixture: &mut Fixture,
+    product: &str,
+    version: Option<&str>,
+    executors: &SoftwareExecutors,
+) -> anyhow::Result<String> {
+    crate::environment::unsubscribe(
+        &mut fixture.ctx,
+        "local",
+        product,
+        version,
+        executors,
+        |_| Ok(()),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn an_unsubscribed_release_is_removed_through_its_own_executor() {
+    let mut fixture = Fixture::new("remove").await;
+    let in_process = Arc::new(Recorder::default());
+    let executors = SoftwareExecutors::with_default(Arc::new(Recorder::default()))
+        .with_adapter(Kind::KubernetesInProcess, in_process.clone());
+    fixture
+        .release("app", "1.0.0", "executor = \"kubernetes-inprocess\"")
+        .await;
+    fixture.apply(&executors).await.unwrap();
+    // The caller names what it removes; anything else changes nothing.
+    let mismatch = unsubscribe(&mut fixture, "app", Some("2.0.0"), &executors)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        mismatch.contains("recorded at 1.0.0, not 2.0.0"),
+        "{mismatch}"
+    );
+    let unnamed = unsubscribe(&mut fixture, "app", None, &executors)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(unnamed.contains("--version 1.0.0"), "{unnamed}");
+    assert!(
+        crate::environment::subscribes(&mut fixture.ctx, "local", "app")
+            .await
+            .unwrap()
+    );
+
+    unsubscribe(&mut fixture, "app", Some("1.0.0"), &executors)
+        .await
+        .unwrap();
+    let outcomes = fixture.apply(&executors).await.unwrap();
+
+    assert_eq!(
+        statuses(&outcomes),
+        [StepOutcomeStatus::Succeeded],
+        "{outcomes:?}"
+    );
+    assert_eq!(in_process.calls(), ["apply app@1.0.0", "remove app@1.0.0"]);
+    assert_eq!(fixture.deployed("app").await, None);
+    let next = crate::plan::create(&mut fixture.ctx, "local")
+        .await
+        .unwrap();
+    assert!(next.steps.is_empty(), "{:?}", next.steps);
+}
+
+#[tokio::test]
+async fn a_provider_is_unsubscribed_only_after_its_bound_dependents() {
+    let mut fixture = Fixture::new("dependents").await;
+    let in_process = Arc::new(Recorder::default());
+    let executors = SoftwareExecutors::with_default(Arc::new(Recorder::default()))
+        .with_adapter(Kind::KubernetesInProcess, in_process.clone());
+    for product in ["db", "web"] {
+        fixture
+            .release(product, "1.0.0", "executor = \"kubernetes-inprocess\"")
+            .await;
+    }
+    fixture.apply(&executors).await.unwrap();
+    let mut environment = crate::environment::environment(&mut fixture.ctx, "local")
+        .await
+        .unwrap();
+    environment.properties.insert(
+        crate::environment_bindings::binding_key("web", "database"),
+        "db".into(),
+    );
+    fixture.ctx.put(environment).await.unwrap();
+
+    let error = unsubscribe(&mut fixture, "db", Some("1.0.0"), &executors)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("still has subscribed dependents: web"),
+        "{error}"
+    );
+    unsubscribe(&mut fixture, "web", Some("1.0.0"), &executors)
+        .await
+        .unwrap();
+    unsubscribe(&mut fixture, "db", Some("1.0.0"), &executors)
+        .await
+        .unwrap();
+    // Declared contracts order the removals dependents first; a binding
+    // alone only gates the unsubscribe.
+    let plan = crate::plan::create(&mut fixture.ctx, "local")
+        .await
+        .unwrap();
+    let mut removals: Vec<_> = plan
+        .steps
+        .iter()
+        .map(|step| (step.action, step.product.as_str()))
+        .collect();
+    removals.sort_by_key(|(_, product)| *product);
+    assert_eq!(
+        removals,
+        [
+            (crate::plan::Action::Remove, "db"),
+            (crate::plan::Action::Remove, "web")
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_release_whose_provider_is_gone_can_still_be_removed() {
+    let mut fixture = Fixture::new("provider-gone").await;
+    let in_process = Arc::new(Recorder::default());
+    let executors = SoftwareExecutors::with_default(Arc::new(Recorder::default()))
+        .with_adapter(Kind::KubernetesInProcess, in_process.clone());
+    let pin = "a".repeat(40);
+    fixture
+        .release(
+            "web",
+            "1.0.0",
+            &format!(
+                "executor = \"kubernetes-inprocess\"\n[compatibility]\nversion = 1\nmax_evidence_age_ms = 60000\n[compatibility.components.web.pin]\nkind = \"revision\"\nvalue = \"{pin}\"\n[compatibility.components.web.requires]\ndatabase = \"1.0.0\""
+            ),
+        )
+        .await;
+    // Deployed while its provider ran; nothing provides database now.
+    let mut environment = crate::environment::environment(&mut fixture.ctx, "local")
+        .await
+        .unwrap();
+    environment
+        .properties
+        .insert("deployed.web".into(), "1.0.0".into());
+    fixture.ctx.put(environment).await.unwrap();
+    unsubscribe(&mut fixture, "web", Some("1.0.0"), &executors)
+        .await
+        .unwrap();
+
+    let outcomes = fixture.apply(&executors).await.unwrap();
+
+    assert_eq!(
+        statuses(&outcomes),
+        [StepOutcomeStatus::Succeeded],
+        "{outcomes:?}"
+    );
+    assert_eq!(in_process.calls(), ["remove web@1.0.0"]);
+}
+
+#[tokio::test]
+async fn a_failed_removal_is_retried_by_the_next_plan() {
+    let mut fixture = Fixture::new("remove-retry").await;
+    let in_process = Arc::new(Recorder::default());
+    let executors = SoftwareExecutors::with_default(Arc::new(Recorder::default()))
+        .with_adapter(Kind::KubernetesInProcess, in_process.clone());
+    fixture
+        .release("app", "1.0.0", "executor = \"kubernetes-inprocess\"")
+        .await;
+    fixture.apply(&executors).await.unwrap();
+    unsubscribe(&mut fixture, "app", Some("1.0.0"), &executors)
+        .await
+        .unwrap();
+    *in_process.fail_remove.lock().unwrap() = true;
+    let failed = fixture.apply(&executors).await.unwrap();
+    assert_eq!(statuses(&failed), [StepOutcomeStatus::Failed], "{failed:?}");
+
+    let retried = fixture.apply(&executors).await.unwrap();
+
+    assert_eq!(
+        statuses(&retried),
+        [StepOutcomeStatus::Succeeded],
+        "{retried:?}"
+    );
+    assert_eq!(
+        in_process.calls(),
+        ["apply app@1.0.0", "remove app@1.0.0", "remove app@1.0.0"]
+    );
+    let environment = crate::environment::environment(&mut fixture.ctx, "local")
+        .await
+        .unwrap();
+    assert_eq!(environment.properties.get("deployed.app"), None);
+    assert_eq!(
+        environment.properties.get("deployment_health.app"),
+        None,
+        "{:?}",
+        environment.properties
+    );
+    let next = crate::plan::create(&mut fixture.ctx, "local")
+        .await
+        .unwrap();
+    assert!(next.steps.is_empty(), "{:?}", next.steps);
+}
+
+#[tokio::test]
+async fn a_failed_first_install_is_removed_after_unsubscribing() {
+    let mut fixture = Fixture::new("failed-install").await;
+    let in_process = Arc::new(Recorder::default());
+    let executors = SoftwareExecutors::with_default(Arc::new(Recorder::default()))
+        .with_adapter(Kind::KubernetesInProcess, in_process.clone());
+    fixture
+        .release("app", "1.0.0", "executor = \"kubernetes-inprocess\"")
+        .await;
+    in_process.fail_version("1.0.0");
+    let failed = fixture.apply(&executors).await.unwrap();
+    assert_eq!(statuses(&failed), [StepOutcomeStatus::Failed], "{failed:?}");
+    assert_eq!(fixture.deployed("app").await, None);
+    unsubscribe(&mut fixture, "app", Some("1.0.0"), &executors)
+        .await
+        .unwrap();
+    let before = in_process.calls().len();
+
+    let removed = fixture.apply(&executors).await.unwrap();
+
+    assert_eq!(
+        statuses(&removed),
+        [StepOutcomeStatus::Succeeded],
+        "{removed:?}"
+    );
+    assert_eq!(in_process.calls()[before..], ["remove app@1.0.0"]);
+    let next = crate::plan::create(&mut fixture.ctx, "local")
+        .await
+        .unwrap();
+    assert!(next.steps.is_empty(), "{:?}", next.steps);
+}
+
+#[tokio::test]
+async fn a_failure_an_older_server_keyed_by_product_removes_no_other_instance() {
+    let mut fixture = Fixture::new("legacy-key").await;
+    let executors = SoftwareExecutors::with_default(Arc::new(Recorder::default()));
+    fixture.release("api", "1.0.0", "install = \"true\"").await;
+    crate::environment::subscribe_instance(
+        &mut fixture.ctx,
+        "local",
+        "api",
+        "stable",
+        Some("blue"),
+    )
+    .await
+    .unwrap();
+    unsubscribe(&mut fixture, "api", None, &executors)
+        .await
+        .unwrap();
+    // The plan that failed installs instance blue; the record names the product.
+    let failed = crate::plan::create(&mut fixture.ctx, "local")
+        .await
+        .unwrap();
+    assert_eq!(failed.steps[0].instance_name(), "blue");
+    let mut environment = crate::environment::environment(&mut fixture.ctx, "local")
+        .await
+        .unwrap();
+    for (key, value) in [
+        ("failed_target.api", "tenkai:release:api@1.0.0"),
+        ("failed_target_plan.api", failed.id.as_str()),
+    ] {
+        environment.properties.insert(key.into(), value.into());
+    }
+    fixture.ctx.put(environment).await.unwrap();
+
+    let plan = crate::plan::create(&mut fixture.ctx, "local")
+        .await
+        .unwrap();
+
+    assert!(
+        plan.steps
+            .iter()
+            .all(|step| step.action != crate::plan::Action::Remove),
+        "{:?}",
+        plan.steps
+    );
+}
+
+#[tokio::test]
+async fn a_runtime_gets_no_removal_package_once_the_instance_is_subscribed_again() {
+    let mut fixture = Fixture::new("runtime-resubscribe").await;
+    let in_process = Arc::new(Recorder::default());
+    let executors = SoftwareExecutors::with_default(Arc::new(Recorder::default()))
+        .with_adapter(Kind::KubernetesInProcess, in_process.clone());
+    fixture
+        .release("app", "1.0.0", "executor = \"kubernetes-inprocess\"")
+        .await;
+    fixture.apply(&executors).await.unwrap();
+    unsubscribe(&mut fixture, "app", Some("1.0.0"), &executors)
+        .await
+        .unwrap();
+    let removal = crate::plan::create(&mut fixture.ctx, "local")
+        .await
+        .unwrap();
+    crate::plan::subscribe(&mut fixture.ctx, "local", "app", "stable")
+        .await
+        .unwrap();
+
+    let error = super::runtime_release(&mut fixture.ctx, &removal, &removal.steps[0], false)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.downcast_ref::<super::ReleaseRefused>().is_some()
+            && error.to_string().contains("subscribes to app again"),
+        "{error:#}"
+    );
 }

@@ -349,7 +349,7 @@ approve_and_apply
 [ "$(app_available)" = 1 ] || fail "app is not available after the cluster rollback"
 
 echo "== uninstall the cluster through an approved plan"
-remote env unsubscribe "$environment" cluster --generation "$(generation)" >/dev/null
+remote env unsubscribe "$environment" cluster --version 1.0.0 --generation "$(generation)" >/dev/null
 approve_and_apply
 ! systemctl is-active --quiet k3s.service || fail "k3s.service still runs"
 [ ! -e /usr/local/bin/k3s ] || fail "the k3s binary is still installed"

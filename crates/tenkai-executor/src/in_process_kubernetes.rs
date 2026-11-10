@@ -988,12 +988,26 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
     }
 
     fn remove(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        self.remove_until_stopped(request, &NOT_STOPPED)
+    }
+
+    fn remove_until_stopped(
+        &self,
+        request: &SoftwareApplyRequest,
+        stop: &AtomicBool,
+    ) -> Result<()> {
         validate_request(request)?;
         let cluster_config = Self::require_cluster_config(request)?;
         let manifests = kubernetes_manifests_dir(&request.workdir)?;
         let files = list_manifest_files(&manifests)?;
         for path in files.iter().rev() {
             for object in parse_manifest_objects(path, request.instance_name())? {
+                if stop.load(Ordering::SeqCst) {
+                    anyhow::bail!(
+                        "removal of {} stopped: the apply lease was lost",
+                        request.instance_name()
+                    );
+                }
                 let (kind, name) = object_identity(&object)?;
                 self.api
                     .remove(cluster_config, &request.environment, &name, &kind)?;
@@ -2413,6 +2427,41 @@ mod tests {
         assert_eq!(live.version_label.as_deref(), Some("1.0.0"));
         let _ = std::fs::remove_dir_all(root_a);
         let _ = std::fs::remove_dir_all(root_b);
+    }
+
+    #[test]
+    fn a_stopped_removal_deletes_nothing_more() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-ssa-remove-stop-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let kubeconfig = write_deployment(&root, "1.0.0", 1);
+        let api = MemoryClusterApi::new();
+        let executor = InProcessKubernetesExecutor::new(&api)
+            .with_timeout(Duration::from_millis(200))
+            .with_poll_interval(Duration::from_millis(20));
+        let request = request(&root, &kubeconfig, "1.0.0");
+        executor.apply(&request).unwrap();
+
+        let error = executor
+            .remove_until_stopped(&request, &AtomicBool::new(true))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("apply lease was lost"), "{error}");
+        assert!(
+            api.observe(Path::new("/unused"), "lab", "edge", "Deployment")
+                .unwrap()
+                .is_some()
+        );
+        executor.remove(&request).unwrap();
+        assert!(
+            api.observe(Path::new("/unused"), "lab", "edge", "Deployment")
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

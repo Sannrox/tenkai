@@ -948,6 +948,7 @@ async fn an_unsubscribed_host_release_is_uninstalled_by_an_approved_plan() {
         &mut host.ctx,
         "edge",
         "cluster",
+        Some("1.0.0"),
         &SoftwareExecutors::default(),
         |_| Ok(()),
     )
@@ -960,6 +961,7 @@ async fn an_unsubscribed_host_release_is_uninstalled_by_an_approved_plan() {
         &mut host.ctx,
         "edge",
         "cluster",
+        Some("1.0.0"),
         &host.executors,
         |_| Ok(()),
     )
@@ -1037,7 +1039,7 @@ async fn an_unsubscribed_host_release_is_uninstalled_by_an_approved_plan() {
 }
 
 #[tokio::test]
-async fn only_a_host_release_is_removed_by_unsubscribing() {
+async fn a_shell_release_without_an_uninstall_command_is_not_unsubscribed() {
     let mut host = Host::new("unsubscribe").await;
     let dir = host.root.join("api-1.0.0");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1067,21 +1069,33 @@ async fn only_a_host_release_is_removed_by_unsubscribing() {
         .await
         .unwrap();
 
-    let error =
-        crate::environment::unsubscribe(&mut host.ctx, "edge", "api", &host.executors, |_| Ok(()))
-            .await
-            .unwrap_err()
-            .to_string();
+    let error = crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "api",
+        Some("1.0.0"),
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
 
-    assert!(error.contains("not a host release"), "{error}");
+    assert!(error.contains("declares no deploy.uninstall"), "{error}");
     // A product with nothing deployed simply leaves the desired state.
     crate::environment::reconcile_deployment(&mut host.ctx, "edge", "api", None)
         .await
         .unwrap();
-    let message =
-        crate::environment::unsubscribe(&mut host.ctx, "edge", "api", &host.executors, |_| Ok(()))
-            .await
-            .unwrap();
+    let message = crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "api",
+        None,
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
     assert_eq!(message, "edge unsubscribed from api");
 }
 
@@ -1095,6 +1109,7 @@ async fn a_removal_is_stale_once_the_product_is_subscribed_again() {
         &mut host.ctx,
         "edge",
         "cluster",
+        Some("1.0.0"),
         &host.executors,
         |_| Ok(()),
     )
@@ -1128,6 +1143,7 @@ async fn a_recalled_host_release_can_still_be_removed() {
         &mut host.ctx,
         "edge",
         "cluster",
+        Some("1.0.0"),
         &host.executors,
         |_| Ok(()),
     )
@@ -1154,6 +1170,7 @@ async fn a_plan_is_stale_once_its_product_is_unsubscribed() {
         &mut host.ctx,
         "edge",
         "cluster",
+        None,
         &host.executors,
         |_| Ok(()),
     )
@@ -1174,13 +1191,17 @@ async fn unsubscribing_waits_for_no_apply_to_run() {
         .await
         .unwrap();
 
-    let error =
-        crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors, |_| {
-            Ok(())
-        })
-        .await
-        .unwrap_err()
-        .to_string();
+    let error = crate::environment::unsubscribe(
+        &mut host.ctx,
+        "edge",
+        "cluster",
+        None,
+        &host.executors,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
 
     assert!(error.contains("apply in progress"), "{error}");
     super::release_environment(&mut host.ctx, &lease)
@@ -1188,9 +1209,14 @@ async fn unsubscribing_waits_for_no_apply_to_run() {
         .unwrap();
     // A stale generation is refused inside the lease and changes nothing.
     assert!(
-        crate::environment::unsubscribe(&mut host.ctx, "edge", "cluster", &host.executors, |_| {
-            anyhow::bail!("stale fencing generation")
-        })
+        crate::environment::unsubscribe(
+            &mut host.ctx,
+            "edge",
+            "cluster",
+            None,
+            &host.executors,
+            |_| { anyhow::bail!("stale fencing generation") }
+        )
         .await
         .is_err()
     );
@@ -1203,6 +1229,7 @@ async fn unsubscribing_waits_for_no_apply_to_run() {
         &mut host.ctx,
         "edge",
         "cluster",
+        None,
         &host.executors,
         |_| Ok(()),
     )
@@ -1220,6 +1247,7 @@ async fn a_deployed_host_release_without_a_record_is_not_reported_removed() {
         &mut host.ctx,
         "edge",
         "cluster",
+        Some("1.0.0"),
         &host.executors,
         |_| Ok(()),
     )
@@ -1270,6 +1298,7 @@ async fn an_unknown_host_deployment_without_a_record_is_not_reported_removed() {
         &mut host.ctx,
         "edge",
         "cluster",
+        Some("1.0.0"),
         &host.executors,
         |_| Ok(()),
     )
@@ -1306,6 +1335,7 @@ async fn an_install_whose_outcome_was_never_recorded_can_still_be_removed() {
         &mut host.ctx,
         "edge",
         "cluster",
+        None,
         &host.executors,
         |_| Ok(()),
     )
@@ -1467,5 +1497,68 @@ async fn a_host_instance_with_sealed_values_gets_a_rewrap_plan() {
             .await
             .is_err(),
         "a re-wrap step has no restore pin"
+    );
+}
+
+#[tokio::test]
+async fn a_host_cluster_is_removed_after_the_releases_in_it() {
+    let mut host = Host::new("teardown").await;
+    host.release("1.0.0", false).await;
+    let dir = host.root.join("zone-1.0.0");
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = dir.join("tenkai.toml");
+    std::fs::write(
+        &manifest,
+        "[product]\nname = \"zone\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\nuninstall = \"true\"\n",
+    )
+    .unwrap();
+    let signature = dir.join("signature.json");
+    let roots = host.root.join("release-trust.toml");
+    crate::dev_sign::sign_release(&host.root.join("keys"), &manifest, &signature, &roots).unwrap();
+    crate::catalog::publish(
+        &mut host.ctx,
+        &manifest,
+        &crate::catalog::PublishOptions {
+            signature: Some(signature),
+            trust_roots: Some(roots),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let actor = crate::auth_context::test_management_context("host-step");
+    crate::catalog::promote(&mut host.ctx, &actor, "zone@1.0.0", "stable")
+        .await
+        .unwrap();
+    crate::plan::subscribe(&mut host.ctx, "edge", "zone", "stable")
+        .await
+        .unwrap();
+    let install = host.plan().await;
+    host.apply(&install).await.unwrap();
+    for product in ["cluster", "zone"] {
+        crate::environment::unsubscribe(
+            &mut host.ctx,
+            "edge",
+            product,
+            Some("1.0.0"),
+            &host.executors,
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    }
+
+    let remove = host.plan().await;
+
+    // Name order alone would put the cluster first.
+
+    let order: Vec<_> = remove
+        .steps
+        .iter()
+        .map(|step| (step.action, step.product.as_str()))
+        .collect();
+    assert_eq!(
+        order,
+        [(Action::Remove, "zone"), (Action::Remove, "cluster")]
     );
 }

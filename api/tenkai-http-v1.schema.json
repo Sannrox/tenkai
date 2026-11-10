@@ -6836,7 +6836,7 @@
     },
     "UnsubscribeRequest": {
       "additionalProperties": false,
-      "description": "`DELETE /v1/environments/{environment}/subscriptions/{product}`: remove\na product from the environment's desired state; the next approved plan\nuninstalls a host release.",
+      "description": "`DELETE /v1/environments/{environment}/subscriptions/{product}`: remove\na product from the environment's desired state; the next approved plan\nremoves what is recorded for it (ADR 0049).",
       "properties": {
         "environment": {
           "type": "string"
@@ -6845,6 +6845,10 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "expected_version": {
+          "description": "The version of the instance's recorded release the caller means to\nremove. Required while one is recorded; refused when another is.",
+          "type": "string"
         },
         "instance": {
           "description": "Named instance; omitted or empty defaults to the product.",

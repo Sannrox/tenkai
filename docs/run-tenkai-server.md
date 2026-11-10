@@ -206,12 +206,13 @@ state; the next plan uninstalls it with a host `uninstall` step at the
 record's generation, approved like any other change:
 
 ```bash
-tenkaictl --target remote env unsubscribe <environment> <product> --generation <generation>
+tenkaictl --target remote env unsubscribe <environment> <product> \
+  --version <version> --generation <generation>
 ```
 
-Only host releases are removed this way: unsubscribing a product deployed
-with another executor is refused. A successful uninstall records the product
-as no longer deployed, with the removed release as its rollback target.
+A successful uninstall records the product as no longer deployed, with the
+removed release as its rollback target. Releases of the other executors are
+removed the same way; see [remove a product](#remove-a-product).
 
 Host steps are always attended. The server never approves a plan with a host
 step itself, whatever the environment's approval policy says, and the
@@ -244,6 +245,40 @@ with `tenkaictl env reconcile <environment> <product> --deployed <version>`.
 To authenticate with enterprise JWT assertions or with an identity provider
 (OIDC) instead of shared bearer tokens, see
 [configure server authentication](configure-server-authentication.md).
+
+### Remove a product
+
+Unsubscribing takes an instance out of the environment's desired state; the
+next approved plan removes it with a `remove` step through the executor its
+deployed release resolves to (ADR 0049). Name the recorded version: the
+deployed one, or the failed target's when that is all that is recorded.
+
+```bash
+tenkaictl --target remote env unsubscribe <environment> <product> \
+  --version <version> --generation <generation>
+```
+
+Unsubscribing is refused, naming what is recorded, when `--version` names
+another version or is missing while a release is recorded. It is refused,
+naming them, while another subscribed instance is bound to it or needs it as
+the sole provider of a required contract; unsubscribe those first, and the
+next plan removes dependents before their providers. A `shell` release
+without `deploy.uninstall` cannot be removed, so unsubscribing it is refused.
+
+A removal deletes what the release declares, through its executor, and
+nothing else:
+
+| Executor | Removed | Kept |
+|----------|---------|------|
+| `helm` | the chart's resources, including PersistentVolumeClaims it declares | resources annotated `helm.sh/resource-policy: keep`; claims from StatefulSet claim templates under the default `Retain` policy |
+| `kubernetes`, `kubernetes-inprocess` | every resource in the release's manifests, including declared claims | claims from StatefulSet claim templates, per that StatefulSet's retention policy |
+| `docker` | containers and networks | volumes |
+| `shell` | whatever `deploy.uninstall` deletes | everything else |
+| `host` | what the `uninstall` command deletes | everything else |
+
+Tenkai-owned sealed Secrets of the instance are deleted with it. Helm
+removals need Helm 3.13 or later: a removal retried after a crash runs
+`helm uninstall --ignore-not-found`.
 
 ### Open the web console
 

@@ -430,6 +430,22 @@ pub(crate) async fn update_runtime_deployments_object(
 ) -> Result<()> {
     for step in steps {
         validate_identifier("product", &step.product)?;
+        // A removal leaves nothing deployed; the removed release is the
+        // rollback target, as when the server runs it.
+        if step.action == crate::plan::Action::Remove {
+            transition_deployment(
+                object,
+                &step.product,
+                step.instance_name(),
+                None,
+                &DeploymentTransition::Removed {
+                    version: step.to.clone(),
+                },
+                "",
+                observed_at,
+            );
+            continue;
+        }
         let previous_key = format!("deployed_prev.{}", step.instance_name());
         let kept_previous = object.properties.get(&previous_key).cloned();
         update_reconciled_deployment_object(
@@ -457,6 +473,25 @@ pub(crate) async fn update_runtime_deployments_object(
         }
     }
     Ok(())
+}
+
+/// Record a runtime's failed removal of `step`'s instance as unknown: it may
+/// be partly removed, and the next plan removes its target again (ADR 0049).
+pub(crate) fn record_removal_unknown(
+    object: &mut Object,
+    step: &Step,
+    detail: &str,
+    observed_at: i64,
+) {
+    transition_deployment(
+        object,
+        &step.product,
+        step.instance_name(),
+        None,
+        &DeploymentTransition::Unknown,
+        detail,
+        observed_at,
+    );
 }
 
 pub(crate) async fn record_deployed(
@@ -1120,18 +1155,23 @@ pub async fn unsubscribe(
     ctx: &mut Ctx,
     env: &str,
     product: &str,
+    expected_version: Option<&str>,
     executors: &crate::software_executor::SoftwareExecutors,
     fence: impl FnOnce(u64) -> Result<()>,
 ) -> Result<String> {
-    unsubscribe_instance(ctx, env, product, None, executors, fence).await
+    unsubscribe_instance(ctx, env, product, None, expected_version, executors, fence).await
 }
 
-/// Remove a named instance, or the default instance when `instance` is omitted.
+/// Remove a named instance, or the default instance when `instance` is
+/// omitted. `expected_version` names the release the operator means to
+/// remove (ADR 0049 §4): required while one is recorded, and refused when
+/// another is.
 pub async fn unsubscribe_instance(
     ctx: &mut Ctx,
     env: &str,
     product: &str,
     instance: Option<&str>,
+    expected_version: Option<&str>,
     executors: &crate::software_executor::SoftwareExecutors,
     fence: impl FnOnce(u64) -> Result<()>,
 ) -> Result<String> {
@@ -1140,7 +1180,7 @@ pub async fn unsubscribe_instance(
     let lease =
         crate::apply::claim_environment(ctx, env, &format!("unsubscribe:{instance}")).await?;
     let unsubscribed = match fence(lease.generation.saturating_sub(1)) {
-        Ok(()) => unsubscribe_held(ctx, env, product, &instance, executors).await,
+        Ok(()) => unsubscribe_held(ctx, env, product, &instance, expected_version, executors).await,
         Err(error) => Err(error),
     };
     let released = crate::apply::release_environment(ctx, &lease).await;
@@ -1166,6 +1206,7 @@ async fn unsubscribe_held(
     env: &str,
     product: &str,
     instance: &str,
+    expected_version: Option<&str>,
     executors: &crate::software_executor::SoftwareExecutors,
 ) -> Result<String> {
     validate_identifier("environment", env)?;
@@ -1192,19 +1233,40 @@ async fn unsubscribe_held(
             "deployment state of {instance} in {env} is unknown; record it with `tenkaictl env reconcile` before unsubscribing"
         );
     }
+    // The deployed version, or the failed target's when that is all that
+    // is recorded (ADR 0049 §4).
+    let recorded = property("deployed").or_else(|| {
+        property("failed_target").and_then(|release| {
+            crate::plan::split_release_id(&release).map(|(_, version)| version.to_string())
+        })
+    });
+    match (recorded.as_deref(), expected_version) {
+        (Some(recorded), Some(expected)) if recorded != expected => bail!(
+            "{instance} in {env} is recorded at {recorded}, not {expected}; nothing was unsubscribed"
+        ),
+        (Some(recorded), None) => bail!(
+            "{instance} in {env} is recorded at {recorded}; name the version to remove with --version {recorded}"
+        ),
+        (None, Some(expected)) => {
+            bail!("{instance} in {env} has no recorded release, not {expected}")
+        }
+        _ => {}
+    }
+    let mut host = false;
     for release in &candidates {
-        let executor = crate::plan::stored_release_executor(ctx, release).await?;
-        if executor != Some(crate::software_executor::SoftwareExecutorKind::Host) {
-            bail!(
-                "{instance} is deployed in {env} from {release}, which is not a host release; only host releases are removed by a plan"
-            );
+        let manifest = crate::plan::stored_release_manifest(ctx, release).await?;
+        if manifest.deploy.executor == Some(crate::software_executor::SoftwareExecutorKind::Host) {
+            host = true;
+        } else {
+            crate::plan::require_removable(executors, release, &manifest)?;
         }
     }
-    if !candidates.is_empty() {
+    if host {
         // The uninstall this promises is planned from the applier's records:
         // this server's own, or those the environment's runtime reports.
         crate::host_records::HostRecords::of(ctx, executors, env).await?;
     }
+    refuse_dependents(ctx, env, &existing, instance).await?;
     let removed = if instance == product {
         let mut removed = 0;
         for link in ctx.links(&eid, REL_SUBSCRIBES).await? {
@@ -1240,8 +1302,54 @@ async fn unsubscribe_held(
     Ok(if candidates.is_empty() {
         format!("{env} unsubscribed from {instance}")
     } else {
-        format!("{env} unsubscribed from {instance}; the next approved plan uninstalls it")
+        format!("{env} unsubscribed from {instance}; the next approved plan removes it")
     })
+}
+
+/// Refuse to unsubscribe `instance` while another subscribed instance depends
+/// on it (ADR 0049 §3): it holds a binding to it (ADR 0044 §3), or needs it as
+/// the sole provider of a required contract (ADR 0043 §5). Dependents being
+/// unsubscribed too do not count; the next plan removes them first.
+async fn refuse_dependents(
+    ctx: &mut Ctx,
+    env: &str,
+    existing: &Object,
+    instance: &str,
+) -> Result<()> {
+    let subscribed: BTreeSet<String> = list_subscriptions(ctx, existing)
+        .await?
+        .into_iter()
+        .map(|subscription| subscription.instance)
+        .filter(|name| name != instance)
+        .collect();
+    let bindings =
+        crate::environment_bindings::EnvironmentBindings::from_properties(&existing.properties);
+    let mut dependents: BTreeSet<String> = bindings
+        .iter()
+        .filter(|(dependent, _, provider)| *provider == instance && subscribed.contains(*dependent))
+        .map(|(dependent, _, _)| dependent.to_string())
+        .collect();
+    let before: BTreeMap<String, crate::software_compatibility::CompatibilityProfile> =
+        crate::dependency_document::deployed_set(ctx, existing)
+            .await?
+            .into_iter()
+            .filter(|(name, _)| name == instance || subscribed.contains(name))
+            .map(|(name, deployed)| (name, deployed.profile))
+            .collect();
+    let mut after = before.clone();
+    after.remove(instance);
+    if let Some(refusal) = crate::software_compatibility::remaining_dependent_refusal_bound(
+        &after, &before, &bindings,
+    )? {
+        dependents.insert(refusal.dependent);
+    }
+    if !dependents.is_empty() {
+        bail!(
+            "{instance} in {env} still has subscribed dependents: {}; unsubscribe them first",
+            dependents.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(())
 }
 
 pub(crate) async fn environment(ctx: &mut Ctx, env: &str) -> Result<Object> {

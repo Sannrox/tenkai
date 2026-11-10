@@ -24,10 +24,10 @@ fn refused(error: anyhow::Error) -> anyhow::Error {
 }
 
 /// Build the release package for `step` of `plan`: its target, or with
-/// `restore` its restore pin. Refuses, with [`ReleaseRefused`], steps a
-/// runtime cannot apply with a built-in executor (removals) and releases the
+/// `restore` its restore pin. Refuses, with [`ReleaseRefused`], releases the
 /// server would not apply itself. A host step's package is its release; the
-/// runtime hands it to its own host applier.
+/// runtime hands it to its own host applier. A removal's package is the
+/// release to remove (ADR 0049).
 pub(crate) async fn runtime_release(
     ctx: &mut Ctx,
     plan: &Plan,
@@ -40,14 +40,6 @@ pub(crate) async fn runtime_release(
             step.id
         )));
     }
-    // Only host releases are removed by a plan; the runtime's applier
-    // uninstalls them.
-    if step.action == Action::Remove && step.host.is_none() {
-        return Err(refused(anyhow!(
-            "step {} removes a release that is not a host release; only host releases are removed by a plan",
-            step.id
-        )));
-    }
     if step.rewrap.is_some() {
         if restore {
             return Err(refused(anyhow!(
@@ -56,6 +48,23 @@ pub(crate) async fn runtime_release(
             )));
         }
         return rewrap_package(ctx, plan, step).await;
+    }
+    // Subscribing does not wait for a runtime, so a removal claimed earlier
+    // must not remove an instance that is desired again; the runtime asks
+    // for the package right before it removes.
+    if step.action == Action::Remove && !restore {
+        let environment = crate::environment::environment(ctx, &plan.environment).await?;
+        if crate::environment::list_subscriptions(ctx, &environment)
+            .await?
+            .iter()
+            .any(|subscription| subscription.instance == step.instance_name())
+        {
+            return Err(refused(anyhow!(
+                "{} subscribes to {} again",
+                plan.environment,
+                step.instance_name()
+            )));
+        }
     }
     let recovery = plan
         .recalled_recovery_reason
@@ -114,9 +123,12 @@ pub(crate) async fn runtime_release(
         registry.as_deref(),
     )
     .map_err(refused)?;
-    let mut request =
-        product_execution::software_request(ctx, &content, format!("plan-{}-{}", plan.id, step.id))
-            .await?;
+    let attempt = format!("plan-{}-{}", plan.id, step.id);
+    let mut request = if removal {
+        product_execution::removal_request(ctx, &content, attempt).await?
+    } else {
+        product_execution::software_request(ctx, &content, attempt).await?
+    };
     // Host-local: the runtime sets these from its own configuration.
     request.workdir = std::path::PathBuf::new();
     request.cluster_config_path = None;

@@ -140,6 +140,9 @@ pub(super) async fn execute(
     if let Some(host) = step.host {
         return execute_host(ctx, step_context, plan, step, host, &content).await;
     }
+    if step.action == Action::Remove {
+        return Box::pin(execute_removal(ctx, step_context, step, &content)).await;
+    }
 
     let mut outgoing_removed = false;
     if step.action == Action::Rollback
@@ -355,6 +358,75 @@ pub(super) async fn execute(
         )
         .await?;
     }
+    Ok(outcome)
+}
+
+/// Remove the release of a non-host step with its own executor (ADR 0049)
+/// and record the outcome. A removal is never restored: a failed one leaves
+/// the deployment unknown, and the next plan removes it again. Removing what
+/// is already gone succeeds, so a retry after a crash is safe.
+async fn execute_removal(
+    ctx: &mut Ctx,
+    step_context: StepContext<'_>,
+    step: &Step,
+    content: &ReleaseContent,
+) -> Result<Outcome> {
+    let StepContext {
+        lease,
+        environment,
+        plan_id,
+        adapters,
+        started_at_ms,
+    } = step_context;
+    // Subscribing does not wait for an apply, so a removal approved and
+    // admitted earlier must not remove an instance that is desired again.
+    let env_object = crate::environment::environment(ctx, environment).await?;
+    let resubscribed = crate::environment::list_subscriptions(ctx, &env_object)
+        .await?
+        .iter()
+        .any(|subscription| subscription.instance == step.instance_name());
+    let removed = if resubscribed {
+        Err(format!(
+            "{environment} subscribes to {} again",
+            step.instance_name()
+        ))
+    } else {
+        match product_execution::deactivate(ctx, lease, content, adapters).await {
+            Ok(removed) => removed,
+            Err(error) if is_execution_fence_lost(&error) => return Err(error),
+            Err(error) => Err(format!("removal executor failed: {error}")),
+        }
+    };
+    let (mut outcome, transition) = match removed {
+        Ok(()) => (
+            Outcome::new(step.clone(), StepOutcomeStatus::Succeeded, String::new()),
+            crate::environment::DeploymentTransition::Removed {
+                version: step.to.clone(),
+            },
+        ),
+        Err(detail) if resubscribed => (
+            Outcome::new(step.clone(), StepOutcomeStatus::Failed, detail),
+            crate::environment::DeploymentTransition::Unchanged,
+        ),
+        Err(detail) => (
+            Outcome::new(
+                step.clone(),
+                StepOutcomeStatus::Failed,
+                format!("removal of {} {} failed: {detail}", step.product, step.to),
+            ),
+            crate::environment::DeploymentTransition::Unknown,
+        ),
+    };
+    record(
+        ctx,
+        started_at_ms,
+        lease,
+        environment,
+        plan_id,
+        &mut outcome,
+        transition,
+    )
+    .await?;
     Ok(outcome)
 }
 

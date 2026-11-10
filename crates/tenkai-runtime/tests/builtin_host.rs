@@ -450,6 +450,7 @@ async fn an_unsubscribed_host_release_is_uninstalled_through_the_runtime() {
         &mut ctx,
         "prod",
         "cluster",
+        Some("1.0.0"),
         &tenkai::software_executor::SoftwareExecutors::default(),
         |_| Ok(()),
     )
@@ -476,6 +477,20 @@ async fn an_unsubscribed_host_release_is_uninstalled_through_the_runtime() {
     assert_eq!(
         *applier.runs.lock().unwrap(),
         ["install cluster@1.0.0", "uninstall cluster@1.0.0"]
+    );
+    // The completion records the removal, not a deployment.
+    let environment = ctx
+        .get(&tenkai::ontology::env_id("prod"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(environment.properties.get("deployed.cluster"), None);
+    assert_eq!(
+        environment
+            .properties
+            .get("deployed_prev.cluster")
+            .map(String::as_str),
+        Some("1.0.0")
     );
     // Nothing is left to plan, and nothing runs twice.
     assert!(!runtime.run_once().await.unwrap());

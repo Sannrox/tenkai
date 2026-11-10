@@ -1732,6 +1732,7 @@ impl ManagementOperations {
             environment,
             product,
             request.instance.as_deref(),
+            request.expected_version.as_deref(),
             &executors,
             |superseded| management_lifecycle::require_expected_generation(expected, superseded),
         )

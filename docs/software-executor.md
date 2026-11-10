@@ -130,6 +130,10 @@ helm upgrade --install <instance> <workdir> \
   [--set-file tenkai.dependencies=<path-to-canonical-json>]
 ```
 
+Remove runs `helm uninstall <instance> --namespace <environment> --wait
+--ignore-not-found`, so a retried removal finds nothing to do. That flag
+needs Helm 3.13 or later.
+
 A release that declares requirements also gets a dependency document
 ([software compatibility](software-compatibility.md)). Helm charts read it as
 `tenkai.dependencies`. Native and in-process Kubernetes apply ConfigMap

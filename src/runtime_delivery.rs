@@ -233,7 +233,12 @@ async fn require_runtime_placement(
     environment: &str,
     plan: &crate::plan::Plan,
 ) -> Result<(), RuntimeDeliveryError> {
-    for step in plan.steps.iter().filter(|step| step.rewrap.is_none()) {
+    // A removal deploys nothing, so it is never refused for placement.
+    for step in plan
+        .steps
+        .iter()
+        .filter(|step| step.rewrap.is_none() && step.action != crate::plan::Action::Remove)
+    {
         crate::topology::require_placement(ctx, environment, &step.release_id)
             .await
             .map_err(
@@ -318,7 +323,7 @@ pub(crate) async fn complete_runtime_work(
                     .into_iter()
                     .filter_map(|(key, value)| {
                         key.strip_prefix("failed_target.")
-                            .map(|product| (product.to_string(), value))
+                            .map(|instance| (instance.to_string(), value))
                     })
                     .collect()
             })
@@ -370,6 +375,12 @@ pub(crate) async fn complete_runtime_work(
             )
             .await?;
         }
+        let subscribed: std::collections::HashSet<String> =
+            crate::environment::list_subscriptions(ctx, object)
+                .await?
+                .into_iter()
+                .map(|subscription| subscription.instance)
+                .collect();
         for step in &stored.steps {
             let Some(receipt) = completion
                 .receipts
@@ -383,7 +394,9 @@ pub(crate) async fn complete_runtime_work(
             if step.rewrap.is_some() {
                 continue;
             }
-            let key = format!("failed_target.{}", step.product);
+            // Keyed by instance, as the server records failures.
+            let instance = step.instance_name();
+            let key = format!("failed_target.{instance}");
             if crate::terminal_outcome::classify(
                 step.action,
                 crate::terminal_outcome::Observation::Runtime {
@@ -395,19 +408,33 @@ pub(crate) async fn complete_runtime_work(
             {
                 continue;
             }
+            // An executed removal that failed may have removed part of the
+            // instance, as the server records it; one refused because the
+            // instance is subscribed again removed nothing.
+            if !receipt.succeeded
+                && step.action == crate::plan::Action::Remove
+                && step.host.is_none()
+                && !subscribed.contains(instance)
+            {
+                crate::environment::record_removal_unknown(
+                    object,
+                    step,
+                    &receipt.detail,
+                    observed_at,
+                );
+            }
             if !receipt.succeeded && step.action != crate::plan::Action::Rollback {
                 object.properties.insert(key, step.release_id.clone());
+                object
+                    .properties
+                    .insert(format!("failed_target_plan.{instance}"), stored.id.clone());
                 object.properties.insert(
-                    format!("failed_target_plan.{}", step.product),
-                    stored.id.clone(),
-                );
-                object.properties.insert(
-                    format!("failed_target_at.{}", step.product),
+                    format!("failed_target_at.{instance}"),
                     observed_at.to_string(),
                 );
                 crate::environment::record_failed_target_error(
                     &mut object.properties,
-                    &step.product,
+                    instance,
                     &step.release_id,
                     &receipt.detail,
                 );
@@ -415,7 +442,7 @@ pub(crate) async fn complete_runtime_work(
                 object.properties.remove(&key);
                 object
                     .properties
-                    .remove(&format!("failed_target_plan.{}", step.product));
+                    .remove(&format!("failed_target_plan.{instance}"));
             }
         }
         let provider_events = if ctx.outcome_export_enabled() {
@@ -512,7 +539,7 @@ pub(crate) async fn complete_runtime_work(
                         observed_at_ms: observed_at,
                         context: crate::feedback_observation::RetryContext {
                             runtime_claim_generation: Some(completion.generation),
-                            failed_target_retry: held_before.get(&step.product)
+                            failed_target_retry: held_before.get(step.instance_name())
                                 == Some(&step.release_id),
                             recovery_reason: stored.recalled_recovery_reason.clone(),
                             ..Default::default()
@@ -776,6 +803,21 @@ pub struct RuntimeSelfReleaseFile {
     pub name: String,
 }
 
+/// Refuse a non-host removal's package to a runtime that did not say it
+/// removes one: an older runtime would install the release, and the server
+/// would then record it removed (ADR 0049 §7).
+fn refuse_removal_by_older_runtime(
+    step: &crate::plan::Step,
+    request: &RuntimeReleaseRequest,
+) -> Result<(), RuntimeDeliveryError> {
+    if step.action == crate::plan::Action::Remove && step.host.is_none() && !request.removal {
+        return Err(RuntimeDeliveryError::ReleaseRefused(
+            "this runtime agent predates removing releases; upgrade it to run this removal".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Which step's release a runtime in built-in mode asks for (ADR 0048 §3).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -787,6 +829,11 @@ pub struct RuntimeReleaseRequest {
     /// rollback removes, instead of its target.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub restore: bool,
+    /// Set by a runtime that removes a non-host removal step's release
+    /// (ADR 0049), only for such a step. An older runtime would install it
+    /// instead, so the server refuses that package without it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removal: bool,
 }
 
 /// The signed release of one claimed step, for a runtime that applies it
@@ -1094,8 +1141,13 @@ impl RuntimeDeliveryOperations {
                 "software compatibility preflight unavailable".into(),
             ));
         };
-        // A re-wrap step deploys nothing, so it needs no deployment preflight.
-        for step in plan.steps.iter().filter(|step| step.rewrap.is_none()) {
+        // A re-wrap step or a removal deploys nothing, so it needs no
+        // deployment preflight.
+        for step in plan
+            .steps
+            .iter()
+            .filter(|step| step.rewrap.is_none() && step.action != crate::plan::Action::Remove)
+        {
             crate::software_compatibility::require_release(
                 &mut ctx,
                 environment,
@@ -1304,8 +1356,13 @@ impl RuntimeDeliveryOperations {
         if plan.environment != environment {
             return Err(RuntimeDeliveryError::ForeignEnvironment);
         }
-        // A re-wrap step deploys nothing, so it needs no deployment preflight.
-        for step in plan.steps.iter().filter(|step| step.rewrap.is_none()) {
+        // A re-wrap step or a removal deploys nothing, so it needs no
+        // deployment preflight.
+        for step in plan
+            .steps
+            .iter()
+            .filter(|step| step.rewrap.is_none() && step.action != crate::plan::Action::Remove)
+        {
             crate::software_compatibility::require_release(
                 &mut ctx,
                 environment,
@@ -1436,6 +1493,7 @@ impl RuntimeDeliveryOperations {
                 "the plan has no step with that id".into(),
             ));
         };
+        refuse_removal_by_older_runtime(step, request)?;
         let mut release = crate::apply::runtime_release(&mut ctx, &plan, step, request.restore)
             .await
             .map_err(
@@ -2211,6 +2269,49 @@ fn runtime_assignment(assignments: &HashMap<String, String>, token: &str) -> Opt
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_older_runtime_gets_no_removal_package() {
+        let mut step = crate::plan::Step {
+            id: "plan:step:0".into(),
+            order: 0,
+            product: "api".into(),
+            instance: String::new(),
+            action: crate::plan::Action::Remove,
+            from: Some("1.0.0".into()),
+            to: "1.0.0".into(),
+            release_id: crate::ontology::release_id("api", "1.0.0"),
+            release_digest: "manifest".into(),
+            artifact_digest: "artifact".into(),
+            workdir: String::new(),
+            restore: None,
+            host: None,
+            sealed: Vec::new(),
+            rewrap: None,
+        };
+        // What an older runtime sends: no removal field.
+        let older: super::RuntimeReleaseRequest =
+            serde_json::from_str(r#"{"plan_id":"plan","generation":1,"step_id":"plan:step:0"}"#)
+                .unwrap();
+        let current = super::RuntimeReleaseRequest {
+            removal: true,
+            ..older.clone()
+        };
+
+        assert!(matches!(
+            super::refuse_removal_by_older_runtime(&step, &older),
+            Err(super::RuntimeDeliveryError::ReleaseRefused(_))
+        ));
+        assert!(super::refuse_removal_by_older_runtime(&step, &current).is_ok());
+        // Host removals and every other step predate the flag.
+        step.host = Some(crate::plan::HostStep {
+            action: crate::host_apply::HostAction::Uninstall,
+            expected_generation: 1,
+        });
+        assert!(super::refuse_removal_by_older_runtime(&step, &older).is_ok());
+        step.host = None;
+        step.action = crate::plan::Action::Upgrade;
+        assert!(super::refuse_removal_by_older_runtime(&step, &older).is_ok());
+    }
 
     /// Completing a re-wrap plan stores the new wraps on the values it named
     /// and leaves the deployment record, rollback history and failed targets

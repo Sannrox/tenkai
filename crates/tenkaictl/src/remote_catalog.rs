@@ -108,13 +108,20 @@ pub(crate) async fn run(
                     env,
                     product,
                     instance,
+                    version,
                     generation,
                 },
         } => {
             let generation = generation
                 .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;
             let result = client
-                .unsubscribe_environment(&env, &product, generation, instance.as_deref())
+                .unsubscribe_environment(
+                    &env,
+                    &product,
+                    generation,
+                    instance.as_deref(),
+                    version.as_deref(),
+                )
                 .await?;
             println!("{}", result.message);
             Ok(())

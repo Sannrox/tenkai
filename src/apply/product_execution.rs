@@ -447,16 +447,22 @@ async fn deactivate_for(
         .software
         .resolve(content.manifest.deploy.executor)?
     {
-        let executor = executor.as_ref();
         refresh_environment_lease(ctx, lease).await?;
-        if let Err(detail) = require_artifact_pull_consumer(content, Some(executor)) {
+        if let Err(detail) = require_artifact_pull_consumer(content, Some(executor.as_ref())) {
             return Ok(Err(detail));
         }
-        let request = software_request(ctx, content, format!("lease-{}", lease.generation)).await?;
-        let removed = software_blocking(|| match removal {
-            Removal::Release => executor.remove(&request),
+        let attempt = format!("lease-{}", lease.generation);
+        let request = match removal {
+            Removal::Release => removal_request(ctx, content, attempt).await?,
+            Removal::FailedApply => software_request(ctx, content, attempt).await?,
+        };
+        // The lease is renewed while the removal runs; losing it stops an
+        // adapter that can stop, and the next plan retries the removal.
+        let removed = run_with_lease_renewal(ctx, lease, move |stop| match removal {
+            Removal::Release => executor.remove_until_stopped(&request, stop),
             Removal::FailedApply => executor.cleanup_failed_apply(&request),
         })
+        .await?
         .map_err(|error| {
             software_phase_error(
                 crate::software_executor::SoftwareDeployPhase::Remove,
@@ -531,6 +537,30 @@ pub(super) async fn software_request(
     content: &ReleaseContent,
     apply_attempt: String,
 ) -> Result<crate::software_executor::SoftwareApplyRequest> {
+    let mut request = removal_request(ctx, content, apply_attempt).await?;
+    if let Some(profile) = &content.manifest.compatibility {
+        let env_obj = crate::environment::environment(ctx, &content.environment).await?;
+        request.dependency_document = crate::dependency_document::json_for_release(
+            ctx,
+            &env_obj,
+            content.instance_name(),
+            profile,
+            &content.manifest_digest,
+        )
+        .await?
+        .unwrap_or_default();
+    }
+    Ok(request)
+}
+
+/// [`software_request`] without the dependency document: only an install
+/// renders it, and a removal must not need its providers, which may be
+/// gone already (ADR 0049).
+pub(super) async fn removal_request(
+    ctx: &mut Ctx,
+    content: &ReleaseContent,
+    apply_attempt: String,
+) -> Result<crate::software_executor::SoftwareApplyRequest> {
     let env_obj = crate::environment::environment(ctx, &content.environment).await?;
     let overlays = crate::environment::product_overlays(&env_obj, &content.product)?;
     let mut request = crate::software_executor::with_overlays(
@@ -555,17 +585,6 @@ pub(super) async fn software_request(
     request.secret_dir_path =
         crate::software_executor::secret_dir_from_properties(&env_obj.properties)?;
     request.apply_attempt = apply_attempt;
-    if let Some(profile) = &content.manifest.compatibility {
-        request.dependency_document = crate::dependency_document::json_for_release(
-            ctx,
-            &env_obj,
-            content.instance_name(),
-            profile,
-            &content.manifest_digest,
-        )
-        .await?
-        .unwrap_or_default();
-    }
     Ok(request)
 }
 

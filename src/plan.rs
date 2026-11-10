@@ -15,7 +15,10 @@ mod convergence;
 mod lifecycle;
 mod release_selection;
 
-pub(crate) use convergence::{require_host_product, stored_release_executor};
+pub(crate) use convergence::{
+    require_host_product, require_removable, split_release_id, stored_release_executor,
+    stored_release_manifest,
+};
 
 pub(crate) use release_selection::resolve_subscription_selection;
 pub use release_selection::{
@@ -62,8 +65,9 @@ pub enum Action {
     Downgrade,
     Rollback,
     Restart,
-    /// Remove a product the environment no longer subscribes to. Only host
-    /// releases are removed by a plan, as a host `uninstall` step.
+    /// Remove a product the environment no longer subscribes to: a host
+    /// release as a host `uninstall` step, any other software release with
+    /// its own executor (ADR 0049).
     Remove,
 }
 
