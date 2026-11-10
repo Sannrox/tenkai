@@ -305,6 +305,10 @@ pub struct RuntimeClient {
     /// so a fast poll does not list the target every time. In memory only:
     /// what is due is read from the target, and a restart just runs a pass.
     renewal_pass_at: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    /// Digest of the last certificate report the server stored, so an
+    /// unchanged one is not sent again. In memory only: the server admits
+    /// a repeated report as a no-op, so a restart just sends it again.
+    certificates_reported: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     /// The host preflight config whose checks runner attestation carries.
     preflight: Option<PathBuf>,
     /// Local approval policy and trust roots, installed on this host
@@ -357,6 +361,7 @@ impl RuntimeClient {
             home: None,
             restart: Default::default(),
             renewal_pass_at: Default::default(),
+            certificates_reported: Default::default(),
             preflight: None,
             local_policy: None,
         })
@@ -985,22 +990,13 @@ impl RuntimeClient {
         let config = std::sync::Arc::clone(config);
         let environment = self.environment.clone();
         let pass = tokio::task::spawn_blocking(move || {
-            crate::runtime_builtin::renew_identities(&config, &environment, now / 1000)
+            crate::runtime_builtin::renew_and_audit(&config, &environment, now / 1000)
         })
         .await;
         match pass {
-            Ok(Ok(renewals)) => {
-                for renewal in renewals {
-                    match renewal.outcome {
-                        Ok(expires) => eprintln!(
-                            "renewed the workload certificate of {}; it expires at {expires}",
-                            renewal.instance
-                        ),
-                        Err(error) => eprintln!(
-                            "renewing the workload certificate of {} failed (retrying): {error}",
-                            renewal.instance
-                        ),
-                    }
+            Ok(Ok(reports)) => {
+                if let Err(error) = self.report_certificates(reports).await {
+                    eprintln!("workload certificate report failed (retrying): {error:#}");
                 }
             }
             Ok(Err(error)) => {
@@ -1008,6 +1004,53 @@ impl RuntimeClient {
             }
             Err(error) => eprintln!("workload certificate renewal panicked (retrying): {error}"),
         }
+    }
+
+    /// Send the certificate state of the last pass to the server, in
+    /// batches the server admits, unless the server already stored exactly
+    /// this state. Each batch is admitted on its own, so a batch sent again
+    /// after a later one failed is a no-op.
+    async fn report_certificates(
+        &self,
+        certificates: Vec<crate::certificate_reports::CertificateReport>,
+    ) -> Result<()> {
+        if certificates.is_empty() {
+            return Ok(());
+        }
+        let digest =
+            <sha2::Sha256 as sha2::Digest>::digest(serde_json::to_vec(&certificates)?).to_vec();
+        if self.certificates_reported.lock().unwrap().as_deref() == Some(digest.as_slice()) {
+            return Ok(());
+        }
+        for batch in certificates.chunks(crate::certificate_reports::MAX_REPORTS) {
+            let report = crate::runtime_delivery::RuntimeCertificatesReport {
+                certificates: batch.to_vec(),
+            };
+            let response = self
+                .client()?
+                .post(format!(
+                    "{}/v1/runtime/environments/{}/certificates",
+                    self.base_url, self.environment
+                ))
+                .bearer_auth(&self.token)
+                .header("x-tenkai-runtime-instance", &self.instance_id)
+                .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
+                .json(&report)
+                .send()
+                .await?;
+            if matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ) {
+                bail!(
+                    "the server does not accept workload certificate reports; upgrade the server"
+                );
+            }
+            let _: crate::runtime_delivery::RuntimeCertificatesResponse =
+                decode_response(response, "reporting workload certificates").await?;
+        }
+        *self.certificates_reported.lock().unwrap() = Some(digest);
+        Ok(())
     }
 
     /// Whether this runtime runs identity issuer steps (ADR 0046 §2): only

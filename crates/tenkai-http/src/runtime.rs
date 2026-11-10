@@ -230,6 +230,29 @@ pub(super) async fn runtime_host_records(
     }
 }
 
+/// The workload certificates a runtime reports (ADR 0046 §3).
+pub(super) async fn runtime_certificates(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
+    Json(report): Json<tenkai::runtime_delivery::RuntimeCertificatesReport>,
+) -> Response {
+    match state
+        .runtime_delivery
+        .report_certificates(
+            bearer(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
+            &environment,
+            &report,
+        )
+        .await
+    {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => runtime_delivery_error(error),
+    }
+}
+
 /// The calling instance, the agent's version when sent (#673), and the
 /// connection's verified client certificate (#674).
 fn runtime_caller<'a>(

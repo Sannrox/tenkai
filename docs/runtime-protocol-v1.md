@@ -12,6 +12,7 @@ There is no served gRPC `RuntimeService`.
 | `POST /v1/runtime/environments/{environment}/heartbeat` | JSON `RuntimeHeartbeat` (`plan_id`, `generation`) | JSON claim |
 | `POST /v1/runtime/environments/{environment}/release` | JSON `RuntimeReleaseRequest` (`plan_id`, `generation`, `step_id`, optional `restore`). Renews the claim. | JSON `RuntimeRelease` (`manifest`, `signature`, `request`, `entries`) for a built-in runtime ([below](#release-package)); `412` naming why the step has none |
 | `POST /v1/runtime/environments/{environment}/host-records` | JSON `RuntimeHostRecordsReport` (`records`: the host applier's applied-state records for the environment) | JSON `RuntimeHostRecordsResponse` (`stored`: products whose record was new) ([below](#host-records)) |
+| `POST /v1/runtime/environments/{environment}/certificates` | JSON `RuntimeCertificatesReport` (`certificates`: each workload certificate its targets hold, with the last renewal attempt) | JSON `RuntimeCertificatesResponse` (`stored`: instances whose report was new) ([below](#workload-certificates)) |
 | `POST /v1/runtime/environments/{environment}/inventory` | JSON `RuntimeInventoryReport` (`facts`, `source`) | JSON `RuntimeInventoryResponse` |
 | `POST /v1/runtime/environments/{environment}/enroll` | No bearer. JSON `RuntimeEnrollRequest` (`token`: a single-use enrollment token; optional `csr`; optional `attestation`; optional `sealing_public_key`) | `201`, JSON `RuntimeEnrolled` (`environment`, `credential`, `credential_id`); `403` for an unknown, spent, expired or foreign token |
 | `POST /v1/runtime/environments/{environment}/certificate` | Runner certificate (or, once it expired, the enrolled bearer) and `x-tenkai-runtime-instance`. JSON `RuntimeCertificateRequest` (`csr`; optional `attestation`; optional `sealing_public_key`) | JSON `RuntimeCertificate` (`certificate`, `ca`) ([runner certificates](run-tenkai-server.md#runner-certificates)) |
@@ -275,6 +276,22 @@ from reported records; before that, only a server that runs an applier
 itself plans them. A stale record makes the step refused by the applier's
 generation check, never run. An older server answers `404`; the runtime
 logs it and continues.
+
+### Workload certificates
+
+A built-in runtime with a sealing key renews workload certificates itself
+([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md) §3) and,
+after a renewal pass whose result changed, posts each certificate its
+targets hold: the instance, `not_before` and `not_after` (Unix seconds), and
+`last_renewal`, the last attempt it audited (`at`, and `renewed` with the new
+`not_after` or `failed` with a `reason` of at most 512 bytes). The server
+stores each report as an immutable fact of the environment and keeps the
+furthest one per instance (by `not_after`, then by the attempt's time), so a
+delayed or repeated report never moves an instance back. `status` shows an
+instance whose certificate is in its last sixth as near expiry, with the
+expiry and the last failure. Reports of another environment, or two of one
+instance, refuse the report (`400`). An older server answers `404`; the
+runtime logs it and continues.
 
 ## Typed proto contract
 

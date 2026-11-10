@@ -488,6 +488,29 @@
       ],
       "type": "object"
     },
+    "CertificateStatus": {
+      "description": "What `status` shows of an instance's workload certificate.",
+      "properties": {
+        "expires_at": {
+          "description": "When the certificate expires, in Unix seconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "near_expiry": {
+          "description": "In the last sixth of its lifetime, so renewal is late.",
+          "type": "boolean"
+        },
+        "renewal_failure": {
+          "description": "Why the last renewal attempt failed, while it is the latest.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "expires_at",
+        "near_expiry"
+      ],
+      "type": "object"
+    },
     "ChangeEvent": {
       "description": "One durable change. `cursor` is the opaque resume token (monotonic sequence).",
       "properties": {
@@ -6490,6 +6513,10 @@
     },
     "StatusRow": {
       "properties": {
+        "certificate": {
+          "$ref": "#/$defs/CertificateStatus",
+          "description": "The instance's workload certificate, as its runtime last reported\nit (ADR 0046 §3). Omitted when none was reported."
+        },
         "channel": {
           "type": "string"
         },

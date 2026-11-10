@@ -15,7 +15,8 @@ use crate::ontology::{
     KIND_PACKAGE_MIGRATION, KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN, KIND_PLAN_APPROVAL_ENVELOPE,
     KIND_PLAN_APPROVAL_VERIFICATION, KIND_PRODUCT, KIND_PRODUCT_MAINTENANCE_CONFIG,
     KIND_PROMOTION_AUDIT, KIND_PROMOTION_LOCK, KIND_RELEASE, KIND_RELEASE_RECALL,
-    KIND_RELEASE_VERIFICATION, KIND_RUNTIME_ENROLLMENT, KIND_WAVE, REL_SUBSCRIBES,
+    KIND_RELEASE_VERIFICATION, KIND_RUNTIME_ENROLLMENT, KIND_WAVE, KIND_WORKLOAD_CERTIFICATE,
+    REL_SUBSCRIBES,
 };
 use crate::pb::graph_action::{ActionOp, ActionParamDef, ActionTypeDef};
 use crate::pb::sekai::{ObjectType, PropertyDef};
@@ -584,6 +585,23 @@ pub fn known_object_types() -> Vec<ObjectType> {
                     "Detached tenkai.plan-approval.v1 envelope",
                 ),
                 prop("collected_at", true, "Collection time in Unix milliseconds"),
+            ],
+        ),
+        object_type(
+            KIND_WORKLOAD_CERTIFICATE,
+            "An immutable workload certificate report an environment runtime made",
+            vec![
+                prop(
+                    "environment",
+                    true,
+                    "Environment the certificate belongs to",
+                ),
+                prop("instance", false, "Instance the certificate belongs to"),
+                prop(
+                    "report",
+                    false,
+                    "Reported tenkai.workload-certificate.v1 report (JSON)",
+                ),
             ],
         ),
         object_type(

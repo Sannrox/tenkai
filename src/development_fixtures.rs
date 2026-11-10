@@ -157,6 +157,7 @@ impl FixtureEnvironmentProjection {
                     delivery_hold: None,
                     dependency_hold: None,
                     spec_drift: None,
+                    certificate: None,
                 }
             })
             .collect()

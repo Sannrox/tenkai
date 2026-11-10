@@ -153,6 +153,13 @@ pub(crate) async fn run(
                 if let Some(drift) = &r.spec_drift {
                     crate::output::print_spec_drift(drift);
                 }
+                if let Some(line) = r
+                    .certificate
+                    .as_ref()
+                    .and_then(crate::output::certificate_line)
+                {
+                    println!("{line}");
+                }
                 if matches!(r.health.as_deref(), Some("unknown") | Some("unhealthy"))
                     && let Some(error) = r.error.as_deref()
                 {
