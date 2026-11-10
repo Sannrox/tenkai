@@ -159,15 +159,9 @@ async fn tenkai_upgrades_rolls_back_and_reverts_its_runtime_agent() {
     tenkai::ontology::register(&mut ctx).await.unwrap();
     let store = Arc::new(tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap());
     let reconciler = Arc::new(
-        Reconciler::new(
-            ctx.clone(),
-            ReconcilerConfig {
-                instance_id: "self-upgrade".into(),
-                ..ReconcilerConfig::default()
-            },
-        )
-        .unwrap()
-        .with_runtime_environments(["prod".into()].into()),
+        Reconciler::new(ctx.clone(), ReconcilerConfig::default())
+            .unwrap()
+            .with_runtime_environments(["prod".into()].into()),
     );
     let app = tenkai_http::router(
         tenkai_http::ServerConfig::community(

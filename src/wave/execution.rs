@@ -942,7 +942,6 @@ async fn execute_plan(
             worker_lifecycle: None,
             artifact_registry: crate::oci_artifact::selected_registry()?,
             delivery_adapter: None,
-            delivery_fence: None,
         },
     )
     .await;

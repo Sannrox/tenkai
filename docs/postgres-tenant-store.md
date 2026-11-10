@@ -39,13 +39,12 @@ store.tenant_postgres:
 against shared PostgreSQL, with standbys sharing the same URL. Failover is
 the hub writer lease moving to a standby; see the
 [hub failover runbook](ha-failover-runbook.md). It does **not** mean
-multi-active concurrent reconcile without tick fencing (#129). It does **not**
+multi-active concurrent reconcile: only the writer-lease holder ticks (#129). It does **not**
 advertise `high_availability` (product HA remains separate per ADR 0009).
 
 | Claim | Meaning |
 | --- | --- |
 | `shared_replica_state` | Shared durable state for this adapter; sufficient for single-active-writer component tests |
-| Tick fence table | `tenkai_reconcile_tick_claims` for multi-host reconcile (#135); not a HA product claim |
 | Not claimed yet | Product `high_availability` |
 
 Community SQLite never advertises `shared_replica_state`.
@@ -170,7 +169,7 @@ Rules:
 In-memory adapter remains for unit tests (`ServerConfig.tenant_store = Some(Arc::new(InMemory…))`).
 
 `--replica-count > 1` passes capability negotiation when the Postgres hub store
-is composed (#128). Multi-active reconcile uses tick fencing (#129). Catalog
+is composed (#128). Only the writer-lease holder reconciles (#129). Catalog
 lifecycle, terminal-outcome export and feedback observation capture share one
 tenant-schema transaction.
 `--outcome-provider chisei` starts on a tenant-mode hub and drains each tenant

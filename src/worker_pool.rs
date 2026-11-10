@@ -673,7 +673,6 @@ replicas = 1
                 worker_lifecycle: Some(port),
                 artifact_registry: None,
                 delivery_adapter: None,
-                delivery_fence: None,
             },
         )
         .await
@@ -1049,7 +1048,6 @@ drain_timeout_ms = 1000
                 worker_lifecycle: Some(port.clone()),
                 artifact_registry: None,
                 delivery_adapter: None,
-                delivery_fence: None,
             },
         )
         .await

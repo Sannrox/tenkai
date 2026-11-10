@@ -97,7 +97,7 @@ a store honestly advertises the matching capabilities. Decision:
 
 The optional Postgres hub store (`--features postgres`, `--tenant-mode`)
 advertises `shared_replica_state` under a **single-active-writer** model.
-Multi-host hubs use the writer lease and tick fencing. Product
+Multi-host hubs use the writer lease; only its holder ticks. Product
 `high_availability` stays unclaimed. See
 [postgres-tenant-store.md](postgres-tenant-store.md#shared-replica-state-128)
 and the [hub failover runbook](ha-failover-runbook.md).

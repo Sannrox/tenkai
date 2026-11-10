@@ -25,7 +25,7 @@ The lab assumes:
 | Postgres multi-tenant hub store | [postgres-tenant-store.md](postgres-tenant-store.md), #111 |
 | Server wires tenant mode → Postgres | #127 |
 | `shared_replica_state` (single-active writer) | #128 |
-| Reconcile tick fencing | [reconcile-tick-fencing.md](reconcile-tick-fencing.md), #129 |
+| Reconcile ticks | [reconcile-tick-fencing.md](reconcile-tick-fencing.md), #129 |
 | Replica and HA capability semantics | [ADR 0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md) |
 | Supported operating-profile contract | [ADR 0010](decisions/0010-supported-operating-profiles.md) |
 
@@ -35,15 +35,14 @@ The lab assumes:
 | --- | --- |
 | Shared durable hub and tenant state in Postgres | Multi-active concurrent writers without fencing |
 | Capability gate for `--replica-count > 1` | Automatic multi-AZ product packaging |
-| Tick fence so two hosts do not double-reconcile the same env | Product `high_availability` |
+| Writer lease so only one host reconciles at a time | Product `high_availability` |
 | Catalog object-graph lifecycle and terminal-outcome export | Zero-downtime migration |
 | Tenant isolation conformance | Stable enterprise recovery without the failover runbook |
 
 **Single-active writer component model:** at most one control-plane process
 should actively reconcile and mutate the tested tenant state. Lab peers share
-`TENKAI_POSTGRES_URL`. Tick fencing (`SharedReconcileFence` /
-`ReconcileTickFence`) reduces double-reconcile races when more than one process
-is live. PostgreSQL dump/restore is the hub recovery path.
+`TENKAI_POSTGRES_URL`. Only the replica holding the hub writer lease runs
+reconcile ticks, so a live standby does not double-reconcile. PostgreSQL dump/restore is the hub recovery path.
 
 ## Prerequisites
 
@@ -65,7 +64,7 @@ Flags:
 | Flag | Role |
 | --- | --- |
 | `--tenant-mode` | Requires Postgres hub store (#127) |
-| `--replica-count N` (`N > 1`) | Requires `shared_replica_state` (#128); enables shared tick fence (#129) |
+| `--replica-count N` (`N > 1`) | Requires `shared_replica_state` (#128); standbys skip ticks under the writer lease (#748) |
 | `--listen 127.0.0.1:PORT` | Plaintext HTTP remains loopback-only |
 
 ## Local lab (docker Postgres + two hubs)
@@ -113,8 +112,7 @@ Notes:
 - Both hosts open the same PostgreSQL database. Hub records live in
   `tenkai_hub`; tenant isolation uses schemas `tenkai_t_*`.
 - With `--features postgres`, `TENKAI_POSTGRES_URL`, and `replica_count > 1`,
-  both hosts use the durable Postgres `ReconcileTickFence`. Distinct
-  `TENKAI_INSTANCE_ID` values are required.
+  both hosts compete for the hub writer lease; only the holder ticks.
 
 ### 4. Verify management plane
 
@@ -140,9 +138,9 @@ product HA.
 5. Re-check `/readyz`, `fleet status`, and one `reconcile` tick.
 6. Confirm tenant isolation still holds (cross-tenant list/get non-disclosing).
 
-If both hubs were left running, tick fencing reduces double-reconcile risk for
-the same environment when both share a fence; with per-process fences only,
-**stop the old writer** before treating the standby as sole active.
+If both hubs were left running, only the writer-lease holder ticks and the
+other refuses writes at a superseded generation. Still **stop the old writer**
+before treating the standby as sole active.
 
 ## PostgreSQL component dump and restore exercise
 
@@ -221,8 +219,7 @@ verification and rollback are in the
 
 CI runs a failover drill against an ephemeral PostgreSQL on every change
 (`Failover drill` job). Each replica is its own process that renews the
-writer lease and works a plan one step at a time under the reconcile tick
-claim and an environment lease, recording a receipt per step. The drill
+writer lease and works a plan one step at a time under an environment lease, recording a receipt per step. The drill
 stops the leader inside a write transaction, in two ways:
 
 - **Killed** (`SIGKILL`): the standby leads within the lease lifetime plus
@@ -254,15 +251,11 @@ TENKAI_POSTGRES_URL='postgresql://…?sslmode=disable' \
   bash scripts/hub-ha-qualification-drill.sh
 ```
 
-## Durable tick fence (#135)
+## Reconcile ticks (#135, #1112)
 
-With `--features postgres` and `TENKAI_POSTGRES_URL`, multi-replica hosts use
-hub table `tenkai_reconcile_tick_claims` for environment tick ownership. Claims
-survive process restart; another host only takes over after TTL expiry or an
-explicit release. Without Postgres, fencing is process-memory only and is not
-safe across machines.
-
-See [reconcile-tick-fencing.md](reconcile-tick-fencing.md).
+Only the writer-lease holder ticks. The hub no longer creates or reads
+`tenkai_reconcile_tick_claims`; an existing table is left for older replicas
+during a rolling deploy. See [reconcile-tick-fencing.md](reconcile-tick-fencing.md).
 Mutation-level replay and stale-generation evidence:
 [fenced delivery-effect conformance](delivery-effect-conformance.md).
 

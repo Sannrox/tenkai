@@ -319,7 +319,6 @@ async fn execute_authorized(
             worker_lifecycle,
             artifact_registry: crate::oci_artifact::selected_registry()?,
             delivery_adapter: None,
-            delivery_fence: None,
         },
     )
     .await?;

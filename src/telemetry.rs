@@ -671,7 +671,6 @@ mod tests {
                         worker_lifecycle: None,
                         artifact_registry: None,
                         delivery_adapter: None,
-                        delivery_fence: None,
                     },
                 )
                 .await
@@ -699,7 +698,6 @@ mod tests {
                         worker_lifecycle: None,
                         artifact_registry: None,
                         delivery_adapter: None,
-                        delivery_fence: None,
                     },
                 )
                 .await
@@ -728,7 +726,6 @@ mod tests {
                         worker_lifecycle: None,
                         artifact_registry: None,
                         delivery_adapter: None,
-                        delivery_fence: None,
                     },
                 )
                 .await
@@ -804,8 +801,6 @@ mod tests {
                     unapproved_development_reason: Some("otel reconcile drill".into()),
                     approval_directory: None,
                     approval_trust_roots: None,
-                    fence_ttl_ms: 30_000,
-                    instance_id: "otel-reconcile".into(),
                 },
             )
             .unwrap();

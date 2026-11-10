@@ -908,4 +908,5 @@ control pipe, terminates the complete command group, and releases the fence
 before replacement work starts. Legacy object-only leases are never taken over
 automatically: stop the old controller and its children, then use
 `tenkaictl env unlock <environment>` as the explicit compatibility fallback.
-Multi-host hubs add [reconcile tick fencing](reconcile-tick-fencing.md).
+On multi-host hubs only the writer-lease holder ticks; see
+[multi-host reconcile ticks](reconcile-tick-fencing.md).

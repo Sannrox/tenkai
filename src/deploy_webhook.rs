@@ -1245,7 +1245,6 @@ mod tests {
             worker_lifecycle: None,
             artifact_registry: None,
             delivery_adapter: None,
-            delivery_fence: None,
         }
     }
 

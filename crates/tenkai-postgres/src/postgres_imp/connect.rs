@@ -157,18 +157,10 @@ fn connect_client(config: &Config, tls: MakeRustlsConnect) -> Result<Client> {
                 .map_err(pg)?;
         }
     }
-    // Hub-wide durable tick fence claims (#135). Not per-tenant: reconcile
-    // environments are coordinated across the control plane.
-    client
-        .batch_execute(
-            "CREATE TABLE IF NOT EXISTS tenkai_reconcile_tick_claims (
-                    environment TEXT PRIMARY KEY,
-                    owner TEXT NOT NULL,
-                    generation BIGINT NOT NULL,
-                    expires_at BIGINT NOT NULL
-                 );",
-        )
-        .map_err(pg)?;
+    // `tenkai_reconcile_tick_claims` is no longer created or read: the hub
+    // writer lease below already lets only one replica tick. Existing
+    // tables are left alone so older replicas keep working during a
+    // rolling deploy.
     // The hub writer lease (#748): one row, a generation that only grows.
     client
         .batch_execute(

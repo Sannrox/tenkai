@@ -38,8 +38,6 @@ pub struct ExecutionOptions<'a> {
     pub artifact_registry: Option<Arc<dyn crate::oci_artifact::ArtifactRegistry>>,
     /// Host-selected external delivery adapter. `None` keeps built-in execution.
     pub delivery_adapter: Option<std::sync::Arc<dyn crate::delivery_bridge::DeliveryAdapter>>,
-    /// Optional tick fence for adapter callbacks. `None` skips extra fencing.
-    pub delivery_fence: Option<std::sync::Arc<dyn crate::reconcile_fence::ReconcileTickFence>>,
 }
 
 impl std::fmt::Debug for ExecutionOptions<'_> {
@@ -57,7 +55,6 @@ impl std::fmt::Debug for ExecutionOptions<'_> {
             .field("worker_lifecycle", &self.worker_lifecycle.is_some())
             .field("artifact_registry", &self.artifact_registry.is_some())
             .field("delivery_adapter", &self.delivery_adapter.is_some())
-            .field("delivery_fence", &self.delivery_fence.is_some())
             .finish()
     }
 }
@@ -72,7 +69,6 @@ pub(super) struct AttemptExecutionPolicy<'a> {
     pub artifact_registry: Option<&'a dyn crate::oci_artifact::ArtifactRegistry>,
     pub artifact_registry_handle: Option<Arc<dyn crate::oci_artifact::ArtifactRegistry>>,
     pub delivery_adapter: Option<std::sync::Arc<dyn crate::delivery_bridge::DeliveryAdapter>>,
-    pub delivery_fence: Option<std::sync::Arc<dyn crate::reconcile_fence::ReconcileTickFence>>,
     pub approval: Option<(std::path::PathBuf, std::path::PathBuf)>,
     pub requester: Option<String>,
 }
@@ -230,7 +226,6 @@ async fn execute_with_options_inner(
     let worker_lifecycle = options.worker_lifecycle;
     let artifact_registry = options.artifact_registry;
     let delivery_adapter = options.delivery_adapter.clone();
-    let delivery_fence = options.delivery_fence.clone();
     let (approval, requester) = match options.authorization {
         ExecutionAuthorization::Signed {
             approval,
@@ -257,7 +252,6 @@ async fn execute_with_options_inner(
                         artifact_registry: artifact_registry.as_deref(),
                         artifact_registry_handle: artifact_registry.clone(),
                         delivery_adapter,
-                        delivery_fence,
                         approval,
                         requester,
                     },

@@ -5,7 +5,6 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
@@ -14,7 +13,6 @@ use crate::client::Ctx;
 use crate::delivery_manifest;
 use crate::environment;
 use crate::plan::{self, Plan, PlanState};
-use crate::reconcile_fence::{FenceAdmission, ReconcileTickFence};
 use crate::runtime_delivery::{RuntimeCompletion, RuntimeStepReceipt};
 
 const PROPERTY_CORRELATION: &str = "bridge.correlation";
@@ -133,7 +131,6 @@ pub struct BridgeExecution<'a> {
     pub requester: Option<&'a str>,
     pub skip_gates: bool,
     pub now: i64,
-    pub fence: Option<Arc<dyn ReconcileTickFence>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,12 +266,6 @@ async fn admit_before_delegation(
                 .is_some_and(|value| !value.is_empty())
         {
             bail!("recalled release {} cannot be delegated", step.release_id);
-        }
-    }
-    if let Some(fence) = &options.fence {
-        match fence.try_begin(&plan.environment, "delivery-bridge", options.now, 60_000)? {
-            FenceAdmission::Started { .. } => {}
-            other => bail!("stale fencing generation rejected late callback: {other:?}"),
         }
     }
     Ok(())
@@ -470,9 +461,9 @@ mod tests {
     use crate::plan_approval::{
         APPROVAL_SCHEMA, ApprovalEnvelope, ApprovalStatement, canonical_bytes,
     };
-    use crate::reconcile_fence::SharedReconcileFence;
     use base64::Engine as _;
     use ed25519_dalek::Signer as _;
+    use std::sync::Arc;
 
     struct Fixture {
         ctx: Ctx,
@@ -574,7 +565,6 @@ mod tests {
             requester: None,
             skip_gates,
             now,
-            fence: None,
         }
     }
 
@@ -618,7 +608,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_foreign_recalled_gated_and_stale_fence_fail_before_apply() {
+    async fn expired_foreign_recalled_gated_and_gated_fail_before_apply() {
         let mut fixture = signed_upgrade("deny").await;
         let now = crate::now_millis();
         let adapter = PollingAdapter::new(FakeMode::Succeed);
@@ -677,28 +667,8 @@ mod tests {
         .to_string();
         assert!(err.contains("gate"), "{err}");
 
-        let mut fenced = signed_upgrade("fence").await;
-        let fence = SharedReconcileFence::new().into_arc();
-        let fenced_now = crate::now_millis();
-        fence
-            .try_begin("prod", "holder", fenced_now, 60_000)
-            .unwrap();
-        let fenced_approval = fenced.approval.clone();
-        let fenced_trust = fenced.trust.clone();
-        let fenced_plan = fenced.plan.clone();
-        let mut late = opts(&fenced_approval, &fenced_trust, fenced_now, true);
-        late.fence = Some(fence);
-        let err = execute_bridged_plan(&mut fenced.ctx, &adapter, &fenced_plan, late)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("stale fencing") || err.contains("Busy"),
-            "{err}"
-        );
         let _ = std::fs::remove_dir_all(fixture.root);
         let _ = std::fs::remove_dir_all(gated.root);
-        let _ = std::fs::remove_dir_all(fenced.root);
     }
 
     #[tokio::test]
@@ -826,7 +796,6 @@ exclude_requester = true
         approval: &'a Path,
         trust: &'a Path,
         adapter: Arc<dyn DeliveryAdapter>,
-        fence: Option<Arc<dyn crate::reconcile_fence::ReconcileTickFence>>,
     ) -> crate::apply::ExecutionOptions<'a> {
         crate::apply::ExecutionOptions {
             skip_gates: false,
@@ -841,7 +810,6 @@ exclude_requester = true
             worker_lifecycle: None,
             artifact_registry: None,
             delivery_adapter: Some(adapter),
-            delivery_fence: fence,
         }
     }
 
@@ -858,7 +826,6 @@ exclude_requester = true
                 &approval,
                 &trust,
                 Arc::new(PollingAdapter::new(FakeMode::Timeout)),
-                None,
             ),
         )
         .await
@@ -892,7 +859,7 @@ exclude_requester = true
     }
 
     #[tokio::test]
-    async fn apply_path_fail_closes_expired_recalled_and_stale_fence() {
+    async fn apply_path_fail_closes_expired_and_recalled() {
         let mut fixture = signed_upgrade("apply-deny").await;
         let approval = fixture.approval.clone();
         let trust = fixture.trust.clone();
@@ -911,7 +878,6 @@ exclude_requester = true
                 &approval,
                 &trust,
                 Arc::new(PollingAdapter::new(FakeMode::Succeed)),
-                None,
             ),
         )
         .await
@@ -940,7 +906,6 @@ exclude_requester = true
                 &approval,
                 &trust,
                 Arc::new(PollingAdapter::new(FakeMode::Succeed)),
-                None,
             ),
         )
         .await
@@ -948,32 +913,6 @@ exclude_requester = true
         .to_string();
         assert!(err.contains("recalled"), "{err}");
 
-        let mut fenced = signed_upgrade("apply-fence").await;
-        let fence = SharedReconcileFence::new().into_arc();
-        fence
-            .try_begin("prod", "holder", crate::now_millis(), 60_000)
-            .unwrap();
-        let fenced_approval = fenced.approval.clone();
-        let fenced_trust = fenced.trust.clone();
-        let fenced_id = fenced.plan.id.clone();
-        let err = crate::apply::execute_with_options(
-            &mut fenced.ctx,
-            &fenced_id,
-            apply_opts(
-                &fenced_approval,
-                &fenced_trust,
-                Arc::new(PollingAdapter::new(FakeMode::Succeed)),
-                Some(fence),
-            ),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(
-            err.contains("stale fencing") || err.contains("Busy"),
-            "{err}"
-        );
         let _ = std::fs::remove_dir_all(fixture.root);
-        let _ = std::fs::remove_dir_all(fenced.root);
     }
 }

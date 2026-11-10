@@ -381,7 +381,6 @@ async fn execute_locked(
                 requester: options.requester.as_deref(),
                 skip_gates,
                 now: crate::now_millis(),
-                fence: options.delivery_fence.clone(),
             },
         )
         .await?;

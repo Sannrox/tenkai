@@ -2,9 +2,8 @@
 //!
 //! Each hub replica is a real process: this test binary started again with
 //! `TENKAI_DRILL_HOLDER` set, running [`drill_replica`]. A replica renews the
-//! hub writer lease and, while it leads, works one plan a step at a time
-//! under the reconcile tick claim and an environment lease, recording one
-//! receipt per step. At `STALL_STEP` the leader stalls inside the write
+//! hub writer lease on its own thread and, while it leads, works one plan a
+//! step at a time under an environment lease, recording one receipt per step. At `STALL_STEP` the leader stalls inside the write
 //! transaction, and the drill kills or stops it there. It checks that a
 //! standby takes the lease within the bound, finishes the plan without
 //! applying a step twice, and that a stopped leader which resumes is refused.
@@ -19,7 +18,6 @@ use tenkai::auth_context::{
     AuthenticatedRequestContext, AuthenticatedRequestContextBuilder, PrincipalIdentity,
     PrincipalKind, TenantDerivationAuthority,
 };
-use tenkai::reconcile_fence::FenceAdmission;
 use tenkai::storage::{
     EnvironmentRecord, OperationalStore, PlanRecord, PlanStatus, ReceiptRecord, StoreError,
 };
@@ -29,8 +27,7 @@ use super::super::*;
 use super::live_writer_lease::ScratchDatabase;
 
 const WRITER_TTL_MS: i64 = 1_500;
-/// Environment lease and reconcile tick claim lifetime; a replica renews
-/// both on every step.
+/// Environment lease lifetime; a replica renews it on every step.
 const WORK_TTL_MS: i64 = 2_000;
 const TICK: Duration = Duration::from_millis(200);
 const STEPS: usize = 6;
@@ -80,48 +77,46 @@ fn drill_replica() {
     let partition = store.partition_for(&context(&tenant)).expect("partition");
     let lease = PostgresHubWriterLease::open(&config, &holder, WRITER_TTL_MS, fence.clone())
         .expect("lease");
-    let ticks = store.reconcile_tick_fence();
-    let mut last_role = None;
+    // Renew on its own thread, as the server does: a write that waits on
+    // another replica's row lock must not starve the lease renewal.
+    std::thread::spawn(move || {
+        let mut last_role = None;
+        loop {
+            let role = match lease.renew() {
+                Ok(WriterRole::Leader { generation, .. }) => format!("leader {generation}"),
+                Ok(WriterRole::Standby) => "standby".to_owned(),
+                Err(error) => format!("standby ({error})"),
+            };
+            if last_role.as_ref() != Some(&role) {
+                println!("drill: role {role}");
+                last_role = Some(role);
+            }
+            std::thread::sleep(TICK);
+        }
+    });
     loop {
-        // Work first, then renew: a replica that was stopped and resumes
-        // writes with the role it last saw, as a paused process would. No
-        // replica works before the drill has every replica running.
+        // A replica that was stopped and resumes writes with the role it
+        // last saw, as a paused process would. No replica works before the
+        // drill has every replica running.
         if fence.is_leader() && go.exists() {
-            match work_one_step(&partition, &*ticks, &holder) {
+            match work_one_step(&partition, &holder) {
                 Ok(Some(line)) => println!("drill: {line}"),
                 Ok(None) => {}
                 Err(error) => println!("drill: refused {error}"),
             }
-        }
-        let role = match lease.renew() {
-            Ok(WriterRole::Leader { generation, .. }) => format!("leader {generation}"),
-            Ok(WriterRole::Standby) => "standby".to_owned(),
-            Err(error) => format!("standby ({error})"),
-        };
-        if last_role.as_ref() != Some(&role) {
-            println!("drill: role {role}");
-            last_role = Some(role);
         }
         std::thread::sleep(TICK);
     }
 }
 
 /// Applies the plan's next step, or finishes the plan, as the reconciler
-/// would: under the tick claim and the environment lease. A step whose
+/// would: under the environment lease. A step whose
 /// receipt exists was applied already and is not applied again.
 fn work_one_step(
     partition: &PostgresTenantPartition,
-    ticks: &dyn tenkai::reconcile_fence::ReconcileTickFence,
     holder: &str,
 ) -> std::result::Result<Option<String>, String> {
     let now = tenkai::now_millis();
-    match ticks
-        .try_begin(ENVIRONMENT, holder, now, WORK_TTL_MS)
-        .map_err(|error| error.to_string())?
-    {
-        FenceAdmission::Started { .. } => {}
-        FenceAdmission::Busy { .. } | FenceAdmission::Stale => return Ok(None),
-    }
     let lease = match partition.acquire_lease(ENVIRONMENT, holder, now + WORK_TTL_MS) {
         Ok(lease) => lease,
         Err(StoreError::LeaseHeld { .. }) => return Ok(None),
@@ -429,7 +424,10 @@ fn live_failover_drill_resumed_leader_is_refused() {
         refused.contains("not the active hub writer") && refused.contains("superseded"),
         "the writer fence refuses the late commit: {refused}"
     );
-    a.wait_for("role standby", Duration::from_secs(10));
+    // The renewal thread may report standby before or after the refusal.
+    if !a.seen[before..].iter().any(|line| line == "role standby") {
+        a.wait_for("role standby", Duration::from_secs(10));
+    }
     b.wait_for("done", Duration::from_secs(30));
     assert!(
         !a.seen[before..]

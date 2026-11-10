@@ -18,7 +18,6 @@ use tenkai::auth_context::{
     PrincipalKind, TenantDerivationAuthority,
 };
 use tenkai::hub_ha_qualification::{self, Statement};
-use tenkai::reconcile_fence::FenceAdmission;
 use tenkai::storage::{
     EnvironmentRecord, OperationalStore, PlanRecord, PlanStatus, ReceiptRecord, StoreError,
 };
@@ -89,7 +88,6 @@ fn drill_replica() {
     let partition = store.partition_for(&context(&tenant)).expect("partition");
     let lease = PostgresHubWriterLease::open(&config, &holder, WRITER_TTL_MS, fence.clone())
         .expect("lease");
-    let ticks = store.reconcile_tick_fence();
     let mut last_role = None;
     let mut turn = 0usize;
     loop {
@@ -99,7 +97,7 @@ fn drill_replica() {
                 for offset in 0..pairs.len() {
                     let idx = (turn + offset) % pairs.len();
                     let (env, plan) = &pairs[idx];
-                    match work_one_step(&partition, &*ticks, &holder, env, plan) {
+                    match work_one_step(&partition, &holder, env, plan) {
                         Ok(Some(line)) => {
                             turn = idx + 1;
                             println!("drill: {line}");
@@ -129,19 +127,11 @@ fn drill_replica() {
 
 fn work_one_step(
     partition: &PostgresTenantPartition,
-    ticks: &dyn tenkai::reconcile_fence::ReconcileTickFence,
     holder: &str,
     environment: &str,
     plan_id: &str,
 ) -> std::result::Result<Option<String>, String> {
     let now = tenkai::now_millis();
-    match ticks
-        .try_begin(environment, holder, now, WORK_TTL_MS)
-        .map_err(|error| error.to_string())?
-    {
-        FenceAdmission::Started { .. } => {}
-        FenceAdmission::Busy { .. } | FenceAdmission::Stale => return Ok(None),
-    }
     let lease = match partition.acquire_lease(environment, holder, now + WORK_TTL_MS) {
         Ok(lease) => lease,
         Err(StoreError::LeaseHeld { .. }) => return Ok(None),

@@ -6,8 +6,8 @@ use tenkai::storage::SCHEMA_VERSION;
 /// Writer model claimed with `shared_replica_state` for the Postgres hub store.
 ///
 /// First slice (#128): shared durable DB with **at most one active control-plane
-/// writer** (failover / cold standby). Multi-active concurrent reconcile
-/// still requires tick fencing (#129) and must not be assumed from this claim alone.
+/// writer** (failover / cold standby). Only the hub writer-lease holder
+/// reconciles; multi-active concurrent reconcile is not claimed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SharedReplicaWriterModel {
     /// One active writer; standbys share the same Postgres URL for failover.

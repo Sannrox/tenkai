@@ -142,5 +142,5 @@ replica clock skew does not change who leads.
 | PostgreSQL is the sole store; catalog and terminal-outcome export live in each tenant schema; startup names any missing surface | `--require-enterprise-profile` (#747, #764, #765) |
 
 Related: [multi-replica compose steps](multi-replica-hub-runbook.md),
-[reconcile tick fencing](reconcile-tick-fencing.md),
+[multi-host reconcile ticks](reconcile-tick-fencing.md),
 [ADR 0010](decisions/0010-supported-operating-profiles.md).

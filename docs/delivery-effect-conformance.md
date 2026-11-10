@@ -14,7 +14,7 @@ store or the environment target enforces the stable identity below.
 | Plan creation | plan ID + immutable digest/body | Concurrent identical plan produces one row | Immutable row |
 | Apply receipt | receipt ID + plan/step/payload | Replay returns the stored receipt, including after process loss | Environment lease generation |
 | Rollback | rollback ID + immutable initial checkpoint/intent | Replay accepts only identical intent | Environment lease generation |
-| Reconcile admission | environment + monotonically increasing generation | One live owner; another replica is busy | Durable tick claim and execution lease |
+| Reconcile admission | environment + monotonically increasing generation | Only the writer-lease holder ticks; one live execution owner | Hub writer lease and execution lease |
 
 The PostgreSQL conformance test opens two independent store connections against
 one tenant partition, races publication and promotion, replays a committed
@@ -75,8 +75,6 @@ TENKAI_CONFORMANCE_POSTGRES_URL='postgresql://127.0.0.1:5432/tenkai_test' \
   without credentials.
 - `fleet status` exposes bounded lease and unknown deployment posture.
 - `GET /metrics` exposes low-cardinality reconcile busy/failure counters.
-- PostgreSQL tick claims retain an expired tombstone so generation never resets
-  after release. A stale generation cannot match a later owner.
 - Immutable receipt and rollback conflicts are explicit store errors. The
   conformance test counts durable rows rather than logging tenant payloads.
 

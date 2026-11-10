@@ -137,15 +137,9 @@ async fn a_builtin_runtime_applies_releases_it_trusts_and_refuses_others() {
     tenkai::ontology::register(&mut ctx).await.unwrap();
     let store = Arc::new(tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap());
     let reconciler = Arc::new(
-        Reconciler::new(
-            ctx.clone(),
-            ReconcilerConfig {
-                instance_id: "builtin".into(),
-                ..ReconcilerConfig::default()
-            },
-        )
-        .unwrap()
-        .with_runtime_environments(["prod".into()].into()),
+        Reconciler::new(ctx.clone(), ReconcilerConfig::default())
+            .unwrap()
+            .with_runtime_environments(["prod".into()].into()),
     );
     let app = tenkai_http::router(
         tenkai_http::ServerConfig::community(

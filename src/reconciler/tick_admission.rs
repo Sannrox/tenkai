@@ -17,7 +17,6 @@ use super::environment_lifecycle;
 use super::*;
 use crate::ontology::{KIND_ENVIRONMENT, env_id};
 use crate::pb::sekai::Object;
-use crate::reconcile_fence::{FenceAdmission, FenceGuard};
 
 #[derive(Default)]
 pub(super) struct SchedulerState {
@@ -186,7 +185,6 @@ pub(super) struct TickRequest<'a> {
     pub tick_lock: &'a tokio::sync::Mutex<()>,
     pub runtime_environments: Arc<HashSet<String>>,
     pub diagnostics: Arc<Mutex<ReconcileDiagnostics>>,
-    pub shared_fence: Option<Arc<dyn ReconcileTickFence>>,
     pub allowed_environments: Option<HashSet<String>>,
 }
 
@@ -226,53 +224,6 @@ async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport>
                 status: EnvironmentStatus::Deferred { retry_at },
             }),
             Admission::Started => {
-                let fence_guard = if let Some(fence) = &request.shared_fence {
-                    let now = crate::now_millis();
-                    match fence.try_begin(
-                        &name,
-                        &request.config.instance_id,
-                        now,
-                        request.config.fence_ttl_ms,
-                    ) {
-                        Ok(FenceAdmission::Started { generation }) => Some(FenceGuard::new(
-                            Arc::clone(fence),
-                            name.clone(),
-                            request.config.instance_id.clone(),
-                            generation,
-                        )),
-                        Ok(FenceAdmission::Busy { .. }) | Ok(FenceAdmission::Stale) => {
-                            request.state.lock().expect("reconciler state lock").finish(
-                                &name,
-                                true, // not a local failure; clear in_flight
-                                crate::now_millis(),
-                                &request.config,
-                            );
-                            report.environments.push(EnvironmentResult {
-                                environment: name,
-                                status: EnvironmentStatus::Busy,
-                            });
-                            continue;
-                        }
-                        Err(error) => {
-                            request.state.lock().expect("reconciler state lock").finish(
-                                &name,
-                                false,
-                                crate::now_millis(),
-                                &request.config,
-                            );
-                            report.environments.push(EnvironmentResult {
-                                environment: name,
-                                status: EnvironmentStatus::Failed {
-                                    error: format!("reconcile fence: {error}"),
-                                },
-                            });
-                            continue;
-                        }
-                    }
-                } else {
-                    None
-                };
-
                 let mut ctx = ctx.clone();
                 let config = request.config.clone();
                 // A configured runtime token, or an enrolled runtime (#630).
@@ -293,7 +244,6 @@ async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport>
                         .acquire_owned()
                         .await
                         .expect("semaphore remains open");
-                    let _fence = fence_guard;
                     let result = environment_lifecycle::reconcile(
                         &mut ctx,
                         environment_lifecycle::Request {
