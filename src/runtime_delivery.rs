@@ -237,7 +237,7 @@ async fn require_runtime_placement(
     for step in plan
         .steps
         .iter()
-        .filter(|step| step.rewrap.is_none() && step.action != crate::plan::Action::Remove)
+        .filter(|step| step.deploys_release() && step.action != crate::plan::Action::Remove)
     {
         crate::topology::require_placement(ctx, environment, &step.release_id)
             .await
@@ -280,19 +280,21 @@ pub(crate) async fn complete_runtime_work(
         )
         .await?;
     }
-    // A re-wrap step deploys nothing: it never touches the deployment record
-    // or the failed targets, and it exports no delivery outcome.
+    // A re-wrap or issuer step deploys nothing: it never touches the
+    // deployment record or the failed targets, and it exports no delivery
+    // outcome.
     let deploying: Vec<crate::plan::Step> = stored
         .steps
         .iter()
-        .filter(|step| step.rewrap.is_none())
+        .filter(|step| step.deploys_release())
         .cloned()
         .collect();
-    // A plan of re-wrap steps only, as `secret rewrap` builds, changes no
-    // environment state: its wraps were stored under the environment lease
-    // before this ran. Rewriting the environment here could restore wraps a
-    // revocation dropped meanwhile, so only the plan moves on.
-    if deploying.is_empty() && stored.steps.iter().all(|step| step.rewrap.is_some()) {
+    // A plan of re-wrap and issuer steps only, as `secret rewrap` and
+    // `env issuer plan` build, changes no environment state here: its wraps
+    // and issuer were stored under the environment lease before this ran.
+    // Rewriting the environment here could restore wraps a revocation
+    // dropped meanwhile, so only the plan moves on.
+    if deploying.is_empty() {
         crate::plan::transition(
             ctx,
             &mut stored,
@@ -389,9 +391,10 @@ pub(crate) async fn complete_runtime_work(
             else {
                 continue;
             };
-            // Its wraps were stored before, under the environment lease
-            // (`sealed_secret::store_completion_wraps`).
-            if step.rewrap.is_some() {
+            // Its wraps or issuer were stored before, under the environment
+            // lease (`sealed_secret::store_completion_wraps`,
+            // `identity_issuer::record_activated`).
+            if !step.deploys_release() {
                 continue;
             }
             // Keyed by instance, as the server records failures.
@@ -637,7 +640,7 @@ pub(crate) async fn validate_runtime_completion(
             .iter()
             .find(|step| step.id == receipt.step_id)
             .expect("receipts cover the plan's steps");
-        require_approved_wraps(step, receipt)?;
+        require_approved_wraps(environment, step, receipt)?;
     }
     let terminal = if completion.succeeded {
         PlanState::Succeeded
@@ -655,6 +658,25 @@ pub(crate) async fn validate_runtime_completion(
         matches!(stored.state, PlanState::Computed | PlanState::Running),
         "runtime plan is not executable"
     );
+    // A stale issuer step is refused before its completion is recorded, so
+    // the current issuer stays (ADR 0046 §2). Checked only for a completion
+    // not yet applied: a replay of an applied one must not depend on a
+    // later rotation.
+    for receipt in completion
+        .receipts
+        .iter()
+        .filter(|receipt| receipt.succeeded)
+    {
+        let step = stored
+            .steps
+            .iter()
+            .find(|step| step.id == receipt.step_id)
+            .expect("receipts cover the plan's steps");
+        if step.issuer.is_some() {
+            let env_obj = crate::environment::environment(ctx, environment).await?;
+            crate::identity_issuer::require_current(&env_obj, step)?;
+        }
+    }
     Ok(())
 }
 
@@ -702,9 +724,11 @@ fn retain_recipient_wraps(
 
 /// Refuse wraps the approved plan does not name (ADR 0045 §5): only a
 /// succeeded re-wrap step carries them, each for the step's recipient and
-/// for a value of the step's bindings at its approved digest. A server can
-/// therefore not attach a wrap a runtime did not make for an approved step.
+/// for a value of the step's bindings, or its issuer key, at its approved
+/// digest. A server can therefore not attach a wrap a runtime did not make
+/// for an approved step.
 fn require_approved_wraps(
+    environment: &str,
     step: &crate::plan::Step,
     receipt: &RuntimeStepReceipt,
 ) -> anyhow::Result<()> {
@@ -726,10 +750,19 @@ fn require_approved_wraps(
             wrap.wrap.fingerprint,
             rewrap.fingerprint
         );
+        let issuer = match &step.issuer {
+            Some(issuer) => {
+                wrap.secret == crate::identity_issuer::WRAP_SECRET
+                    && wrap.key == issuer.key.wrap_key()
+                    && wrap.digest == issuer.key.digest(environment)?
+            }
+            None => false,
+        };
         anyhow::ensure!(
-            step.sealed.iter().any(|sealed| sealed.secret == wrap.secret
-                && sealed.key == wrap.key
-                && sealed.digest == wrap.digest),
+            issuer
+                || step.sealed.iter().any(|sealed| sealed.secret == wrap.secret
+                    && sealed.key == wrap.key
+                    && sealed.digest == wrap.digest),
             "step {} has no sealed {}/{} at that digest",
             step.id,
             wrap.secret,
@@ -750,6 +783,11 @@ pub struct RuntimeWork {
     /// the field keeps decoding idle work and plans without sealed steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approvals: Vec<crate::plan_approval::ApprovalEnvelope>,
+    /// Set when the environment asks for an identity issuer candidate
+    /// (ADR 0046 §2), and only for a runtime that names the
+    /// `workload_identity` capability: an older one would refuse the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer_candidate: Option<crate::identity_issuer::CandidateRequest>,
 }
 
 fn idle_work(environment: &str) -> RuntimeWork {
@@ -758,6 +796,7 @@ fn idle_work(environment: &str) -> RuntimeWork {
         plan: None,
         claim: None,
         approvals: Vec::new(),
+        issuer_candidate: None,
     }
 }
 
@@ -790,6 +829,7 @@ async fn delivered_work(
         plan: Some(plan),
         claim: Some(claim),
         approvals,
+        issuer_candidate: None,
     })
 }
 
@@ -982,14 +1022,20 @@ pub struct RuntimeCaller<'a> {
     /// The verified client certificate (DER) of the connection, which names
     /// the runner when the runner CA issued it (#674).
     pub certificate: Option<&'a [u8]>,
+    /// The agent named the `workload_identity` capability in
+    /// `x-tenkai-runtime-capabilities` (ADR 0046): it runs identity issuer
+    /// steps and generates issuer candidates.
+    pub workload_identity: bool,
 }
+
+/// The capability a runtime names to be offered identity issuer work.
+pub const WORKLOAD_IDENTITY_CAPABILITY: &str = "workload_identity";
 
 impl<'a> From<Option<&'a str>> for RuntimeCaller<'a> {
     fn from(instance: Option<&'a str>) -> Self {
         Self {
             instance,
-            version: None,
-            certificate: None,
+            ..Self::default()
         }
     }
 }
@@ -1107,6 +1153,67 @@ impl RuntimeDeliveryOperations {
         environment: &str,
     ) -> Result<RuntimeWork, RuntimeDeliveryError> {
         let caller = caller.into();
+        let mut work = self.claim_plan(token, &caller, environment).await?;
+        if caller.workload_identity && work.plan.is_none() {
+            work.issuer_candidate = self.issuer_candidate_request(environment).await?;
+        }
+        Ok(work)
+    }
+
+    /// What an idle runtime that names `workload_identity` should generate:
+    /// a candidate for the requested issuer generation, while none is
+    /// uploaded (ADR 0046 §2).
+    async fn issuer_candidate_request(
+        &self,
+        environment: &str,
+    ) -> Result<Option<crate::identity_issuer::CandidateRequest>, RuntimeDeliveryError> {
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Ok(None);
+        };
+        let unavailable =
+            |error: anyhow::Error| RuntimeDeliveryError::Unavailable(error.to_string());
+        let env_obj = crate::environment::environment(&mut ctx, environment)
+            .await
+            .map_err(unavailable)?;
+        Ok(crate::identity_issuer::wanted_generation(&env_obj)
+            .map_err(unavailable)?
+            .map(|generation| crate::identity_issuer::CandidateRequest { generation }))
+    }
+
+    /// Store a runtime's identity issuer candidate (ADR 0046 §2). The first
+    /// candidate for the requested generation is kept and returned to every
+    /// later upload, so a runtime whose candidate lost discards its key.
+    pub async fn upload_issuer_candidate(
+        &self,
+        token: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
+        environment: &str,
+        candidate: crate::identity_issuer::IssuerKey,
+    ) -> Result<crate::identity_issuer::IssuerKey, RuntimeDeliveryError> {
+        let caller = caller.into();
+        let identity = self.admit_work(token, &caller, environment).await?;
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "identity issuer unavailable".into(),
+            ));
+        };
+        // The uploader's own key is read inside the lease, so a revocation
+        // that finished before it is never undone by this upload.
+        crate::identity_issuer::store_candidate(&mut ctx, environment, candidate, || {
+            self.own_recipient_fingerprint(&identity, environment)
+                .map_err(|error| anyhow::anyhow!("{error}"))
+        })
+        .await
+        .map_err(|error| RuntimeDeliveryError::Conflict(format!("{error:#}")))
+    }
+
+    async fn claim_plan(
+        &self,
+        token: Option<&str>,
+        caller: &RuntimeCaller<'_>,
+        environment: &str,
+    ) -> Result<RuntimeWork, RuntimeDeliveryError> {
+        let caller = *caller;
         let identity = self.admit_work(token, &caller, environment).await?;
         self.note_activity(&identity, environment, caller.version, Activity::Work);
         // While the server may still run a plan it began before a runtime
@@ -1136,17 +1243,29 @@ impl RuntimeDeliveryOperations {
         let Some(plan) = plan else {
             return Ok(idle_work(environment));
         };
+        // Only a runtime that names `workload_identity` runs an identity
+        // issuer step; an older one waits, so it never fails the plan.
+        // Blocking an issuer plan no runtime can open executes nothing, so
+        // any runtime does it, whatever its capability.
         let Some(mut ctx) = self.reconciler.application_ctx() else {
             return Err(RuntimeDeliveryError::Unavailable(
                 "software compatibility preflight unavailable".into(),
             ));
         };
+        if let Some(reason) = self.issuer_unrunnable(&mut ctx, &plan, environment).await? {
+            return self
+                .retire_unrunnable(&mut ctx, environment, plan, &identity.owner, reason)
+                .await;
+        }
+        if !caller.workload_identity && plan.steps.iter().any(|step| step.issuer.is_some()) {
+            return self.idle_after_lapsed(environment, &plan.id).await;
+        }
         // A re-wrap step or a removal deploys nothing, so it needs no
         // deployment preflight.
         for step in plan
             .steps
             .iter()
-            .filter(|step| step.rewrap.is_none() && step.action != crate::plan::Action::Remove)
+            .filter(|step| step.deploys_release() && step.action != crate::plan::Action::Remove)
         {
             crate::software_compatibility::require_release(
                 &mut ctx,
@@ -1176,7 +1295,7 @@ impl RuntimeDeliveryOperations {
         // Recovered wraps open only for the runtime whose key the step names
         // (ADR 0045 §7); another runtime would fail the plan, so it waits.
         if !self.may_run_recovery(&plan, &identity, environment)? {
-            return Ok(idle_work(environment));
+            return self.idle_after_lapsed(environment, &plan.id).await;
         }
         // A drifted clock must not touch leases: it could expire or take
         // over another runtime's claim. Only a durable completion this owner
@@ -1191,6 +1310,7 @@ impl RuntimeDeliveryOperations {
                     plan: Some(plan),
                     claim: Some(claim),
                     approvals: Vec::new(),
+                    issuer_candidate: None,
                 }),
                 _ => Err(RuntimeDeliveryError::Unavailable(refusal.to_string())),
             };
@@ -1232,22 +1352,112 @@ impl RuntimeDeliveryOperations {
                 }
                 delivered_work(&mut ctx, environment, plan, claim).await
             }
-            None => {
-                // Another runtime's claim. If it stored its completion and
-                // then stopped, or was revoked, before it was applied, the
-                // server applies it once that claim lapses (#630).
-                let lapsed = self
-                    .store
-                    .lapsed_runtime_completion(environment, &plan.id, crate::now_millis())
-                    .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
-                if let Some(completion_json) = lapsed {
-                    let completion: RuntimeCompletion = serde_json::from_str(&completion_json)
-                        .map_err(|error| RuntimeDeliveryError::Internal(error.to_string()))?;
-                    self.apply_completion(environment, completion).await?;
-                }
-                Ok(idle_work(environment))
+            None => self.idle_after_lapsed(environment, &plan.id).await,
+        }
+    }
+
+    /// Why `plan` has an issuer step no runtime can run to completion, if
+    /// it has one: every key wrapping the issuer key was revoked, so no
+    /// runtime claims it; or the issuer changed since it was planned (a
+    /// re-wrap planned before a rotation finished), so its completion would
+    /// be refused. Either would block the environment.
+    async fn issuer_unrunnable(
+        &self,
+        ctx: &mut Ctx,
+        plan: &crate::plan::Plan,
+        environment: &str,
+    ) -> Result<Option<&'static str>, RuntimeDeliveryError> {
+        if !plan.steps.iter().any(|step| step.issuer.is_some()) {
+            return Ok(None);
+        }
+        let env_obj = crate::environment::environment(ctx, environment)
+            .await
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+        if plan
+            .steps
+            .iter()
+            .filter(|step| step.issuer.is_some())
+            .any(|step| crate::identity_issuer::require_current(&env_obj, step).is_err())
+        {
+            return Ok(Some(
+                "the identity issuer changed since this plan was made; plan again",
+            ));
+        }
+        if !self
+            .environment_recipient_keys(environment)?
+            .iter()
+            .any(|record| recovery_claimable(plan, Some(record.fingerprint.as_str())))
+        {
+            return Ok(Some(
+                "no unrevoked runtime holds the identity issuer key; prepare a new candidate",
+            ));
+        }
+        Ok(None)
+    }
+
+    /// Block an [`issuer_unrunnable`](Self::issuer_unrunnable) plan, which
+    /// takes it out of the queue so the environment moves on. The caller
+    /// first takes the plan's runtime claim, which it gets only when no
+    /// other claim is live and none holds a durable completion, so a stored
+    /// completion is applied, never discarded.
+    async fn retire_unrunnable(
+        &self,
+        ctx: &mut Ctx,
+        environment: &str,
+        mut plan: crate::plan::Plan,
+        owner: &str,
+        reason: &str,
+    ) -> Result<RuntimeWork, RuntimeDeliveryError> {
+        if crate::clock_guard::require_trusted_time("runtime lease claim").is_err() {
+            return Ok(idle_work(environment));
+        }
+        let claim = self
+            .store
+            .claim_runtime_plan(
+                environment,
+                &plan.id,
+                owner,
+                crate::now_millis().saturating_add(2 * 60 * 1000),
+            )
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+        if claim.is_none_or(|claim| claim.completion_json.is_some()) {
+            return self.idle_after_lapsed(environment, &plan.id).await;
+        }
+        crate::plan::transition(
+            ctx,
+            &mut plan,
+            crate::plan::Transition::new(crate::plan::PlanState::Blocked, reason),
+            crate::plan::Persistence::Standard,
+        )
+        .await
+        .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+        Ok(idle_work(environment))
+    }
+
+    /// Idle work for a runtime that may not run `plan_id`. Another runtime's
+    /// claim may hold a durable completion: if it stopped, or was revoked,
+    /// before the completion was applied, the server applies it once that
+    /// claim lapses (#630). This runs before any capability or key check
+    /// would turn the caller away, since replaying executes nothing, so a
+    /// plan only its lost runtime could run never blocks the environment.
+    async fn idle_after_lapsed(
+        &self,
+        environment: &str,
+        plan_id: &str,
+    ) -> Result<RuntimeWork, RuntimeDeliveryError> {
+        // A drifted clock cannot tell that a claim lapsed.
+        if crate::clock_guard::require_trusted_time("runtime lease claim").is_ok() {
+            let lapsed = self
+                .store
+                .lapsed_runtime_completion(environment, plan_id, crate::now_millis())
+                .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+            if let Some(completion_json) = lapsed {
+                let completion: RuntimeCompletion = serde_json::from_str(&completion_json)
+                    .map_err(|error| RuntimeDeliveryError::Internal(error.to_string()))?;
+                self.apply_completion(environment, completion).await?;
             }
         }
+        Ok(idle_work(environment))
     }
 
     pub async fn complete(
@@ -1309,10 +1519,51 @@ impl RuntimeDeliveryOperations {
             // Stored; the plan's completion carries nothing more to apply.
             retain_recipient_wraps(&mut completion, &Default::default());
         }
+        if completion.succeeded {
+            self.record_activated_issuers(environment, &completion)
+                .await?;
+        }
         self.reconciler
             .complete_work(environment.to_string(), completion)
             .await
             .map_err(|error| RuntimeDeliveryError::Internal(format!("{error:#}")))
+    }
+
+    /// Record the issuers a succeeded completion's steps activated, under
+    /// the environment lease, before the plan finishes (ADR 0046 §2).
+    async fn record_activated_issuers(
+        &self,
+        environment: &str,
+        completion: &RuntimeCompletion,
+    ) -> Result<(), RuntimeDeliveryError> {
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "identity issuer unavailable".into(),
+            ));
+        };
+        let plan = crate::plan::load(&mut ctx, &completion.plan_id)
+            .await
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+        // An applied completion recorded its issuer already; a later
+        // rotation must not turn its replay into a stale refusal.
+        if matches!(
+            plan.state,
+            crate::plan::PlanState::Succeeded | crate::plan::PlanState::Failed
+        ) {
+            return Ok(());
+        }
+        let activated: Vec<&crate::plan::Step> = plan
+            .steps
+            .iter()
+            .filter(|step| step.issuer.is_some() && step.rewrap.is_none())
+            .collect();
+        crate::identity_issuer::record_activated(&mut ctx, environment, &activated)
+            .await
+            .map_err(|error| {
+                RuntimeDeliveryError::Unavailable(format!(
+                    "recording the identity issuer: {error:#}"
+                ))
+            })
     }
 
     /// Fingerprints of `environment`'s unrevoked recipient keys.
@@ -1361,7 +1612,7 @@ impl RuntimeDeliveryOperations {
         for step in plan
             .steps
             .iter()
-            .filter(|step| step.rewrap.is_none() && step.action != crate::plan::Action::Remove)
+            .filter(|step| step.deploys_release() && step.action != crate::plan::Action::Remove)
         {
             crate::software_compatibility::require_release(
                 &mut ctx,
@@ -1806,21 +2057,32 @@ impl RuntimeDeliveryOperations {
         environment: &str,
     ) -> Result<bool, RuntimeDeliveryError> {
         if !plan.steps.iter().any(|step| {
-            step.rewrap
-                .as_ref()
-                .is_some_and(|rewrap| !rewrap.recovered.is_empty())
+            step.issuer.is_some()
+                || step
+                    .rewrap
+                    .as_ref()
+                    .is_some_and(|rewrap| !rewrap.recovered.is_empty())
         }) {
             return Ok(true);
         }
-        let own = self
+        let own = self.own_recipient_fingerprint(identity, environment)?;
+        Ok(recovery_claimable(plan, own.as_deref()))
+    }
+
+    /// Fingerprint of the caller's unrevoked sealing key, if it has one.
+    fn own_recipient_fingerprint(
+        &self,
+        identity: &RuntimeIdentity,
+        environment: &str,
+    ) -> Result<Option<String>, RuntimeDeliveryError> {
+        Ok(self
             .environment_recipient_keys(environment)?
             .into_iter()
             .find(|record| record.runner_id == identity.runner_id)
             .and_then(|record| {
                 crate::sealing_key::SealingPublicKey::from_wire(&record.public_key).ok()
             })
-            .map(|key| key.fingerprint());
-        Ok(recovery_claimable(plan, own.as_deref()))
+            .map(|key| key.fingerprint()))
     }
 
     pub fn environment_recipient_keys(
@@ -1834,15 +2096,30 @@ impl RuntimeDeliveryOperations {
 }
 
 /// A plan whose re-wrap steps carry recovered wraps (ADR 0045 §7) may be
-/// claimed only by the runtime with sealing key `own`, their recipient:
-/// another runtime cannot open them and would fail the plan. Any other plan
-/// may be claimed by any runtime.
+/// claimed only by the runtime with sealing key `own`, their recipient, and
+/// a plan with identity issuer steps only by a runtime whose key wraps each
+/// step's issuer key (ADR 0046 §2): another runtime cannot open them and
+/// would fail the plan. Any other plan may be claimed by any runtime.
 fn recovery_claimable(plan: &crate::plan::Plan, own: Option<&str>) -> bool {
-    plan.steps
+    let recovered = plan
+        .steps
         .iter()
         .filter_map(|step| step.rewrap.as_ref())
         .filter(|rewrap| !rewrap.recovered.is_empty())
-        .all(|rewrap| Some(rewrap.fingerprint.as_str()) == own)
+        .all(|rewrap| Some(rewrap.fingerprint.as_str()) == own);
+    let issuer = plan
+        .steps
+        .iter()
+        .filter_map(|step| step.issuer.as_ref())
+        .all(|issuer| {
+            issuer
+                .key
+                .sealed_key
+                .wraps
+                .iter()
+                .any(|wrap| Some(wrap.fingerprint.as_str()) == own)
+        });
+    recovered && issuer
 }
 
 fn parse_sealing_key(
@@ -2287,6 +2564,7 @@ mod tests {
             host: None,
             sealed: Vec::new(),
             rewrap: None,
+            issuer: None,
         };
         // What an older runtime sends: no removal field.
         let older: super::RuntimeReleaseRequest =
@@ -2394,6 +2672,7 @@ mod tests {
                     key: "password".into(),
                     digest: "sha256:value".into(),
                 }],
+                issuer: None,
                 rewrap: Some(crate::plan::RewrapStep {
                     fingerprint: new.clone(),
                     recovered: Vec::new(),
@@ -2518,6 +2797,7 @@ mod tests {
             restore: None,
             host: None,
             sealed: Vec::new(),
+            issuer: None,
             rewrap: Some(crate::plan::RewrapStep {
                 fingerprint: recipient.clone(),
                 recovered,
@@ -2616,6 +2896,7 @@ mod tests {
             restore: None,
             host: None,
             sealed: vec![sealed.clone()],
+            issuer: None,
             rewrap: Some(crate::plan::RewrapStep {
                 fingerprint: recipient.clone(),
                 recovered: Vec::new(),
@@ -2638,6 +2919,7 @@ mod tests {
             wraps,
         };
         require_approved_wraps(
+            "prod",
             &step,
             &receipt(true, vec![wrap(&recipient, "sha256:approved")]),
         )
@@ -2668,7 +2950,7 @@ mod tests {
             }),
         ] {
             assert!(
-                require_approved_wraps(&step, &receipt).is_err(),
+                require_approved_wraps("prod", &step, &receipt).is_err(),
                 "{refused}"
             );
         }
@@ -2676,6 +2958,7 @@ mod tests {
         deploy.rewrap = None;
         assert!(
             require_approved_wraps(
+                "prod",
                 &deploy,
                 &receipt(true, vec![wrap(&recipient, "sha256:approved")])
             )
@@ -2888,6 +3171,7 @@ mod tests {
                 instance: Some("instance-a"),
                 version: None,
                 certificate: Some(certificate),
+                workload_identity: false,
             };
             operations.admit(None, &caller, environment)
         };
@@ -2933,6 +3217,7 @@ mod tests {
                         instance: Some("instance-a"),
                         version: None,
                         certificate,
+                        workload_identity: false,
                     },
                     "prod",
                     &request,
@@ -3111,6 +3396,7 @@ mod tests {
                             instance: Some("instance-a"),
                             version: None,
                             certificate,
+                            workload_identity: false,
                         },
                         "prod",
                         &request,
@@ -3193,6 +3479,7 @@ mod tests {
                         instance: Some("instance-a"),
                         version: None,
                         certificate,
+                        workload_identity: false,
                     },
                     "prod",
                     RuntimeInventoryReport {
@@ -3401,6 +3688,394 @@ mod tests {
                 .await,
             Err(RuntimeDeliveryError::Unavailable(_))
         ));
+    }
+
+    /// Only a runtime that names `workload_identity` is asked for an
+    /// issuer candidate or offered an issuer step (ADR 0046 §2); an older
+    /// one claims nothing, so it never fails the plan.
+    #[tokio::test]
+    async fn only_a_workload_identity_runtime_is_offered_issuer_work() {
+        let (operations, port) = operations();
+        let mut ctx = port.ctx.clone().unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::environment::env_add(&mut ctx, "prod", "issuer")
+            .await
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-issuer-claim-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = crate::sealing_key::SealingKey::open_or_generate(&dir).unwrap();
+        let token =
+            crate::runtime_credentials::mint(crate::runtime_credentials::ENROLLMENT_TOKEN_PREFIX)
+                .unwrap();
+        operations
+            .store
+            .create_runtime_enrollment(&crate::storage::RuntimeEnrollmentRecord {
+                token_digest: crate::runtime_credentials::digest(&token),
+                environment_id: "prod".into(),
+                expires_at: i64::MAX,
+                created_by: "operator".into(),
+            })
+            .unwrap();
+        let enrolled = operations
+            .enroll(
+                "prod",
+                &RuntimeEnrollRequest {
+                    token,
+                    csr: None,
+                    attestation: None,
+                    sealing_public_key: Some(runtime.public().to_wire()),
+                },
+            )
+            .await
+            .unwrap();
+        crate::identity_issuer::request_candidate(&mut ctx, "prod")
+            .await
+            .unwrap();
+        let wanted = operations.issuer_candidate_request("prod").await.unwrap();
+        assert_eq!(wanted.map(|request| request.generation), Some(1));
+        let key = crate::identity_issuer::generate(
+            "prod",
+            1,
+            runtime.public(),
+            crate::now_millis() / 1000,
+        )
+        .unwrap();
+        let own = runtime.fingerprint();
+        crate::identity_issuer::store_candidate(&mut ctx, "prod", key, || Ok(Some(own)))
+            .await
+            .unwrap();
+        assert!(
+            operations
+                .issuer_candidate_request("prod")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let env_obj = crate::environment::environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+        let step = crate::identity_issuer::activation_step(&env_obj, "prod").unwrap();
+        let plan = crate::plan::create_from_steps(&mut ctx, "prod", vec![step])
+            .await
+            .unwrap();
+        port.plan.set(plan.clone()).unwrap();
+        let credential = Some(enrolled.credential.as_str());
+        let older = operations
+            .claim_work(credential, Some("instance-a"), "prod")
+            .await
+            .unwrap();
+        assert!(older.plan.is_none() && older.claim.is_none());
+        let capable = RuntimeCaller {
+            instance: Some("instance-a"),
+            workload_identity: true,
+            ..RuntimeCaller::default()
+        };
+        // The static runtime holds no wrap of the issuer key.
+        let unwrapped = operations
+            .claim_work(Some("runtime-secret"), capable, "prod")
+            .await
+            .unwrap();
+        assert!(unwrapped.plan.is_none() && unwrapped.claim.is_none());
+        let work = operations
+            .claim_work(credential, capable, "prod")
+            .await
+            .unwrap();
+        assert_eq!(work.plan.map(|plan| plan.id), Some(plan.id));
+        assert!(work.claim.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A runtime turned away from an issuer plan (no capability, or no wrap
+    /// of the key) still has the server apply the durable completion of a
+    /// lost claimant once its claim lapses, so the plan never blocks.
+    #[tokio::test]
+    async fn a_lapsed_issuer_completion_is_applied_for_a_runtime_that_may_not_run_it() {
+        let (operations, port) = operations();
+        let mut ctx = port.ctx.clone().unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::environment::env_add(&mut ctx, "prod", "issuer")
+            .await
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-issuer-lapsed-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = crate::sealing_key::SealingKey::open_or_generate(&dir).unwrap();
+        crate::identity_issuer::request_candidate(&mut ctx, "prod")
+            .await
+            .unwrap();
+        let key = crate::identity_issuer::generate(
+            "prod",
+            1,
+            runtime.public(),
+            crate::now_millis() / 1000,
+        )
+        .unwrap();
+        let own = runtime.fingerprint();
+        crate::identity_issuer::store_candidate(&mut ctx, "prod", key, || Ok(Some(own)))
+            .await
+            .unwrap();
+        let env_obj = crate::environment::environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+        let step = crate::identity_issuer::activation_step(&env_obj, "prod").unwrap();
+        let plan = crate::plan::create_from_steps(&mut ctx, "prod", vec![step])
+            .await
+            .unwrap();
+        port.plan.set(plan.clone()).unwrap();
+
+        // The generating runtime stored its completion, then was lost.
+        let gone = runtime_owner("runtime-secret", "instance-a");
+        let lease_until = crate::now_millis() + 2_000;
+        let claim = operations
+            .store
+            .claim_runtime_plan("prod", &plan.id, &gone, lease_until)
+            .unwrap()
+            .unwrap();
+        let completion = RuntimeCompletion {
+            plan_id: plan.id.clone(),
+            generation: claim.generation,
+            succeeded: true,
+            detail: "done".into(),
+            receipts: Vec::new(),
+        };
+        operations
+            .store
+            .complete_runtime_plan(
+                &plan.id,
+                &gone,
+                claim.generation,
+                &serde_json::to_string(&completion).unwrap(),
+            )
+            .unwrap();
+        let remaining = lease_until - crate::now_millis() + 20;
+        tokio::time::sleep(std::time::Duration::from_millis(remaining.max(0) as u64)).await;
+
+        let capable = RuntimeCaller {
+            instance: Some("instance-b"),
+            workload_identity: true,
+            ..RuntimeCaller::default()
+        };
+        for caller in [RuntimeCaller::from(Some("instance-b")), capable] {
+            let work = operations
+                .claim_work(Some("runtime-secret"), caller, "prod")
+                .await
+                .unwrap();
+            assert!(work.plan.is_none() && work.claim.is_none());
+        }
+        assert!(port.calls.lock().unwrap().contains(&"complete"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An issuer plan whose key only a revoked runtime holds is blocked by
+    /// the next runtime that polls, so it does not block the environment.
+    #[tokio::test]
+    async fn an_issuer_plan_no_runtime_can_open_is_blocked() {
+        let (operations, port) = operations();
+        let mut ctx = port.ctx.clone().unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::environment::env_add(&mut ctx, "prod", "issuer")
+            .await
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-issuer-orphan-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Generated by a runtime that is no longer an unrevoked recipient.
+        let revoked = crate::sealing_key::SealingKey::open_or_generate(&dir).unwrap();
+        crate::identity_issuer::request_candidate(&mut ctx, "prod")
+            .await
+            .unwrap();
+        let key = crate::identity_issuer::generate(
+            "prod",
+            1,
+            revoked.public(),
+            crate::now_millis() / 1000,
+        )
+        .unwrap();
+        let own = revoked.fingerprint();
+        crate::identity_issuer::store_candidate(&mut ctx, "prod", key, || Ok(Some(own)))
+            .await
+            .unwrap();
+        let env_obj = crate::environment::environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+        let step = crate::identity_issuer::activation_step(&env_obj, "prod").unwrap();
+        let plan = crate::plan::create_from_steps(&mut ctx, "prod", vec![step])
+            .await
+            .unwrap();
+        port.plan.set(plan.clone()).unwrap();
+
+        // An older runtime, which never runs issuer steps, blocks it too.
+        let work = operations
+            .claim_work(Some("runtime-secret"), Some("instance-b"), "prod")
+            .await
+            .unwrap();
+        assert!(work.plan.is_none() && work.claim.is_none());
+        let stored = crate::plan::load(&mut ctx, &plan.id).await.unwrap();
+        assert_eq!(stored.state, crate::plan::PlanState::Blocked);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A replay of an applied issuer completion is accepted after a later
+    /// rotation; a completion not yet applied is still checked as stale.
+    #[tokio::test]
+    async fn an_applied_issuer_completion_replays_after_a_rotation() {
+        let (_, port) = operations();
+        let mut ctx = port.ctx.clone().unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::environment::env_add(&mut ctx, "prod", "issuer")
+            .await
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-issuer-replay-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = crate::sealing_key::SealingKey::open_or_generate(&dir).unwrap();
+        let mut plans = Vec::new();
+        for generation in 1..=2 {
+            crate::identity_issuer::request_candidate(&mut ctx, "prod")
+                .await
+                .unwrap();
+            let key = crate::identity_issuer::generate(
+                "prod",
+                generation,
+                runtime.public(),
+                crate::now_millis() / 1000,
+            )
+            .unwrap();
+            let own = runtime.fingerprint();
+            crate::identity_issuer::store_candidate(&mut ctx, "prod", key, || Ok(Some(own)))
+                .await
+                .unwrap();
+            let env_obj = crate::environment::environment(&mut ctx, "prod")
+                .await
+                .unwrap();
+            let step = crate::identity_issuer::activation_step(&env_obj, "prod").unwrap();
+            let mut plan = crate::plan::create_from_steps(&mut ctx, "prod", vec![step.clone()])
+                .await
+                .unwrap();
+            crate::identity_issuer::record_activated(&mut ctx, "prod", &[&step])
+                .await
+                .unwrap();
+            for state in [
+                crate::plan::PlanState::Running,
+                crate::plan::PlanState::Succeeded,
+            ] {
+                crate::plan::transition(
+                    &mut ctx,
+                    &mut plan,
+                    crate::plan::Transition::new(state, "applied"),
+                    crate::plan::Persistence::Standard,
+                )
+                .await
+                .unwrap();
+            }
+            plans.push(plan);
+        }
+        let completion = |plan: &crate::plan::Plan| RuntimeCompletion {
+            plan_id: plan.id.clone(),
+            generation: 1,
+            succeeded: true,
+            detail: "done".into(),
+            receipts: vec![RuntimeStepReceipt {
+                step_id: plan.steps[0].id.clone(),
+                succeeded: true,
+                detail: "done".into(),
+                wraps: Vec::new(),
+            }],
+        };
+        validate_runtime_completion(&mut ctx, "prod", &completion(&plans[0]))
+            .await
+            .unwrap();
+
+        // The same generation-1 step in a plan not yet applied is stale.
+        let stale = crate::plan::create_from_steps(&mut ctx, "prod", plans[0].steps.clone())
+            .await
+            .unwrap();
+        let error = validate_runtime_completion(&mut ctx, "prod", &completion(&stale))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("stale"), "{error:#}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An issuer plan made before the issuer rotated past it is blocked
+    /// before it is handed out: its completion would be refused as stale,
+    /// so it would otherwise block the environment.
+    #[tokio::test]
+    async fn a_stale_issuer_plan_is_blocked_before_dispatch() {
+        let (operations, port) = operations();
+        let mut ctx = port.ctx.clone().unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::environment::env_add(&mut ctx, "prod", "issuer")
+            .await
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-issuer-stale-plan-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = crate::sealing_key::SealingKey::open_or_generate(&dir).unwrap();
+        let mut stale = None;
+        for generation in 1..=2 {
+            crate::identity_issuer::request_candidate(&mut ctx, "prod")
+                .await
+                .unwrap();
+            let key = crate::identity_issuer::generate(
+                "prod",
+                generation,
+                runtime.public(),
+                crate::now_millis() / 1000,
+            )
+            .unwrap();
+            let own = runtime.fingerprint();
+            crate::identity_issuer::store_candidate(&mut ctx, "prod", key, || Ok(Some(own)))
+                .await
+                .unwrap();
+            let env_obj = crate::environment::environment(&mut ctx, "prod")
+                .await
+                .unwrap();
+            let step = crate::identity_issuer::activation_step(&env_obj, "prod").unwrap();
+            if generation == 1 {
+                stale = Some(
+                    crate::plan::create_from_steps(&mut ctx, "prod", vec![step.clone()])
+                        .await
+                        .unwrap(),
+                );
+            }
+            crate::identity_issuer::record_activated(&mut ctx, "prod", &[&step])
+                .await
+                .unwrap();
+        }
+        let stale = stale.unwrap();
+        port.plan.set(stale.clone()).unwrap();
+
+        let work = operations
+            .claim_work(Some("runtime-secret"), Some("instance-a"), "prod")
+            .await
+            .unwrap();
+        assert!(work.plan.is_none() && work.claim.is_none());
+        let stored = crate::plan::load(&mut ctx, &stale.id).await.unwrap();
+        assert_eq!(stored.state, crate::plan::PlanState::Blocked);
+        assert!(
+            stored.status_detail.contains("changed"),
+            "{}",
+            stored.status_detail
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -3662,6 +4337,7 @@ mod tests {
                     instance: Some("instance-a"),
                     version: None,
                     certificate: None,
+                    workload_identity: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -3775,6 +4451,7 @@ mod tests {
                     instance: Some("instance-a"),
                     version: None,
                     certificate: None,
+                    workload_identity: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -3809,6 +4486,7 @@ mod tests {
                     instance: Some("instance-a"),
                     version: None,
                     certificate: None,
+                    workload_identity: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {

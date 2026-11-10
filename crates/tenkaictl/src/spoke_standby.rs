@@ -20,18 +20,19 @@ pub(crate) fn run(command: &SpokeStandbyCommand) -> Result<()> {
         SpokeStandbyCommand::Promote {
             profile,
             holder,
-            lease_dir,
+            environment,
             state,
+            lease_dir,
             signing_key,
         } => {
             let profile = spoke_standby::SpokeStandbyProfile::load(profile)?;
             let evidence = spoke_standby::promote_on_disk(
                 &profile,
                 holder,
-                lease_dir,
+                environment,
                 state,
+                lease_dir,
                 signing_key,
-                tenkai::now_millis() as u64,
             )?;
             println!(
                 "promoted {} generation {} (fenced {})",

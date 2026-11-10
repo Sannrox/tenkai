@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 mod exports;
 mod grant_rules;
+mod identity_issuer;
 mod runtime_enrollment;
 pub use exports::ExportRequest;
 pub use grant_rules::{CreateGrantRuleRequest, GrantRuleList, RemoveGrantRuleRequest};
@@ -2708,6 +2709,37 @@ impl ManagementOperations {
         .with_digest(digest))
     }
 
+    /// The sealing public key with `fingerprint`: an unrevoked runtime key
+    /// of `environment`, or its recovery key.
+    async fn recipient_key(
+        &self,
+        environment: &str,
+        fingerprint: &str,
+    ) -> Result<crate::sealing_key::SealingPublicKey, ManagementError> {
+        let runtime = self
+            .store
+            .runtime_sealing_keys(environment)
+            .map_err(|error| ManagementError::Unavailable(error.to_string()))?
+            .into_iter()
+            .filter_map(|record| {
+                crate::sealing_key::SealingPublicKey::from_wire(&record.public_key).ok()
+            })
+            .find(|key| key.fingerprint() == fingerprint);
+        if let Some(key) = runtime {
+            return Ok(key);
+        }
+        let mut ctx = self.application_ctx()?;
+        crate::sealed_secret::stored_recovery_key(&mut ctx, environment)
+            .await
+            .map_err(internal)?
+            .filter(|key| key.fingerprint() == fingerprint)
+            .ok_or_else(|| {
+                ManagementError::BadRequest(format!(
+                    "{fingerprint} is not a recipient key of {environment}"
+                ))
+            })
+    }
+
     /// Every recipient a sealed value of `environment` may be wrapped for:
     /// its unrevoked runtime keys and its recovery key (ADR 0045 §7).
     async fn sealed_recipient_fingerprints(
@@ -3131,6 +3163,7 @@ mod tests {
             sealed: Vec::new(),
             restore: None,
             rewrap: None,
+            issuer: None,
         };
         use crate::apply::{Outcome, StepOutcomeStatus};
         let outcomes = [
@@ -3254,6 +3287,7 @@ mod tests {
                     criticality: None,
                     latest_failures: Vec::new(),
                     sealed_recovery_warning: None,
+                    identity_issuer: None,
                 })
             })
         }

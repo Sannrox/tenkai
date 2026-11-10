@@ -1179,6 +1179,7 @@ mod tests {
                     _ => None,
                 },
                 rewrap: None,
+                issuer: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,

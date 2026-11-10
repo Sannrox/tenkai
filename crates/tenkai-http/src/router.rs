@@ -32,11 +32,12 @@ use super::inspect::{
 };
 use super::lifecycle::{
     apply_plan, approve_plan, channel_hold, clear_product_criticality, environment_hold,
-    import_derived_criticality, install_model_evaluation_trust, plan_environment, promote_release,
-    publish_release, recall_release, record_model_evaluation_evidence,
-    record_software_compatibility_evidence, release_channel_hold, release_environment_hold,
-    retire_environment, retry_failed_target, rewrap_sealed_secrets, rollback_environment,
-    set_channel_hold, set_environment_hold, set_product_criticality, software_compatibility_report,
+    import_derived_criticality, install_model_evaluation_trust, plan_environment,
+    plan_identity_issuer, prepare_identity_issuer, promote_release, publish_release,
+    recall_release, record_model_evaluation_evidence, record_software_compatibility_evidence,
+    release_channel_hold, release_environment_hold, retire_environment, retry_failed_target,
+    rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment, set_channel_hold,
+    set_environment_hold, set_product_criticality, software_compatibility_report,
     subscribe_environment, unsubscribe_environment,
 };
 use super::package_migration::{
@@ -47,7 +48,8 @@ use super::runtime::{
     create_runtime_enrollment, inspect_runtime_runner, list_environment_recipients,
     list_runtime_runners, revoke_runtime_credential, revoke_runtime_credential_legacy,
     runtime_certificate, runtime_complete, runtime_enroll, runtime_heartbeat, runtime_host_records,
-    runtime_inventory, runtime_release, runtime_self_release, runtime_work,
+    runtime_inventory, runtime_issuer_candidate, runtime_release, runtime_self_release,
+    runtime_work,
 };
 
 pub(super) struct AppState {
@@ -249,6 +251,18 @@ pub fn router(
             post(rewrap_sealed_secrets),
         )
         .route(
+            "/v1/environments/{environment}/identity-issuer/prepare",
+            post(prepare_identity_issuer),
+        )
+        .route(
+            "/v1/environments/{environment}/identity-issuer/plan",
+            post(plan_identity_issuer),
+        )
+        .route(
+            "/v1/environments/{environment}/identity-issuer/rewrap",
+            post(rewrap_identity_issuer),
+        )
+        .route(
             "/v1/environments/{environment}/sealed-secrets",
             get(list_sealed_secrets)
                 .put(configure_sealed_secrets)
@@ -370,6 +384,10 @@ pub fn router(
         .route(
             "/v1/runtime/environments/{environment}/host-records",
             post(runtime_host_records),
+        )
+        .route(
+            "/v1/runtime/environments/{environment}/identity-issuer/candidate",
+            post(runtime_issuer_candidate),
         )
         .route(
             "/v1/runtime/environments/{environment}/self-release",

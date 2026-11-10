@@ -107,6 +107,21 @@ impl SealedTarget {
         })
     }
 
+    /// The environment's identity issuer key of `generation` (ADR 0046 §2).
+    /// Its instance is empty, which no instance name is, so the issuer key
+    /// can never pass for an instance's sealed value or the reverse.
+    pub fn identity_issuer(environment: &str, generation: u64) -> Result<Self> {
+        validate_identifier("environment", environment)?;
+        Ok(Self {
+            environment: environment.into(),
+            instance: String::new(),
+            secret: SecretRef {
+                secret: crate::identity_issuer::WRAP_SECRET.into(),
+                key: format!("generation-{generation}"),
+            },
+        })
+    }
+
     /// Associated data: format version, environment, instance, secret, key.
     pub fn associated_data(&self) -> Vec<u8> {
         let mut data = format!("tenkai.sealed-secret.v{SEALED_FORMAT_VERSION}").into_bytes();
@@ -942,7 +957,13 @@ pub async fn store_completion_wraps(
                 .filter(|wrap| current.contains(&wrap.wrap.fingerprint))
                 .cloned()
                 .collect();
-            add_wraps(&mut env_obj, instance, &kept)?;
+            // The identity issuer is environment-level: its re-wrap step
+            // names no instance (ADR 0046 §2).
+            if instance.is_empty() {
+                crate::identity_issuer::add_wraps(&mut env_obj, environment, &kept)?;
+            } else {
+                add_wraps(&mut env_obj, instance, &kept)?;
+            }
         }
         env_obj.updated = crate::now_millis();
         put_fenced(ctx, env_obj, &lease).await?;
@@ -970,7 +991,7 @@ pub fn unopenable(env_obj: &Object, instance: &str) -> Result<Vec<String>> {
 /// Write `env_obj` only while `lease` is still the environment's current
 /// holder: a holder that stalled past its lease never overwrites a newer
 /// one, so a revocation cannot be undone by a delayed write.
-async fn put_fenced(
+pub(crate) async fn put_fenced(
     ctx: &mut Ctx,
     env_obj: Object,
     lease: &crate::apply::EnvironmentLease,
@@ -1050,6 +1071,9 @@ fn drop_wraps(env_obj: &mut Object, fingerprint: &str) -> Result<(bool, Vec<Stri
         }
         persist_instance_records(env_obj, &instance, &records);
     }
+    let (issuer_changed, issuer_lost) = crate::identity_issuer::drop_wraps(env_obj, fingerprint)?;
+    changed |= issuer_changed;
+    lost.extend(issuer_lost);
     Ok((changed, lost))
 }
 

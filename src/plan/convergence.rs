@@ -329,8 +329,9 @@ async fn bind_host_steps(
     let mut records = None;
     for mut step in steps {
         // A re-wrap step runs no applier: it only re-wraps sealed values
-        // (ADR 0045 §5), whatever executor deployed the instance.
-        if step.rewrap.is_some() {
+        // (ADR 0045 §5), whatever executor deployed the instance. An issuer
+        // step names no release.
+        if !step.deploys_release() {
             bound.push(step);
             continue;
         }
@@ -1255,6 +1256,7 @@ async fn compute_snapshot_with_policy(
                 workdir: entry.release.workdir,
                 restore: entry.restore,
                 rewrap: None,
+                issuer: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -2092,7 +2094,8 @@ async fn create_with_content(
     recalled_recovery_reason: Option<String>,
 ) -> Result<Plan> {
     let mut steps = bind_host_steps(ctx, executors, env, steps).await?;
-    for step in &steps {
+    // An identity issuer step names no release to check.
+    for step in steps.iter().filter(|step| step.issuer.is_none()) {
         require_same_executor(ctx, executors, step).await?;
         admit_step_overlay_schema(ctx, env, step).await?;
     }
@@ -2253,6 +2256,7 @@ pub(super) async fn rollback_step_with_recovery(
         from: current,
         to: prev,
         rewrap: None,
+        issuer: None,
     })
 }
 
@@ -2297,6 +2301,7 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
         from: Some(current.clone()),
         to: current,
         rewrap: None,
+        issuer: None,
     })
 }
 
@@ -2376,6 +2381,7 @@ pub(super) async fn rewrap_steps(
             action: Action::Restart,
             from: Some(current.clone()),
             to: current,
+            issuer: None,
             rewrap: Some(crate::plan::RewrapStep {
                 fingerprint: fingerprint.clone(),
                 recovered,

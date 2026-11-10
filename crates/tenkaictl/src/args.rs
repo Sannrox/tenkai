@@ -193,6 +193,12 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: SecretCommand,
     },
+    /// Create or rotate an environment's workload identity issuer
+    /// (ADR 0046 §2): `prepare`, then `plan` and approve.
+    IdentityIssuer {
+        #[command(subcommand)]
+        command: IdentityIssuerCommand,
+    },
     /// The read-only seed registry over the local artifact store.
     Registry {
         #[command(subcommand)]
@@ -503,6 +509,40 @@ pub(crate) enum SecretCommand {
 }
 
 #[derive(Subcommand)]
+pub(crate) enum IdentityIssuerCommand {
+    /// Ask the environment's runtimes for a candidate key of the next issuer
+    /// generation. A runtime generates it, seals it to its own key and
+    /// uploads it; `env inspect` shows its fingerprint.
+    Prepare {
+        env: String,
+        /// Current fencing generation.
+        #[arg(long)]
+        generation: u64,
+    },
+    /// Plan activating the uploaded candidate. The plan names its
+    /// fingerprint and needs signed approval; the runtime that runs it
+    /// refuses a key with any other fingerprint.
+    Plan {
+        env: String,
+        /// Current fencing generation.
+        #[arg(long)]
+        generation: u64,
+    },
+    /// Plan wrapping the current issuer key for one more recipient: another
+    /// runtime's sealing key or the recovery key. Needs signed approval; a
+    /// runtime that already opens the issuer runs it.
+    Rewrap {
+        env: String,
+        /// Recipient sealing key fingerprint.
+        #[arg(long)]
+        recipient: String,
+        /// Current fencing generation.
+        #[arg(long)]
+        generation: u64,
+    },
+}
+
+#[derive(Subcommand)]
 pub(crate) enum RecoveryKeyCommand {
     /// Generate a recovery key pair offline: the private key is written
     /// owner-only to `path` and never overwritten; the public key and
@@ -707,12 +747,15 @@ pub(crate) enum SpokeStandbyCommand {
         /// Holder id of this process (`spoke-b` on the standby).
         #[arg(long)]
         holder: String,
-        /// Directory of `fencing-lease` lock files. Shared only when the profile sets `exclusive_lock`.
+        /// Site environment whose lease in the restored store is the spoke writer lease.
         #[arg(long)]
-        lease_dir: PathBuf,
-        /// Restored spoke state directory (`spoke-standby.json`).
+        environment: String,
+        /// Restored spoke operational store (SQLite) to promote.
         #[arg(long)]
         state: PathBuf,
+        /// Lock directory outside the restored backup that issues promotion epochs. Every member must use the same directory.
+        #[arg(long)]
+        lease_dir: PathBuf,
         /// Key file (32-byte Ed25519 seed, mode 0600) or `pkcs11:` token locator for the promotion statement.
         #[arg(long)]
         signing_key: PathBuf,

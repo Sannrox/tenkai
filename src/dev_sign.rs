@@ -727,6 +727,7 @@ inputs = ["manifests"]
                 sealed: Vec::new(),
                 restore: None,
                 rewrap: None,
+                issuer: None,
             }],
         )
         .await

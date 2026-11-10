@@ -533,6 +533,7 @@ mod tests {
                 workdir: "/srv/api".into(),
             }),
             rewrap: None,
+            issuer: None,
         }];
         sealed_test_plan(env, created_at, state, inputs, steps)
     }
@@ -600,6 +601,7 @@ mod tests {
             sealed: Vec::new(),
             restore: None,
             rewrap: None,
+            issuer: None,
         };
         sealed_test_plan(env, created_at, PlanState::Computed, Vec::new(), vec![step])
     }
