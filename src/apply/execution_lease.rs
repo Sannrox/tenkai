@@ -1,44 +1,28 @@
-//! Environment execution ownership, compatibility, and generation fencing.
+//! Environment execution ownership and generation fencing.
+//!
+//! One catalog lease per environment (`tenkai/environment-execution`) is the
+//! only execution claim. Earlier releases also kept a claim object
+//! (`<env>:execution`, then `<env>:execution:v2` with an
+//! `active_environment_execution` link); those are no longer read or written.
+//! Every release since 0.2.0 takes this lease before it writes such an
+//! object, so a live holder of one is still refused by the lease. Only a
+//! controller older than 0.2.0 held the object alone, which is outside the
+//! one-minor rolling-deploy window.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result, bail};
 
 use crate::client::Ctx;
-use crate::ontology::{KIND_ENVIRONMENT_EXECUTION, NS, env_id};
-use crate::pb::sekai::{Lease, Link, Object};
+use crate::pb::sekai::Lease;
 
 use super::ReleaseContent;
-
-fn record(id: String, kind: &str, name: String, properties: HashMap<String, String>) -> Object {
-    let now = crate::now_millis();
-    Object {
-        id,
-        kind: kind.into(),
-        name,
-        namespace: NS.into(),
-        external_id: String::new(),
-        properties,
-        created: now,
-        updated: now,
-    }
-}
-
-fn legacy_environment_claim_id(environment: &str) -> String {
-    format!("{}:execution", env_id(environment))
-}
-
-fn object_environment_claim_id(environment: &str) -> String {
-    format!("{}:execution:v2", env_id(environment))
-}
 
 const ENVIRONMENT_LEASE_MS: i64 = 2 * 60 * 60 * 1000;
 const EXECUTION_LEASE_MS: i64 = 30_000;
 const MANUAL_UNLOCK_LEASE_MS: i64 = 5_000;
 pub(crate) const ENVIRONMENT_LEASE_NAMESPACE: &str = "tenkai/environment-execution";
-const REL_ACTIVE_ENVIRONMENT_EXECUTION: &str = "active_environment_execution";
 
 #[derive(Clone)]
 pub(crate) struct EnvironmentLease {
@@ -49,79 +33,6 @@ pub(crate) struct EnvironmentLease {
     ttl_ms: i64,
     /// The lease was taken over from an expired holder (#803).
     pub(crate) took_over: bool,
-}
-
-fn object_environment_claim(environment: &str, owner: &str, expires_at_ms: i64) -> Object {
-    record(
-        object_environment_claim_id(environment),
-        KIND_ENVIRONMENT_EXECUTION,
-        format!("apply lease for {environment}"),
-        HashMap::from([
-            ("environment".into(), environment.into()),
-            ("owner".into(), owner.into()),
-            ("expires_at".into(), expires_at_ms.to_string()),
-        ]),
-    )
-}
-
-fn object_environment_claim_for_lease(lease: &EnvironmentLease, expires_at_ms: i64) -> Object {
-    let mut object = object_environment_claim(&lease.environment, &lease.owner, expires_at_ms);
-    object
-        .properties
-        .insert("generation".into(), lease.generation.to_string());
-    object
-}
-
-fn object_environment_claim_link(environment: &str) -> Link {
-    let environment_id = env_id(environment);
-    let lease_id = object_environment_claim_id(environment);
-    Link {
-        id: format!("{environment_id}--{REL_ACTIVE_ENVIRONMENT_EXECUTION}--{lease_id}"),
-        from_id: environment_id,
-        to_id: lease_id,
-        relation: REL_ACTIVE_ENVIRONMENT_EXECUTION.into(),
-        created: crate::now_millis(),
-    }
-}
-
-async fn release_object_environment_claim(ctx: &mut Ctx, environment: &str) -> Result<()> {
-    let claim_id = object_environment_claim_id(environment);
-    if let Some(mut existing) = ctx.get(&claim_id).await? {
-        existing
-            .properties
-            .insert("owner".into(), "released".into());
-        existing.properties.insert("expires_at".into(), "0".into());
-        existing.updated = crate::now_millis();
-        ctx.put(existing).await?;
-    }
-    ctx.unlink(
-        &env_id(environment),
-        &claim_id,
-        REL_ACTIVE_ENVIRONMENT_EXECUTION,
-    )
-    .await?;
-    Ok(())
-}
-
-async fn mark_object_environment_claim_released(
-    ctx: &mut Ctx,
-    lease: &EnvironmentLease,
-) -> Result<()> {
-    let mut claim = ctx
-        .get(&object_environment_claim_id(&lease.environment))
-        .await?
-        .context("object-backed environment apply lease disappeared")?;
-    claim.properties.insert("owner".into(), "released".into());
-    claim.properties.insert("expires_at".into(), "0".into());
-    claim.updated = crate::now_millis();
-    ctx.guarded_update(
-        claim,
-        ENVIRONMENT_LEASE_NAMESPACE,
-        &lease.environment,
-        &lease.fencing_token,
-    )
-    .await?;
-    Ok(())
 }
 
 pub(crate) async fn claim_environment(
@@ -250,48 +161,6 @@ async fn claim_environment_with_options(
         anyhow::bail!("retired environment {environment} cannot accept new apply leases");
     }
     reject_foreign_migration_lock(ctx, environment, owner).await?;
-    if let Some(existing) = ctx.get(&legacy_environment_claim_id(environment)).await? {
-        let expires_at = existing
-            .properties
-            .get("expires_at")
-            .and_then(|value| value.parse::<i64>().ok())
-            .unwrap_or(i64::MAX);
-        if expires_at <= now {
-            bail!(
-                "environment {environment} has an expired legacy apply lease; verify no apply is running, then run `tenkaictl env unlock {environment}`"
-            );
-        }
-        bail!("environment {environment} already has a legacy apply in progress");
-    }
-    let object_claim_id = object_environment_claim_id(environment);
-    let has_object_claim = ctx
-        .links(&env_id(environment), REL_ACTIVE_ENVIRONMENT_EXECUTION)
-        .await?
-        .into_iter()
-        .any(|link| link.to_id == object_claim_id);
-    if has_object_claim {
-        match get_environment_lease(ctx, environment).await? {
-            Some(existing) if existing.status == "active" => {
-                if existing.expires_at_ms > now {
-                    bail!(
-                        "environment {environment} already has an apply in progress owned by {}",
-                        existing.owner
-                    );
-                }
-            }
-            _ => {
-                let claim = ctx
-                    .get(&object_claim_id)
-                    .await?
-                    .context("object-backed environment apply lease disappeared")?;
-                if claim.properties.get("owner").map(String::as_str) != Some("released") {
-                    bail!(
-                        "environment {environment} has an object-backed apply lease without an active Tenkai lease; finish any older controller, then run `tenkaictl env unlock {environment}`"
-                    );
-                }
-            }
-        }
-    }
     // An expired active holder replaced by this claim is a takeover (#803),
     // whether the backend replaces it inside AcquireLease (embedded) or
     // through the explicit takeover below.
@@ -355,39 +224,6 @@ async fn claim_environment_with_options(
         ttl_ms,
         took_over,
     };
-    let available = object_environment_claim(environment, "released", 0);
-    match ctx.create_once(available).await {
-        Ok(_) => {}
-        Err(status)
-            if crate::client::is_unique_conflict(&status) || status.is_retired_identity() => {}
-        Err(status) => {
-            let _ = release_environment_lease(ctx, &environment_lease).await;
-            return Err(status.into());
-        }
-    }
-    if !has_object_claim
-        && let Err(status) = ctx
-            .create_link_once(object_environment_claim_link(environment))
-            .await
-    {
-        let _ = release_environment_lease(ctx, &environment_lease).await;
-        if crate::client::is_unique_conflict(&status) {
-            bail!("environment {environment} already has an apply in progress");
-        }
-        return Err(status.into());
-    }
-    if let Err(error) = ctx
-        .guarded_update(
-            object_environment_claim_for_lease(&environment_lease, lease.expires_at_ms),
-            ENVIRONMENT_LEASE_NAMESPACE,
-            &environment_lease.environment,
-            &environment_lease.fencing_token,
-        )
-        .await
-    {
-        let _ = release_environment_lease(ctx, &environment_lease).await;
-        return Err(error);
-    }
     if let Err(error) = reject_foreign_migration_lock(ctx, environment, owner).await {
         let _ = release_environment_lease(ctx, &environment_lease).await;
         return Err(error);
@@ -475,15 +311,8 @@ async fn refresh_environment_lease_inner(ctx: &mut Ctx, lease: &EnvironmentLease
         ttl_ms: lease.ttl_ms,
         extend: true,
     });
-    let claim = object_environment_claim_for_lease(lease, now.saturating_add(lease.ttl_ms));
-    let (refreshed, _) = ctx
-        .refresh_leases_and_guarded_put(
-            refreshes,
-            claim,
-            ENVIRONMENT_LEASE_NAMESPACE,
-            &lease.environment,
-            &lease.fencing_token,
-        )
+    let refreshed = ctx
+        .refresh_leases(refreshes)
         .await
         .map_err(|error| map_held_lease_error(ctx, error))?;
     let Some(env) = refreshed.last() else {
@@ -739,7 +568,6 @@ async fn release_environment_lease(ctx: &mut Ctx, lease: &EnvironmentLease) -> R
 }
 
 pub(crate) async fn release_environment(ctx: &mut Ctx, lease: &EnvironmentLease) -> Result<()> {
-    mark_object_environment_claim_released(ctx, lease).await?;
     release_environment_lease(ctx, lease).await?;
     crate::telemetry::record_metric(
         crate::telemetry::METRIC_LEASE_RELEASED,
@@ -780,40 +608,21 @@ pub async fn inspect_environment_lease(
     environment: &str,
 ) -> Result<EnvironmentLeaseInspect> {
     crate::ontology::validate_identifier("environment", environment)?;
-    if let Some(active) = get_environment_lease(ctx, environment).await? {
-        if active.status == "active" {
-            return Ok(EnvironmentLeaseInspect {
-                held: true,
-                owner: Some(active.owner),
-                generation: Some(active.generation),
-                expires_at_ms: Some(active.expires_at_ms),
-                status: active.status,
-            });
-        }
+    let Some(lease) = get_environment_lease(ctx, environment).await? else {
         return Ok(EnvironmentLeaseInspect {
             held: false,
-            owner: Some(active.owner),
-            generation: Some(active.generation),
-            expires_at_ms: Some(active.expires_at_ms),
-            status: active.status,
-        });
-    }
-    // Compatibility path: object/legacy claim without Tenkai generation lease.
-    if let Some(status) = environment_lease_status(ctx, environment).await? {
-        return Ok(EnvironmentLeaseInspect {
-            held: true,
-            owner: Some(status.owner),
+            owner: None,
             generation: None,
             expires_at_ms: None,
-            status: "active".into(),
+            status: "absent".into(),
         });
-    }
+    };
     Ok(EnvironmentLeaseInspect {
-        held: false,
-        owner: None,
-        generation: None,
-        expires_at_ms: None,
-        status: "absent".into(),
+        held: lease.status == "active",
+        owner: Some(lease.owner),
+        generation: Some(lease.generation),
+        expires_at_ms: Some(lease.expires_at_ms),
+        status: lease.status,
     })
 }
 
@@ -821,45 +630,6 @@ pub(crate) async fn environment_lease_status(
     ctx: &mut Ctx,
     environment: &str,
 ) -> Result<Option<EnvironmentLeaseStatus>> {
-    if let Some(lease) = ctx.get(&legacy_environment_claim_id(environment)).await? {
-        let owner = lease
-            .properties
-            .get("owner")
-            .cloned()
-            .context("legacy environment apply lease has no owner")?;
-        return Ok(Some(EnvironmentLeaseStatus { owner }));
-    }
-    let object_claim_id = object_environment_claim_id(environment);
-    if ctx
-        .links(&env_id(environment), REL_ACTIVE_ENVIRONMENT_EXECUTION)
-        .await?
-        .into_iter()
-        .any(|link| link.to_id == object_claim_id)
-    {
-        let lease = ctx
-            .get(&object_claim_id)
-            .await?
-            .context("object-backed environment apply lease disappeared")?;
-        let owner = lease
-            .properties
-            .get("owner")
-            .cloned()
-            .context("object-backed environment apply lease has no owner")?;
-        if owner != "released" {
-            return Ok(Some(EnvironmentLeaseStatus { owner }));
-        }
-        // New controllers retain the compatibility link so an older binary
-        // fails closed. The authoritative Tenkai lease determines whether the
-        // released marker is merely idle or a new generation is being adopted.
-        if let Some(active) = get_environment_lease(ctx, environment).await?
-            && active.status == "active"
-        {
-            return Ok(Some(EnvironmentLeaseStatus {
-                owner: active.owner,
-            }));
-        }
-        return Ok(None);
-    }
     let Some(lease) = get_environment_lease(ctx, environment).await? else {
         return Ok(None);
     };
@@ -873,26 +643,16 @@ pub(crate) async fn environment_lease_status(
 /// (#630): no server execution may still be running there. A server lease
 /// past its expiry is taken over atomically, as server execution takes one
 /// over, and released: its holder can no longer renew it, and its writes fail
-/// their generation fence. A live lease, or a claim only an operator may
-/// clear, keeps the runtime waiting. Polls write nothing unless a lease is
-/// taken over.
+/// their generation fence. A live lease keeps the runtime waiting. Polls
+/// write nothing unless a lease is taken over.
 pub(crate) async fn runtime_may_take_over(ctx: &mut Ctx, environment: &str) -> Result<bool> {
-    if environment_lease_status(ctx, environment).await?.is_none() {
-        return Ok(true);
-    }
-    if ctx
-        .get(&legacy_environment_claim_id(environment))
-        .await?
-        .is_some()
-    {
-        return Ok(false);
-    }
     match get_environment_lease(ctx, environment).await? {
-        Some(lease) if lease.status == "active" && lease.expires_at_ms > crate::now_millis() => {
-            return Ok(false);
+        Some(lease) if lease.status == "active" => {
+            if lease.expires_at_ms > crate::now_millis() {
+                return Ok(false);
+            }
         }
-        Some(lease) if lease.status == "active" => {}
-        _ => return Ok(false),
+        _ => return Ok(true),
     }
     // Renewed meanwhile, the lease refuses this takeover, and the runtime retries.
     let lease = claim_environment_with_options(
@@ -909,30 +669,6 @@ pub(crate) async fn runtime_may_take_over(ctx: &mut Ctx, environment: &str) -> R
 
 pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<String> {
     crate::ontology::validate_identifier("environment", environment)?;
-    let legacy_id = legacy_environment_claim_id(environment);
-    if ctx.get(&legacy_id).await?.is_some() {
-        ctx.delete(&legacy_id).await?;
-        return Ok(format!(
-            "removed legacy apply lease for environment {environment}"
-        ));
-    }
-    let object_claim_id = object_environment_claim_id(environment);
-    let has_object_claim = ctx.get(&object_claim_id).await?.is_some()
-        && ctx
-            .links(&env_id(environment), REL_ACTIVE_ENVIRONMENT_EXECUTION)
-            .await?
-            .into_iter()
-            .any(|link| link.to_id == object_claim_id);
-    if has_object_claim
-        && get_environment_lease(ctx, environment)
-            .await?
-            .is_none_or(|lease| lease.status != "active")
-    {
-        release_object_environment_claim(ctx, environment).await?;
-        return Ok(format!(
-            "removed object-backed apply lease for environment {environment}"
-        ));
-    }
     let Some(existing) = get_environment_lease(ctx, environment).await? else {
         return Ok(format!("environment {environment} has no apply lease"));
     };
@@ -962,9 +698,6 @@ pub async fn unlock_environment(ctx: &mut Ctx, environment: &str) -> Result<Stri
         &takeover.fencing_token,
     )
     .await?;
-    if has_object_claim {
-        release_object_environment_claim(ctx, environment).await?;
-    }
     Ok(format!("removed apply lease for environment {environment}"))
 }
 
@@ -1288,32 +1021,6 @@ mod tests {
         assert_eq!(
             after.expires_at_ms, before.expires_at_ms,
             "a 2h-class lease must not refresh on the 10s fence"
-        );
-        release_environment(&mut ctx, &lease).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn environment_execution_heartbeat_does_not_record_catalog_changes() {
-        let mut ctx = context("heartbeat-history");
-        let lease = claim_environment(&mut ctx, "prod", "plan-1").await.unwrap();
-        let claim_id = object_environment_claim_id("prod");
-        let before = ctx
-            .embedded_arc()
-            .expect("embedded store")
-            .changes(&claim_id)
-            .unwrap()
-            .len();
-        refresh_environment_lease(&mut ctx, &lease).await.unwrap();
-        refresh_environment_lease(&mut ctx, &lease).await.unwrap();
-        let after = ctx
-            .embedded_arc()
-            .expect("embedded store")
-            .changes(&claim_id)
-            .unwrap()
-            .len();
-        assert_eq!(
-            after, before,
-            "expires_at-only heartbeats must not grow catalog_changes"
         );
         release_environment(&mut ctx, &lease).await.unwrap();
     }

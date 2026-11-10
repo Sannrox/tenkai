@@ -324,6 +324,17 @@ impl Inner {
         })
     }
 
+    /// Refresh every lease in `refreshes` in one writer transaction.
+    pub fn catalog_refresh_leases(
+        &self,
+        schema: &str,
+        refreshes: Vec<LeaseRefresh>,
+    ) -> Result<Vec<Lease>> {
+        self.with_writer_schema(schema, move |tx| {
+            refresh_leases_locked_in(tx, &refreshes, None)
+        })
+    }
+
     pub fn catalog_refresh_leases_and_guarded_put(
         &self,
         schema: &str,
@@ -337,49 +348,11 @@ impl Inner {
         let object_key = object_key.to_owned();
         let object_fencing_token = object_fencing_token.to_owned();
         self.with_writer_schema(schema, move |tx| {
-            let mut lock_keys: Vec<(String, String)> = refreshes
-                .iter()
-                .map(|refresh| (refresh.namespace.clone(), refresh.key.clone()))
-                .collect();
-            lock_keys.push((object_namespace.clone(), object_key.clone()));
-            lock_keys.sort();
-            lock_keys.dedup();
-            if lock_keys
-                .iter()
-                .any(|(namespace, _)| namespace == ENVIRONMENT_LEASE_NAMESPACE)
-            {
-                for (_, key) in lock_keys
-                    .iter()
-                    .filter(|(namespace, _)| namespace == ENVIRONMENT_LEASE_NAMESPACE)
-                {
-                    lock_typed_environment_if_present(tx, key)?;
-                    lock_catalog_apply_leases(tx, key)?;
-                }
-            }
-            for (namespace, key) in &lock_keys {
-                if namespace != ENVIRONMENT_LEASE_NAMESPACE {
-                    lock_catalog_lease(tx, namespace, key)?;
-                }
-            }
-            let mut leases = Vec::with_capacity(refreshes.len());
-            for refresh in &refreshes {
-                if refresh.extend {
-                    leases.push(refresh_lease_in(
-                        tx,
-                        &refresh.namespace,
-                        &refresh.key,
-                        &refresh.fencing_token,
-                        refresh.ttl_ms,
-                    )?);
-                } else {
-                    leases.push(require_active_lease_in(
-                        tx,
-                        &refresh.namespace,
-                        &refresh.key,
-                        &refresh.fencing_token,
-                    )?);
-                }
-            }
+            let leases = refresh_leases_locked_in(
+                tx,
+                &refreshes,
+                Some((object_namespace.as_str(), object_key.as_str())),
+            )?;
             stamp_claim_expiry(&mut object, &leases, &object_namespace, &object_key);
             lock_catalog_object(tx, &object.id)?;
             require_active_lease_in(tx, &object_namespace, &object_key, &object_fencing_token)?;
@@ -1772,6 +1745,62 @@ fn refresh_lease_in(
     lease.expires_at_ms = now.saturating_add(ttl_ms);
     save_lease_in(tx, &lease)?;
     Ok(lease)
+}
+
+/// Lock and refresh `refreshes` inside `tx`, in the lock order every
+/// environment write uses. `object_lease` is locked as well when a guarded
+/// put follows.
+fn refresh_leases_locked_in(
+    tx: &mut Transaction<'_>,
+    refreshes: &[LeaseRefresh],
+    object_lease: Option<(&str, &str)>,
+) -> Result<Vec<Lease>> {
+    let mut lock_keys: Vec<(String, String)> = refreshes
+        .iter()
+        .map(|refresh| (refresh.namespace.clone(), refresh.key.clone()))
+        .collect();
+    if let Some((namespace, key)) = object_lease {
+        lock_keys.push((namespace.to_owned(), key.to_owned()));
+    }
+    lock_keys.sort();
+    lock_keys.dedup();
+    if lock_keys
+        .iter()
+        .any(|(namespace, _)| namespace == ENVIRONMENT_LEASE_NAMESPACE)
+    {
+        for (_, key) in lock_keys
+            .iter()
+            .filter(|(namespace, _)| namespace == ENVIRONMENT_LEASE_NAMESPACE)
+        {
+            lock_typed_environment_if_present(tx, key)?;
+            lock_catalog_apply_leases(tx, key)?;
+        }
+    }
+    for (namespace, key) in &lock_keys {
+        if namespace != ENVIRONMENT_LEASE_NAMESPACE {
+            lock_catalog_lease(tx, namespace, key)?;
+        }
+    }
+    let mut leases = Vec::with_capacity(refreshes.len());
+    for refresh in refreshes {
+        if refresh.extend {
+            leases.push(refresh_lease_in(
+                tx,
+                &refresh.namespace,
+                &refresh.key,
+                &refresh.fencing_token,
+                refresh.ttl_ms,
+            )?);
+        } else {
+            leases.push(require_active_lease_in(
+                tx,
+                &refresh.namespace,
+                &refresh.key,
+                &refresh.fencing_token,
+            )?);
+        }
+    }
+    Ok(leases)
 }
 
 fn prune_execution_claim_history_in(tx: &mut Transaction<'_>, now: i64) -> Result<()> {

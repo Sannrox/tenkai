@@ -97,20 +97,13 @@ pub trait CatalogGraph: Send + Sync {
         fencing_token: &str,
         ttl_ms: i64,
     ) -> AnyResult<Lease>;
-    /// Refresh `refreshes` and guarded-put `object` in one catalog transaction.
-    ///
-    /// When a refreshed lease matches `object_namespace`/`object_key`, the
-    /// object's `expires_at` is taken from that lease so a heartbeat does not
-    /// take a second round trip (#874).
-    fn refresh_leases_and_guarded_put(
+    /// Refresh every lease in `refreshes` in one catalog transaction: a
+    /// lease with `extend` is renewed, the rest must still be held.
+    fn refresh_leases(
         &self,
         tenant: Option<&str>,
         refreshes: &[LeaseRefresh],
-        mut object: Object,
-        object_namespace: &str,
-        object_key: &str,
-        object_fencing_token: &str,
-    ) -> AnyResult<(Vec<Lease>, Object)> {
+    ) -> AnyResult<Vec<Lease>> {
         let mut leases = Vec::with_capacity(refreshes.len());
         for refresh in refreshes {
             if refresh.extend {
@@ -141,6 +134,23 @@ pub trait CatalogGraph: Send + Sync {
                 leases.push(lease);
             }
         }
+        Ok(leases)
+    }
+    /// Refresh `refreshes` and guarded-put `object` in one catalog transaction.
+    ///
+    /// When a refreshed lease matches `object_namespace`/`object_key`, the
+    /// object's `expires_at` is taken from that lease so a heartbeat does not
+    /// take a second round trip (#874).
+    fn refresh_leases_and_guarded_put(
+        &self,
+        tenant: Option<&str>,
+        refreshes: &[LeaseRefresh],
+        mut object: Object,
+        object_namespace: &str,
+        object_key: &str,
+        object_fencing_token: &str,
+    ) -> AnyResult<(Vec<Lease>, Object)> {
+        let leases = self.refresh_leases(tenant, refreshes)?;
         stamp_claim_expiry(&mut object, &leases, object_namespace, object_key);
         let object = self.guarded_put(
             tenant,
@@ -1167,6 +1177,14 @@ impl CatalogGraph for SqliteStore {
         ttl_ms: i64,
     ) -> AnyResult<Lease> {
         self.refresh_namespaced_lease(namespace, key, fencing_token, ttl_ms)
+    }
+
+    fn refresh_leases(
+        &self,
+        _tenant: Option<&str>,
+        refreshes: &[LeaseRefresh],
+    ) -> AnyResult<Vec<Lease>> {
+        SqliteStore::refresh_leases(self, refreshes)
     }
 
     fn refresh_leases_and_guarded_put(
