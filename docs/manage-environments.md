@@ -207,8 +207,11 @@ tenkaictl --target remote identity-issuer rewrap prod --recipient sha256:<hex> -
   An issuer plan whose key no unrevoked runtime holds, or one made before
   the issuer rotated past it, is blocked when the next runtime polls, so it
   does not hold up later plans. Plan it again.
-- An environment without a separate runtime cannot hold the key; its plans
-  with an issuer step are refused.
+- An environment without a separate runtime cannot issue workload
+  certificates. The server never holds the issuing key, so it refuses plans
+  that activate an issuer or issue a certificate, and the refusal says to
+  enroll an environment runtime. There is no setting that lets the server's
+  host issue them ([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md) §8).
 
 A release that declares [`[deploy.identity]`](manifest.md#workload-identity)
 needs a current issuer: planning it without one fails and names

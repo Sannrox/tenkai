@@ -130,7 +130,8 @@ Planning grants the names to the step, so approving the plan approves them.
 The environment's runtime issues a fresh key and certificate from the
 [identity issuer](manage-environments.md#identity-issuer) and refuses names
 the plan step grants but the signed manifest does not. The private key is
-generated on the runtime and never reaches the server. Older binaries refuse
+generated on the runtime and never reaches the server, so an environment
+without a separate runtime cannot apply the release. Older binaries refuse
 a manifest that declares the table.
 
 ## Config schema

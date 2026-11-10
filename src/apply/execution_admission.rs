@@ -111,21 +111,20 @@ pub(super) async fn admit(ctx: &mut Ctx, plan: &Plan) -> Result<()> {
             step.id
         );
     }
-    // The issuing key exists unsealed only inside runtimes (ADR 0046 §8).
-    if let Some(step) = plan.steps.iter().find(|step| step.issuer.is_some()) {
+    // The issuing key exists unsealed only inside runtimes, so the server
+    // never issues a certificate, even for an environment without a separate
+    // runtime (ADR 0046 §8).
+    if let Some((step, what)) = plan.steps.iter().find_map(|step| {
+        if step.issuer.is_some() {
+            Some((step, "activates an identity issuer"))
+        } else if step.identity_grants().next().is_some() {
+            Some((step, "issues a workload certificate"))
+        } else {
+            None
+        }
+    }) {
         anyhow::bail!(
-            "plan {} step {} activates an identity issuer; only an environment runtime that names workload_identity runs it",
-            plan.id,
-            step.id
-        );
-    }
-    if let Some(step) = plan
-        .steps
-        .iter()
-        .find(|step| step.identity_grants().next().is_some())
-    {
-        anyhow::bail!(
-            "plan {} step {} issues a workload certificate; only an environment runtime that names workload_identity runs it",
+            "plan {} step {} {what}, and the server never holds the issuing key; enroll an environment runtime in built-in mode that names workload_identity to run it",
             plan.id,
             step.id
         );
@@ -392,6 +391,29 @@ mod tests {
             CandidateAdmission::Admissible
         );
         admit(&mut ctx, &plan).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_identity_plan_in_an_environment_without_a_separate_runtime_is_refused() {
+        use crate::workload_identity::{CertificateRole, IdentityGrant, Reload};
+
+        let mut ctx = context("identity");
+        put_current_state(&mut ctx).await;
+        let mut plan = plan();
+        plan.steps[0].identity = Some(IdentityGrant {
+            uri: "tenkai://prod/api".into(),
+            dns_names: vec!["api.prod.svc".into()],
+            certificate: CertificateRole::Server,
+            reload: Reload::Restart,
+            issuer_generation: 1,
+            issuer_fingerprint: "sha256:issuer".into(),
+        });
+        let error = admit(&mut ctx, &plan).await.unwrap_err().to_string();
+        assert!(
+            error.contains("issues a workload certificate")
+                && error.contains("enroll an environment runtime"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
