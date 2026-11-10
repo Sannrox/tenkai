@@ -195,6 +195,55 @@ impl Ctx {
             .context("Sekai returned an empty canonical create result")
     }
 
+    /// Refresh every lease in `refreshes` in one store transaction where
+    /// the backend has one. A lease with `extend` is renewed; the rest must
+    /// still be held.
+    pub(crate) async fn refresh_leases(
+        &mut self,
+        refreshes: Vec<LeaseRefresh>,
+    ) -> Result<Vec<Lease>> {
+        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+            return super::block_catalog(catalog, move |catalog| {
+                catalog.refresh_leases(Some(&tenant), &refreshes)
+            })
+            .await;
+        }
+        if let Some(store) = self.embedded_arc() {
+            return block_embedded(store, move |store| store.refresh_leases(&refreshes)).await;
+        }
+        let mut leases = Vec::with_capacity(refreshes.len());
+        for refresh in &refreshes {
+            if refresh.extend {
+                leases.push(
+                    self.refresh_lease(
+                        &refresh.namespace,
+                        &refresh.key,
+                        &refresh.fencing_token,
+                        refresh.ttl_ms,
+                    )
+                    .await?,
+                );
+            } else {
+                let lease = self
+                    .get_lease(&refresh.namespace, &refresh.key)
+                    .await?
+                    .with_context(|| {
+                        format!("lease {}/{} does not exist", refresh.namespace, refresh.key)
+                    })?;
+                ensure!(
+                    lease.status == "active"
+                        && lease.fencing_token == refresh.fencing_token
+                        && lease.expires_at_ms > crate::now_millis(),
+                    "lease {}/{} is not the active fenced holder",
+                    refresh.namespace,
+                    refresh.key
+                );
+                leases.push(lease);
+            }
+        }
+        Ok(leases)
+    }
+
     pub(crate) async fn refresh_leases_and_guarded_put(
         &mut self,
         refreshes: Vec<LeaseRefresh>,
@@ -252,39 +301,7 @@ impl Ctx {
             })
             .await;
         }
-        let mut leases = Vec::with_capacity(refreshes.len());
-        for refresh in &refreshes {
-            if refresh.extend {
-                leases.push(
-                    self.refresh_lease(
-                        &refresh.namespace,
-                        &refresh.key,
-                        &refresh.fencing_token,
-                        refresh.ttl_ms,
-                    )
-                    .await?,
-                );
-            } else {
-                let lease = self
-                    .get_lease(&refresh.namespace, &refresh.key)
-                    .await?
-                    .with_context(|| {
-                        format!(
-                            "embedded lease {}/{} does not exist",
-                            refresh.namespace, refresh.key
-                        )
-                    })?;
-                ensure!(
-                    lease.status == "active"
-                        && lease.fencing_token == refresh.fencing_token
-                        && lease.expires_at_ms > crate::now_millis(),
-                    "embedded lease {}/{} is not the active fenced holder",
-                    refresh.namespace,
-                    refresh.key
-                );
-                leases.push(lease);
-            }
-        }
+        let leases = self.refresh_leases(refreshes).await?;
         let mut object = object;
         crate::storage::stamp_claim_expiry(&mut object, &leases, lease_namespace, lease_key);
         let object = self

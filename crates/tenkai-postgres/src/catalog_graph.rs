@@ -262,6 +262,25 @@ impl CatalogGraph for PostgresTenantOperationalStore {
         }
     }
 
+    fn refresh_leases(
+        &self,
+        tenant: Option<&str>,
+        refreshes: &[LeaseRefresh],
+    ) -> anyhow::Result<Vec<Lease>> {
+        let schema = self.catalog_schema(tenant)?;
+        #[cfg(feature = "postgres")]
+        {
+            Ok(self
+                .inner
+                .catalog_refresh_leases(&schema, refreshes.to_vec())?)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (schema, refreshes);
+            Err(postgres_disabled().into())
+        }
+    }
+
     fn refresh_leases_and_guarded_put(
         &self,
         tenant: Option<&str>,

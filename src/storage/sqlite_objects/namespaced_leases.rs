@@ -82,6 +82,18 @@ impl SqliteStore {
         Ok(lease)
     }
 
+    /// Refresh every lease in `refreshes` in one transaction.
+    pub fn refresh_leases(
+        &self,
+        refreshes: &[crate::storage::LeaseRefresh],
+    ) -> AnyResult<Vec<Lease>> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let leases = refresh_leases_in(&tx, refreshes)?;
+        tx.commit()?;
+        Ok(leases)
+    }
+
     pub fn refresh_leases_and_guarded_put(
         &self,
         refreshes: &[crate::storage::LeaseRefresh],
@@ -92,26 +104,7 @@ impl SqliteStore {
     ) -> AnyResult<(Vec<Lease>, Object)> {
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let mut leases = Vec::with_capacity(refreshes.len());
-        for refresh in refreshes {
-            anyhow::ensure!(refresh.ttl_ms > 0, "embedded lease TTL must be positive");
-            if refresh.extend {
-                leases.push(refresh_lease_in(
-                    &tx,
-                    &refresh.namespace,
-                    &refresh.key,
-                    &refresh.fencing_token,
-                    refresh.ttl_ms,
-                )?);
-            } else {
-                leases.push(require_active_lease_in(
-                    &tx,
-                    &refresh.namespace,
-                    &refresh.key,
-                    &refresh.fencing_token,
-                )?);
-            }
-        }
+        let leases = refresh_leases_in(&tx, refreshes)?;
         crate::storage::stamp_claim_expiry(&mut object, &leases, object_namespace, object_key);
         require_active_lease_in(&tx, object_namespace, object_key, object_fencing_token)?;
         let previous = decode_optional(
@@ -251,4 +244,31 @@ pub(super) fn decode_lease(payload: Option<Vec<u8>>) -> AnyResult<Option<Lease>>
     payload
         .map(|bytes| Lease::decode(bytes.as_slice()).context("decoding lease"))
         .transpose()
+}
+
+fn refresh_leases_in(
+    tx: &rusqlite::Transaction<'_>,
+    refreshes: &[crate::storage::LeaseRefresh],
+) -> AnyResult<Vec<Lease>> {
+    let mut leases = Vec::with_capacity(refreshes.len());
+    for refresh in refreshes {
+        anyhow::ensure!(refresh.ttl_ms > 0, "embedded lease TTL must be positive");
+        if refresh.extend {
+            leases.push(refresh_lease_in(
+                tx,
+                &refresh.namespace,
+                &refresh.key,
+                &refresh.fencing_token,
+                refresh.ttl_ms,
+            )?);
+        } else {
+            leases.push(require_active_lease_in(
+                tx,
+                &refresh.namespace,
+                &refresh.key,
+                &refresh.fencing_token,
+            )?);
+        }
+    }
+    Ok(leases)
 }

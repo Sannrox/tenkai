@@ -919,8 +919,9 @@ refresh or release the replacement generation and revalidates ownership before
 each deployment step. A local supervisor holds the process fence while mutation
 commands receive `TENKAI_FENCING_GENERATION`; controller death closes its
 control pipe, terminates the complete command group, and releases the fence
-before replacement work starts. Legacy object-only leases are never taken over
-automatically: stop the old controller and its children, then use
-`tenkaictl env unlock <environment>` as the explicit compatibility fallback.
+before replacement work starts. The lease is the only execution claim; claim
+objects written by earlier releases are no longer read. During a rolling
+deploy, an older replica may refuse an environment whose apply a newer replica
+took over, until that replica is replaced.
 On multi-host hubs only the writer-lease holder ticks; see
 [multi-host reconcile ticks](reconcile-tick-fencing.md).

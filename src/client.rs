@@ -261,14 +261,6 @@ impl ClientError {
             _ => Self::Failed(status.into()),
         }
     }
-
-    /// True when create reused a deleted id whose audit history is still stored.
-    pub(crate) fn is_retired_identity(&self) -> bool {
-        match self {
-            Self::Failed(error) => error.to_string().contains("object IDs with audit history"),
-            _ => false,
-        }
-    }
 }
 
 impl From<Status> for ClientError {
