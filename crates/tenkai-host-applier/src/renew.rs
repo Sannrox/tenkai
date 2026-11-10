@@ -14,7 +14,26 @@ use tenkai::host_apply::identity::{HostIdentityRecord, certificate_digest};
 use tenkai::host_apply::state::AppliedState;
 use tenkai::workload_identity::Reload;
 
-use crate::{Applied, ApplierConfig, ApplierPaths, copy, secrets, store};
+use crate::{ApplierConfig, ApplierPaths, copy, secrets, store};
+
+/// How one renewal run ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Renewal {
+    /// The renewed certificate is installed.
+    Installed,
+    /// Refused, recorded in `refused.json`; nothing was written.
+    Refused(String),
+}
+
+impl Renewal {
+    /// The unit's exit code: 0 installed, 2 refused.
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::Installed => 0,
+            Self::Refused(_) => 2,
+        }
+    }
+}
 
 /// Whether `instance` is a spooled renewal. A spool or config that cannot be
 /// read answers no, so the step path refuses it and records why.
@@ -24,14 +43,16 @@ pub fn spooled(paths: &ApplierPaths, instance: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Install the renewal spooled as `instance`, or record why not.
-pub fn renew(paths: &ApplierPaths, instance: &str) -> Result<Applied> {
+/// Install the renewal spooled as `instance`, or record why not. The
+/// binary calls it instead of [`crate::apply`] for a spooled renewal.
+pub fn renew(paths: &ApplierPaths, instance: &str) -> Result<Renewal> {
+    tenkai::host_apply::validate_instance_name(instance)?;
     match install(paths, instance) {
-        Ok(()) => Ok(Applied::Renewed),
+        Ok(()) => Ok(Renewal::Installed),
         Err(error) => {
             let reason = format!("{error:#}");
             store::record_refusal(paths, instance, &reason, tenkai::now_millis())?;
-            Ok(Applied::Refused(reason))
+            Ok(Renewal::Refused(reason))
         }
     }
 }
@@ -78,7 +99,7 @@ fn install(paths: &ApplierPaths, instance: &str) -> Result<()> {
         .sealed
         .bind_identity(Some(&record.grant))?
         .context("the renewal carries no certificate")?;
-    secrets::write_identity(paths, environment, &renewal.instance, &issued)
+    secrets::write_instance_identity(paths, environment, &renewal.instance, &issued)
         .context("writing the renewed workload certificate")?;
     store::write_identity_record(
         paths,

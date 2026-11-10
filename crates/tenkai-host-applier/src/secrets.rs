@@ -84,10 +84,20 @@ pub fn write(
     Ok(dir)
 }
 
+/// Write `issued`, the workload certificate of `step`, and return the path
+/// of its [`CURRENT_LINK`].
+pub fn write_identity(
+    paths: &ApplierPaths,
+    step: &VerifiedHostStep,
+    issued: &tenkai::workload_identity::IssuedIdentity,
+) -> Result<PathBuf> {
+    write_instance_identity(paths, &step.environment, step_instance(step), issued)
+}
+
 /// Write `issued`, the workload certificate of `instance` in `environment`,
 /// and return the path of its [`CURRENT_LINK`]. A step writes it under its
 /// product lock, and so does a renewal.
-pub fn write_identity(
+pub fn write_instance_identity(
     paths: &ApplierPaths,
     environment: &str,
     instance: &str,

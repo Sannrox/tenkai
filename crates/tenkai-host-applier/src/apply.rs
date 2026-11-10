@@ -17,9 +17,6 @@ pub enum Applied {
     /// Refused before anything started; the server may start the instance
     /// again once the reason is fixed, for example with more approvals.
     Refused(String),
-    /// A workload certificate renewal installed its certificate
-    /// ([`crate::renew`]).
-    Renewed,
 }
 
 impl Applied {
@@ -27,7 +24,6 @@ impl Applied {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Result(result) if result.outcome.succeeded() => 0,
-            Self::Renewed => 0,
             Self::Result(_) => 1,
             Self::Refused(_) => 2,
         }
@@ -50,9 +46,6 @@ pub async fn apply<F: Future<Output = ()>>(
     tenkai::host_apply::validate_instance_name(instance)?;
     if let Some(result) = store::recover(paths, instance)? {
         return Ok(Applied::Result(result));
-    }
-    if crate::renew::spooled(paths, instance) {
-        return crate::renew::renew(paths, instance);
     }
     let admitted = (|| {
         let config = ApplierConfig::load(paths)?;
@@ -98,8 +91,9 @@ pub async fn apply<F: Future<Output = ()>>(
             Some(issued) => {
                 let step = &intake.verified;
                 let instance = secrets::step_instance(step);
-                let current = secrets::write_identity(paths, &step.environment, instance, issued)
-                    .context("writing the step's workload certificate")?;
+                let current =
+                    secrets::write_instance_identity(paths, &step.environment, instance, issued)
+                        .context("writing the step's workload certificate")?;
                 store::write_identity_record(
                     paths,
                     &tenkai::host_apply::identity::HostIdentityRecord::new(

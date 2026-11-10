@@ -14,7 +14,8 @@ use tenkai::identity_issuer::IssuerKey;
 use tenkai::workload_identity::{
     CertificateRole, IdentityGrant, IdentitySection, IssuedIdentity, Reload,
 };
-use tenkai_host_applier::{Applied, ApplierPaths, renew, secrets, store};
+use tenkai_host_applier::renew::Renewal;
+use tenkai_host_applier::{ApplierPaths, renew, secrets, store};
 
 const ENVIRONMENT: &str = "edge";
 
@@ -102,7 +103,7 @@ impl Host {
         let path = record_path(&self.paths.state_dir, ENVIRONMENT, "api");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, serde_json::to_vec(&product).unwrap()).unwrap();
-        secrets::write_identity(&self.paths, ENVIRONMENT, "api", issued).unwrap();
+        secrets::write_instance_identity(&self.paths, ENVIRONMENT, "api", issued).unwrap();
         let record = HostIdentityRecord::new(ENVIRONMENT, "api", "api", issued);
         store::write_identity_record(&self.paths, &record).unwrap();
         record
@@ -140,7 +141,7 @@ impl Host {
 
     fn refused(&self, instance: &str) -> String {
         match renew::renew(&self.paths, instance).unwrap() {
-            Applied::Refused(reason) => reason,
+            Renewal::Refused(reason) => reason,
             other => panic!("renewal must be refused: {other:?}"),
         }
     }
@@ -177,7 +178,7 @@ fn a_renewal_replaces_exactly_the_recorded_certificate() {
     assert!(renew::spooled(&host.paths, &instance));
     assert_eq!(
         renew::renew(&host.paths, &instance).unwrap(),
-        Applied::Renewed
+        Renewal::Installed
     );
     assert_eq!(host.installed_certificate(), renewed.certificate);
     let recorded = store::identity_record(&host.paths, ENVIRONMENT, "api")
