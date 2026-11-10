@@ -249,15 +249,9 @@ async fn rig(label: &str) -> Rig {
     tenkai::ontology::register(&mut ctx).await.unwrap();
     let store = Arc::new(tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap());
     let reconciler = Arc::new(
-        Reconciler::new(
-            ctx.clone(),
-            ReconcilerConfig {
-                instance_id: "builtin-host".into(),
-                ..ReconcilerConfig::default()
-            },
-        )
-        .unwrap()
-        .with_runtime_environments(["prod".into()].into()),
+        Reconciler::new(ctx.clone(), ReconcilerConfig::default())
+            .unwrap()
+            .with_runtime_environments(["prod".into()].into()),
     );
     let app = tenkai_http::router(
         tenkai_http::ServerConfig::community(

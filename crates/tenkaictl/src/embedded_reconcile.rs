@@ -36,7 +36,6 @@ pub(crate) async fn run(ctx: client::Ctx, command: Command) -> Result<()> {
             approval_directory: std::env::var_os("TENKAI_PLAN_APPROVAL_DIR").map(PathBuf::from),
             approval_trust_roots: std::env::var_os("TENKAI_PLAN_APPROVAL_TRUST_ROOTS")
                 .map(PathBuf::from),
-            ..reconciler::Config::default()
         },
     )?;
     if once {

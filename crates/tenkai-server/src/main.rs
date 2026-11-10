@@ -36,7 +36,6 @@ use tenkai_http::{ServerConfig, router};
 use tenkai_postgres::{
     compiled_host_feature_report_with, enterprise_postgres_hub_profile,
     refuse_mixed_store_configuration, require_hub_tenant_mode, resolve_fenced_enterprise_hub,
-    resolve_reconcile_fence_for_replicas,
 };
 
 const JWT_AUTH_EXTENSION_ID: &str = "auth.jwt.aldunis";
@@ -995,29 +994,17 @@ async fn main() -> Result<()> {
         .values()
         .cloned()
         .collect::<HashSet<_>>();
-    let mut reconciler = Reconciler::new(
+    // Only the writer-lease leader ticks (#748), and the scheduler
+    // serializes environments inside the process, so ticks need no
+    // separate cross-replica claim.
+    let reconciler = Reconciler::new(
         ctx,
         ReconcilerConfig {
             max_concurrency: cli.max_concurrency,
-            instance_id: format!(
-                "tenkai-server-{}",
-                std::env::var("TENKAI_INSTANCE_ID")
-                    .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())
-            ),
             ..ReconcilerConfig::default()
         },
     )?
     .with_runtime_environments(runtime_environments);
-    // Multi-host tick fencing (#129 / #135): durable Postgres fence when
-    // TENKAI_POSTGRES_URL + features postgres; otherwise process-shared only.
-    if let Some(fence) = run_blocking_startup("multi-replica reconcile tick fence", move || {
-        resolve_reconcile_fence_for_replicas(cli.replica_count).map_err(Into::into)
-    })
-    .await
-    .context("resolving multi-replica reconcile tick fence")?
-    {
-        reconciler = reconciler.with_shared_fence(fence);
-    }
     let reconciler = Arc::new(reconciler);
     let ui_connect_origins = enterprise_auth
         .oidc_client

@@ -92,7 +92,6 @@ pub(crate) async fn run(
                     worker_lifecycle: None,
                     artifact_registry: None,
                     delivery_adapter: None,
-                    delivery_fence: None,
                 },
                 PlanResultContext {
                     command: CommandName::Apply,
@@ -210,7 +209,6 @@ pub(crate) async fn run_plan(
         worker_lifecycle,
         artifact_registry: tenkai::oci_artifact::selected_registry()?,
         delivery_adapter: None,
-        delivery_fence: None,
     };
     let outcomes = apply::execute_with_options(ctx, plan_id, execution).await?;
     let mut failed = false;

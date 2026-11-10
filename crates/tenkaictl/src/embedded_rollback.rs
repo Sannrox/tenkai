@@ -68,7 +68,6 @@ pub(crate) async fn run(
                         worker_lifecycle: None,
                         artifact_registry: None,
                         delivery_adapter: None,
-                        delivery_fence: None,
                     },
                     PlanResultContext {
                         command: CommandName::Rollback,
@@ -136,7 +135,6 @@ pub(crate) async fn run(
                         worker_lifecycle: None,
                         artifact_registry: None,
                         delivery_adapter: None,
-                        delivery_fence: None,
                     },
                     PlanResultContext {
                         command: CommandName::Restart,

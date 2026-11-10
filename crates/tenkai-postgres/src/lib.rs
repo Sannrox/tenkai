@@ -21,7 +21,6 @@
 mod capabilities;
 mod catalog_graph;
 mod config;
-mod fence;
 mod partition;
 #[cfg(feature = "postgres")]
 mod partition_store;
@@ -44,9 +43,6 @@ pub use config::{
     require_hub_tenant_mode, resolve_enterprise_hub, resolve_fenced_enterprise_hub,
     resolve_server_tenant_store, tenant_schema_name,
 };
-#[cfg(feature = "postgres")]
-pub use fence::PostgresReconcileFence;
-pub use fence::{open_postgres_reconcile_fence, resolve_reconcile_fence_for_replicas};
 pub use partition::PostgresTenantPartition;
 pub use store::PostgresTenantOperationalStore;
 #[cfg(feature = "postgres")]

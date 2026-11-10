@@ -15,7 +15,6 @@ use crate::environment;
 use crate::fleet_workload::{self, WORKLOAD_SIZE, WorkloadPlan, WorkloadPosture, WorkloadSpec};
 use crate::plan;
 use crate::providers::{self, PolicyProvider as _, ProviderError};
-use crate::reconcile_fence::{FenceAdmission, ReconcileTickFence, SharedReconcileFence};
 use crate::reconciler::{EnvironmentStatus, Reconciler, TickReport};
 use crate::runtime_delivery::{RuntimeCompletion, RuntimeStepReceipt};
 
@@ -30,7 +29,6 @@ pub struct FairnessReport {
     pub failing_applied: usize,
     pub deferred_failing: usize,
     pub runtime_waiting: usize,
-    pub fence_busy: usize,
     pub rollback_isolated: bool,
     pub conflicting_receipt_rejected: bool,
     pub failed_restore_explicit: bool,
@@ -42,14 +40,13 @@ pub struct FairnessReport {
 
 pub fn format_report(report: &FairnessReport) -> String {
     format!(
-        "fleet fairness seed_digest={} behind_progressed={} healthy_starved={} failing_applied={} deferred_failing={} runtime_waiting={} fence_busy={} rollback_isolated={} conflicting_receipt_rejected={} failed_restore_explicit={} required_provider_blocked={} runtime_timeout_isolated={} unhealthy_remain_explicit={} backup_environments={}",
+        "fleet fairness seed_digest={} behind_progressed={} healthy_starved={} failing_applied={} deferred_failing={} runtime_waiting={} rollback_isolated={} conflicting_receipt_rejected={} failed_restore_explicit={} required_provider_blocked={} runtime_timeout_isolated={} unhealthy_remain_explicit={} backup_environments={}",
         report.seed_digest,
         report.behind_progressed,
         report.healthy_starved,
         report.failing_applied,
         report.deferred_failing,
         report.runtime_waiting,
-        report.fence_busy,
         report.rollback_isolated,
         report.conflicting_receipt_rejected,
         report.failed_restore_explicit,
@@ -88,10 +85,9 @@ pub async fn observe(
     let plan = fleet_workload::materialize(ctx, spec).await?;
     let postures = stored_postures(ctx).await?;
     let behind = members_with(&plan, WorkloadPosture::Behind);
-    let held = behind
-        .first()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("workload is missing a behind environment"))?;
+    if behind.is_empty() {
+        bail!("workload is missing a behind environment");
+    }
     let receipt_env = behind
         .get(1)
         .cloned()
@@ -104,13 +100,6 @@ pub async fn observe(
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("workload is missing a current environment"))?;
-
-    let fence = SharedReconcileFence::new().into_arc();
-    let now = crate::now_millis();
-    match fence.try_begin(&held, "fairness-hold", now, 60_000)? {
-        FenceAdmission::Started { .. } => {}
-        other => bail!("failed to hold reconcile fence: {other:?}"),
-    }
 
     let reconciler = Reconciler::new(
         ctx.clone(),
@@ -127,8 +116,7 @@ pub async fn observe(
             .iter()
             .cloned()
             .collect::<HashSet<_>>(),
-    )
-    .with_shared_fence(fence);
+    );
 
     let first = reconciler.run_once().await?;
     let rollback_isolated = rollback_unknown_target(ctx, &current, &plan.product).await?;
@@ -169,16 +157,6 @@ pub async fn observe(
     });
     if runtime_waiting == 0 {
         bail!("runtime-managed behind environments did not wait for runtime");
-    }
-    let fence_busy = first
-        .environments
-        .iter()
-        .filter(|result| {
-            result.environment == held && matches!(result.status, EnvironmentStatus::Busy)
-        })
-        .count();
-    if fence_busy != 1 {
-        bail!("held fencing generation did not reject the overlapping tick");
     }
 
     let Some(progress) = first.environments.iter().find(|result| {
@@ -253,7 +231,6 @@ pub async fn observe(
             failing_applied,
             deferred_failing,
             runtime_waiting,
-            fence_busy,
             rollback_isolated,
             conflicting_receipt_rejected,
             failed_restore_explicit,
@@ -594,7 +571,6 @@ mod tests {
         assert_eq!(report.healthy_starved, 0);
         assert!(report.deferred_failing > 0, "{report:?}");
         assert!(report.runtime_waiting > 0, "{report:?}");
-        assert_eq!(report.fence_busy, 1);
         assert!(report.rollback_isolated);
         assert!(report.conflicting_receipt_rejected);
         assert!(report.failed_restore_explicit);

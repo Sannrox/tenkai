@@ -82,12 +82,12 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Optional Postgres multi-tenant hub store (feature `postgres`) | [Postgres tenant store](postgres-tenant-store.md); #111 |
 | tenkai-server tenant mode → Postgres hub store | [Postgres server wiring](postgres-tenant-store.md#tenkai-server-wiring-127); #127 |
 | Postgres hub `shared_replica_state` (single-active writer) | [Shared replica state](postgres-tenant-store.md#shared-replica-state-128); #128 |
-| Multi-host reconcile tick fencing | [Tick fencing](reconcile-tick-fencing.md); #129 |
+| Multi-host reconcile ticks (writer-lease holder only) | [Reconcile ticks](reconcile-tick-fencing.md); #129, #1112 |
 | Fenced multi-replica delivery effects | [Conformance](delivery-effect-conformance.md); #180 |
 | Hub failover runbook | [Hub failover](ha-failover-runbook.md); #647, #750 |
 | Hub HA qualification drill (gate; product claim unadvertised) | [Qualification criteria](ha-failover-runbook.md#qualification-criteria-903); `bash scripts/hub-ha-qualification-drill.sh`; #903 |
 | Multi-replica hub compose steps | [Multi-replica hub runbook](multi-replica-hub-runbook.md); #130 |
-| Durable Postgres tick fence + inventory heartbeat + OpenMetrics + outcome priors | #135–#138; [tick fencing](reconcile-tick-fencing.md), [plan priors](plan-priors.md) |
+| Inventory heartbeat + OpenMetrics + outcome priors | #136–#138; [plan priors](plan-priors.md) |
 | Local minikube dogfood (embedded, no remote server) | [ops note](local-dogfood-minikube.md); #145–#146, #152 |
 | Dogfood `tenkaictl dev` release/plan signing (not production KMS) | [ops note](local-dogfood-minikube.md#first-class-dogfood-signing-149); #149 |
 | Production content signer (PKCS#11 or lab; production refuses file seeds) | [release signing](release-signing.md#production-signer); #642 |

@@ -1663,7 +1663,6 @@ media_type = "{}"
                 worker_lifecycle: None,
                 artifact_registry: Some(registry.clone()),
                 delivery_adapter: None,
-                delivery_fence: None,
             },
         )
         .await
@@ -1708,7 +1707,6 @@ media_type = "{}"
                 worker_lifecycle: None,
                 artifact_registry: Some(mirror_only),
                 delivery_adapter: None,
-                delivery_fence: None,
             },
         )
         .await
@@ -1852,7 +1850,6 @@ media_type = "{}"
                 worker_lifecycle: None,
                 artifact_registry: Some(mirror),
                 delivery_adapter: None,
-                delivery_fence: None,
             },
         )
         .await
@@ -2024,7 +2021,6 @@ media_type = "{}"
                     worker_lifecycle: None,
                     artifact_registry: Some(store.clone()),
                     delivery_adapter: None,
-                    delivery_fence: None,
                 },
             )
             .await

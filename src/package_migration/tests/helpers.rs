@@ -128,7 +128,6 @@ pub(super) async fn deploy_source(ctx: &mut Ctx) {
             worker_lifecycle: None,
             artifact_registry: None,
             delivery_adapter: None,
-            delivery_fence: None,
         },
     )
     .await

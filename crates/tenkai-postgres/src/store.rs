@@ -6,8 +6,6 @@ use tenkai::storage::{EnvironmentRecord, Result};
 use tenkai::tenant_isolation::IsolationError;
 
 #[cfg(feature = "postgres")]
-use super::PostgresReconcileFence;
-#[cfg(feature = "postgres")]
 use super::PostgresTenantConfig;
 use super::PostgresTenantPartition;
 #[cfg(feature = "postgres")]
@@ -72,16 +70,6 @@ impl PostgresTenantOperationalStore {
         fence: std::sync::Arc<tenkai::writer_fence::WriterFence>,
     ) -> Result<()> {
         self.inner.fence_writes(fence)
-    }
-
-    /// Durable multi-host reconcile tick fence backed by hub Postgres (#135).
-    #[cfg(feature = "postgres")]
-    pub fn reconcile_tick_fence(
-        &self,
-    ) -> std::sync::Arc<dyn tenkai::reconcile_fence::ReconcileTickFence> {
-        std::sync::Arc::new(PostgresReconcileFence {
-            inner: self.inner.clone(),
-        })
     }
 
     pub fn partition_for(

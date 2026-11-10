@@ -68,7 +68,6 @@ async fn compatible_migration_approves_executes_resumes_and_rolls_back() {
             worker_lifecycle: None,
             artifact_registry: None,
             delivery_adapter: None,
-            delivery_fence: None,
         },
     )
     .await

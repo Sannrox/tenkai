@@ -182,7 +182,6 @@ mod provider_claim;
 mod provider_lifecycle;
 mod provider_queue;
 mod receipts;
-mod reconcile;
 mod rollbacks;
 mod runtime;
 mod runtime_enrollment;

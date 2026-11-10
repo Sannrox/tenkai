@@ -162,7 +162,7 @@ will be split over time. Contributor and agent workflow live in
 | Design history (founding plan and what was decided since) | [design-history.md](design-history.md) |
 | Architecture decisions (ADRs) | [decisions/README.md](decisions/README.md) |
 | Operational storage and recovery authority | [operational-storage.md](operational-storage.md) |
-| Reconcile tick fencing | [reconcile-tick-fencing.md](reconcile-tick-fencing.md) |
+| Multi-host reconcile ticks | [reconcile-tick-fencing.md](reconcile-tick-fencing.md) |
 | Enterprise integration boundary | [enterprise-integration-boundary.md](enterprise-integration-boundary.md) |
 
 ### Research

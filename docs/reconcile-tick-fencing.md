@@ -1,87 +1,36 @@
-# Multi-host reconcile tick fencing (#129)
+# Multi-host reconcile ticks (#129, #1112)
 
 ADR: [0009](decisions/0009-multi-replica-reconcile-and-ha-profile.md).  
 Store claim: [shared_replica_state](postgres-tenant-store.md#shared-replica-state-128).
 
-## Problem
+## How ticks stay single
 
-In-process `SchedulerState` only prevents concurrent reconcile of the same
-environment **inside one process**. With multiple hub hosts sharing operational
-state, two ticks can race on the same environment without an inter-host fence.
-
-## Design
+Two guards keep one environment from being reconciled twice at once:
 
 | Layer | Role |
 | --- | --- |
-| Local `SchedulerState` | Per-process in-flight + backoff (unchanged) |
-| `ReconcileTickFence` | Optional multi-host claim: owner + generation + TTL |
-| `SharedReconcileFence` | Process-shared fence (`Arc`) for tests and co-located hosts |
+| Local `SchedulerState` | Per-process in-flight and backoff for each environment |
+| Hub writer lease (#748) | Only the replica holding the lease ticks; standbys skip their ticks |
 
-On each environment, after local admission `Started`:
-
-1. If a shared fence is configured, `try_begin(env, instance_id, now, ttl)`.
-2. `Busy` / `Stale` → report `EnvironmentStatus::Busy` (clear local in-flight).
-3. `Started { generation }` → hold `FenceGuard` for the duration of the tick job.
-4. Guard releases the claim on drop (or explicit release).
-
-Stale generations must not steal another host's live claim.
-
-## Wiring
-
-```rust
-use std::sync::Arc;
-use tenkai::reconcile_fence::SharedReconcileFence;
-use tenkai::reconciler::{Config, Reconciler};
-
-let fence = SharedReconcileFence::new().into_arc();
-let reconciler = Reconciler::new(ctx, Config {
-    instance_id: "hub-1".into(),
-    fence_ttl_ms: 30_000,
-    ..Config::default()
-})?
-.with_shared_fence(Arc::clone(&fence) as Arc<dyn tenkai::reconcile_fence::ReconcileTickFence>);
-```
-
-Without `with_shared_fence`, behavior matches the historical single-process model.
-
-## Durable Postgres fence (#135)
-
-Hub multi-process deployments should use durable claims in Postgres:
-
-```text
-public.tenkai_reconcile_tick_claims
-  environment TEXT PRIMARY KEY
-  owner TEXT
-  generation BIGINT
-  expires_at BIGINT   -- unix millis
-```
-
-`tenkai-server` with `--replica-count > 1` calls
-`resolve_reconcile_fence_for_replicas`: when `TENKAI_POSTGRES_URL` is set and the
-binary is built with `--features postgres`, it opens
-[`PostgresReconcileFence`](../crates/tenkai-postgres/src/fence.rs) (same URL as the hub
-store). Otherwise it falls back to process-shared memory (single machine only).
-
-Claims are hub-wide (not schema-per-tenant). TTL expiry allows takeover with a
-bumped generation. Release expires the claim but retains its generation
-tombstone, so generations never reset and a delayed stale `release` cannot
-match or steal a later owner's live claim.
-
-This does **not** advertise product `high_availability` by itself.
-
-## Hub writer lease (#748)
-
-Tick claims coordinate who reconciles an environment; they are not checked
-inside data writes. On multi-replica tenant-mode hubs the hub writer lease
-fences the writes themselves: every authoritative write checks the lease's
-holder and generation in its own transaction. See
+The writer lease also fences the writes themselves: every authoritative write
+checks the lease's holder and generation in its own transaction, so a replica
+that lost the lease cannot commit even before it notices. See
 [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md#hub-writer-lease-748).
+
+There is no separate per-environment tick claim. Earlier releases kept one
+(`tenkai_reconcile_tick_claims`); it duplicated the writer lease and was
+removed in #1112.
+
+## Upgrading
+
+Current replicas no longer create or read `tenkai_reconcile_tick_claims`.
+An existing table is left in place so older replicas keep working during a
+rolling deploy. Drop it once every replica runs this release.
 
 ## Relation to store capabilities
 
 `--replica-count > 1` requires `shared_replica_state` (Postgres hub, single-active
-writer model). Tick fencing is the reconcile-side coordination once multiple
-processes are allowed past capability negotiation.
+writer model). It does **not** advertise product `high_availability` by itself.
 
 ## Ops
 

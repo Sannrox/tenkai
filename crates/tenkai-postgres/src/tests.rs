@@ -275,38 +275,6 @@ fn resolve_enterprise_hub_fails_closed_without_feature_or_url() {
     );
 }
 
-#[test]
-fn open_postgres_reconcile_fence_fails_closed_without_feature_or_url() {
-    let err = match open_postgres_reconcile_fence() {
-        Ok(_) => {
-            // Live URL may be set in developer env; only assert when feature off
-            // or when open failed path was expected.
-            if !postgres_feature_enabled() {
-                panic!("open should fail without postgres feature");
-            }
-            return;
-        }
-        Err(error) => error.to_string(),
-    };
-    assert!(
-        err.contains("features postgres")
-            || err.contains("TENKAI_POSTGRES_URL")
-            || err.contains("postgres"),
-        "{err}"
-    );
-}
-
-#[test]
-fn resolve_reconcile_fence_none_for_single_replica() {
-    assert!(resolve_reconcile_fence_for_replicas(1).unwrap().is_none());
-}
-
-#[test]
-fn resolve_reconcile_fence_some_for_multi_replica() {
-    // Always returns a fence (durable or process-shared fallback).
-    assert!(resolve_reconcile_fence_for_replicas(2).unwrap().is_some());
-}
-
 #[cfg(feature = "postgres")]
 fn invalidate_tenant_schema_stamp(
     store: &PostgresTenantOperationalStore,
@@ -335,8 +303,6 @@ mod live_failover_drill;
 mod live_feedback_capture;
 #[cfg(feature = "postgres")]
 mod live_feedback_denial;
-#[cfg(feature = "postgres")]
-mod live_fence;
 #[cfg(feature = "postgres")]
 mod live_fixture;
 #[cfg(feature = "postgres")]
