@@ -206,7 +206,8 @@ state; the next plan uninstalls it with a host `uninstall` step at the
 record's generation, approved like any other change:
 
 ```bash
-tenkaictl --target remote env unsubscribe <environment> <product> --generation <generation>
+tenkaictl --target remote env unsubscribe <environment> <product> \
+  --version <version> --generation <generation>
 ```
 
 A successful uninstall records the product as no longer deployed, with the

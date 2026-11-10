@@ -160,7 +160,7 @@ grep -q 'host-env is up to date' "$work/again.txt" ||
   fail "a converged environment planned steps: $(cat "$work/again.txt")"
 
 echo "== unsubscribing uninstalls the host release through an approved plan"
-remote env unsubscribe host-env host-drill --generation "$(generation)" >/dev/null
+remote env unsubscribe host-env host-drill --version 1.0.0 --generation "$(generation)" >/dev/null
 remote plan --env host-env --generation "$(generation)" >"$work/remove.txt"
 plan=$(sed -n 's/^plan id: //p' "$work/remove.txt")
 digest=$(sed -n 's/^plan digest: //p' "$work/remove.txt")
