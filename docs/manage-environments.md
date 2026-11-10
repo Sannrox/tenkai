@@ -226,8 +226,16 @@ two thirds of its lifetime have passed, with no plan or approval
 re-issues exactly the grant the old certificate proves, with a fresh key,
 from the issuer it last verified at apply. A certificate from an older
 issuer generation is not renewed: it needs a step after `identity-issuer
-rewrap`. Restart-reload certificates are not renewed yet; apply a step
-before they expire. A host certificate installed by an applier older than
+rewrap`.
+
+A `reload = "restart"` certificate on `helm` renews the same way, then
+restarts the release's Deployments, StatefulSets and DaemonSets, which
+roll out under their own update strategy. It falls due up to two hours
+later, by an amount fixed per environment, so replicas of one topology in
+different environments do not restart together. A crash between the new
+certificate and the restart finishes the restart on the next pass without
+issuing again. Restart-reload certificates on `host` are not renewed yet;
+apply a step before they expire. A host certificate installed by an applier older than
 this release is renewed once a step installs it again.
 
 `env add --connectivity <class>` also sets the connectivity class.
@@ -367,6 +375,30 @@ Bindings are environment configuration: remote calls take `--generation` and
 satisfying version is refused. Unbinding a required contract on an installed
 dependent is refused. The dependency document names the provider instance;
 changing a binding re-renders the dependent.
+
+A binding is also the only peer authorization
+([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md) §5). When
+the dependent or the provider holds a
+[workload certificate](manifest.md#workload-identity), its step's grant names
+the other side, and the document carries it: in `servers` the provider
+identity it accepts for each contract it requires, and in `callers` the
+identities allowed to call each contract it provides. A unique provider without a binding counts
+as bound; an instance with no edge is never a caller. The runtime refuses a
+document whose peers differ from the approved step's, so a server cannot add
+a peer. A provider admits a new caller before that caller deploys. A caller
+that is rebound, removed, or upgraded away keeps its old provider's grant
+for the rest of that plan, so it is never refused while it moves; the next
+plan withdraws it. Host releases are not re-rendered for a binding change;
+one picks up its peers on its next deploy, and its old provider keeps
+admitting it until then. A rollback or restore never withdraws a caller.
+Any plan with a step that needs a provider that does not admit it yet, and
+is not admitted by an earlier step of that plan, is refused. This catches a
+rollback, restart or migration, which changes only its own instance, and a
+host provider, which is not re-rendered; deploy the provider with the
+binding first. `status` and
+`env dependencies` mark
+such an edge `granted`. The product enforces it: Tenkai cannot see whether
+it checks the peer.
 
 ## Facts and constraints
 

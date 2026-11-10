@@ -1032,10 +1032,16 @@ pub struct RuntimeCaller<'a> {
     /// `x-tenkai-runtime-capabilities` (ADR 0046): it runs identity issuer
     /// steps and generates issuer candidates.
     pub workload_identity: bool,
+    /// The agent named the `peer_grants` capability: it reads certificate
+    /// grants that name peers (ADR 0046 §5), which an older runtime refuses
+    /// to decode.
+    pub peer_grants: bool,
 }
 
 /// The capability a runtime names to be offered identity issuer work.
 pub const WORKLOAD_IDENTITY_CAPABILITY: &str = "workload_identity";
+/// The capability a runtime names to be offered grants with peers.
+pub const PEER_GRANTS_CAPABILITY: &str = "peer_grants";
 
 impl<'a> From<Option<&'a str>> for RuntimeCaller<'a> {
     fn from(instance: Option<&'a str>) -> Self {
@@ -1264,6 +1270,13 @@ impl RuntimeDeliveryOperations {
                 .await;
         }
         if !caller.workload_identity && plan.steps.iter().any(needs_workload_identity) {
+            return self.idle_after_lapsed(environment, &plan.id).await;
+        }
+        // An older runtime cannot decode a grant that names peers, so it
+        // waits while a newer one takes the plan.
+        let names_peers =
+            |step: &crate::plan::Step| step.identity_grants().any(|grant| !grant.peers.is_empty());
+        if !caller.peer_grants && plan.steps.iter().any(names_peers) {
             return self.idle_after_lapsed(environment, &plan.id).await;
         }
         // A re-wrap step or a removal deploys nothing, so it needs no
@@ -3244,6 +3257,7 @@ mod tests {
                 version: None,
                 certificate: Some(certificate),
                 workload_identity: false,
+                peer_grants: false,
             };
             operations.admit(None, &caller, environment)
         };
@@ -3290,6 +3304,7 @@ mod tests {
                         version: None,
                         certificate,
                         workload_identity: false,
+                        peer_grants: false,
                     },
                     "prod",
                     &request,
@@ -3469,6 +3484,7 @@ mod tests {
                             version: None,
                             certificate,
                             workload_identity: false,
+                            peer_grants: false,
                         },
                         "prod",
                         &request,
@@ -3552,6 +3568,7 @@ mod tests {
                         version: None,
                         certificate,
                         workload_identity: false,
+                        peer_grants: false,
                     },
                     "prod",
                     RuntimeInventoryReport {
@@ -3845,6 +3862,7 @@ mod tests {
         let capable = RuntimeCaller {
             instance: Some("instance-a"),
             workload_identity: true,
+            peer_grants: true,
             ..RuntimeCaller::default()
         };
         // The static runtime holds no wrap of the issuer key.
@@ -3933,6 +3951,7 @@ mod tests {
         let capable = RuntimeCaller {
             instance: Some("instance-b"),
             workload_identity: true,
+            peer_grants: true,
             ..RuntimeCaller::default()
         };
         for caller in [RuntimeCaller::from(Some("instance-b")), capable] {
@@ -4410,6 +4429,7 @@ mod tests {
                     version: None,
                     certificate: None,
                     workload_identity: false,
+                    peer_grants: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -4524,6 +4544,7 @@ mod tests {
                     version: None,
                     certificate: None,
                     workload_identity: false,
+                    peer_grants: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -4559,6 +4580,7 @@ mod tests {
                     version: None,
                     certificate: None,
                     workload_identity: false,
+                    peer_grants: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {

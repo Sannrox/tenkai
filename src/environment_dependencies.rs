@@ -63,6 +63,12 @@ pub enum ProviderView {
         contract: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         instance: String,
+        /// The edge is a peer grant (ADR 0046 §5): the dependent or the
+        /// provider holds a workload certificate, so its peer document
+        /// names the other side. Tenkai cannot see whether the product
+        /// enforces it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        granted: bool,
     },
     Absent,
     Ambiguous {
@@ -201,11 +207,13 @@ fn provider_text(provider: &ProviderView) -> String {
             release,
             contract,
             instance,
+            granted,
         } => {
+            let granted = if *granted { " granted" } else { "" };
             if instance.is_empty() || instance == product {
-                format!("{product}@{release} ({contract})")
+                format!("{product}@{release} ({contract}){granted}")
             } else {
-                format!("{instance} {product}@{release} ({contract})")
+                format!("{instance} {product}@{release} ({contract}){granted}")
             }
         }
         ProviderView::Absent => "absent".into(),
@@ -273,7 +281,7 @@ pub async fn for_environment(ctx: &mut Ctx, env: &str) -> Result<EnvironmentDepe
             crate::software_compatibility::observed_contract_versions(ctx, env, &digest).await?,
         );
     }
-    view_from(
+    let mut view = view_from(
         env,
         holds,
         &products,
@@ -281,7 +289,47 @@ pub async fn for_environment(ctx: &mut Ctx, env: &str) -> Result<EnvironmentDepe
         &deployed_profiles,
         &bindings,
         &observed,
-    )
+    )?;
+    let mut certified = BTreeSet::new();
+    for (instance, release) in &deployed {
+        let id = env_obj
+            .properties
+            .get(&format!("deployed_release.{instance}"))
+            .cloned()
+            .unwrap_or_else(|| crate::ontology::release_id(&release.product, &release.version));
+        if crate::plan::stored_release_manifest(ctx, &id)
+            .await
+            .is_ok_and(|manifest| manifest.deploy.identity.is_some())
+        {
+            certified.insert(instance.clone());
+        }
+    }
+    mark_granted(&mut view, &certified);
+    Ok(view)
+}
+
+/// Mark each unique edge whose dependent or provider is in `certified`, the
+/// instances that hold a workload certificate, as a peer grant.
+fn mark_granted(view: &mut EnvironmentDependencies, certified: &BTreeSet<String>) {
+    for product in &mut view.products {
+        for requirement in &mut product.requirements {
+            if let ProviderView::Unique {
+                product: provider,
+                instance,
+                granted,
+                ..
+            } = &mut requirement.provider
+            {
+                let provider = if instance.is_empty() {
+                    provider
+                } else {
+                    instance
+                };
+                *granted =
+                    certified.contains(&product.product) || certified.contains(provider.as_str());
+            }
+        }
+    }
 }
 
 struct ViewedProduct {
@@ -480,6 +528,7 @@ fn requirements_for(
                 } else {
                     provider.instance.clone()
                 },
+                granted: false,
             },
             several => ProviderView::Ambiguous {
                 products: several.iter().map(|m| m.instance.clone()).collect(),
@@ -689,6 +738,7 @@ mod tests {
                     release: "1.2.0".into(),
                     contract: "1.0.0".into(),
                     instance: String::new(),
+                    granted: false,
                 },
             }]
         );

@@ -306,7 +306,7 @@ fn processes_a_finished_command_left_behind_are_stopped_before_the_step_ends() {
 #[test]
 fn a_certificate_record_is_forgotten_only_after_a_successful_step() {
     use tenkai::host_apply::identity::{HostIdentityRecord, IDENTITY_RECORD_SCHEMA};
-    use tenkai::workload_identity::{CertificateRole, IdentityGrant, Reload};
+    use tenkai::workload_identity::{CertificateRole, IdentityGrant, Peers, Reload};
     let host = host();
     let record = HostIdentityRecord {
         schema: IDENTITY_RECORD_SCHEMA.into(),
@@ -320,6 +320,7 @@ fn a_certificate_record_is_forgotten_only_after_a_successful_step() {
             reload: Reload::Runtime,
             issuer_generation: 1,
             issuer_fingerprint: "sha256:00".into(),
+            peers: Peers::default(),
         },
         certificate: "cert".into(),
         ca: "ca".into(),

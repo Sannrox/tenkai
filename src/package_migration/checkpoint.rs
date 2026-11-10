@@ -217,22 +217,40 @@ pub(super) async fn create_pin_plan(
         Some(version) if version == pin.version => Action::Restart,
         Some(_) => Action::Upgrade,
     };
+    let peers = crate::plan::current_peers(
+        ctx,
+        &record.environment,
+        &env,
+        &pin.product,
+        &descriptor.release_id,
+    )
+    .await?;
     let identity = crate::plan::step_identity(
         ctx,
         &env,
         &record.environment,
         &descriptor.release_id,
         &pin.product,
+        &peers,
     )
     .await?;
     let restore_identity = match &restore {
         Some(restore) => {
+            let peers = crate::plan::current_peers(
+                ctx,
+                &record.environment,
+                &env,
+                &pin.product,
+                &restore.release_id,
+            )
+            .await?;
             crate::plan::step_identity(
                 ctx,
                 &env,
                 &record.environment,
                 &restore.release_id,
                 &pin.product,
+                &peers,
             )
             .await?
         }

@@ -407,6 +407,7 @@ mod tests {
             reload: Reload::Restart,
             issuer_generation: 1,
             issuer_fingerprint: "sha256:issuer".into(),
+            peers: Default::default(),
         });
         let error = admit(&mut ctx, &plan).await.unwrap_err().to_string();
         assert!(

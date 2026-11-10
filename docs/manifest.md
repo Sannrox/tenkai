@@ -122,7 +122,8 @@ dns_names = ["api-${TENKAI_INSTANCE}.prod.svc"]
   refused at publication.
 - `reload` says how the workload picks up a renewed certificate: `runtime`
   watches its files, and the runtime renews it in place before it expires;
-  `restart` needs a restart. A release that reads the
+  `restart` reads them only at start, so on `helm` the runtime renews it
+  with a rolling restart of its workloads. A release that reads the
   certificate through a subPath mount or environment variables does not see
   file updates and declares `restart`.
 - Only software releases on `helm` or `host` take it.

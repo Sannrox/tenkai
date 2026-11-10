@@ -242,15 +242,24 @@ fn runtime_caller<'a>(
             .get("x-tenkai-runtime-version")
             .and_then(|value| value.to_str().ok()),
         certificate: certificate.and_then(|certificate| certificate.0.0.as_deref()),
-        workload_identity: headers
-            .get("x-tenkai-runtime-capabilities")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|capabilities| {
-                capabilities.split(',').any(|capability| {
-                    capability.trim() == tenkai::runtime_delivery::WORKLOAD_IDENTITY_CAPABILITY
-                })
-            }),
+        workload_identity: names_capability(
+            headers,
+            tenkai::runtime_delivery::WORKLOAD_IDENTITY_CAPABILITY,
+        ),
+        peer_grants: names_capability(headers, tenkai::runtime_delivery::PEER_GRANTS_CAPABILITY),
     }
+}
+
+/// Whether `x-tenkai-runtime-capabilities` names `capability`.
+fn names_capability(headers: &HeaderMap, capability: &str) -> bool {
+    headers
+        .get("x-tenkai-runtime-capabilities")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|capabilities| {
+            capabilities
+                .split(',')
+                .any(|named| named.trim() == capability)
+        })
 }
 
 fn runtime_instance(headers: &HeaderMap) -> Option<&str> {

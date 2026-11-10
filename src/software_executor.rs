@@ -337,9 +337,12 @@ pub trait SoftwareExecutor: Send + Sync {
         Ok(Vec::new())
     }
     /// Replace `installed`, as [`Self::installed_identities`] read it, with
-    /// `issued` in place, with nothing restarted. Refuses when the target no
-    /// longer holds exactly `installed`: an apply or a removal since the read
-    /// wins, and renewal never creates a certificate.
+    /// `issued`. Refuses when the target no longer holds exactly
+    /// `installed`: an apply or a removal since the read wins, and renewal
+    /// never creates a certificate. A `reload = "restart"` workload is
+    /// rolled onto the new certificate, durably enough that
+    /// [`Self::resume_identity_restarts`] finishes a restart this call left
+    /// part-way; an adapter that cannot do that refuses it.
     fn renew_identity(
         &self,
         target: &IdentityTarget<'_>,
@@ -351,6 +354,18 @@ pub trait SoftwareExecutor: Send + Sync {
             "this executor holds no workload certificate for {}",
             installed.instance
         )
+    }
+    /// Finish the rolling restarts a [`Self::renew_identity`] left part-way
+    /// in `target`, each named by its instance with how it ended. Runs
+    /// every renewal pass, so a crash between writing a certificate and
+    /// restarting its workload never needs a second issuance. Default: it
+    /// starts none.
+    fn resume_identity_restarts(
+        &self,
+        target: &IdentityTarget<'_>,
+    ) -> Result<Vec<(String, Result<()>)>> {
+        let _ = target;
+        Ok(Vec::new())
     }
     /// Whether this adapter deploys from admitted environment-mirror refs.
     fn consumes_admitted_artifact_pulls(&self) -> bool {

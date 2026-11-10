@@ -910,6 +910,10 @@ impl BuiltinConfig {
         request.remove_owned_secrets = true;
         request.identity =
             self.workload_identity(&manifest, release.identity_issuer, environment, expected)?;
+        crate::dependency_document::check_peers(
+            &request.dependency_document,
+            expected.identity.map(|grant| &grant.peers),
+        )?;
         let replaced_executor = match release.replaces {
             None => None,
             Some(replaced) => Some(match replaced.executor {
@@ -961,8 +965,12 @@ impl BuiltinConfig {
             ),
         };
         let issuer = issuer.context("the server sent no identity issuer for the step")?;
-        let computed =
-            crate::workload_identity::grant(section, environment, expected.instance, &issuer)?;
+        // Peers come from the approved bindings, not the manifest; the
+        // dependency document is checked against them.
+        let computed = crate::workload_identity::IdentityGrant {
+            peers: grant.peers.clone(),
+            ..crate::workload_identity::grant(section, environment, expected.instance, &issuer)?
+        };
         if &computed != grant {
             bail!(
                 "the plan step's workload certificate grant ({}, {:?}) is not what the signed manifest gives ({}, {:?}) with the identity issuer the server sent",
@@ -1384,6 +1392,17 @@ pub fn renew_identities(
     let mut renewals = Vec::new();
     let mut unreadable = Vec::new();
     for adapter in config.executors.adapters() {
+        // Restarts a crashed pass left part-way finish first.
+        match adapter.resume_identity_restarts(&target) {
+            Ok(resumed) => renewals.extend(resumed.into_iter().filter_map(|(instance, done)| {
+                let error = done.err()?;
+                Some(Renewal {
+                    instance,
+                    outcome: Err(format!("{error:#}")),
+                })
+            })),
+            Err(error) => unreadable.push(format!("{error:#}")),
+        }
         let installed = match adapter.installed_identities(&target) {
             Ok(installed) => installed,
             Err(error) => {
@@ -1402,7 +1421,7 @@ pub fn renew_identities(
                     continue;
                 }
             };
-            if !renews_in_place(&identity, now_secs) {
+            if !renewal_due(&identity, environment, now_secs) {
                 continue;
             }
             let outcome = renew_one(dir, environment, &identity, now_secs)
@@ -1423,7 +1442,15 @@ pub fn renew_identities(
                 for (instance, identity) in installed {
                     let outcome = match identity {
                         Err(error) => Err(error),
-                        Ok(identity) if !renews_in_place(&identity.installed, now_secs) => continue,
+                        // The applier renews in place only; a host
+                        // restart-reload workload is not renewed yet.
+                        Ok(identity)
+                            if identity.installed.grant.reload
+                                != crate::workload_identity::Reload::Runtime
+                                || !identity.installed.renewal_due(now_secs) =>
+                        {
+                            continue;
+                        }
                         Ok(identity) => renew_host(host, dir, environment, &identity, now_secs),
                     };
                     renewals.push(Renewal {
@@ -1444,11 +1471,32 @@ pub fn renew_identities(
     Ok(renewals)
 }
 
-/// Whether `identity` is due and renews in place. A restart-reload
-/// workload reads its certificate once; it renews with a rolling restart.
-fn renews_in_place(identity: &crate::workload_identity::InstalledIdentity, now_secs: i64) -> bool {
-    identity.grant.reload == crate::workload_identity::Reload::Runtime
-        && identity.renewal_due(now_secs)
+/// Whether `identity` is due. A restart-reload workload falls due up to a
+/// twelfth of its lifetime later, by an amount fixed per environment, so
+/// replicas of one topology in different environments do not restart
+/// together, and every restart still starts well before the last sixth.
+fn renewal_due(
+    identity: &crate::workload_identity::InstalledIdentity,
+    environment: &str,
+    now_secs: i64,
+) -> bool {
+    let delay = match identity.grant.reload {
+        crate::workload_identity::Reload::Runtime => 0,
+        crate::workload_identity::Reload::Restart => {
+            restart_delay(environment, identity.not_after - identity.not_before)
+        }
+    };
+    identity.renewal_due(now_secs.saturating_sub(delay))
+}
+
+/// `environment`'s fixed share of a twelfth of `lifetime`, in seconds.
+fn restart_delay(environment: &str, lifetime: i64) -> i64 {
+    use sha2::Digest as _;
+    let spread = u64::try_from(lifetime / 12).unwrap_or(0).max(1);
+    let digest = sha2::Sha256::digest(environment.as_bytes());
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&digest[..8]);
+    i64::try_from(u64::from_be_bytes(first) % spread).unwrap_or(0)
 }
 
 /// Renew a host certificate through the applier unit, waiting for it on
@@ -1491,6 +1539,8 @@ fn renew_one(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use super::*;
     use crate::host_apply::fixture::{HostFixture, key, sign_release_with};
     use crate::runtime_delivery::RuntimeReleaseEntry;
@@ -1632,6 +1682,12 @@ mod tests {
             Some(crate::workload_identity::grant(&section, ENVIRONMENT, "api", &issuer).unwrap());
         case.config.sealing_dir = Some(sealing);
         case.release.identity_issuer = Some(issuer);
+        // A step with a grant always delivers a document, here with no peers.
+        case.release.request.dependency_document = crate::dependency_document::json_with_peers(
+            "",
+            &crate::workload_identity::Peers::default(),
+        )
+        .unwrap();
         case
     }
 
@@ -1655,6 +1711,37 @@ mod tests {
         let error = refusal(&case, case.release.clone());
         assert!(
             error.contains("is not what the signed manifest gives"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_dependency_document_with_a_peer_the_approved_bindings_lack_is_refused() {
+        let mut case = identity_case();
+        let caller = crate::workload_identity::uri(ENVIRONMENT, "app");
+        case.step.identity.as_mut().unwrap().peers.clients =
+            BTreeMap::from([("database".into(), BTreeSet::from([caller.clone()]))]);
+        let document = |callers: &[&str]| {
+            serde_json::json!({
+                "version": 1,
+                "contracts": {},
+                "callers": { "database": callers },
+            })
+            .to_string()
+        };
+        let mut release = case.release.clone();
+        release.request.dependency_document = document(&[&caller]);
+        case.config
+            .verify(release, ENVIRONMENT, &Expected::target(&case.step))
+            .unwrap();
+
+        // The server adds a caller no approved binding gives.
+        let mut release = case.release.clone();
+        let intruder = crate::workload_identity::uri(ENVIRONMENT, "intruder");
+        release.request.dependency_document = document(&[&caller, &intruder]);
+        let error = refusal(&case, release);
+        assert!(
+            error.contains("names peers the plan step does not grant"),
             "{error}"
         );
     }
@@ -2204,9 +2291,10 @@ mod tests {
         assert!(error.contains("verified no identity issuer"), "{error}");
     }
 
-    /// A restart-reload workload is not rewritten in place.
+    /// A restart-reload certificate falls due later by its environment's
+    /// fixed delay, then renews through the adapter, which restarts it.
     #[test]
-    fn a_restart_reload_certificate_is_not_renewed_in_place() {
+    fn a_restart_reload_certificate_renews_after_its_environment_delay() {
         let mut case = identity_case();
         let verified = case
             .config
@@ -2216,17 +2304,31 @@ mod tests {
                 &Expected::target(&case.step),
             )
             .unwrap();
+        let issued = verified.request.identity.unwrap();
         let held = std::sync::Arc::new(HeldIdentities::default());
-        held.0
-            .lock()
-            .unwrap()
-            .push(verified.request.identity.unwrap());
-        case.config.executors = SoftwareExecutors::with_default(held);
-        let due = crate::now_millis() / 1000 + 17 * 3600;
+        held.0.lock().unwrap().push(issued.clone());
+        case.config.executors = SoftwareExecutors::with_default(held.clone());
+        let installed = crate::workload_identity::InstalledIdentity::read(
+            ENVIRONMENT,
+            "api",
+            &issued.certificate,
+            &issued.ca,
+            &serde_json::to_vec(&issued.grant).unwrap(),
+        )
+        .unwrap();
+        let lifetime = installed.not_after - installed.not_before;
+        let delay = restart_delay(ENVIRONMENT, lifetime);
+        assert!((0..lifetime / 12).contains(&delay));
+        assert_ne!(delay, restart_delay("staging", lifetime));
+        let due = installed.not_before + lifetime / 3 * 2 + delay;
+
         assert!(
-            renew_identities(&case.config, ENVIRONMENT, due)
+            renew_identities(&case.config, ENVIRONMENT, due - 1)
                 .unwrap()
                 .is_empty()
         );
+        let renewed = renew_identities(&case.config, ENVIRONMENT, due).unwrap();
+        renewed[0].outcome.as_ref().unwrap();
+        assert_ne!(held.0.lock().unwrap()[0].certificate, issued.certificate);
     }
 }

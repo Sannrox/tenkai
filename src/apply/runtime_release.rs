@@ -135,6 +135,19 @@ pub(crate) async fn runtime_release(
     } else {
         product_execution::software_request(ctx, &content, attempt).await?
     };
+    // The peers the step grants (ADR 0046 §5); the runtime refuses a
+    // document that names any other.
+    let grant = if restore {
+        step.restore_identity.as_ref()
+    } else {
+        step.identity.as_ref()
+    };
+    if let Some(grant) = grant {
+        request.dependency_document = crate::dependency_document::json_with_peers(
+            &request.dependency_document,
+            &grant.peers,
+        )?;
+    }
     // Host-local: the runtime sets these from its own configuration.
     request.workdir = std::path::PathBuf::new();
     request.cluster_config_path = None;

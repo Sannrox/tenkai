@@ -3,7 +3,7 @@
 //! The document is computed from stored successful deployments only. Executors
 //! deliver it; it carries no endpoints or credentials.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ use crate::environment_bindings::{EnvironmentBindings, OBSERVED_INSTANCE};
 use crate::ontology::release_id;
 use crate::pb::sekai::Object;
 use crate::software_compatibility::{CompatibilityProfile, ContractRequirement};
+use crate::workload_identity::{Peers, uri};
 
 /// Format version of [`DependencyDocument`].
 pub const FORMAT_VERSION: u32 = 1;
@@ -27,12 +28,24 @@ pub const HELM_VALUES_KEY: &str = "tenkai.dependencies";
 pub const CONFIGMAP_KEY: &str = HOST_FILE;
 /// Environment property holding the last applied document digest.
 pub const APPLIED_PROPERTY_PREFIX: &str = "applied_dependencies.";
+/// Environment property holding the peers last granted, as JSON.
+pub const APPLIED_PEERS_PREFIX: &str = "applied_peers.";
 
 /// v1 dependency document: one entry per required or optional contract.
+///
+/// For an instance with a workload certificate it also names its peers
+/// (ADR 0046 §5): in `servers` the provider identity it accepts for each
+/// contract it requires, and in `callers` the identities allowed to call
+/// each contract it provides. Both are the approved step's grant, so the
+/// runtime refuses any other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DependencyDocument {
     pub version: u32,
     pub contracts: BTreeMap<String, DependencyContract>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub servers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub callers: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Last successful deployment of one instance.
@@ -79,6 +92,115 @@ impl DependencyDocument {
     pub fn digest(&self) -> Result<String> {
         Ok(digest_json(&self.to_canonical_json()?))
     }
+
+    /// `document` with the peers a step's grant names, `None` without a
+    /// grant. An instance with a grant always gets a document, even with no
+    /// contracts and no peers, so a withdrawn grant replaces the one its
+    /// executor delivered before.
+    pub fn with_peers(document: Option<Self>, peers: Option<&Peers>) -> Option<Self> {
+        let Some(peers) = peers else {
+            return document;
+        };
+        let mut document = document.unwrap_or(Self {
+            version: FORMAT_VERSION,
+            contracts: BTreeMap::new(),
+            servers: BTreeMap::new(),
+            callers: BTreeMap::new(),
+        });
+        document.servers = peers.servers.clone();
+        document.callers = peers.clients.clone();
+        Some(document)
+    }
+
+    /// The peers this document names, for comparison with a grant.
+    pub fn peers(&self) -> Peers {
+        Peers {
+            servers: self.servers.clone(),
+            clients: self.callers.clone(),
+        }
+    }
+}
+
+/// The peers every instance in `documents` may accept, by instance (ADR
+/// 0046 §5). Each present contract is one edge: the dependent accepts the
+/// provider as server, and the provider accepts the dependent as client.
+/// The documents come from bindings, or from a unique provider, so an
+/// instance outside the graph is never a peer.
+pub fn peer_graph(
+    environment: &str,
+    documents: &BTreeMap<String, DependencyDocument>,
+) -> BTreeMap<String, Peers> {
+    let mut graph: BTreeMap<String, Peers> = BTreeMap::new();
+    for (dependent, document) in documents {
+        for (contract, entry) in &document.contracts {
+            let DependencyContract::Present {
+                product, instance, ..
+            } = entry
+            else {
+                continue;
+            };
+            let provider = if instance.is_empty() {
+                product
+            } else {
+                instance
+            };
+            // An observed provider runs outside Tenkai and holds no
+            // workload identity, so it gets no peer edge.
+            if provider == crate::environment_bindings::OBSERVED_INSTANCE {
+                continue;
+            }
+            graph
+                .entry(dependent.clone())
+                .or_default()
+                .servers
+                .insert(contract.clone(), uri(environment, provider));
+            graph
+                .entry(provider.clone())
+                .or_default()
+                .clients
+                .entry(contract.clone())
+                .or_default()
+                .insert(uri(environment, dependent));
+        }
+    }
+    graph
+}
+
+/// Canonical document JSON `json` (empty: no document) with the peers of a
+/// grant set.
+pub fn json_with_peers(json: &str, peers: &Peers) -> Result<String> {
+    Ok(DependencyDocument::with_peers(parse(json)?, Some(peers))
+        .map(|document| document.to_canonical_json())
+        .transpose()?
+        .unwrap_or_default())
+}
+
+/// Refuse a document whose peers are not exactly `granted`, the peers of the
+/// approved step's grant (ADR 0046 §5; none without a grant). A grant that
+/// names peers needs a document; a grant without peers accepts none, as an
+/// older server sends. The runtime calls it before delivering the document,
+/// so a server cannot add a peer the approved bindings lack.
+pub fn check_peers(json: &str, granted: Option<&Peers>) -> Result<()> {
+    let Some(document) = parse(json)? else {
+        if granted.is_none_or(Peers::is_empty) {
+            return Ok(());
+        }
+        bail!("the plan step grants peers, and the server sent no dependency document");
+    };
+    if document.peers() != granted.cloned().unwrap_or_default() {
+        bail!("the dependency document names peers the plan step does not grant");
+    }
+    Ok(())
+}
+
+/// The document in `json`, `None` when empty.
+pub fn parse(json: &str) -> Result<Option<DependencyDocument>> {
+    if json.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str(json)
+        .map(Some)
+        .context("parsing dependency document")
 }
 
 /// SHA-256 hex of canonical document JSON.
@@ -207,6 +329,8 @@ pub fn document_for_bound(
     Ok(Some(DependencyDocument {
         version: FORMAT_VERSION,
         contracts,
+        servers: BTreeMap::new(),
+        callers: BTreeMap::new(),
     }))
 }
 
@@ -345,7 +469,7 @@ pub(crate) async fn instance_release_digest(
     stored_release_digest(ctx, &id).await
 }
 
-async fn stored_release_digest(ctx: &mut Ctx, id: &str) -> Result<Option<String>> {
+pub(crate) async fn stored_release_digest(ctx: &mut Ctx, id: &str) -> Result<Option<String>> {
     let Some(object) = ctx.get(id).await? else {
         return Ok(None);
     };
@@ -472,8 +596,25 @@ async fn observed_for_instance(
     crate::software_compatibility::observed_contract_versions(ctx, &environment.name, &digest).await
 }
 
-/// Record or clear `applied_dependencies.{instance}` from the current deployed set.
-pub async fn stamp(ctx: &mut Ctx, environment: &mut Object, instance: &str) -> Result<()> {
+/// Record or clear `applied_dependencies.{instance}` from the current deployed
+/// set and the peers the applied step granted (`None`: no grant).
+pub async fn stamp(
+    ctx: &mut Ctx,
+    environment: &mut Object,
+    instance: &str,
+    peers: Option<&Peers>,
+) -> Result<()> {
+    let peers_key = format!("{APPLIED_PEERS_PREFIX}{instance}");
+    match peers.filter(|peers| !peers.is_empty()) {
+        Some(peers) => {
+            environment
+                .properties
+                .insert(peers_key, serde_json::to_string(peers)?);
+        }
+        None => {
+            environment.properties.remove(&peers_key);
+        }
+    }
     let key = format!("{APPLIED_PROPERTY_PREFIX}{instance}");
     let Some(version) = environment
         .properties
@@ -495,7 +636,8 @@ pub async fn stamp(ctx: &mut Ctx, environment: &mut Object, instance: &str) -> R
     let deployed = deployed_set(ctx, environment).await?;
     let bindings = EnvironmentBindings::from_properties(&environment.properties);
     let observed = observed_for_instance(ctx, environment, instance).await?;
-    match document_for_bound(instance, &profile, &deployed, &bindings, &observed)? {
+    let document = document_for_bound(instance, &profile, &deployed, &bindings, &observed)?;
+    match DependencyDocument::with_peers(document, peers) {
         Some(document) => {
             environment.properties.insert(key, document.digest()?);
         }
@@ -504,6 +646,15 @@ pub async fn stamp(ctx: &mut Ctx, environment: &mut Object, instance: &str) -> R
         }
     }
     Ok(())
+}
+
+/// Peers last granted to `instance`, empty when none or unreadable.
+pub fn applied_peers(environment: &Object, instance: &str) -> Peers {
+    environment
+        .properties
+        .get(&format!("{APPLIED_PEERS_PREFIX}{instance}"))
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default()
 }
 
 /// Digest last applied for `instance`, empty when none.
@@ -560,6 +711,30 @@ mod tests {
             schema: None,
             max_evidence_age_ms: 60_000,
         }
+    }
+
+    #[test]
+    fn a_withdrawn_grant_still_delivers_a_document() {
+        // A certificate holder that lost its last caller gets an empty
+        // document, so its executor overwrites the callers it delivered.
+        let document = DependencyDocument::with_peers(None, Some(&Peers::default())).unwrap();
+        assert!(document.contracts.is_empty() && document.callers.is_empty());
+        assert_eq!(DependencyDocument::with_peers(None, None), None);
+    }
+
+    #[test]
+    fn an_observed_provider_gets_no_peer_edge() {
+        let app = profile(2, &[("database", "1.0.0", false)], &[]);
+        let db = profile(2, &[], &[("database", "1.3.0")]);
+        let deployed = BTreeMap::from([("db".into(), DeployedRelease::of("db", "1.2.0", db))]);
+        let mut document = document_for("app", &app, &deployed).unwrap().unwrap();
+        if let Some(DependencyContract::Present { product, .. }) =
+            document.contracts.get_mut("database")
+        {
+            *product = crate::environment_bindings::OBSERVED_INSTANCE.into();
+        }
+        let graph = peer_graph("local", &BTreeMap::from([("app".into(), document)]));
+        assert!(graph.is_empty(), "{graph:?}");
     }
 
     #[test]

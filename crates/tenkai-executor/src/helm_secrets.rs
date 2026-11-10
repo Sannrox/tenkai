@@ -13,6 +13,15 @@
 //! on every issuance and must not roll the workload. It lands in one stable
 //! Secret `<instance>-tenkai-identity`, replaced in place, which the chart
 //! receives as `tenkai.identity.secret`.
+//!
+//! A workload that reads its certificate only at start (`reload =
+//! "restart"`) renews with a rolling restart (ADR 0046 §3). The renewed
+//! Secret is written with a [`RESTART_ANNOTATION`] naming the new
+//! certificate in the same write; the release's workloads then get that
+//! certificate's digest in their pod template, which Kubernetes rolls out
+//! under each workload's own update strategy, and only then is the marker
+//! cleared. A crash anywhere leaves the marker, and the next pass finishes
+//! the restart without issuing again.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -24,6 +33,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroize as _;
 
+use tenkai::host_apply::identity::certificate_digest;
 use tenkai::software_executor::SoftwareApplyRequest;
 
 use crate::in_process_kubernetes::{
@@ -37,6 +47,14 @@ const SECRET_LABEL: &str = "tenkai.dev/secret";
 /// Marks the workload certificate Secret. It carries no [`SECRET_LABEL`], so
 /// pruning sealed values never groups it with one.
 const IDENTITY_LABEL: &str = "tenkai.dev/identity";
+/// On an identity Secret: the digest of the certificate it holds, whose
+/// workloads still need a rolling restart to read it.
+const RESTART_ANNOTATION: &str = "tenkai.dev/restart-for";
+/// In a workload's pod template: the digest of the certificate its pods
+/// were restarted for. Changing it rolls the workload.
+const TEMPLATE_ANNOTATION: &str = "tenkai.dev/identity-certificate";
+/// The annotation Helm puts on every object of a release.
+const HELM_RELEASE_ANNOTATION: &str = "meta.helm.sh/release-name";
 
 /// The Secrets API the writer needs, so tests can stand in for a cluster.
 pub(crate) trait SecretApi {
@@ -48,6 +66,15 @@ pub(crate) trait SecretApi {
     /// Replace the Secret of that name, only if it still has the
     /// `resourceVersion` `secret` carries; a conflict fails.
     fn replace(&self, namespace: &str, secret: &Secret) -> Result<()>;
+}
+
+/// The workload API a restart-reload renewal needs.
+pub(crate) trait WorkloadApi {
+    /// Set [`TEMPLATE_ANNOTATION`] to `certificate` in the pod template of
+    /// every Deployment, StatefulSet and DaemonSet of Helm release `release`
+    /// in `namespace`. Idempotent: a workload already carrying it does not
+    /// roll again.
+    fn restart_for(&self, namespace: &str, release: &str, certificate: &str) -> Result<()>;
 }
 
 /// The Secret one secret name of `request` is written to.
@@ -251,6 +278,13 @@ fn write_identity_secret(
             "Secret {name} in {namespace} exists and is not Tenkai's; Tenkai never writes over it"
         );
     }
+    // A renewal of a restart-reload workload restarts it; an apply over a
+    // restart still pending keeps it pending, for the certificate it writes.
+    let restart = (replacing.is_some()
+        && issued.grant.reload == tenkai::workload_identity::Reload::Restart)
+        || existing
+            .as_ref()
+            .is_some_and(|secret| pending_restart(secret).is_some());
     if let Some(certificate) = replacing {
         let held = existing
             .as_ref()
@@ -270,6 +304,12 @@ fn write_identity_secret(
                 (INSTANCE_LABEL.to_owned(), instance.to_owned()),
                 (IDENTITY_LABEL.to_owned(), "true".to_owned()),
             ])),
+            annotations: restart.then(|| {
+                BTreeMap::from([(
+                    RESTART_ANNOTATION.to_owned(),
+                    certificate_digest(&issued.certificate),
+                )])
+            }),
             ..ObjectMeta::default()
         },
         type_: Some("Opaque".into()),
@@ -323,7 +363,16 @@ pub(crate) fn installed_identities(
                 .as_ref()
                 .and_then(|labels| labels.get(INSTANCE_LABEL))
                 .cloned();
-            let installed = installed_identity(environment, &name, instance.as_deref(), secret);
+            // A listing carries metadata only; the certificate is read
+            // from the Secret itself.
+            let installed = api
+                .get(environment, &name)
+                .and_then(|secret| {
+                    secret.with_context(|| format!("identity Secret {name} is gone"))
+                })
+                .and_then(|secret| {
+                    installed_identity(environment, &name, instance.as_deref(), secret)
+                });
             (instance.unwrap_or(name), installed)
         })
         .collect())
@@ -354,6 +403,69 @@ fn installed_identity(
         std::str::from_utf8(text(CA_FILE)?)?,
         text(GRANT_FILE)?,
     )
+}
+
+/// The certificate digest a restart is pending for, if any.
+fn pending_restart(secret: &Secret) -> Option<&str> {
+    secret
+        .metadata
+        .annotations
+        .as_ref()?
+        .get(RESTART_ANNOTATION)
+        .map(String::as_str)
+}
+
+/// Finish the restart pending on `instance`'s identity Secret, if any:
+/// roll its workloads onto the certificate the marker names, then clear
+/// the marker, only while the Secret is the version just read. A failure
+/// leaves the marker for the next pass.
+pub(crate) fn finish_restart(
+    secrets: &dyn SecretApi,
+    workloads: &dyn WorkloadApi,
+    namespace: &str,
+    instance: &str,
+) -> Result<()> {
+    let name = identity_secret_name(instance);
+    let Some(mut secret) = secrets.get(namespace, &name)? else {
+        return Ok(());
+    };
+    if !owns_identity(&secret, instance) {
+        bail!("Secret {name} in {namespace} is not Tenkai's; Tenkai never writes over it");
+    }
+    let Some(certificate) = pending_restart(&secret).map(str::to_owned) else {
+        return Ok(());
+    };
+    workloads
+        .restart_for(namespace, instance, &certificate)
+        .with_context(|| format!("restarting {instance} onto its renewed certificate"))?;
+    if let Some(annotations) = secret.metadata.annotations.as_mut() {
+        annotations.remove(RESTART_ANNOTATION);
+    }
+    let cleared = secrets.replace(namespace, &secret);
+    for value in secret.data.iter_mut().flat_map(|data| data.values_mut()) {
+        value.0.zeroize();
+    }
+    cleared.with_context(|| format!("clearing the restart marker of {name}"))
+}
+
+/// Finish every restart pending in `environment`, each named by its
+/// instance with how it ended.
+pub(crate) fn finish_restarts(
+    secrets: &dyn SecretApi,
+    workloads: &dyn WorkloadApi,
+    environment: &str,
+) -> Result<Vec<(String, Result<()>)>> {
+    let selector = format!("{OWNER_LABEL}={OWNER},{IDENTITY_LABEL}=true");
+    Ok(secrets
+        .list(environment, &selector)?
+        .into_iter()
+        .filter(|secret| pending_restart(secret).is_some())
+        .filter_map(|secret| {
+            let instance = secret.metadata.labels?.remove(INSTANCE_LABEL)?;
+            let finished = finish_restart(secrets, workloads, environment, &instance);
+            Some((instance, finished))
+        })
+        .collect())
 }
 
 fn is_identity(secret: &Secret) -> bool {
@@ -531,6 +643,135 @@ impl SecretApi for LiveSecrets {
     }
 }
 
+impl WorkloadApi for LiveSecrets {
+    fn restart_for(&self, namespace: &str, release: &str, certificate: &str) -> Result<()> {
+        use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
+        block_on(async {
+            let deployments: Vec<Deployment> =
+                bounded(release_workloads(&self.0, namespace, release)).await?;
+            let stateful_sets: Vec<StatefulSet> =
+                bounded(release_workloads(&self.0, namespace, release)).await?;
+            let daemon_sets: Vec<DaemonSet> =
+                bounded(release_workloads(&self.0, namespace, release)).await?;
+            // Refuse before patching any: a workload that does not replace
+            // its pods on a template change would keep the old certificate
+            // while the marker says it was restarted.
+            for (kind, name, held) in deployments
+                .iter()
+                .map(|deployment| {
+                    let paused = deployment
+                        .spec
+                        .as_ref()
+                        .and_then(|spec| spec.paused)
+                        .unwrap_or(false);
+                    (
+                        "Deployment",
+                        &deployment.metadata.name,
+                        paused.then_some("is paused"),
+                    )
+                })
+                .chain(
+                    stateful_sets
+                        .iter()
+                        .map(|set| ("StatefulSet", &set.metadata.name, stateful_set_holds(set))),
+                )
+                .chain(
+                    daemon_sets
+                        .iter()
+                        .map(|set| ("DaemonSet", &set.metadata.name, daemon_set_holds(set))),
+                )
+            {
+                if let Some(reason) = held {
+                    bail!(
+                        "{kind} {} in {namespace} {reason}, so a template change does not restart all of its pods; restart it by hand onto the renewed certificate",
+                        name.as_deref().unwrap_or_default()
+                    );
+                }
+            }
+            let patch = kube::api::Patch::Merge(serde_json::json!({
+                "spec": {"template": {"metadata": {"annotations": {TEMPLATE_ANNOTATION: certificate}}}}
+            }));
+            bounded(patch_all(&self.0, namespace, &deployments, &patch)).await?;
+            bounded(patch_all(&self.0, namespace, &stateful_sets, &patch)).await?;
+            bounded(patch_all(&self.0, namespace, &daemon_sets, &patch)).await
+        })
+    }
+}
+
+/// Why a StatefulSet does not roll every pod on a template change.
+fn stateful_set_holds(set: &k8s_openapi::api::apps::v1::StatefulSet) -> Option<&'static str> {
+    let strategy = set.spec.as_ref()?.update_strategy.as_ref()?;
+    if strategy.type_.as_deref() == Some("OnDelete") {
+        return Some("updates on delete only");
+    }
+    let partition = strategy.rolling_update.as_ref()?.partition.unwrap_or(0);
+    (partition > 0).then_some("has a rollout partition")
+}
+
+/// Why a DaemonSet does not roll every pod on a template change.
+fn daemon_set_holds(set: &k8s_openapi::api::apps::v1::DaemonSet) -> Option<&'static str> {
+    let strategy = set.spec.as_ref()?.update_strategy.as_ref()?;
+    (strategy.type_.as_deref() == Some("OnDelete")).then_some("updates on delete only")
+}
+
+/// The objects of kind `K` that Helm release `release` owns in `namespace`.
+async fn release_workloads<K>(
+    client: &kube::Client,
+    namespace: &str,
+    release: &str,
+) -> Result<Vec<K>>
+where
+    K: kube::Resource<Scope = k8s_openapi::NamespaceResourceScope>
+        + Clone
+        + std::fmt::Debug
+        + serde::de::DeserializeOwned,
+    K::DynamicType: Default,
+{
+    let api: kube::Api<K> = kube::Api::namespaced(client.clone(), namespace);
+    let kind = K::kind(&K::DynamicType::default()).into_owned();
+    Ok(api
+        .list(&kube::api::ListParams::default())
+        .await
+        .with_context(|| format!("listing {kind}s in {namespace}"))?
+        .items
+        .into_iter()
+        .filter(|item| {
+            item.meta()
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(HELM_RELEASE_ANNOTATION))
+                .is_some_and(|name| name == release)
+        })
+        .collect())
+}
+
+/// Apply `patch` to each of `objects`.
+async fn patch_all<K>(
+    client: &kube::Client,
+    namespace: &str,
+    objects: &[K],
+    patch: &kube::api::Patch<serde_json::Value>,
+) -> Result<()>
+where
+    K: kube::Resource<Scope = k8s_openapi::NamespaceResourceScope>
+        + Clone
+        + std::fmt::Debug
+        + serde::de::DeserializeOwned,
+    K::DynamicType: Default,
+{
+    let api: kube::Api<K> = kube::Api::namespaced(client.clone(), namespace);
+    let kind = K::kind(&K::DynamicType::default()).into_owned();
+    for name in objects
+        .iter()
+        .filter_map(|object| object.meta().name.as_deref())
+    {
+        api.patch(name, &kube::api::PatchParams::default(), patch)
+            .await
+            .with_context(|| format!("restarting {kind} {name} in {namespace}"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,7 +824,11 @@ mod tests {
                         .iter()
                         .all(|(key, value)| labels.get(*key).map(String::as_str) == Some(*value))
                 })
-                .cloned()
+                // A listing carries metadata only, as the live one does.
+                .map(|secret| Secret {
+                    metadata: secret.metadata.clone(),
+                    ..Secret::default()
+                })
                 .collect())
         }
 
@@ -602,7 +847,31 @@ mod tests {
                 "conflict"
             );
             self.delete(namespace, name)?;
-            self.0.borrow_mut().push(secret.clone());
+            let mut secret = secret.clone();
+            let version = current
+                .metadata
+                .resource_version
+                .map_or(1, |v| v.parse::<u64>().unwrap() + 1);
+            secret.metadata.resource_version = Some(version.to_string());
+            self.0.borrow_mut().push(secret);
+            Ok(())
+        }
+    }
+
+    /// Workloads of releases, each holding the certificate its pod
+    /// template names; restarts fail while `down` is set.
+    #[derive(Default)]
+    struct Workloads {
+        restarted: RefCell<Vec<(String, String)>>,
+        down: std::cell::Cell<bool>,
+    }
+
+    impl WorkloadApi for Workloads {
+        fn restart_for(&self, _: &str, release: &str, certificate: &str) -> Result<()> {
+            anyhow::ensure!(!self.down.get(), "the cluster is unreachable");
+            let mut restarted = self.restarted.borrow_mut();
+            restarted.retain(|(name, _)| name != release);
+            restarted.push((release.to_owned(), certificate.to_owned()));
             Ok(())
         }
     }
@@ -672,6 +941,7 @@ mod tests {
                 reload: Reload::Runtime,
                 issuer_generation: 3,
                 issuer_fingerprint: "sha256:cc".into(),
+                peers: Default::default(),
             },
             certificate: certificate.into(),
             key: zeroize::Zeroizing::new("key".into()),
@@ -705,7 +975,13 @@ mod tests {
 
     /// A certificate issued for `api` in `prod` by a fresh issuer.
     fn genuine_identity() -> tenkai::workload_identity::IssuedIdentity {
-        use tenkai::workload_identity::{CertificateRole, IdentitySection, Reload};
+        genuine_identity_reloading(tenkai::workload_identity::Reload::Runtime)
+    }
+
+    fn genuine_identity_reloading(
+        reload: tenkai::workload_identity::Reload,
+    ) -> tenkai::workload_identity::IssuedIdentity {
+        use tenkai::workload_identity::{CertificateRole, IdentitySection};
         let dir = std::env::temp_dir().join(format!(
             "tenkai-helm-identity-{}-{}",
             std::process::id(),
@@ -727,7 +1003,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let section = IdentitySection {
             certificate: CertificateRole::Server,
-            reload: Reload::Runtime,
+            reload,
             dns_names: vec!["api.prod.svc".into()],
         };
         let grant = tenkai::workload_identity::grant(&section, "prod", "api", &issuer).unwrap();
@@ -765,6 +1041,120 @@ mod tests {
         api.delete("prod", "api-tenkai-identity").unwrap();
         renew_identity_secret(&api, "prod", installed, &renewed).unwrap_err();
         assert!(api.get("prod", "api-tenkai-identity").unwrap().is_none());
+    }
+
+    /// A restart-reload renewal writes the certificate and the restart it
+    /// needs in one write. A crash before the restart leaves the marker, and
+    /// the next pass rolls the workload onto that certificate without
+    /// issuing again, then clears it.
+    #[test]
+    fn a_restart_reload_renewal_rolls_the_workload_once_even_after_a_crash() {
+        use tenkai::workload_identity::Reload;
+        let api = Memory::default();
+        let workloads = Workloads::default();
+        let first = genuine_identity_reloading(Reload::Restart);
+        write_identity_secret(&api, "prod", "api", &first, None).unwrap();
+        // An approved apply needs no restart from renewal.
+        assert!(
+            finish_restarts(&api, &workloads, "prod")
+                .unwrap()
+                .is_empty()
+        );
+
+        let (_, installed) = installed_identities(&api, "prod").unwrap().pop().unwrap();
+        let renewed = genuine_identity_reloading(Reload::Restart);
+        renew_identity_secret(&api, "prod", &installed.unwrap(), &renewed).unwrap();
+        // The cluster goes away before the restart.
+        workloads.down.set(true);
+        finish_restart(&api, &workloads, "prod", "api").unwrap_err();
+        let [(instance, failed)] = finish_restarts(&api, &workloads, "prod")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(instance, "api");
+        failed.unwrap_err();
+
+        workloads.down.set(false);
+        let [(_, finished)] = finish_restarts(&api, &workloads, "prod")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        finished.unwrap();
+        let digest = certificate_digest(&renewed.certificate);
+        assert_eq!(*workloads.restarted.borrow(), [("api".to_owned(), digest)]);
+        let secret = api.get("prod", "api-tenkai-identity").unwrap().unwrap();
+        assert!(pending_restart(&secret).is_none());
+        assert_eq!(
+            secret.data.unwrap()["cert.pem"].0,
+            renewed.certificate.as_bytes()
+        );
+        assert!(
+            finish_restarts(&api, &workloads, "prod")
+                .unwrap()
+                .is_empty()
+        );
+
+        // An apply over a pending restart keeps it, for its own certificate.
+        let (_, installed) = installed_identities(&api, "prod").unwrap().pop().unwrap();
+        let again = genuine_identity_reloading(Reload::Restart);
+        renew_identity_secret(&api, "prod", &installed.unwrap(), &again).unwrap();
+        let applied = genuine_identity_reloading(Reload::Restart);
+        write_identity_secret(&api, "prod", "api", &applied, None).unwrap();
+        let secret = api.get("prod", "api-tenkai-identity").unwrap().unwrap();
+        assert_eq!(
+            pending_restart(&secret),
+            Some(certificate_digest(&applied.certificate).as_str())
+        );
+
+        // A runtime-reload renewal restarts nothing.
+        let api = Memory::default();
+        write_identity_secret(&api, "prod", "api", &genuine_identity(), None).unwrap();
+        let (_, installed) = installed_identities(&api, "prod").unwrap().pop().unwrap();
+        renew_identity_secret(&api, "prod", &installed.unwrap(), &genuine_identity()).unwrap();
+        assert!(
+            finish_restarts(&api, &workloads, "prod")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A workload that keeps its pods on a template change is refused, so
+    /// its restart is never recorded as done.
+    #[test]
+    fn workloads_that_keep_their_pods_on_a_template_change_are_found() {
+        use k8s_openapi::api::apps::v1::{
+            DaemonSet, DaemonSetSpec, DaemonSetUpdateStrategy, RollingUpdateStatefulSetStrategy,
+            StatefulSet, StatefulSetSpec, StatefulSetUpdateStrategy,
+        };
+        let stateful = |type_: &str, partition: Option<i32>| StatefulSet {
+            spec: Some(StatefulSetSpec {
+                update_strategy: Some(StatefulSetUpdateStrategy {
+                    type_: Some(type_.into()),
+                    rolling_update: partition.map(|partition| RollingUpdateStatefulSetStrategy {
+                        partition: Some(partition),
+                        ..Default::default()
+                    }),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(stateful_set_holds(&StatefulSet::default()).is_none());
+        assert!(stateful_set_holds(&stateful("RollingUpdate", Some(0))).is_none());
+        assert!(stateful_set_holds(&stateful("RollingUpdate", Some(1))).is_some());
+        assert!(stateful_set_holds(&stateful("OnDelete", None)).is_some());
+        let daemon = |type_: &str| DaemonSet {
+            spec: Some(DaemonSetSpec {
+                update_strategy: Some(DaemonSetUpdateStrategy {
+                    type_: Some(type_.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(daemon_set_holds(&daemon("RollingUpdate")).is_none());
+        assert!(daemon_set_holds(&daemon("OnDelete")).is_some());
     }
 
     #[test]

@@ -16,7 +16,7 @@ mod lifecycle;
 mod release_selection;
 
 pub(crate) use convergence::{
-    require_host_product, require_removable, split_release_id, step_identity,
+    current_peers, require_host_product, require_removable, split_release_id, step_identity,
     stored_release_executor, stored_release_manifest,
 };
 
@@ -192,6 +192,25 @@ impl Step {
         &self,
     ) -> impl Iterator<Item = &crate::workload_identity::IdentityGrant> {
         self.identity.iter().chain(&self.restore_identity)
+    }
+
+    /// Whether the step delivers a dependency document, so its completion
+    /// stamps what it applied. A host health step only checks what its
+    /// install wrote.
+    pub fn delivers_dependencies(&self) -> bool {
+        !matches!(
+            self.host,
+            Some(HostStep {
+                action: HostAction::Health,
+                ..
+            })
+        )
+    }
+
+    /// The peers the step's certificate grant allows (ADR 0046 §5), `None`
+    /// without a grant.
+    pub fn granted_peers(&self) -> Option<&crate::workload_identity::Peers> {
+        self.identity.as_ref().map(|grant| &grant.peers)
     }
 
     /// Whether the environment runtime must verify this step against a local
