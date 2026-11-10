@@ -747,12 +747,15 @@ pub(crate) enum SpokeStandbyCommand {
         /// Holder id of this process (`spoke-b` on the standby).
         #[arg(long)]
         holder: String,
-        /// Directory of `fencing-lease` lock files. Shared only when the profile sets `exclusive_lock`.
+        /// Site environment whose lease in the restored store is the spoke writer lease.
         #[arg(long)]
-        lease_dir: PathBuf,
-        /// Restored spoke state directory (`spoke-standby.json`).
+        environment: String,
+        /// Restored spoke operational store (SQLite) to promote.
         #[arg(long)]
         state: PathBuf,
+        /// Lock directory outside the restored backup that issues promotion epochs. Every member must use the same directory.
+        #[arg(long)]
+        lease_dir: PathBuf,
         /// Key file (32-byte Ed25519 seed, mode 0600) or `pkcs11:` token locator for the promotion statement.
         #[arg(long)]
         signing_key: PathBuf,

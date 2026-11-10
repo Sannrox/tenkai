@@ -5,8 +5,10 @@ The site often has one or two nodes. This profile says what happens when the
 writer dies. It is not the hub profile ([ADR 0010](decisions/0010-supported-operating-profiles.md)
 `enterprise-experimental`). Product `high_availability` stays unclaimed.
 
-The lease vocabulary and the two-node rule come from the shared
-`fencing-lease` crate.
+The writer lease is the environment lease in the spoke's own SQLite
+operational store, and the writer role is the same one the hub uses. Each
+applied step is a receipt stamped with the lease generation. The two-node
+promotion rule comes from the shared `fencing-lease` crate.
 
 ## Static stability
 
@@ -23,23 +25,51 @@ PostgreSQL on spokes and multi-writer SQLite are out of scope (ADR 0029).
 
 ## Promotion
 
-Promotion is a signed operator action by default:
+Promotion is a signed operator action by default. Restore the last shipped
+backup on the standby, then promote it:
 
 ```bash
 tenkaictl spoke-standby promote \
   --profile examples/spoke-standby/profile.toml \
   --holder spoke-b \
-  --lease-dir .tenkai-state/spoke-lease \
-  --state .tenkai-state/spoke \
+  --environment site \
+  --state .tenkai-state/spoke/tenkai.db \
+  --lease-dir /var/lib/tenkai/spoke-locks \
   --signing-key "$PROMOTION_SEED"
 ```
+
+Promotion takes over the restored lease once the old writer's lease has
+lapsed, so the standby writes at the next generation. It is refused while
+that lease is still live. The signed statement is written next to the store
+as `<store>.promotion.json`. To roll back, restore the same backup again.
+
+Restoring a backup rewinds its lease, so the generation cannot come from the
+store alone. `--lease-dir` is a lock directory kept outside the backup and
+used by every member: storage both spokes mount, or a directory the
+operator moves to the promoting member. Each promotion claims it and gets a
+higher fencing token, and the promoted generation starts from that token.
+Promoting a restored or rolled-back copy, on either member, therefore still
+fences every earlier promotion. Keep the directory across restores. Two
+members with separate fresh directories can issue the same generation, and
+runtimes cannot tell those writers apart.
+
+Site runtimes are the fence: once they see a later generation they refuse
+every earlier writer, whichever copy it runs on.
+
+The statement is signed before the store changes and is stored with the
+lease takeover in one transaction. A promotion that fails on the key leaves
+the restored lease untouched. `<store>.promotion.json` is a copy of the
+stored statement. Promoting a store whose lease is still live is refused,
+even for the same holder. After a crash, wait for the lease to lapse and
+promote again; the new promotion gets a later epoch.
 
 Automatic promotion happens only with a witness vote or a storage-level
 exclusive lock (a lock file every member mounts, a PostgreSQL row lock, or a
 Kubernetes Lease). Two nodes and a timeout alone are refused.
 
 On promotion the old generation is fenced. Site runtimes refuse work that
-presents it. Receipts restored from the backup are not executed again.
+presents it, and the store refuses a receipt stamped with it. Receipts
+restored from the backup are not executed again.
 
 ## Published bounds
 

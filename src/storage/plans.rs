@@ -113,6 +113,60 @@ impl SqliteStore {
         owner: &str,
         expires_at: i64,
     ) -> Result<LeaseRecord> {
+        self.grant_lease(environment, owner, expires_at, None)
+    }
+
+    /// Take over `environment`'s lease for `owner` at exactly `generation`,
+    /// which must be above the current one, recording `evidence_json` (the
+    /// signed promotion) in the same transaction. Refused while any holder's
+    /// lease, including `owner`'s own, is unexpired, so the result always
+    /// fences the previous generation.
+    pub fn takeover_expired_lease(
+        &self,
+        environment: &str,
+        owner: &str,
+        generation: u64,
+        expires_at: i64,
+        evidence_json: &str,
+    ) -> Result<LeaseRecord> {
+        self.grant_lease(
+            environment,
+            owner,
+            expires_at,
+            Some(Takeover {
+                generation,
+                evidence_json,
+            }),
+        )
+    }
+
+    /// Owner and evidence recorded by the takeover that issued `generation`.
+    pub fn lease_takeover(
+        &self,
+        environment: &str,
+        generation: u64,
+    ) -> Result<Option<(String, String)>> {
+        Ok(self
+            .connection()?
+            .query_row(
+                "SELECT owner, evidence_json FROM lease_takeovers
+                 WHERE environment_id=?1 AND generation=?2",
+                params![environment, generation],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// Shared lease grant. `takeover` carries the exact generation and its
+    /// evidence; `None` is a plain acquire that renews the owner's own lease.
+    fn grant_lease(
+        &self,
+        environment: &str,
+        owner: &str,
+        expires_at: i64,
+        takeover: Option<Takeover<'_>>,
+    ) -> Result<LeaseRecord> {
+        let wanted = takeover.as_ref().map(|takeover| takeover.generation);
         let now = crate::now_millis();
         if expires_at <= now {
             return Err(StoreError::LeaseExpired {
@@ -138,7 +192,9 @@ impl SqliteStore {
         }
         let current = lease_in(&tx, environment)?;
         let generation = match current {
-            Some(current) if current.expires_at > now && current.owner != owner => {
+            Some(current)
+                if current.expires_at > now && (current.owner != owner || wanted.is_some()) =>
+            {
                 return Err(StoreError::LeaseHeld {
                     environment: environment.into(),
                     owner: current.owner,
@@ -146,14 +202,30 @@ impl SqliteStore {
                 });
             }
             Some(current) if current.expires_at > now => current.generation,
-            Some(current) => current.generation + 1,
-            None => 1,
+            Some(current) if wanted.is_some_and(|wanted| wanted <= current.generation) => {
+                return Err(StoreError::InvalidData {
+                    kind: "lease",
+                    detail: format!(
+                        "takeover generation must exceed {} for {environment}",
+                        current.generation
+                    ),
+                });
+            }
+            Some(current) => wanted.unwrap_or(current.generation + 1),
+            None => wanted.unwrap_or(1).max(1),
         };
         tx.execute(
             "INSERT INTO leases(environment_id,owner,generation,expires_at) VALUES(?1,?2,?3,?4)
              ON CONFLICT(environment_id) DO UPDATE SET owner=excluded.owner,generation=excluded.generation,expires_at=excluded.expires_at",
             params![environment, owner, generation, expires_at],
         )?;
+        if let Some(takeover) = takeover {
+            tx.execute(
+                "INSERT INTO lease_takeovers(environment_id,generation,owner,evidence_json)
+                 VALUES(?1,?2,?3,?4)",
+                params![environment, generation, owner, takeover.evidence_json],
+            )?;
+        }
         tx.commit()?;
         Ok(LeaseRecord {
             environment_id: environment.into(),
@@ -162,6 +234,25 @@ impl SqliteStore {
             expires_at,
         })
     }
+}
+
+/// A fenced takeover's exact generation and the evidence stored with it.
+struct Takeover<'a> {
+    generation: u64,
+    evidence_json: &'a str,
+}
+
+/// Evidence of each fenced takeover, written in the takeover's transaction.
+/// Additive: older binaries ignore the table.
+pub(super) fn ensure_lease_takeover_table(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS lease_takeovers (
+             environment_id TEXT NOT NULL, generation INTEGER NOT NULL,
+             owner TEXT NOT NULL, evidence_json TEXT NOT NULL,
+             PRIMARY KEY(environment_id, generation)
+         );",
+    )?;
+    Ok(())
 }
 
 pub(super) fn lease_in(tx: &Transaction<'_>, environment: &str) -> Result<Option<LeaseRecord>> {
