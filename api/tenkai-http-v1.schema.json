@@ -5211,6 +5211,10 @@
     "PromoteRequest": {
       "additionalProperties": false,
       "properties": {
+        "expected_head": {
+          "description": "`<product>@<version>` the channel must head for the promotion to\nreplace it (#1158). An empty channel, or one already heading `spec`,\nis promoted either way. A server that predates the field refuses it.",
+          "type": "string"
+        },
         "operation": {
           "type": "string"
         },

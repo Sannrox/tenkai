@@ -1600,7 +1600,18 @@ impl ManagementOperations {
         let actor = &context.audit_principal();
         self.audit(actor, "catalog.promote.requested")?;
         let mut ctx = self.catalog_ctx(&context)?;
-        let message = crate::catalog::promote(&mut ctx, &context, &request.spec, channel)
+        let message = crate::catalog::promote_expecting(
+            &mut ctx,
+            &context,
+            &request.spec,
+            channel,
+            request.expected_head.as_deref(),
+        )
+        .await
+        .map_err(map_catalog_error)?;
+        // Releases are immutable, so the digest read after the move is the
+        // content the channel now heads.
+        let digest = crate::catalog::release_digest(&mut ctx, &request.spec)
             .await
             .map_err(map_catalog_error)?;
         self.audit(actor, "catalog.promote.completed")?;
@@ -1614,7 +1625,8 @@ impl ManagementOperations {
             ManagementLifecycleOperation::Promote,
             message,
             Some(request.spec),
-        ))
+        )
+        .with_digest(digest))
     }
 
     pub async fn recall_release(
@@ -2957,6 +2969,7 @@ fn map_lifecycle_error(error: anyhow::Error) -> ManagementError {
 fn map_catalog_error(error: anyhow::Error) -> ManagementError {
     let message = format!("{error:#}");
     if message.contains("already published")
+        || message.contains("refusing to replace")
         || message.contains("no delivery hold")
         || message.contains("no held failed target")
     {
@@ -3739,6 +3752,7 @@ mod tests {
                 version: 1,
                 operation: "promote".into(),
                 spec: "api@1.0.0".into(),
+                expected_head: None,
             },
         )
         .await
@@ -3846,6 +3860,7 @@ mod tests {
                 version: 1,
                 operation: "promote".into(),
                 spec: "api@1.0.0".into(),
+                expected_head: None,
             },
         )
         .await
@@ -3858,6 +3873,7 @@ mod tests {
                     version: 1,
                     operation: "promote".into(),
                     spec: "api@1.0.0".into(),
+                    expected_head: None,
                 },
             )
             .await
@@ -3893,6 +3909,7 @@ mod tests {
                 version: 1,
                 operation: "promote".into(),
                 spec: "api@1.0.0".into(),
+                expected_head: None,
             },
         )
         .await
@@ -3968,6 +3985,7 @@ mod tests {
                 version: 1,
                 operation: "promote".into(),
                 spec: "api@1.0.0".into(),
+                expected_head: None,
             },
         )
         .await

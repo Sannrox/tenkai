@@ -40,7 +40,7 @@ call it before the Catalog, planner, or apply core.
 | Operation | Scope | Path | Status |
 | --- | --- | --- | --- |
 | `publish` | Catalog-wide | `POST /v1/releases` | Implemented ([#394](https://github.com/Sannrox/tenkai/issues/394)) |
-| `promote` | Catalog-wide | `POST /v1/channels/{channel}/promote` | Implemented (#394) |
+| `promote` | Catalog-wide | `POST /v1/channels/{channel}/promote` | Implemented (#394). The result's `digest` is the promoted release's manifest digest (`sha256:<hex>`). Optional `expected_head` (`<product>@<version>`) refuses the promotion with `409` when the channel heads another release; an empty channel, or one already heading the spec, is promoted either way ([#1158](https://github.com/Sannrox/tenkai/issues/1158)) |
 | `recall` | Catalog-wide | `POST /v1/releases/{release}/recall` | Implemented (#394) |
 | `subscribe` | Environment | `POST /v1/environments/{environment}/subscriptions` | Implemented (#394). Optional `instance` defaults to the product ([#1014](https://github.com/Sannrox/tenkai/issues/1014)) |
 | `unsubscribe` | Environment | `DELETE /v1/environments/{environment}/subscriptions/{product}` | Implemented ([#969](https://github.com/Sannrox/tenkai/issues/969)). The next approved plan removes the instance (ADR 0049). Optional `instance` defaults to the product (#1014); `expected_version` names the recorded version and is required while one is recorded |

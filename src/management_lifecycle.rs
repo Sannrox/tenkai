@@ -474,6 +474,12 @@ pub struct PromoteRequest {
     pub version: u32,
     pub operation: String,
     pub spec: String,
+    /// `<product>@<version>` the channel must head for the promotion to
+    /// replace it (#1158). An empty channel, or one already heading `spec`,
+    /// is promoted either way. A server that predates the field refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub expected_head: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -802,6 +808,18 @@ pub fn admit_promote(
     require_route_operation(admitted.operation, ManagementLifecycleOperation::Promote)?;
     if request.spec.trim().is_empty() {
         bail!("promote requires <product>@<version>");
+    }
+    if let Some(expected) = &request.expected_head {
+        let product = |spec: &str| spec.split_once('@').map(|(product, _)| product.to_string());
+        let Some(expected_product) = product(expected) else {
+            bail!("expected_head must be <product>@<version>, got {expected:?}");
+        };
+        if product(&request.spec).as_deref() != Some(expected_product.as_str()) {
+            bail!(
+                "expected_head {expected} names another product than {}",
+                request.spec
+            );
+        }
     }
     Ok(admitted)
 }
@@ -1735,6 +1753,7 @@ mod tests {
                 version: 1,
                 operation: "publish".into(),
                 spec: "api@1.0.0".into(),
+                expected_head: None,
             },
             PrincipalKind::Management,
             None,

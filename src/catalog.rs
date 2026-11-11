@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -837,6 +837,52 @@ pub async fn promote(
     channel: &str,
 ) -> Result<String> {
     promote_inner(ctx, actor, spec, channel, None).await
+}
+
+/// [`promote`], refused when the channel heads a release other than
+/// `expected_head` (`<product>@<version>`), so a compensating promote never
+/// overwrites a head another publisher moved (#1158). An empty channel, or
+/// one already heading `spec`, is promoted either way.
+pub async fn promote_expecting(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    spec: &str,
+    channel: &str,
+    expected_head: Option<&str>,
+) -> Result<String> {
+    let Some(expected) = expected_head else {
+        return promote(ctx, actor, spec, channel).await;
+    };
+    let Some((product, version)) = expected.split_once('@') else {
+        bail!("expected head must be <product>@<version>, got {expected:?}");
+    };
+    validate_identifier("product", product)?;
+    validate_identifier("version", version)?;
+    promote_inner(
+        ctx,
+        actor,
+        spec,
+        channel,
+        Some(&[release_id(product, version)]),
+    )
+    .await
+}
+
+/// The manifest digest of the published release `spec`, as `sha256:<hex>`.
+pub async fn release_digest(ctx: &mut Ctx, spec: &str) -> Result<String> {
+    let Some((name, version)) = spec.split_once('@') else {
+        bail!("expected <product>@<version>, got {spec:?}");
+    };
+    let release = ctx
+        .get(&release_id(name, version))
+        .await?
+        .with_context(|| format!("release {spec} is not published"))?;
+    let digest = release
+        .properties
+        .get("digest")
+        .filter(|digest| !digest.is_empty())
+        .with_context(|| format!("release {spec} has no recorded digest"))?;
+    Ok(format!("sha256:{digest}"))
 }
 
 /// Promote `spec` onto `channel` while holding the promotion lock, only when

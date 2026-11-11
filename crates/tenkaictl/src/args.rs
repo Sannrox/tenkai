@@ -225,7 +225,14 @@ pub(crate) enum Command {
         command: ApprovalCommand,
     },
     /// Point a channel at a published release, e.g. `promote hello@0.1.0 stable`.
-    Promote { spec: String, channel: String },
+    Promote {
+        spec: String,
+        channel: String,
+        /// Refuse unless the channel is empty, already heads `spec`, or heads
+        /// this `<product>@<version>`.
+        #[arg(long)]
+        expected_head: Option<String>,
+    },
     /// Install evaluation trust roots or record a signed Chisei evaluation.
     EvalEvidence {
         #[command(subcommand)]

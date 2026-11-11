@@ -82,8 +82,14 @@ pub(crate) async fn run(
             }
             Ok(())
         }
-        Command::Promote { spec, channel } => {
-            let result = client.promote_release(&spec, &channel).await?;
+        Command::Promote {
+            spec,
+            channel,
+            expected_head,
+        } => {
+            let result = client
+                .promote_release_expecting(&spec, &channel, expected_head.as_deref())
+                .await?;
             if machine {
                 return print_machine_result(&crate::output::promote_result(&spec, &channel));
             }
