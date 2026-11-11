@@ -62,6 +62,9 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
         client_config::apply_resolved_environment(&mut cli.command, config, &names)?;
     }
     match cli.command {
+        Command::Release {
+            command: crate::catalog_args::ReleaseCommand::Render { .. },
+        } => unreachable!("handled before opening the embedded database"),
         command @ (Command::Init
         | Command::Publish { .. }
         | Command::Release { .. }

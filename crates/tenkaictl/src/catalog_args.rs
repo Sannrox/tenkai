@@ -40,6 +40,22 @@ pub(crate) enum ReleaseCommand {
     },
     /// Recall a published release so lookup and planning fail closed.
     Recall { spec: String },
+    /// Pin version and artifact digests, then validate the manifest to sign.
+    Render {
+        manifest: PathBuf,
+        /// Set `product.version`.
+        #[arg(long)]
+        version: Option<String>,
+        /// Set the digest of the `[[artifacts]]` entry with this repository.
+        #[arg(long = "artifact", value_name = "REPOSITORY=DIGEST")]
+        artifacts: Vec<String>,
+        /// Set that entry's SBOM digest and keep its declared media type.
+        #[arg(long = "sbom", value_name = "REPOSITORY=DIGEST")]
+        sboms: Vec<String>,
+        /// Write the rendered manifest here. Without it, validate only.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -211,6 +227,41 @@ mod tests {
             Command::Release {
                 command: ReleaseCommand::Verify { spec, trust_roots }
             } if spec == "api@1.2.3" && trust_roots == std::path::Path::new("release-trust.toml")
+        ));
+    }
+
+    #[test]
+    fn parses_release_render_pins_and_output() {
+        let cli = Cli::try_parse_from([
+            "tenkaictl",
+            "release",
+            "render",
+            "deploy/tenkai.toml",
+            "--version",
+            "1.4.0",
+            "--artifact",
+            "edge/app=sha256:aaa",
+            "--sbom",
+            "edge/app=sha256:bbb",
+            "--out",
+            "out/tenkai.toml",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Release {
+                command: ReleaseCommand::Render {
+                    ref manifest,
+                    ref version,
+                    ref artifacts,
+                    ref sboms,
+                    ref out,
+                }
+            } if manifest == std::path::Path::new("deploy/tenkai.toml")
+                && version.as_deref() == Some("1.4.0")
+                && artifacts == &["edge/app=sha256:aaa".to_string()]
+                && sboms == &["edge/app=sha256:bbb".to_string()]
+                && out.as_deref() == Some(std::path::Path::new("out/tenkai.toml"))
         ));
     }
 

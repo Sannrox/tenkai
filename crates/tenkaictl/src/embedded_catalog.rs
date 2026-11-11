@@ -84,6 +84,9 @@ pub(crate) async fn run(
                     println!("{message}");
                 }
             }
+            ReleaseCommand::Render { .. } => {
+                unreachable!("handled before opening the embedded database")
+            }
         },
         Command::Exposure { command } => match command {
             ExposureCommand::Import {

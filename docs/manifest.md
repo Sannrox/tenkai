@@ -176,6 +176,32 @@ Releases are immutable: re-publishing the same version with different manifest
 content or different declared deploy inputs is rejected — bump
 `product.version`. Runtime state must live outside declared `inputs`.
 
+## Render before signing
+
+`product.version`, each `[[artifacts]]` digest, and each artifact's SBOM digest
+change with every release. Render those pins from a checked-in manifest, then
+sign the bytes it wrote:
+
+```bash
+tenkaictl release render deploy/tenkai.toml \
+  --version 1.4.0 \
+  --artifact edge/app=sha256:<image digest> \
+  --sbom edge/app=sha256:<sbom digest> \
+  --out out/tenkai.toml
+```
+
+The input must already be a valid manifest. `--version` sets `product.version`.
+`--artifact <repository>=<digest>` sets the digest of the `[[artifacts]]`
+entry with that repository. `--sbom` sets that entry's SBOM digest and keeps
+its declared media type. The result passes the same structure and
+artifact-reference checks `publish` runs, or the command fails naming the
+field and writes nothing. Without `--out` the command validates only, so
+`tenkaictl release render deploy/tenkai.toml` is the pre-signing check.
+Comments and key order of the input are kept. The command reads no catalog,
+registry, or server.
+
+See the sample workflow in [examples/ci-publish](../examples/ci-publish/).
+
 ## Signing
 
 Release publication fails closed unless `--signature` and `--trust-roots` are

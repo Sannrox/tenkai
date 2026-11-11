@@ -35,6 +35,7 @@ mod login;
 mod migrate_args;
 mod output;
 mod product_args;
+mod release_render;
 mod remote;
 mod remote_catalog;
 mod remote_delivery;
@@ -449,13 +450,24 @@ async fn run(mut cli: Cli) -> Result<()> {
         );
         return Ok(());
     }
-    // Local only: keys, signatures, and restore never talk to a server.
-    // client.toml `target = "remote"` must not hijack them on a server host.
+    // Local only: keys, signatures, restore, and release render never talk
+    // to a server. client.toml `target = "remote"` must not hijack them.
     if matches!(cli.command, Command::Restore { .. }) {
         return embedded_dev::restore(&cli).await;
     }
     if matches!(cli.command, Command::Dev { .. }) {
         return embedded_dev::run_dev(&cli).await;
+    }
+    if matches!(
+        cli.command,
+        Command::Release {
+            command: crate::catalog_args::ReleaseCommand::Render { .. }
+        }
+    ) {
+        let Command::Release { command } = cli.command else {
+            unreachable!("matched above");
+        };
+        return crate::release_render::run(command);
     }
     if target == Target::Remote {
         return remote::run(cli, &config, token_file_from_flag, host_socket).await;
