@@ -52,7 +52,7 @@ rustls-native-certs = "0.8"
 sekai-client = { git = "https://github.com/Sannrox/sekai-chisei", rev = "67157d1fa242ac2f133c88243ef23b56f88042e6", version = "0.1.2" }
 tar = { version = "0.4", default-features = false }
 cryptoki = "0.10"
-sekai-keys = { git = "https://github.com/Sannrox/sekai-chisei", rev = "40ab00a4954d435c67c6c12b560522ba5eaebb53", version = "1.0.0" }
+sekai-keys = { git = "https://github.com/Sannrox/sekai-chisei", tag = "v2.0.0", version = "1.0.0" }
 fencing-lease = { git = "https://github.com/Sannrox/agent-kit", rev = "7adf5da3254b6a78f93c49837ab9f7cd6103b2d0" }
 hpke = { version = "0.13", default-features = false, features = ["alloc", "p256", "std"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdh", "pem", "pkcs8"] }

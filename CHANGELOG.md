@@ -20,10 +20,12 @@ bindings (ADR 0046). Operators sign in through host identity on a Unix socket
 serves web console
 [v0.3.1](https://github.com/Sannrox/tenkai-console/releases/tag/v0.3.1)
 at `/ui/`. The release candidate `v0.8.0-rc.1` published its signed
-hosts, SBOM and attestations with no changes since. Full operator
+hosts, SBOM and attestations. Since then only the `sekai-keys` dependency
+moved to the sekai-chisei `v2.0.0` tag, with identical code (#1189). Full operator
 notes: [docs/releases/0.8.0.md](https://github.com/Sannrox/tenkai/blob/v0.8.0/docs/releases/0.8.0.md).
 
 ### What's Changed
+- chore(keys): pin sekai-keys to the sekai-chisei v2.0.0 tag (#1189)
 - chore(release): prepare v0.8.0-rc.1 with console v0.3.1 (#1179)
 - ci: retry apt installs on runner DNS failures (#1185)
 - feat(catalog)!: remove a product's head from one channel (#1177)
