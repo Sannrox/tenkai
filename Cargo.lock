@@ -3306,6 +3306,7 @@ dependencies = [
  "tenkai-http",
  "tokio",
  "toml",
+ "toml_edit",
  "url",
  "uuid",
  "zeroize",

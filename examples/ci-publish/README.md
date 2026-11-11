@@ -34,13 +34,15 @@ See [configure server authentication](../../docs/configure-server-authentication
 | `TENKAI_RELEASE_SEED` | 32-byte Ed25519 seed used by the product's signing step, not by `tenkai-server` |
 
 `TENKAI_OIDC_CLIENT_ID`, `TENKAI_SERVER_URL`, and `TENKAI_PRODUCT` may be
-variables. The detached signature `deploy/tenkai.sig.json` is produced before
-publish (on the tag, as in [deploy from GitHub](../../docs/deploy-from-github.md),
-or by a signing step that holds the seed). The server keeps only public trust
-roots. Rotate by overlapping public keys, then removing the old key; see
-[release signing](../../docs/release-signing.md). Do not use
-`--allow-unsigned-development`. `tenkaictl dev sign-release` is laptop dogfood,
-not the production signer.
+variables. Render the checked-in manifest with `tenkaictl release render`
+(`--version`, and `--artifact` / `--sbom` when the release names images), then
+sign those bytes. The sample writes the rendered manifest next to the source
+so `deploy.workdir` still resolves, and the signature under `$RUNNER_TEMP`.
+See [the manifest](../../docs/manifest.md#render-before-signing).
+The server keeps only public trust roots. Rotate by overlapping public keys,
+then removing the old key; see [release signing](../../docs/release-signing.md).
+Do not use `--allow-unsigned-development`. `tenkaictl dev sign-release` is
+laptop dogfood, not the production signer.
 
 ## Idempotent re-run
 

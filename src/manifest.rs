@@ -546,6 +546,36 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     if let Some(topology) = &manifest.topology {
         topology.validate()?;
     }
+    validate_declared(&manifest)?;
+    let workdir = base
+        .join(&manifest.deploy.workdir)
+        .canonicalize()
+        .with_context(|| format!("resolving workdir {:?}", manifest.deploy.workdir))?;
+    if manifest.product.kind == ProductKind::RoutingConfig {
+        crate::routing::load_and_validate(
+            &workdir.join(&manifest.routing.as_ref().expect("validated routing").config),
+            &manifest
+                .routing
+                .as_ref()
+                .expect("validated routing")
+                .allowed_providers,
+        )?;
+    }
+    if manifest.product.kind == ProductKind::ModelRuntime {
+        crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&manifest)?;
+    }
+    if crate::staged_artifact::is_staged_kind(manifest.product.kind) {
+        crate::staged_artifact::validate_staged_manifest(&manifest, &workdir)?;
+    }
+    Ok(LoadedManifest {
+        manifest,
+        raw,
+        workdir,
+    })
+}
+
+/// Kind, identifier, and install checks `load` runs before touching the workdir.
+pub fn validate_declared(manifest: &Manifest) -> Result<()> {
     if manifest.product.name.is_empty() || manifest.product.version.is_empty() {
         bail!("manifest needs product.name and product.version");
     }
@@ -645,7 +675,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
                 bail!("model_runtime manifests cannot declare a worker_pool section");
             }
             // Full section validation lives in the model_runtime contract.
-            crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&manifest)?;
+            crate::model_runtime::ModelRuntimeDescriptor::from_manifest(manifest)?;
         }
         crate::product_kind::ProductTarget::WorkerPool => {
             if manifest.routing.is_some()
@@ -664,7 +694,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
             {
                 bail!("worker_pool manifests cannot declare staged-product sections");
             }
-            crate::worker_pool::spec_from_manifest(&manifest)?;
+            crate::worker_pool::spec_from_manifest(manifest)?;
         }
         crate::product_kind::ProductTarget::Staged(staged_kind) => {
             if manifest.routing.is_some()
@@ -772,31 +802,7 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     }
     crate::ontology::validate_identifier("product.name", &manifest.product.name)?;
     crate::ontology::validate_identifier("product.version", &manifest.product.version)?;
-    let workdir = base
-        .join(&manifest.deploy.workdir)
-        .canonicalize()
-        .with_context(|| format!("resolving workdir {:?}", manifest.deploy.workdir))?;
-    if manifest.product.kind == ProductKind::RoutingConfig {
-        crate::routing::load_and_validate(
-            &workdir.join(&manifest.routing.as_ref().expect("validated routing").config),
-            &manifest
-                .routing
-                .as_ref()
-                .expect("validated routing")
-                .allowed_providers,
-        )?;
-    }
-    if manifest.product.kind == ProductKind::ModelRuntime {
-        crate::model_runtime::ModelRuntimeDescriptor::from_manifest(&manifest)?;
-    }
-    if crate::staged_artifact::is_staged_kind(manifest.product.kind) {
-        crate::staged_artifact::validate_staged_manifest(&manifest, &workdir)?;
-    }
-    Ok(LoadedManifest {
-        manifest,
-        raw,
-        workdir,
-    })
+    Ok(())
 }
 
 pub fn parse_raw(raw: &str) -> Result<Manifest> {
