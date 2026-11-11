@@ -2770,7 +2770,7 @@ dependencies = [
 [[package]]
 name = "sekai-keys"
 version = "1.0.0"
-source = "git+https://github.com/Sannrox/sekai-chisei?rev=40ab00a4954d435c67c6c12b560522ba5eaebb53#40ab00a4954d435c67c6c12b560522ba5eaebb53"
+source = "git+https://github.com/Sannrox/sekai-chisei?tag=v2.0.0#1f0cbc31e832d2ef2db527ffafa6e61e7cedf6cb"
 dependencies = [
  "aes-gcm",
  "libc",
