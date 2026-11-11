@@ -34,14 +34,16 @@ pub(super) async fn promote_release(
         Ok(credential) => credential,
         Err(error) => return *error,
     };
-    let request = match parse_management_json(&body) {
-        Ok(request) => request,
-        Err(error) => return *error,
-    };
+    let request =
+        match parse_management_json::<tenkai::management_lifecycle::PromoteHttpRequest>(&body) {
+            Ok(request) => request,
+            Err(error) => return *error,
+        };
+    let (request, expected_head) = request.into_promote();
     manage_result(
         state
             .management
-            .promote_release(&credential, &channel, request)
+            .promote_release_expecting(&credential, &channel, request, expected_head.as_deref())
             .await,
     )
 }

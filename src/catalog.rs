@@ -869,7 +869,7 @@ pub async fn promote_expecting(
 }
 
 /// The manifest digest of the published release `spec`, as `sha256:<hex>`.
-pub async fn release_digest(ctx: &mut Ctx, spec: &str) -> Result<String> {
+pub(crate) async fn release_digest(ctx: &mut Ctx, spec: &str) -> Result<String> {
     let Some((name, version)) = spec.split_once('@') else {
         bail!("expected <product>@<version>, got {spec:?}");
     };

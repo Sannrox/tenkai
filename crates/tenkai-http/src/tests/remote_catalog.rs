@@ -95,7 +95,6 @@ async fn remote_catalog_lifecycle_publish_promote_subscribe_and_recall() {
                         version: 1,
                         operation: "promote".into(),
                         spec: "api@1.0.0".into(),
-                        expected_head: None,
                     })
                     .unwrap(),
                 ))
@@ -159,7 +158,6 @@ async fn remote_catalog_lifecycle_publish_promote_subscribe_and_recall() {
                         version: 1,
                         operation: "promote".into(),
                         spec: "api@1.0.0".into(),
-                        expected_head: None,
                     })
                     .unwrap(),
                 ))

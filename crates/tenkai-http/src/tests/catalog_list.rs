@@ -56,7 +56,6 @@ async fn promote(app: &Router, spec: &str, channel: &str) {
                         version: 1,
                         operation: "promote".into(),
                         spec: spec.into(),
-                        expected_head: None,
                     })
                     .unwrap(),
                 ))
@@ -489,7 +488,7 @@ async fn promote_expecting(
                 .header("authorization", "Bearer management-secret")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::to_vec(&tenkai::management_lifecycle::PromoteRequest {
+                    serde_json::to_vec(&tenkai::management_lifecycle::PromoteHttpRequest {
                         version: 1,
                         operation: "promote".into(),
                         spec: spec.into(),

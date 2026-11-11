@@ -1581,6 +1581,19 @@ impl ManagementOperations {
         channel: &str,
         request: PromoteRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
+        self.promote_release_expecting(credential, channel, request, None)
+            .await
+    }
+
+    /// [`Self::promote_release`], refused unless the channel is empty, heads
+    /// `spec`, or heads `expected_head` (#1158).
+    pub async fn promote_release_expecting(
+        &self,
+        credential: &CredentialMaterial,
+        channel: &str,
+        request: PromoteRequest,
+        expected_head: Option<&str>,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
         self.refuse_agent(&context, "catalog.promote")?;
         Self::require_capability(&context, DeliveryCapability::Publish)?;
@@ -1597,6 +1610,8 @@ impl ManagementOperations {
             self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
+        management_lifecycle::require_promote_expected_head(&request.spec, expected_head)
+            .map_err(map_lifecycle_error)?;
         let actor = &context.audit_principal();
         self.audit(actor, "catalog.promote.requested")?;
         let mut ctx = self.catalog_ctx(&context)?;
@@ -1605,7 +1620,7 @@ impl ManagementOperations {
             &context,
             &request.spec,
             channel,
-            request.expected_head.as_deref(),
+            expected_head,
         )
         .await
         .map_err(map_catalog_error)?;
@@ -3752,7 +3767,6 @@ mod tests {
                 version: 1,
                 operation: "promote".into(),
                 spec: "api@1.0.0".into(),
-                expected_head: None,
             },
         )
         .await
@@ -3860,7 +3874,6 @@ mod tests {
                 version: 1,
                 operation: "promote".into(),
                 spec: "api@1.0.0".into(),
-                expected_head: None,
             },
         )
         .await
@@ -3873,7 +3886,6 @@ mod tests {
                     version: 1,
                     operation: "promote".into(),
                     spec: "api@1.0.0".into(),
-                    expected_head: None,
                 },
             )
             .await
@@ -3909,7 +3921,6 @@ mod tests {
                 version: 1,
                 operation: "promote".into(),
                 spec: "api@1.0.0".into(),
-                expected_head: None,
             },
         )
         .await
@@ -3985,7 +3996,6 @@ mod tests {
                 version: 1,
                 operation: "promote".into(),
                 spec: "api@1.0.0".into(),
-                expected_head: None,
             },
         )
         .await
