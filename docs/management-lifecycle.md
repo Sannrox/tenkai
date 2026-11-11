@@ -26,7 +26,9 @@ Every lifecycle request and result carries:
 | `environment` | Required for environment-bound operations. Forbidden for catalog-wide operations. |
 | `expected_generation` | Required for mutating environment-bound operations. A stale generation fails before the next effect. |
 
-Unknown JSON fields fail closed (`deny_unknown_fields`). A remote body must
+Unknown JSON fields in a request fail closed (`deny_unknown_fields`). A
+client ignores unknown fields in a result, so a newer server can add one
+without breaking older clients. A remote body must
 not carry `--allow-unapproved-development` or any other embedded
 local-development bypass.
 
@@ -98,9 +100,11 @@ built-in `local` environment.
 
 ## Compatibility
 
-Within version `1`, senders may add fields only through a new minor contract
-revision that existing receivers treat as unknown and refuse when the field
-would change admission. Removing an operation, changing digest meaning, or
+Within version `1`, a client may add a request field only through a new
+minor contract revision that existing servers treat as unknown and refuse
+when the field would change admission. A server may add an informational
+result field; clients from before results accepted unknown fields (#1172)
+refuse it, so such a field ships in a later release than that change. Removing an operation, changing digest meaning, or
 changing failure semantics requires version `2` and an explicit migration
 window.
 

@@ -317,9 +317,10 @@ pub fn parse_management_lifecycle_json(
     admit_management_lifecycle(&envelope, kind, granted_environment)
 }
 
-/// Versioned result shared by catalog lifecycle routes.
+/// Versioned result shared by catalog lifecycle routes. A client ignores
+/// fields it does not know, so a newer server can add one (#1172);
+/// requests stay strict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ManagementLifecycleResult {
     pub version: u32,
     pub operation: String,

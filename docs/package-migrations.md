@@ -128,7 +128,9 @@ Authenticated management API (ADR 0026), sibling to `/v1/reconcile`:
 | resume | `POST /v1/migrations/{name}/resume` |
 | rollback | `POST /v1/migrations/{name}/rollback` |
 
-Request and result documents use `version` `1` with `deny_unknown_fields`.
+Request and result documents use `version` `1`. Requests use
+`deny_unknown_fields`; a client ignores unknown top-level result fields, and
+the migration record inside a result stays strict.
 Unknown version, unknown profile, or an extra field that would change
 admission fails closed. `--allow-unapproved-development` is not a request
 field; remote apply, resume, and rollback require the signed approval

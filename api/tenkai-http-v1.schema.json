@@ -4092,8 +4092,7 @@
       "type": "object"
     },
     "IssuerStatus": {
-      "additionalProperties": false,
-      "description": "The issuer state of an environment for inspection.",
+      "description": "The issuer state of an environment for inspection. A view: clients\nignore fields they do not know (#1172).",
       "properties": {
         "candidate": {
           "anyOf": [
@@ -4151,8 +4150,7 @@
       "type": "object"
     },
     "IssuerSummary": {
-      "additionalProperties": false,
-      "description": "The issuer as `env inspect` and `status` show it. Never a key.",
+      "description": "The issuer as `env inspect` and `status` show it. Never a key. A view:\nclients ignore fields they do not know (#1172).",
       "properties": {
         "fingerprint": {
           "type": "string"
@@ -4178,8 +4176,7 @@
       "type": "object"
     },
     "ManagementLifecycleResult": {
-      "additionalProperties": false,
-      "description": "Versioned result shared by catalog lifecycle routes.",
+      "description": "Versioned result shared by catalog lifecycle routes. A client ignores\nfields it does not know, so a newer server can add one (#1172);\nrequests stay strict.",
       "properties": {
         "digest": {
           "type": "string"
@@ -4894,7 +4891,7 @@
       "type": "object"
     },
     "PackageMigrationResult": {
-      "additionalProperties": false,
+      "description": "The result of a migration route. A client ignores top-level fields it\ndoes not know (#1172); the digest-bound record inside stays strict.",
       "properties": {
         "record": {
           "$ref": "#/$defs/MigrationRecord"

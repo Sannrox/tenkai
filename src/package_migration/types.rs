@@ -248,8 +248,9 @@ pub struct PackageMigrationMutateRequest {
     pub plan_approvals: BTreeMap<String, crate::plan_approval::ApprovalEnvelope>,
 }
 
+/// The result of a migration route. A client ignores top-level fields it
+/// does not know (#1172); the digest-bound record inside stays strict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct PackageMigrationResult {
     pub version: u32,
     pub record: MigrationRecord,
