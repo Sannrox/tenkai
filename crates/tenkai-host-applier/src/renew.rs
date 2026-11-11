@@ -1,9 +1,10 @@
 //! One run of `tenkai-host-apply@<instance>.service` for a spooled workload
 //! certificate renewal (ADR 0046 §3).
 //!
-//! A renewal needs no approval: it installs a fresh certificate and key for
-//! exactly the grant an approved step installed, which this applier
-//! recorded itself. Under the product lock it checks that the product is
+//! A renewal needs no approval of its own: it installs a fresh certificate
+//! and key for exactly the grant an approved step installed, which this
+//! applier recorded itself, or that grant moved to the issuer an approved
+//! issue plan put in place of the recorded one (ADR 0046 §7). Under the product lock it checks that the product is
 //! still applied, that the record still holds the certificate the renewal
 //! replaces, and that the new certificate proves the recorded grant, is
 //! valid now and matches its key. Anything else is refused and recorded in
@@ -95,10 +96,15 @@ fn install(paths: &ApplierPaths, instance: &str) -> Result<()> {
             renewal.instance
         );
     }
-    let issued = spooled
-        .sealed
-        .bind_identity(Some(&record.grant))?
-        .context("the renewal carries no certificate")?;
+    let policy = || crate::config::load_trust(paths).map(|trust| trust.policy);
+    let issued = spooled.sealed.bind_renewal(
+        &record.grant,
+        &tenkai::host_apply::sealed::IssuerTrust {
+            policy: &policy,
+            environment,
+            now_ms: tenkai::now_millis(),
+        },
+    )?;
     secrets::write_instance_identity(paths, environment, &renewal.instance, &issued)
         .context("writing the renewed workload certificate")?;
     store::write_identity_record(

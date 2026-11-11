@@ -407,6 +407,17 @@ impl Run<'_> {
         // workload certificate the step issued.
         let issued = target.request.identity.as_ref();
         let spools = !target.request.opened_secrets.is_empty() || issued.is_some();
+        // The approved rotation plans that prove the further issuers of
+        // the certificate's bundle, which the applier checks itself.
+        let issuer_proofs = match (issued, self.config.sealing_dir.as_deref()) {
+            (Some(issued), Some(dir)) => {
+                match crate::identity_issuer::host_proofs(dir, environment, &issued.ca) {
+                    Ok(proofs) => proofs,
+                    Err(error) => return Ok(did_not_run(format!("{error:#}"))),
+                }
+            }
+            _ => Vec::new(),
+        };
         let sealed = spools.then(|| {
             crate::host_apply::sealed::HostSealedValues::new(
                 target
@@ -426,6 +437,7 @@ impl Run<'_> {
                     )
                     .collect(),
                 issued.map(Into::into),
+                issuer_proofs,
             )
         });
         let ended = crate::host_executor::step::run(
@@ -990,11 +1002,12 @@ impl BuiltinConfig {
             eprintln!("keeping the identity issuer for renewal failed: {error:#}");
         }
         let now_secs = crate::now_millis() / 1000;
-        // The host applier installs the granted issuer alone.
-        if manifest.deploy.executor == Some(SoftwareExecutorKind::Host) {
-            return crate::workload_identity::issue(grant, &issuer, key, now_secs).map(Some);
-        }
-        issue_with_bundle(dir, environment, grant, &issuer, key, now_secs).map(Some)
+        let bundle = if manifest.deploy.executor == Some(SoftwareExecutorKind::Host) {
+            Bundle::Host
+        } else {
+            Bundle::Workload
+        };
+        issue_with_bundle(dir, environment, grant, &issuer, key, now_secs, bundle).map(Some)
     }
 
     /// Check the server's sealed values against the plan step, which the
@@ -1446,7 +1459,7 @@ pub fn renew_identities(
     let mut unreadable = Vec::new();
     // A certificate whose bundle a rotation changed is renewed now, without
     // the restart spread: peers must trust the next issuer before it issues.
-    let trust = expected_trust(dir, environment);
+    let trust = expected_trust(dir, environment, Bundle::Workload);
     for adapter in config.executors.adapters() {
         // Restarts a crashed pass left part-way finish first.
         match adapter.resume_identity_restarts(&target) {
@@ -1483,7 +1496,7 @@ pub fn renew_identities(
             {
                 continue;
             }
-            let outcome = renew_one(dir, environment, &identity, now_secs, true)
+            let outcome = renew_one(dir, environment, &identity, now_secs, Bundle::Workload)
                 .and_then(|issued| {
                     adapter.renew_identity(&target, &identity, &issued)?;
                     Ok(now_secs + crate::workload_identity::WORKLOAD_CERTIFICATE_TTL_SECS)
@@ -1496,6 +1509,7 @@ pub fn renew_identities(
         }
     }
     if let Ok(host) = config.executors.host() {
+        let trust = expected_trust(dir, environment, Bundle::Host);
         match host.installed_identities(environment) {
             Ok(installed) => {
                 for (instance, identity) in installed {
@@ -1509,7 +1523,8 @@ pub fn renew_identities(
                         Ok(identity)
                             if identity.installed.grant.reload
                                 != crate::workload_identity::Reload::Runtime
-                                || !identity.installed.renewal_due(now_secs) =>
+                                || (!identity.installed.renewal_due(now_secs)
+                                    && !bundle_stale(&identity.installed, trust.as_ref())) =>
                         {
                             continue;
                         }
@@ -1635,11 +1650,17 @@ fn renew_host(
     identity: &crate::host_executor::InstalledHostIdentity,
     now_secs: i64,
 ) -> Result<i64> {
-    // The host applier installs the granted issuer alone.
-    let issued = renew_one(dir, environment, &identity.installed, now_secs, false)?;
+    let issued = renew_one(
+        dir,
+        environment,
+        &identity.installed,
+        now_secs,
+        Bundle::Host,
+    )?;
+    let proofs = crate::identity_issuer::host_proofs(dir, environment, &issued.ca)?;
     tokio::runtime::Handle::try_current()
         .context("renewing a host certificate needs the agent's runtime")?
-        .block_on(host.renew_identity(identity, &issued))?;
+        .block_on(host.renew_identity(identity, &issued, proofs))?;
     Ok(now_secs + crate::workload_identity::WORKLOAD_CERTIFICATE_TTL_SECS)
 }
 
@@ -1652,7 +1673,7 @@ fn renew_one(
     environment: &str,
     identity: &crate::workload_identity::InstalledIdentity,
     now_secs: i64,
-    bundle: bool,
+    bundle: Bundle,
 ) -> Result<crate::workload_identity::IssuedIdentity> {
     let issuer = crate::identity_issuer::cached_verified(dir, environment)?.context(
         "this runtime has verified no identity issuer yet; it renews once it applies a step that grants a certificate",
@@ -1677,10 +1698,17 @@ fn renew_one(
         ..granted.clone()
     };
     let key = issuer.open(environment, &SealedOpener::load(dir)?)?;
-    if !bundle {
-        return crate::workload_identity::issue(&grant, &issuer, key, now_secs);
-    }
-    issue_with_bundle(dir, environment, &grant, &issuer, key, now_secs)
+    issue_with_bundle(dir, environment, &grant, &issuer, key, now_secs, bundle)
+}
+
+/// Which issuers a certificate's trust bundle carries beside its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bundle {
+    /// Every issuer this runtime verified for a rotation.
+    Workload,
+    /// Only those a kept approved rotation plan proves, which the host
+    /// applier checks itself before it admits them.
+    Host,
 }
 
 /// Issue `grant` from `issuer` with the trust bundle of the issuers this
@@ -1693,8 +1721,9 @@ fn issue_with_bundle(
     issuer: &crate::identity_issuer::IssuerKey,
     key: rcgen::KeyPair,
     now_secs: i64,
+    bundle: Bundle,
 ) -> Result<crate::workload_identity::IssuedIdentity> {
-    let trusted = crate::identity_issuer::trust_bundle(dir, environment, issuer)
+    let trusted = trusted_issuers(dir, environment, issuer, bundle)
         .context("reading the trusted identity issuers")?;
     let certificates: Vec<&str> = trusted
         .iter()
@@ -1707,13 +1736,26 @@ fn issue_with_bundle(
 /// fingerprints with the issuer first, and the issuer's generation. None
 /// while this runtime has verified no issuer or cannot read its cache; a
 /// due renewal then fails visibly instead.
-fn expected_trust(dir: &Path, environment: &str) -> Option<(u64, Vec<String>)> {
+fn expected_trust(dir: &Path, environment: &str, bundle: Bundle) -> Option<(u64, Vec<String>)> {
     let issuer = crate::identity_issuer::cached_verified(dir, environment).ok()??;
-    let trusted = crate::identity_issuer::trust_bundle(dir, environment, &issuer).ok()?;
+    let trusted = trusted_issuers(dir, environment, &issuer, bundle).ok()?;
     let fingerprints = std::iter::once(issuer.fingerprint)
         .chain(trusted.into_iter().map(|trusted| trusted.fingerprint))
         .collect();
     Some((issuer.generation, fingerprints))
+}
+
+/// The issuers a `bundle` issued by `issuer` carries after it.
+fn trusted_issuers(
+    dir: &Path,
+    environment: &str,
+    issuer: &crate::identity_issuer::IssuerKey,
+    bundle: Bundle,
+) -> Result<Vec<crate::identity_issuer::IssuerKey>> {
+    match bundle {
+        Bundle::Workload => crate::identity_issuer::trust_bundle(dir, environment, issuer),
+        Bundle::Host => crate::identity_issuer::host_trust_bundle(dir, environment, issuer),
+    }
 }
 
 /// Whether `identity`, issued by the issuing issuer, lacks an issuer its
@@ -2619,7 +2661,7 @@ mod tests {
         // one written into the target beside a forged CA, is not renewed.
         let mut forged = installed.clone();
         forged.grant.issuer_fingerprint = next.fingerprint.clone();
-        let refused = renew_one(&dir, ENVIRONMENT, &forged, now, true).unwrap_err();
+        let refused = renew_one(&dir, ENVIRONMENT, &forged, now, Bundle::Workload).unwrap_err();
         assert!(format!("{refused:#}").contains("needs a new approved issuance"));
         assert!(
             renew_identities(&case.config, ENVIRONMENT, now)

@@ -249,8 +249,11 @@ compare-and-set, and a replay changes nothing. The runtime keeps each key it
 opens for an `add` or `issue` step, and every certificate it issues for a
 Helm target carries the issuer one generation before and after the issuing
 one in its trust bundle (`ca.pem`), after the issuing issuer. A certificate
-whose bundle lacks one of them is renewed on the next pass. The host applier
-accepts only the granted issuer in `ca.pem`.
+whose bundle lacks one of them is renewed on the next pass. A host
+certificate's bundle carries only the issuers an approved rotation plan the
+runtime kept proves. The runtime spools those plans with the certificate,
+and the host applier checks them against its own approval policy
+([Host releases](host-releases.md)).
 
 Work for a runtime that names `issuer_take_up`, idle or claimed, carries
 `issuer_proofs`, each an approved rotation plan (`plan`) and its

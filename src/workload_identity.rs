@@ -318,19 +318,12 @@ pub fn issue_trusting(
     Ok(issued)
 }
 
-/// [`check_issued`] for the host applier, which reads what it installs from
-/// a spool: `ca` must be the granted issuer alone, since nothing the
-/// applier verifies binds another issuer to an approval.
-pub fn check_issued_alone(issued: &IssuedIdentity, now_secs: i64) -> Result<()> {
+/// [`check_issued`], returning the fingerprints of the trust bundle's
+/// issuers, the granted one first. The host applier admits each further
+/// one only when an approved rotation plan proves it.
+pub fn check_issued_trust(issued: &IssuedIdentity, now_secs: i64) -> Result<Vec<String>> {
     check_issued(issued, now_secs)?;
-    ensure!(
-        check_certificate(&issued.grant, &issued.certificate, &issued.ca)?
-            .trust
-            .len()
-            == 1,
-        "ca.pem holds more than the granted issuer"
-    );
-    Ok(())
+    Ok(check_certificate(&issued.grant, &issued.certificate, &issued.ca)?.trust)
 }
 
 /// Check, where the files are written, that the certificate is signed by
@@ -364,13 +357,15 @@ struct CheckedLeaf {
     trust: Vec<String>,
 }
 
-/// Check that `certificate` is signed by the first certificate of `ca`,
-/// that it is the issuer `grant` names, and that the certificate's names
-/// and key usage are exactly the grant's. The rest of `ca` may only be
-/// other issuer certificates, at most [`MAX_BUNDLE_ISSUERS`] in all: a
-/// workload loads ca.pem as its trust bundle. Says nothing about time or
-/// the key.
-fn check_certificate(grant: &IdentityGrant, certificate: &str, ca: &str) -> Result<CheckedLeaf> {
+/// Fingerprints of the issuers in the trust bundle `ca`, in file order.
+/// Only parses: it checks nothing a signature proves.
+pub fn bundle_fingerprints(ca: &str) -> Result<Vec<String>> {
+    Ok(read_bundle(ca)?.1)
+}
+
+/// The issuer certificates of `ca` and their fingerprints, in file order:
+/// at most [`MAX_BUNDLE_ISSUERS`], each an issuer, none twice.
+fn read_bundle(ca: &str) -> Result<(Vec<x509_parser::pem::Pem>, Vec<String>)> {
     use x509_parser::prelude::*;
     let mut blocks = Vec::new();
     let mut rest = ca.as_bytes();
@@ -400,6 +395,18 @@ fn check_certificate(grant: &IdentityGrant, certificate: &str, ca: &str) -> Resu
         );
         trust.push(fingerprint);
     }
+    Ok((blocks, trust))
+}
+
+/// Check that `certificate` is signed by the first certificate of `ca`,
+/// that it is the issuer `grant` names, and that the certificate's names
+/// and key usage are exactly the grant's. The rest of `ca` may only be
+/// other issuer certificates, at most [`MAX_BUNDLE_ISSUERS`] in all: a
+/// workload loads ca.pem as its trust bundle. Says nothing about time or
+/// the key.
+fn check_certificate(grant: &IdentityGrant, certificate: &str, ca: &str) -> Result<CheckedLeaf> {
+    use x509_parser::prelude::*;
+    let (blocks, trust) = read_bundle(ca)?;
     ensure!(
         trust.first() == Some(&grant.issuer_fingerprint),
         "ca.pem does not start with the granted issuer {}",
@@ -627,13 +634,17 @@ mod tests {
         let mut swapped = issued.clone();
         swapped.ca = format!("{}{}", other.certificate, issued.ca);
         assert!(refused(&swapped, now).contains("does not start with"));
-        // Another issuer after it, which only a runtime may install.
+        // Another issuer after it, which the host applier admits only with a proof.
         let (next, _) = issuer();
         let mut bundle = issued.clone();
         bundle.ca = format!("{}{}", issued.ca, next.certificate);
-        check_issued(&bundle, now).unwrap();
-        let error = format!("{:#}", check_issued_alone(&bundle, now).unwrap_err());
-        assert!(error.contains("more than the granted issuer"), "{error}");
+        assert_eq!(
+            check_issued_trust(&bundle, now).unwrap(),
+            [
+                issued.grant.issuer_fingerprint.clone(),
+                next.fingerprint.clone()
+            ]
+        );
         // The same issuer twice.
         let mut twice = issued.clone();
         twice.ca = format!("{}{}", issued.ca, issued.ca);

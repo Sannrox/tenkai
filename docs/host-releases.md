@@ -115,6 +115,17 @@ exactly the recorded grant, is valid now and matches its key. Otherwise it
 records the refusal in `refused.json`, and the runtime retries on a later
 pass. A renewal never writes a result or advances the generation.
 
+During an issuer rotation
+([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md) §7) the
+runtime spools, beside a certificate, the approved rotation plans it
+verified. `ca.pem` may then hold the next or the previous issuer after the
+granted one. The applier admits each such issuer only when a spooled plan
+proves it under the applier's own approval policy, and only one generation
+from the granted issuer. Once an approved issue plan replaced the recorded
+issuer, a renewal may move the recorded grant to the issuer that replaced
+it, with everything else unchanged. A plan the applier's policy does not
+approve proves nothing, so the certificate is refused and names the issuer.
+
 The applier kills the command's process group when its own timeout fires
 (`timeout_seconds`) and when the unit is stopped (`systemctl stop` sends it
 SIGTERM). Nothing the command starts outlives the step: the applier is the

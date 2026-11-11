@@ -152,6 +152,7 @@ fn values(secret: &str, ciphertext: &[u8]) -> HostSealedValues {
             value: Zeroizing::new(STANDARD.encode(VALUE)),
         }],
         None,
+        Vec::new(),
     )
 }
 
