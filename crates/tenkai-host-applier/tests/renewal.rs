@@ -121,7 +121,7 @@ impl Host {
             serde_json::to_vec(&renewal).unwrap(),
         )
         .unwrap();
-        let values = HostSealedValues::new(Vec::new(), Some(issued.into()));
+        let values = HostSealedValues::new(Vec::new(), Some(issued.into()), Vec::new());
         std::fs::write(dir.join(SEALED_FILE), serde_json::to_vec(&values).unwrap()).unwrap();
         instance
     }

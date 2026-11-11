@@ -81,13 +81,15 @@ impl HostExecutor {
     }
 
     /// Have the applier replace `installed`'s certificate with `issued`,
-    /// and confirm from its record that it did. The applier refuses when
+    /// spooled with the approved rotation plans that prove its bundle's
+    /// further issuers or its move to the next issuer, and confirm from its record that it did. The applier refuses when
     /// the certificate changed since it was read, so a step that installed
     /// or removed one meanwhile wins.
     pub async fn renew_identity(
         &self,
         installed: &InstalledHostIdentity,
         issued: &IssuedIdentity,
+        issuer_proofs: Vec<crate::identity_issuer::IssuerProof>,
     ) -> Result<()> {
         let renewal = HostIdentityRenewal::new(&installed.record);
         let instance = renewal.instance_key();
@@ -95,7 +97,7 @@ impl HostExecutor {
         let spooled = self.spool_renewal(&instance, &renewal).and_then(|()| {
             self.write_sealed(
                 &instance,
-                &HostSealedValues::new(Vec::new(), Some(issued.into())),
+                &HostSealedValues::new(Vec::new(), Some(issued.into()), issuer_proofs),
             )
         });
         if let Err(error) = spooled {
@@ -318,7 +320,10 @@ mod tests {
         assert_eq!(installed.installed.grant, case.grant);
 
         let issued = case.issue();
-        executor.renew_identity(&installed, &issued).await.unwrap();
+        executor
+            .renew_identity(&installed, &issued, Vec::new())
+            .await
+            .unwrap();
         let recorded = executor
             .installed_identities("edge")
             .unwrap()
@@ -331,7 +336,7 @@ mod tests {
 
         let refused = case
             .executor(true)
-            .renew_identity(&recorded, &case.issue())
+            .renew_identity(&recorded, &case.issue(), Vec::new())
             .await
             .unwrap_err();
         assert!(

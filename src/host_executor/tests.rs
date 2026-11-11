@@ -354,6 +354,7 @@ async fn sealed_values_are_spooled_only_to_memory_and_cleaned_up_per_environment
             value: zeroize::Zeroizing::new("dmFsdWU=".into()),
         }],
         None,
+        Vec::new(),
     );
     let [stopped, live, foreign] = ["a", "b", "c"].map(|c| c.repeat(64));
     let executor_in = |base: &std::path::Path| {

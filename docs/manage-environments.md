@@ -224,9 +224,12 @@ tenkaictl --target remote identity-issuer rewrap prod --recipient sha256:<hex> -
     the previous issuer; a runtime that joins later trusts it through the
     approved issue plan. Certificates of the replaced issuer renew from the
     next one as they fall due.
-  - `status` shows the next and previous issuers. `host` certificates keep
-    the issuer alone for now, so an environment with them waits at the
-    issue step.
+  - `status` shows the next and previous issuers. A `host` certificate's
+    bundle gets an issuer only once the host's own approval policy accepts
+    the plan that added or replaced it: a host whose policy does not
+    approve the rotation plans holds the issue step back. A `host`
+    certificate with `reload = "restart"` is not renewed in place, so it
+    takes up the next issuer only through a new deployment.
 - `rewrap` wraps the issuer key for one more recipient: another runtime's
   key or the recovery key. Run it after activation; until then only the
   generating runtime can open the issuer. A runtime enrolled later can use

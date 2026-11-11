@@ -79,7 +79,16 @@ pub fn intake(
                     &verified.product_instance
                 };
                 let secrets = values.bind(&verified.environment, instance, &verified.sealed)?;
-                (secrets, values.bind_identity(verified.identity.as_ref())?)
+                let policy = || Ok(trust.policy.clone());
+                let issuers = tenkai::host_apply::sealed::IssuerTrust {
+                    policy: &policy,
+                    environment: &verified.environment,
+                    now_ms,
+                };
+                (
+                    secrets,
+                    values.bind_identity(verified.identity.as_ref(), &issuers)?,
+                )
             }
         };
         let workdir = spooled.copy_artifacts(&verified.inputs, config.copy_limits())?;

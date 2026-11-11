@@ -1199,6 +1199,118 @@ pub fn trust_bundle(
         .collect())
 }
 
+fn proofs_path(sealing_dir: &std::path::Path, environment: &str) -> Result<std::path::PathBuf> {
+    crate::ontology::validate_identifier("environment", environment)?;
+    Ok(sealing_dir.join(format!("identity-issuer-proofs-{environment}.json")))
+}
+
+/// The issuer `proof`'s plan has bundles trust: the key an add step adds,
+/// or the key an issue step replaces.
+fn proof_trusts(proof: &IssuerProof) -> Option<&IssuerKey> {
+    let [step] = proof.plan.steps.as_slice() else {
+        return None;
+    };
+    let issuer = step.issuer.as_ref()?;
+    match (issuer.phase, &issuer.replaces) {
+        (Some(RotationPhase::Add), None) => Some(&issuer.key),
+        (Some(RotationPhase::Issue), Some(replaced)) => Some(replaced),
+        _ => None,
+    }
+}
+
+/// Keep `proof`, which this runtime verified, for the host applier, which
+/// checks it itself before a host certificate's bundle may carry the issuer
+/// it proves (ADR 0046 §7). Call after [`cache_trusted`]: a proof is kept
+/// only while the issuer it proves is trusted. A later delivery of the same
+/// plan replaces the kept one; an identical one writes nothing.
+pub fn cache_proof(
+    sealing_dir: &std::path::Path,
+    environment: &str,
+    proof: &IssuerProof,
+) -> Result<()> {
+    // The applier needs no wraps; the issuing key's fingerprint is the plan's.
+    let proof = IssuerProof {
+        current: None,
+        ..proof.clone()
+    };
+    let path = proofs_path(sealing_dir, environment)?;
+    let lock = path.with_extension("lock");
+    crate::fenced_mutation::with_mutation_lock(&lock, || {
+        let mut proofs = cached_proofs(sealing_dir, environment)?;
+        let bytes = serde_json::to_vec(&proof)?;
+        if proofs
+            .iter()
+            .map(serde_json::to_vec)
+            .any(|kept| kept.is_ok_and(|kept| kept == bytes))
+        {
+            return Ok(());
+        }
+        proofs.retain(|kept| kept.plan.id != proof.plan.id);
+        proofs.push(proof);
+        let trusted = cached_trusted(sealing_dir, environment)?;
+        proofs.retain(|kept| {
+            proof_trusts(kept).is_some_and(|key| {
+                trusted
+                    .iter()
+                    .any(|trusted| trusted.fingerprint == key.fingerprint)
+            })
+        });
+        crate::atomic_state::write_file(&path, &serde_json::to_vec_pretty(&proofs)?, Some(0o600))
+            .with_context(|| format!("writing {}", path.display()))
+    })?
+}
+
+/// The proofs [`cache_proof`] kept for `environment`.
+fn cached_proofs(sealing_dir: &std::path::Path, environment: &str) -> Result<Vec<IssuerProof>> {
+    let path = proofs_path(sealing_dir, environment)?;
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).with_context(|| format!("reading {}", path.display()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// [`trust_bundle`] for a host certificate: only the issuers a kept proof
+/// proves, since the host applier admits no other.
+pub fn host_trust_bundle(
+    sealing_dir: &std::path::Path,
+    environment: &str,
+    issuing: &IssuerKey,
+) -> Result<Vec<IssuerKey>> {
+    let proofs = cached_proofs(sealing_dir, environment)?;
+    Ok(trust_bundle(sealing_dir, environment, issuing)?
+        .into_iter()
+        .filter(|kept| {
+            proofs
+                .iter()
+                .filter_map(proof_trusts)
+                .any(|proven| proven.fingerprint == kept.fingerprint)
+        })
+        .collect())
+}
+
+/// The kept proofs of the issuers the bundle `ca` carries after its first,
+/// which the host applier needs to admit them.
+pub fn host_proofs(
+    sealing_dir: &std::path::Path,
+    environment: &str,
+    ca: &str,
+) -> Result<Vec<IssuerProof>> {
+    let further: Vec<String> = crate::workload_identity::bundle_fingerprints(ca)?
+        .into_iter()
+        .skip(1)
+        .collect();
+    if further.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(cached_proofs(sealing_dir, environment)?
+        .into_iter()
+        .filter(|proof| proof_trusts(proof).is_some_and(|key| further.contains(&key.fingerprint)))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1418,10 +1530,10 @@ mod tests {
     /// local policy approves, and a replaced one only through an approved
     /// issue plan: a key swapped into the approved plan, a plan of another
     /// environment, another kind of step or missing approvals are refused.
-    #[test]
-    fn a_runtime_trusts_rotated_issuers_only_through_approved_plans() {
+    /// A host approval policy where one approval of `alice` (ops) runs a plan.
+    fn ops_fixture() -> crate::host_apply::fixture::HostFixture {
         use crate::approval_policy::{QuorumPurpose, QuorumRule};
-        let fixture = crate::host_apply::fixture::HostFixture::new(
+        crate::host_apply::fixture::HostFixture::new(
             &[("alice", &["ops"])],
             vec![QuorumRule {
                 purpose: QuorumPurpose::ExecutePlan,
@@ -1430,35 +1542,61 @@ mod tests {
                 exclude_requester: false,
                 min_criticality: None,
             }],
-        );
+        )
+    }
+
+    /// A succeeded plan of `environment` whose one step rotates to `key`.
+    fn rotation_plan(
+        environment: &str,
+        key: &IssuerKey,
+        phase: Option<RotationPhase>,
+        replaces: Option<&IssuerKey>,
+        now_ms: i64,
+    ) -> crate::plan::Plan {
+        let mut step = issuer_step(key.clone(), None, None, phase);
+        step.id = format!("plan:{environment}:step:0");
+        step.issuer.as_mut().unwrap().replaces = replaces.cloned();
+        crate::plan::Plan {
+            format_version: crate::plan::PLAN_FORMAT_VERSION,
+            id: format!("plan:{environment}:{phase:?}:{}", key.generation),
+            content_id: "content".into(),
+            environment: environment.into(),
+            created_at: now_ms,
+            inputs: Vec::new(),
+            steps: vec![step],
+            state: crate::plan::PlanState::Succeeded,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+            credential_runway: None,
+        }
+    }
+
+    /// `plan` with alice's approval.
+    fn approved(
+        fixture: &crate::host_apply::fixture::HostFixture,
+        plan: crate::plan::Plan,
+        now_ms: i64,
+    ) -> IssuerProof {
+        IssuerProof {
+            approvals: vec![fixture.approve(&plan, 0, now_ms)],
+            plan,
+            current: None,
+        }
+    }
+
+    #[test]
+    fn a_runtime_trusts_rotated_issuers_only_through_approved_plans() {
+        let fixture = ops_fixture();
         let runtime = Runtime::new("proof");
         let now_ms = crate::now_millis();
         let next = runtime.candidate(2);
         let plan = |environment: &str, phase: Option<RotationPhase>| {
-            let mut step = issuer_step(next.clone(), None, None, phase);
-            step.id = format!("plan:{environment}:step:0");
-            crate::plan::Plan {
-                format_version: crate::plan::PLAN_FORMAT_VERSION,
-                id: format!("plan:{environment}"),
-                content_id: "content".into(),
-                environment: environment.into(),
-                created_at: now_ms,
-                inputs: Vec::new(),
-                steps: vec![step],
-                state: crate::plan::PlanState::Succeeded,
-                gates_skipped: None,
-                status_detail: String::new(),
-                maintenance_blocked: false,
-                prior_warnings: Vec::new(),
-                recalled_recovery_reason: None,
-                credential_runway: None,
-            }
+            rotation_plan(environment, &next, phase, None, now_ms)
         };
-        let proof = |plan: crate::plan::Plan| IssuerProof {
-            approvals: vec![fixture.approve(&plan, 0, now_ms)],
-            plan,
-            current: None,
-        };
+        let proof = |plan: crate::plan::Plan| approved(&fixture, plan, now_ms);
         let policy = Some(&fixture.trust.policy);
         let approved = proof(plan("prod", Some(RotationPhase::Add)));
         assert_eq!(
@@ -1493,9 +1631,13 @@ mod tests {
         // generation back; a swapped one breaks the approval.
         let replaced = runtime.candidate(1);
         let issue = |replaces: IssuerKey| {
-            let mut plan = plan("prod", Some(RotationPhase::Issue));
-            plan.steps[0].issuer.as_mut().unwrap().replaces = Some(replaces);
-            plan
+            rotation_plan(
+                "prod",
+                &next,
+                Some(RotationPhase::Issue),
+                Some(&replaces),
+                now_ms,
+            )
         };
         let approved_issue = proof(issue(replaced.clone()));
         assert_eq!(
@@ -1535,6 +1677,139 @@ mod tests {
         assert!(verify_proof(policy, "prod", &skipped, now_ms).is_err());
         let bare_issue = proof(plan("prod", Some(RotationPhase::Issue)));
         assert!(verify_proof(policy, "prod", &bare_issue, now_ms).is_err());
+    }
+
+    /// A host certificate's bundle carries a further issuer only with a
+    /// kept approved plan proving it, and the host applier admits it, or a
+    /// renewal moved to the next issuer, only when that plan passes its own
+    /// approval policy.
+    #[test]
+    fn the_host_applier_admits_only_issuers_an_approved_plan_proves() {
+        use crate::host_apply::sealed::{HostSealedValues, IssuerTrust};
+        use crate::workload_identity::{CertificateRole, IdentityGrant, IssuedIdentity, Reload};
+        let fixture = ops_fixture();
+        let runtime = Runtime::new("host-bundle");
+        let dir = runtime.dir.as_path();
+        let now_ms = crate::now_millis();
+        let (first, second) = (runtime.candidate(1), runtime.candidate(2));
+        cache_verified(dir, "prod", &first).unwrap();
+        // Trusted from the add step it ran, with no proof yet: workload
+        // bundles carry it, host bundles do not.
+        cache_trusted(dir, "prod", &second).unwrap();
+        assert_eq!(
+            trust_bundle(dir, "prod", &first).unwrap(),
+            std::slice::from_ref(&second)
+        );
+        assert!(host_trust_bundle(dir, "prod", &first).unwrap().is_empty());
+        let add = approved(
+            &fixture,
+            rotation_plan("prod", &second, Some(RotationPhase::Add), None, now_ms),
+            now_ms,
+        );
+        cache_proof(dir, "prod", &add).unwrap();
+        cache_proof(dir, "prod", &add).unwrap();
+        assert_eq!(cached_proofs(dir, "prod").unwrap().len(), 1);
+        assert_eq!(
+            host_trust_bundle(dir, "prod", &first).unwrap(),
+            std::slice::from_ref(&second)
+        );
+
+        let grant = |issuer: &IssuerKey| IdentityGrant {
+            uri: "tenkai://prod/api".into(),
+            dns_names: vec!["api.internal".into()],
+            certificate: CertificateRole::Server,
+            reload: Reload::Runtime,
+            issuer_generation: issuer.generation,
+            issuer_fingerprint: issuer.fingerprint.clone(),
+            peers: Default::default(),
+        };
+        let issue = |from: &IssuerKey, beside: &IssuerKey| {
+            let key = from.open("prod", &runtime.opener()).unwrap();
+            crate::workload_identity::issue_trusting(
+                &grant(from),
+                from,
+                key,
+                &[beside.certificate.as_str()],
+                now_ms / 1000,
+            )
+            .unwrap()
+        };
+        let spooled = |issued: &IssuedIdentity, proofs: Vec<IssuerProof>| {
+            HostSealedValues::new(Vec::new(), Some(issued.into()), proofs)
+        };
+        let host_policy = || Ok(fixture.trust.policy.clone());
+        let trust = IssuerTrust {
+            policy: &host_policy,
+            environment: "prod",
+            now_ms,
+        };
+        let mut stricter = fixture.trust.policy.clone();
+        stricter.signers.clear();
+        let stricter_policy = || Ok(stricter.clone());
+        let strict = IssuerTrust {
+            policy: &stricter_policy,
+            ..trust
+        };
+
+        // Before promotion: the next issuer beside the granted one.
+        let issued = issue(&first, &second);
+        let proofs = host_proofs(dir, "prod", &issued.ca).unwrap();
+        assert_eq!(proofs.len(), 1);
+        spooled(&issued, proofs.clone())
+            .bind_identity(Some(&grant(&first)), &trust)
+            .unwrap();
+        for (values, trust) in [
+            (spooled(&issued, Vec::new()), &trust),
+            (spooled(&issued, proofs), &strict),
+        ] {
+            let error = format!(
+                "{:#}",
+                values
+                    .bind_identity(Some(&grant(&first)), trust)
+                    .unwrap_err()
+            );
+            assert!(error.contains("no approved rotation plan"), "{error}");
+        }
+
+        // After promotion: a renewal moves the recorded grant to the issuer
+        // an approved issue plan put in place of its own, and only then.
+        let promoted = approved(
+            &fixture,
+            rotation_plan(
+                "prod",
+                &second,
+                Some(RotationPhase::Issue),
+                Some(&first),
+                now_ms,
+            ),
+            now_ms,
+        );
+        cache_proof(dir, "prod", &promoted).unwrap();
+        let renewed = issue(&second, &first);
+        let proofs = host_proofs(dir, "prod", &renewed.ca).unwrap();
+        assert_eq!(proofs.len(), 1);
+        assert_eq!(
+            spooled(&renewed, proofs.clone())
+                .bind_renewal(&grant(&first), &trust)
+                .unwrap()
+                .grant,
+            grant(&second)
+        );
+        for (values, trust) in [
+            (spooled(&renewed, vec![add.clone()]), &trust),
+            (spooled(&renewed, proofs), &strict),
+        ] {
+            assert!(values.bind_renewal(&grant(&first), trust).is_err());
+        }
+        // A renewal from the recorded issuer still binds the recorded grant.
+        let proofs = host_proofs(dir, "prod", &issued.ca).unwrap();
+        assert_eq!(
+            spooled(&issued, proofs)
+                .bind_renewal(&grant(&first), &trust)
+                .unwrap()
+                .grant,
+            grant(&first)
+        );
     }
 
     /// A runtime keeps each issuer an approved step verified, and a bundle

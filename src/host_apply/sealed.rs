@@ -11,14 +11,20 @@
 //! The same document carries the workload certificate a step issues
 //! (ADR 0046 §4), whose private key the runtime generated: the applier
 //! accepts it only when it is signed by the approved issuer for exactly the
-//! approved grant.
+//! approved grant. During an issuer rotation (ADR 0046 §7) the document also
+//! carries the approved rotation plans the runtime verified: the applier
+//! checks them against its own approval policy, and admits a further issuer
+//! in the trust bundle, or a renewal from the next issuer, only as one of
+//! them proves.
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use crate::host_apply::HostApprovalPolicy;
+use crate::identity_issuer::{IssuerProof, Proven};
 use crate::plan::SealedStep;
 use crate::sealed_secret::{SealedTarget, SealedValue, SecretRef};
 use crate::workload_identity::{IdentityGrant, IssuedIdentity};
@@ -81,6 +87,20 @@ pub struct HostSealedValues {
     pub values: Vec<HostSealedValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<HostIdentity>,
+    /// Approved rotation plans that prove the further issuers of the
+    /// certificate's trust bundle, or a renewal from the next issuer. Sent
+    /// only with such a certificate, which an older applier refuses anyway.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issuer_proofs: Vec<IssuerProof>,
+}
+
+/// What the applier checks [`HostSealedValues::issuer_proofs`] against: its
+/// approval policy, loaded only when a proof is spooled, for one environment
+/// at one time.
+pub struct IssuerTrust<'a> {
+    pub policy: &'a dyn Fn() -> Result<HostApprovalPolicy>,
+    pub environment: &'a str,
+    pub now_ms: i64,
 }
 
 /// A workload certificate the runtime issued, as PEM.
@@ -131,11 +151,16 @@ impl std::fmt::Debug for BoundSecret {
 impl HostSealedValues {
     /// The document for `values`, already checked by the runtime against the
     /// plan step it writes.
-    pub fn new(values: Vec<HostSealedValue>, identity: Option<HostIdentity>) -> Self {
+    pub fn new(
+        values: Vec<HostSealedValue>,
+        identity: Option<HostIdentity>,
+        issuer_proofs: Vec<IssuerProof>,
+    ) -> Self {
         Self {
             schema: SEALED_SCHEMA.into(),
             values,
             identity,
+            issuer_proofs,
         }
     }
 
@@ -198,22 +223,18 @@ impl HostSealedValues {
 
     /// Bind the workload certificate to `approved`, the grant of the
     /// verified step: one is spooled exactly when the step grants one, and
-    /// it is signed by the approved issuer for exactly the approved names.
+    /// it is signed by the approved issuer for exactly the approved names,
+    /// with only proven further issuers in its bundle.
     pub fn bind_identity(
         &self,
         approved: Option<&IdentityGrant>,
+        trust: &IssuerTrust<'_>,
     ) -> Result<Option<IssuedIdentity>> {
         match (&self.identity, approved) {
             (None, None) => Ok(None),
             (Some(identity), Some(grant)) => {
-                let issued = IssuedIdentity {
-                    grant: grant.clone(),
-                    certificate: identity.certificate.clone(),
-                    key: identity.key.clone(),
-                    ca: identity.ca.clone(),
-                };
-                crate::workload_identity::check_issued_alone(&issued, crate::now_millis() / 1000)?;
-                Ok(Some(issued))
+                let proven = self.proven(trust)?;
+                check_bundle(identity.issued(grant), &proven, trust.now_ms).map(Some)
             }
             (None, Some(_)) => {
                 bail!("the approved step grants a workload certificate, and none was spooled")
@@ -223,6 +244,107 @@ impl HostSealedValues {
             }
         }
     }
+
+    /// Bind a renewed certificate to `recorded`, the grant the applier
+    /// installed. It is that grant from the same issuer, or, once an
+    /// approved issue plan replaced that issuer, the same grant from the
+    /// issuer that replaced it.
+    pub fn bind_renewal(
+        &self,
+        recorded: &IdentityGrant,
+        trust: &IssuerTrust<'_>,
+    ) -> Result<IssuedIdentity> {
+        let identity = self
+            .identity
+            .as_ref()
+            .context("the renewal carries no certificate")?;
+        let proven = self.proven(trust)?;
+        let first = crate::workload_identity::bundle_fingerprints(&identity.ca)?
+            .into_iter()
+            .next();
+        let grant = if first.as_ref() == Some(&recorded.issuer_fingerprint) {
+            recorded.clone()
+        } else {
+            proven
+                .iter()
+                .filter(|proven| {
+                    proven.trusted.generation == recorded.issuer_generation
+                        && proven.trusted.fingerprint == recorded.issuer_fingerprint
+                })
+                .filter_map(|proven| proven.issuing.as_ref())
+                .find(|issuing| first.as_ref() == Some(&issuing.fingerprint))
+                .map(|issuing| IdentityGrant {
+                    issuer_generation: issuing.generation,
+                    issuer_fingerprint: issuing.fingerprint.clone(),
+                    ..recorded.clone()
+                })
+                .with_context(|| {
+                    format!(
+                        "the renewed certificate is not from the recorded issuer {}, and no approved issue plan replaced it with its issuer",
+                        recorded.issuer_fingerprint
+                    )
+                })?
+        };
+        check_bundle(identity.issued(&grant), &proven, trust.now_ms)
+    }
+
+    /// The spooled proofs that verify under the applier's policy. One that
+    /// does not is left out, so the issuer it would prove is refused by
+    /// name; with none spooled the policy is never read.
+    fn proven(&self, trust: &IssuerTrust<'_>) -> Result<Vec<Proven>> {
+        if self.issuer_proofs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let policy = (trust.policy)()?;
+        Ok(self
+            .issuer_proofs
+            .iter()
+            .filter_map(|proof| {
+                crate::identity_issuer::verify_proof(
+                    Some(&policy),
+                    trust.environment,
+                    proof,
+                    trust.now_ms,
+                )
+                .inspect_err(|error| eprintln!("an issuer proof was refused: {error:#}"))
+                .ok()
+            })
+            .collect())
+    }
+}
+
+impl HostIdentity {
+    fn issued(&self, grant: &IdentityGrant) -> IssuedIdentity {
+        IssuedIdentity {
+            grant: grant.clone(),
+            certificate: self.certificate.clone(),
+            key: self.key.clone(),
+            ca: self.ca.clone(),
+        }
+    }
+}
+
+/// Check `issued` where the applier writes it, and that every issuer of its
+/// bundle after the granted one is one generation from it and trusted by
+/// an approved rotation plan in `proven`.
+fn check_bundle(issued: IssuedIdentity, proven: &[Proven], now_ms: i64) -> Result<IssuedIdentity> {
+    let trust = crate::workload_identity::check_issued_trust(&issued, now_ms / 1000)?;
+    for fingerprint in trust.iter().skip(1) {
+        let approved = proven.iter().any(|proven| {
+            proven.trusted.fingerprint == *fingerprint
+                && proven
+                    .trusted
+                    .generation
+                    .abs_diff(issued.grant.issuer_generation)
+                    == 1
+        });
+        if !approved {
+            bail!(
+                "ca.pem holds issuer {fingerprint}, which no approved rotation plan proves next to the granted issuer"
+            );
+        }
+    }
+    Ok(issued)
 }
 
 /// Filesystem types whose pages stay in memory (reaching disk only through
@@ -280,6 +402,7 @@ mod tests {
                 value: Zeroizing::new(STANDARD.encode(VALUE)),
             }],
             None,
+            Vec::new(),
         )
     }
 

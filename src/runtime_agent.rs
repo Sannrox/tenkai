@@ -1139,6 +1139,8 @@ impl RuntimeClient {
                 crate::identity_issuer::cache_trusted(dir, &self.environment, key)?;
             }
         }
+        // Kept for the host applier, which checks the plan itself.
+        crate::identity_issuer::cache_proof(dir, &self.environment, proof)?;
         // The server hands out an issue plan only once it recorded the
         // step, so the next issuer now issues: renew from it if this
         // runtime can open it.
