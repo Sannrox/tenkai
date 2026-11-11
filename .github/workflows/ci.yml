@@ -382,6 +382,11 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
+          # The baseline build needs the base's console zip. When the pin
+          # moves, let each build download and check its own pinned zip.
+          if ! git diff --quiet "$BASE" HEAD -- ui/console.pin; then
+            unset TENKAI_UI_BUNDLE
+          fi
           # Every workspace library crate, so a new crate is covered without editing this list.
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"
           mapfile -t packages < <(jq -r '.packages[] | select(any(.targets[]; .kind | index("lib"))) | .name' <<<"$metadata")
