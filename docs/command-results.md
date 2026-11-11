@@ -84,7 +84,7 @@ Mutation retry behavior:
 | Command | Reconciliation before another attempt |
 | --- | --- |
 | `publish` | Inspect the immutable `product@version`; identical publication is idempotent. |
-| `promote` | Inspect the channel head before promoting again. |
+| `promote` | Inspect the channel head before promoting again. `--expected-head <product>@<version>` makes a retry or restore refuse a head another publisher moved. |
 | `plan` | Inspect the referenced/latest environment plan before creating another. |
 | `apply` | Inspect plan state and environment status; never blindly repeat an unknown apply. |
 | `rollback` | Inspect the rollback plan and environment; approval-required and unknown rollback are not safe to repeat blindly. |

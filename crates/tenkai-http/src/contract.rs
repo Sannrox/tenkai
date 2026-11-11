@@ -32,7 +32,7 @@ use tenkai::fleet::FleetStatusReport;
 use tenkai::host_identity::AuthSession;
 use tenkai::management_lifecycle::{
     ApplyRequest, ApproveRequest, ChannelHoldRequest, DeliveryHoldRequest,
-    ManagementLifecycleResult, PlanRequest, PromoteRequest, PublishRequest, RecallRequest,
+    ManagementLifecycleResult, PlanRequest, PromoteHttpRequest, PublishRequest, RecallRequest,
     RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
     UnsubscribeRequest,
 };
@@ -741,7 +741,7 @@ pub fn http_contract() -> Value {
             method: "POST",
             path: "/v1/channels/{channel}/promote",
             auth: Auth::Publish,
-            request: Some(schema::<PromoteRequest>(&mut g)),
+            request: Some(schema::<PromoteHttpRequest>(&mut g)),
             response: lifecycle,
         },
         Route {
@@ -1069,7 +1069,7 @@ mod tests {
             .unwrap();
         assert_eq!(lifecycle.digest.as_deref(), Some("sha256:aa"));
         let request =
-            serde_json::from_value::<tenkai::management_lifecycle::PromoteRequest>(json!({
+            serde_json::from_value::<tenkai::management_lifecycle::PromoteHttpRequest>(json!({
                 "version": 1,
                 "operation": "promote",
                 "spec": "api@1.0.0",

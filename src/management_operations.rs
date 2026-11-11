@@ -1581,6 +1581,19 @@ impl ManagementOperations {
         channel: &str,
         request: PromoteRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
+        self.promote_release_expecting(credential, channel, request, None)
+            .await
+    }
+
+    /// [`Self::promote_release`], refused unless the channel is empty, heads
+    /// `spec`, or heads `expected_head` (#1158).
+    pub async fn promote_release_expecting(
+        &self,
+        credential: &CredentialMaterial,
+        channel: &str,
+        request: PromoteRequest,
+        expected_head: Option<&str>,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
         self.refuse_agent(&context, "catalog.promote")?;
         Self::require_capability(&context, DeliveryCapability::Publish)?;
@@ -1597,10 +1610,23 @@ impl ManagementOperations {
             self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
+        management_lifecycle::require_promote_expected_head(&request.spec, expected_head)
+            .map_err(map_lifecycle_error)?;
         let actor = &context.audit_principal();
         self.audit(actor, "catalog.promote.requested")?;
         let mut ctx = self.catalog_ctx(&context)?;
-        let message = crate::catalog::promote(&mut ctx, &context, &request.spec, channel)
+        let message = crate::catalog::promote_expecting(
+            &mut ctx,
+            &context,
+            &request.spec,
+            channel,
+            expected_head,
+        )
+        .await
+        .map_err(map_catalog_error)?;
+        // Releases are immutable, so the digest read after the move is the
+        // content the channel now heads.
+        let digest = crate::catalog::release_digest(&mut ctx, &request.spec)
             .await
             .map_err(map_catalog_error)?;
         self.audit(actor, "catalog.promote.completed")?;
@@ -1614,7 +1640,8 @@ impl ManagementOperations {
             ManagementLifecycleOperation::Promote,
             message,
             Some(request.spec),
-        ))
+        )
+        .with_digest(digest))
     }
 
     pub async fn recall_release(
@@ -2957,6 +2984,7 @@ fn map_lifecycle_error(error: anyhow::Error) -> ManagementError {
 fn map_catalog_error(error: anyhow::Error) -> ManagementError {
     let message = format!("{error:#}");
     if message.contains("already published")
+        || message.contains("refusing to replace")
         || message.contains("no delivery hold")
         || message.contains("no held failed target")
     {

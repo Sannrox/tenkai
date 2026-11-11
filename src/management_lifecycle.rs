@@ -476,6 +476,37 @@ pub struct PromoteRequest {
     pub spec: String,
 }
 
+// HTTP promote body with optional `expected_head` (#1158). A separate type so
+// adding the field is not a Rust break on PromoteRequest; the published schema
+// name stays PromoteRequest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "PromoteRequest")]
+pub struct PromoteHttpRequest {
+    pub version: u32,
+    pub operation: String,
+    pub spec: String,
+    /// `<product>@<version>` the channel must head for the promotion to
+    /// replace it (#1158). An empty channel, or one already heading `spec`,
+    /// is promoted either way. A server that predates the field refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub expected_head: Option<String>,
+}
+
+impl PromoteHttpRequest {
+    pub fn into_promote(self) -> (PromoteRequest, Option<String>) {
+        (
+            PromoteRequest {
+                version: self.version,
+                operation: self.operation,
+                spec: self.spec,
+            },
+            self.expected_head,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecallRequest {
@@ -804,6 +835,22 @@ pub fn admit_promote(
         bail!("promote requires <product>@<version>");
     }
     Ok(admitted)
+}
+
+/// Refuses `expected_head` that is not `<product>@<version>` of the same
+/// product as `spec` (#1158).
+pub(crate) fn require_promote_expected_head(spec: &str, expected_head: Option<&str>) -> Result<()> {
+    let Some(expected) = expected_head else {
+        return Ok(());
+    };
+    let Some((expected_product, _)) = expected.split_once('@') else {
+        bail!("expected_head must be <product>@<version>, got {expected:?}");
+    };
+    let spec_product = spec.split_once('@').map(|(product, _)| product);
+    if spec_product != Some(expected_product) {
+        bail!("expected_head {expected} names another product than {spec}");
+    }
+    Ok(())
 }
 
 pub fn admit_recall(

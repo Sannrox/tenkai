@@ -278,7 +278,11 @@ pub(crate) async fn run(
                 );
             }
         },
-        Command::Promote { spec, channel } => {
+        Command::Promote {
+            spec,
+            channel,
+            expected_head,
+        } => {
             if output == OutputFormat::JsonV1 {
                 let product = spec.split_once('@').map_or(spec.as_str(), |value| value.0);
                 tenkai::command_result::validate_resource_reference(
@@ -288,7 +292,9 @@ pub(crate) async fn run(
                 .map_err(|message| anyhow::anyhow!(message))?;
             }
             let actor = embedded_management_actor()?;
-            let message = catalog::promote(ctx, &actor, &spec, &channel).await?;
+            let message =
+                catalog::promote_expecting(ctx, &actor, &spec, &channel, expected_head.as_deref())
+                    .await?;
             if output == OutputFormat::JsonV1 {
                 print_machine_result(&crate::output::promote_result(&spec, &channel))?;
             } else {

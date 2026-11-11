@@ -474,3 +474,100 @@ async fn catalog_list_rejects_invalid_limit() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// POSTs a promote with `expected_head`, returning the status and body.
+async fn promote_expecting(
+    app: &Router,
+    spec: &str,
+    expected_head: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/channels/stable/promote")
+                .header("authorization", "Bearer management-secret")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&tenkai::management_lifecycle::PromoteHttpRequest {
+                        version: 1,
+                        operation: "promote".into(),
+                        spec: spec.into(),
+                        expected_head: expected_head.map(str::to_string),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+async fn stable_head(app: &Router) -> serde_json::Value {
+    let (_, channels) = get_json(app, "/v1/channels", Some("management-secret")).await;
+    channels["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "stable")
+        .map(|item| item["head"].clone())
+        .unwrap_or_default()
+}
+
+/// Promote names the manifest digest it moved onto the channel, and a
+/// compensating promote with `expected_head` never overwrites a head another
+/// publisher moved (#1158).
+#[tokio::test]
+async fn promote_returns_its_digest_and_honours_an_expected_head() {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-catalog-promote-expected-{}-{}",
+        std::process::id(),
+        tenkai::now_millis()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (app, _) = catalog_router(&root).await;
+    for version in ["1.0.0", "1.1.0", "1.2.0"] {
+        publish(&app, &signed_catalog_fixture(&root, version)).await;
+    }
+
+    // Onto an empty channel, whatever head is expected.
+    let (status, first) = promote_expecting(&app, "api@1.0.0", Some("api@9.9.9")).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let digest = first["digest"].as_str().expect("promote digest");
+    assert!(
+        digest.len() == 71 && digest.starts_with("sha256:"),
+        "{digest}"
+    );
+
+    // Another publisher moves the head to 1.2.0.
+    let (status, moved) = promote_expecting(&app, "api@1.2.0", None).await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    assert_ne!(moved["digest"], first["digest"]);
+
+    // A restore that expects 1.1.0 is refused and names the current head.
+    let (status, refused) = promote_expecting(&app, "api@1.0.0", Some("api@1.1.0")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(
+        refused.to_string().contains("api@1.2.0"),
+        "names the current head: {refused}"
+    );
+    assert_eq!(stable_head(&app).await, "tenkai:release:api@1.2.0");
+
+    // Expecting the actual head replaces it; repeating it is a no-op.
+    for _ in 0..2 {
+        let (status, restored) = promote_expecting(&app, "api@1.0.0", Some("api@1.2.0")).await;
+        assert_eq!(status, StatusCode::OK, "{restored}");
+        assert_eq!(restored["digest"], first["digest"]);
+    }
+    assert_eq!(stable_head(&app).await, "tenkai:release:api@1.0.0");
+
+    // An expected head of another product is refused before any effect.
+    let (status, other) = promote_expecting(&app, "api@1.1.0", Some("web@1.0.0")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{other}");
+    assert_eq!(stable_head(&app).await, "tenkai:release:api@1.0.0");
+    let _ = std::fs::remove_dir_all(root);
+}

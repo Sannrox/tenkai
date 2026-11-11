@@ -85,15 +85,27 @@ impl RemoteClient {
         spec: &str,
         channel: &str,
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.promote_release_expecting(spec, channel, None).await
+    }
+
+    /// [`Self::promote_release`], refused unless the channel is empty, heads
+    /// `spec`, or heads `expected_head`.
+    pub async fn promote_release_expecting(
+        &self,
+        spec: &str,
+        channel: &str,
+        expected_head: Option<&str>,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
             &format!("/v1/channels/{channel}/promote"),
-            Some(&tenkai::management_lifecycle::PromoteRequest {
+            Some(&tenkai::management_lifecycle::PromoteHttpRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Promote
                     .as_str()
                     .into(),
                 spec: spec.to_string(),
+                expected_head: expected_head.map(str::to_string),
             }),
         )
         .await
