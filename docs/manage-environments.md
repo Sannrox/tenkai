@@ -196,16 +196,37 @@ tenkaictl --target remote identity-issuer rewrap prod --recipient sha256:<hex> -
   like any plan. The runtime that runs it refuses a key with any other
   fingerprint, and the server records the issuer only if its generation is
   the next one, so a stale plan fails and the issuer stays.
-- With an issuer already current, rotation takes approved steps, so no
-  valid peer fails (ADR 0046 §7). The first `plan` after `prepare` builds
-  the **add** step: the runtime that runs it records the candidate as the
-  next issuer, and its next renewal pass re-issues each `helm` certificate
-  it renews with a trust bundle (`ca.pem`) holding the current issuer first
-  and the next one after it, without waiting for the restart spread.
-  `status` shows the next issuer. The **issue** step, which makes the next
-  issuer current once every instance has taken up the bundle, is not
-  available yet: `plan` refuses while a next issuer waits. `host`
-  certificates keep the issuer alone.
+- With an issuer already current, rotation takes two approved steps, so no
+  valid peer fails (ADR 0046 §7).
+  - **Add**: the first `plan` after `prepare` builds it. The server records
+    the candidate as the next issuer and hands the approved add plan to every
+    runtime of the environment. Each runtime trusts the next issuer only once
+    its own local approval policy accepts that plan, and its next renewal
+    pass re-issues each `helm` certificate with a trust bundle (`ca.pem`)
+    holding the current issuer first and the next one after it, without
+    waiting for the restart spread.
+  - **Issue**: the next `plan` builds it, once every deployed instance
+    whose release asks for a certificate has taken up that bundle. This
+    includes an unsubscribed instance whose removal has not run yet, and
+    an instance whose deployment state is unknown. Taken
+    up means its runtime reported a certificate whose bundle holds the next
+    issuer, written at least 10 minutes earlier. For `reload = "restart"`,
+    every live pod of each Deployment, StatefulSet and DaemonSet of the
+    release must also run a template naming that certificate and be ready,
+    with no old pod left beside a new one; a
+    certificate an apply wrote counts once a renewal has restarted onto it.
+    A report not observed after the second of the instance's last
+    deployment does not count;
+    the runtime reports again within 5 minutes.
+    Until then `plan` refuses and names each waiting instance and why. The
+    server checks again when it records the step. The issue step makes
+    the next issuer current and keeps the replaced one in every bundle as
+    the previous issuer; a runtime that joins later trusts it through the
+    approved issue plan. Certificates of the replaced issuer renew from the
+    next one as they fall due.
+  - `status` shows the next and previous issuers. `host` certificates keep
+    the issuer alone for now, so an environment with them waits at the
+    issue step.
 - `rewrap` wraps the issuer key for one more recipient: another runtime's
   key or the recovery key. Run it after activation; until then only the
   generating runtime can open the issuer. A runtime enrolled later can use

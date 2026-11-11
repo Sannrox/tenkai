@@ -410,10 +410,12 @@ async fn update_reconciled_deployment_object(
             object
                 .properties
                 .insert(format!("deployed_release.{key}"), release);
+            stamp_deployment(object, key);
         }
         None => {
             object.properties.remove(&format!("deployed.{key}"));
             object.properties.remove(&format!("deployed_release.{key}"));
+            object.properties.remove(&format!("{DEPLOYMENT_AT}{key}"));
         }
     }
     object
@@ -533,6 +535,7 @@ pub(crate) async fn record_deployed(
         format!("deployed_release.{key}"),
         release_id(product, version),
     );
+    stamp_deployment(&mut object, key);
     if let Some(previous) = previous {
         object
             .properties
@@ -936,6 +939,20 @@ async fn guarded_update(
     Ok(())
 }
 
+/// Prefix of `deployment_at.{instance}`: when the server last recorded a
+/// release deployed to the instance, in Unix milliseconds. Workload
+/// certificate evidence older than it no longer describes the instance
+/// (ADR 0046 §7).
+pub const DEPLOYMENT_AT: &str = "deployment_at.";
+
+/// Stamp that a release was just deployed to `key`.
+fn stamp_deployment(object: &mut Object, key: &str) {
+    object.properties.insert(
+        format!("{DEPLOYMENT_AT}{key}"),
+        crate::now_millis().to_string(),
+    );
+}
+
 fn clear_unknown_origin(environment: &mut Object, product: &str) {
     for prefix in [
         "deployment_unknown_plan.",
@@ -981,6 +998,7 @@ fn transition_deployment(
                 format!("deployed_release.{key}"),
                 release_id(product, version),
             );
+            stamp_deployment(environment, key);
             if let Some(previous) = previous {
                 environment
                     .properties
@@ -1020,6 +1038,9 @@ fn transition_deployment(
             environment
                 .properties
                 .remove(&format!("deployed_release.{key}"));
+            environment
+                .properties
+                .remove(&format!("{DEPLOYMENT_AT}{key}"));
             environment
                 .properties
                 .insert(format!("deployment_health.{key}"), "unknown".into());

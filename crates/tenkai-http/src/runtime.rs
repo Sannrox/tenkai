@@ -26,7 +26,14 @@ pub(super) async fn runtime_work(
         )
         .await
     {
-        Ok(work) => Json(work).into_response(),
+        Ok(work) => (
+            [(
+                tenkai::runtime_delivery::SERVER_CAPABILITIES_HEADER,
+                tenkai::runtime_delivery::CERTIFICATE_OBSERVATIONS_CAPABILITY,
+            )],
+            Json(work),
+        )
+            .into_response(),
         Err(error) => runtime_delivery_error(error),
     }
 }
@@ -273,6 +280,10 @@ fn runtime_caller<'a>(
         issuer_rotation: names_capability(
             headers,
             tenkai::runtime_delivery::ISSUER_ROTATION_CAPABILITY,
+        ),
+        issuer_take_up: names_capability(
+            headers,
+            tenkai::runtime_delivery::ISSUER_TAKE_UP_CAPABILITY,
         ),
     }
 }

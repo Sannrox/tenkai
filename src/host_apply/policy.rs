@@ -108,6 +108,18 @@ impl HostApprovalPolicy {
         }
     }
 
+    /// Whether `envelope`'s signer is one of this policy's and inside its
+    /// validity window at `now_ms`. Removing a signer from the policy, or
+    /// ending its window, revokes it.
+    pub fn signer_valid(&self, envelope: &ApprovalEnvelope, now_ms: i64) -> bool {
+        self.trust_roots()
+            .signer(
+                crate::signature_verification::TrustRootKind::PlanApproval,
+                &envelope.key_id,
+            )
+            .is_ok_and(|signer| signer.validity().check(&signer.identity, now_ms).is_ok())
+    }
+
     /// Every rule for `purpose`, whatever its `min_criticality`, or the
     /// default of one trusted approval when the policy names none.
     fn rules(&self, purpose: QuorumPurpose) -> Vec<QuorumRule> {

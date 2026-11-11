@@ -250,7 +250,41 @@ opens for an `add` or `issue` step, and every certificate it issues for a
 Helm target carries the issuer one generation before and after the issuing
 one in its trust bundle (`ca.pem`), after the issuing issuer. A certificate
 whose bundle lacks one of them is renewed on the next pass. The host applier
-accepts only the granted issuer in `ca.pem`. `phase` is omitted on the first
+accepts only the granted issuer in `ca.pem`.
+
+Work for a runtime that names `issuer_take_up`, idle or claimed, carries
+`issuer_proofs`, each an approved rotation plan (`plan`) and its
+`approvals`: the add plan while a next issuer waits, and the issue plan
+while the issuer it replaced is kept. The issue step names that issuer in
+`replaces`. The runtime trusts the add step's key, or the
+issue step's `replaces` one generation below its key, only if its local
+approval policy accepts the plan and the plan is of this environment with
+that single step. A plan with `replaces` goes only to a runtime that names
+`issuer_take_up`. Running the issue step only keeps both issuers. The
+server hands out the issue plan once it recorded the step; from then on a
+runtime that can open the next issuer renews from it, and a certificate
+granted by the replaced generation, whose issuer the runtime trusts,
+renews from it with the same grant otherwise. A proof holds after its
+approvals expire, as long as their signers are still in the runtime's
+local policy and inside their validity window, so a runtime that joins
+later still verifies it. The issue plan's proof also carries `current`,
+the issuer as the server holds it now; the runtime uses it, for the wraps
+re-wraps added since the plan, only when its generation, fingerprint and
+certificate are the approved key's. Certificate reports carry `trust`, the bundle's issuer
+fingerprints with the issuing one first (at most 4), and `restart_pending`
+until every live pod of each restart-reload workload runs a template naming
+the certificate and is ready;
+both are omitted when empty. `observed_at` is when the runtime observed
+the state, in Unix seconds; of two reports of one certificate the server
+keeps the later observed, and a pending restart on a tie. A runtime sends
+`trust`, `restart_pending` and `observed_at` only while the last work
+response carried `x-tenkai-server-capabilities: certificate_observations`,
+since an older server refuses them. The runtime
+sends an unchanged state again every 5 minutes with a fresh `observed_at`;
+a report not observed in a later second than the instance's last deployment does not count
+toward take-up. The server plans the issue step only once
+every instance with a certificate has taken up a bundle with the next
+issuer. `phase` is omitted on the first
 issuer's step and on a re-wrap, so they keep their digest. The server hands
 a plan with a phase only to a runtime that also names `issuer_rotation`; an
 older one, which cannot decode the field, polls idle.

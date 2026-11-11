@@ -16,8 +16,8 @@ mod lifecycle;
 mod release_selection;
 
 pub(crate) use convergence::{
-    current_peers, require_host_product, require_removable, split_release_id, step_identity,
-    stored_release_executor, stored_release_manifest,
+    current_peers, readable_manifest, require_host_product, require_removable, split_release_id,
+    step_identity, stored_release_executor, stored_release_manifest,
 };
 
 pub(crate) use release_selection::resolve_subscription_selection;
@@ -164,6 +164,11 @@ pub struct IssuerStep {
     /// are unchanged; a binary that predates it fails approval closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<crate::identity_issuer::RotationPhase>,
+    /// On an issue step: the issuer it replaces. The step's
+    /// approval proves it to a runtime that joins after the rotation, which
+    /// keeps trusting it until it is removed (ADR 0046 §7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<crate::identity_issuer::IssuerKey>,
 }
 
 /// The recipient a re-wrap step adds (ADR 0045 §5).

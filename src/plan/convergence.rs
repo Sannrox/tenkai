@@ -195,7 +195,7 @@ pub(crate) async fn stored_release_manifest(
 
 /// The stored manifest of `release`, or `None` when the release is missing or
 /// its manifest does not parse; apply admission refuses such a release.
-async fn readable_manifest(
+pub(crate) async fn readable_manifest(
     ctx: &mut Ctx,
     release: &str,
 ) -> Result<Option<crate::manifest::Manifest>> {
@@ -4227,6 +4227,172 @@ mod tests {
         assert!(rebound.contains("db-b"), "{rebound}");
         let rebound_plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         assert_ne!(planned.content_id, rebound_plan.content_id);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The issue step of a rotation waits until every deployed instance
+    /// whose release asks for a certificate took up the bundle with the
+    /// next issuer (ADR 0046 §7), and names each one still waiting and why.
+    #[tokio::test]
+    async fn the_issue_step_waits_for_every_instance_to_take_up_the_bundle() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-take-up-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        publish_compat_release(
+            &mut ctx,
+            &root,
+            "api",
+            "[deploy.identity]\ncertificate = \"server\"\nreload = \"restart\"\n",
+        )
+        .await;
+        let actor = crate::auth_context::test_management_context("env-take-up");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
+        let sealing = root.join("sealing");
+        std::fs::create_dir_all(&sealing).unwrap();
+        let public = crate::sealing_key::SealingKey::open_or_generate(&sealing)
+            .unwrap()
+            .public()
+            .clone();
+        let now = crate::now_millis() / 1000;
+        let current = crate::identity_issuer::generate("local", 1, &public, now).unwrap();
+        let next = crate::identity_issuer::generate("local", 2, &public, now).unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        for (property, key) in [
+            ("identity_issuer", &current),
+            ("identity_issuer_next", &next),
+        ] {
+            env.properties
+                .insert(property.into(), serde_json::to_string(key).unwrap());
+        }
+        ctx.put(env).await.unwrap();
+        crate::environment::reconcile_deployment(&mut ctx, "local", "api", Some("1.0.0"))
+            .await
+            .unwrap();
+
+        async fn refusal(ctx: &mut Ctx, now: i64) -> String {
+            let env = crate::environment::environment(ctx, "local").await.unwrap();
+            format!(
+                "{:#}",
+                crate::identity_issuer::issue_step(ctx, &env, now)
+                    .await
+                    .unwrap_err()
+            )
+        }
+        assert!(
+            refusal(&mut ctx, now)
+                .await
+                .contains("api (no certificate reported)")
+        );
+        let mut not_after = now + 24 * 3600;
+        let mut report = |trust: Vec<String>, written: i64| {
+            not_after += 1;
+            crate::certificate_reports::CertificateReport {
+                schema: crate::certificate_reports::CERTIFICATE_REPORT_SCHEMA.into(),
+                environment: "local".into(),
+                instance: "api".into(),
+                not_before: written - 60,
+                not_after,
+                last_renewal: None,
+                trust,
+                restart_pending: false,
+                observed_at: now + 1,
+            }
+        };
+        let both = vec![current.fingerprint.clone(), next.fingerprint.clone()];
+        let long_ago = now - crate::identity_issuer::TAKE_UP_SECS - 60;
+        let old_bundle = report(vec![current.fingerprint.clone()], now - 3600);
+        let pending = crate::certificate_reports::CertificateReport {
+            restart_pending: true,
+            ..report(both.clone(), long_ago)
+        };
+        let fresh = report(both.clone(), now - 60);
+        let settled = report(both, long_ago);
+        for (report, why) in [
+            (old_bundle, "bundle without the next issuer"),
+            (pending, "restart pending"),
+            (fresh, "written too recently"),
+        ] {
+            crate::certificate_reports::admit(&mut ctx, "local", &[report])
+                .await
+                .unwrap();
+            let refused = refusal(&mut ctx, now).await;
+            assert!(refused.contains(why), "{refused}");
+        }
+        crate::certificate_reports::admit(&mut ctx, "local", &[settled])
+            .await
+            .unwrap();
+        // A deployment after the report voids it until a later observation.
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        let deployment = format!("{}api", crate::environment::DEPLOYMENT_AT);
+        env.properties
+            .insert(deployment.clone(), ((now + 1) * 1000 + 999).to_string());
+        ctx.put(env.clone()).await.unwrap();
+        assert!(
+            refusal(&mut ctx, now)
+                .await
+                .contains("api (not reported since its last deployment)")
+        );
+        env.properties.remove(&deployment);
+        ctx.put(env).await.unwrap();
+        // An instance no longer subscribed still runs until its removal
+        // completes, and still counts.
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.insert(
+            "deployed_release.api-old".into(),
+            crate::ontology::release_id("api", "1.0.0"),
+        );
+        ctx.put(env.clone()).await.unwrap();
+        let refused = refusal(&mut ctx, now).await;
+        assert!(
+            refused.contains("api-old (no certificate reported)") && !refused.contains("api ("),
+            "{refused}"
+        );
+        // An instance whose deployment is unknown waits.
+        env.properties.remove("deployed_release.api-old");
+        env.properties
+            .insert("deployment_health.api-old".into(), "unknown".into());
+        ctx.put(env.clone()).await.unwrap();
+        let refused = refusal(&mut ctx, now).await;
+        assert!(
+            refused.contains("api-old (deployment state unknown)"),
+            "{refused}"
+        );
+        env.properties.remove("deployment_health.api-old");
+        // A release whose manifest cannot be read waits, never skipped.
+        env.properties.insert(
+            "deployed_release.api-old".into(),
+            "tenkai:release:gone".into(),
+        );
+        ctx.put(env.clone()).await.unwrap();
+        let refused = refusal(&mut ctx, now).await;
+        assert!(
+            refused.contains("api-old (release manifest unreadable)"),
+            "{refused}"
+        );
+        env.properties.remove("deployed_release.api-old");
+        ctx.put(env).await.unwrap();
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        let step = crate::identity_issuer::issue_step(&mut ctx, &env, now)
+            .await
+            .unwrap();
+        assert_eq!(step.issuer.unwrap().key, next);
         std::fs::remove_dir_all(root).unwrap();
     }
 

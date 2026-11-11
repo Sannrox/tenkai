@@ -75,6 +75,10 @@ pub(crate) trait WorkloadApi {
     /// in `namespace`. Idempotent: a workload already carrying it does not
     /// roll again.
     fn restart_for(&self, namespace: &str, release: &str, certificate: &str) -> Result<()>;
+    /// Whether every Deployment, StatefulSet and DaemonSet of `release` in
+    /// `namespace` names `certificate` in its pod template and has rolled
+    /// out all of its pods, available, under that template.
+    fn rolled_out(&self, namespace: &str, release: &str, certificate: &str) -> Result<bool>;
 }
 
 /// The Secret one secret name of `request` is written to.
@@ -349,6 +353,7 @@ fn write_identity_secret(
 /// certificate does not prove its recorded grant fails the read, naming it.
 pub(crate) fn installed_identities(
     api: &dyn SecretApi,
+    workloads: &dyn WorkloadApi,
     environment: &str,
 ) -> Result<Vec<(String, Result<tenkai::workload_identity::InstalledIdentity>)>> {
     let selector = format!("{OWNER_LABEL}={OWNER},{IDENTITY_LABEL}=true");
@@ -372,10 +377,33 @@ pub(crate) fn installed_identities(
                 })
                 .and_then(|secret| {
                     installed_identity(environment, &name, instance.as_deref(), secret)
+                })
+                .map(|mut installed| {
+                    installed.restart_pending |= !settled(workloads, environment, &installed);
+                    installed
                 });
             (instance.unwrap_or(name), installed)
         })
         .collect())
+}
+
+/// Whether a restart-reload workload runs on `installed`: its rollout onto
+/// the certificate completed (ADR 0046 §7). A workload that reads its
+/// certificate itself always does. A rollout that cannot be read is not
+/// settled.
+fn settled(
+    workloads: &dyn WorkloadApi,
+    environment: &str,
+    installed: &tenkai::workload_identity::InstalledIdentity,
+) -> bool {
+    installed.grant.reload != tenkai::workload_identity::Reload::Restart
+        || workloads
+            .rolled_out(
+                environment,
+                &installed.instance,
+                &certificate_digest(&installed.certificate),
+            )
+            .unwrap_or(false)
 }
 
 /// The identity one listed Secret proves, if it is the one Tenkai writes.
@@ -390,19 +418,23 @@ fn installed_identity(
     if !owns_identity(&secret, instance) || name != identity_secret_name(instance) {
         bail!("identity Secret {name} is not the one Tenkai writes for {instance}");
     }
+    let restart_pending = pending_restart(&secret).is_some();
     let data = secret.data.unwrap_or_default();
     let text = |file: &str| {
         data.get(file)
             .map(|bytes| bytes.0.as_slice())
             .with_context(|| format!("identity Secret {name} has no {file}"))
     };
-    InstalledIdentity::read(
-        environment,
-        instance,
-        std::str::from_utf8(text(CERTIFICATE_FILE)?)?,
-        std::str::from_utf8(text(CA_FILE)?)?,
-        text(GRANT_FILE)?,
-    )
+    Ok(InstalledIdentity {
+        restart_pending,
+        ..InstalledIdentity::read(
+            environment,
+            instance,
+            std::str::from_utf8(text(CERTIFICATE_FILE)?)?,
+            std::str::from_utf8(text(CA_FILE)?)?,
+            text(GRANT_FILE)?,
+        )?
+    })
 }
 
 /// The certificate digest a restart is pending for, if any.
@@ -696,6 +728,147 @@ impl WorkloadApi for LiveSecrets {
             bounded(patch_all(&self.0, namespace, &daemon_sets, &patch)).await
         })
     }
+
+    fn rolled_out(&self, namespace: &str, release: &str, certificate: &str) -> Result<bool> {
+        use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
+        block_on(async {
+            let deployments: Vec<Deployment> =
+                bounded(release_workloads(&self.0, namespace, release)).await?;
+            let stateful_sets: Vec<StatefulSet> =
+                bounded(release_workloads(&self.0, namespace, release)).await?;
+            let daemon_sets: Vec<DaemonSet> =
+                bounded(release_workloads(&self.0, namespace, release)).await?;
+            // Each workload: its template names the certificate, and every
+            // live pod it selects runs that template, ready.
+            let mut checks = Vec::new();
+            for deployment in &deployments {
+                let Some(spec) = &deployment.spec else {
+                    return Ok(false);
+                };
+                checks.push((
+                    template_certificate(Some(&spec.template)),
+                    pod_selector(&spec.selector),
+                    spec.replicas.unwrap_or(1),
+                ));
+            }
+            for set in &stateful_sets {
+                let Some(spec) = &set.spec else {
+                    return Ok(false);
+                };
+                checks.push((
+                    template_certificate(Some(&spec.template)),
+                    pod_selector(&spec.selector),
+                    spec.replicas.unwrap_or(1),
+                ));
+            }
+            for set in &daemon_sets {
+                let Some(spec) = &set.spec else {
+                    return Ok(false);
+                };
+                let wanted = set
+                    .status
+                    .as_ref()
+                    .map_or(i32::MAX, |status| status.desired_number_scheduled);
+                checks.push((
+                    template_certificate(Some(&spec.template)),
+                    pod_selector(&spec.selector),
+                    wanted,
+                ));
+            }
+            let pods: kube::Api<k8s_openapi::api::core::v1::Pod> =
+                kube::Api::namespaced(self.0.clone(), namespace);
+            for (named, selector, wanted) in checks {
+                let (Some(named), Some(selector)) = (named, selector) else {
+                    return Ok(false);
+                };
+                if named != certificate {
+                    return Ok(false);
+                }
+                let listed = bounded(async {
+                    pods.list(&kube::api::ListParams::default().labels(&selector))
+                        .await
+                        .with_context(|| format!("listing pods in {namespace}"))
+                })
+                .await?;
+                if !pods_on(&listed.items, certificate, wanted) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })
+    }
+}
+
+/// The certificate digest `template` names, if any.
+fn template_certificate(
+    template: Option<&k8s_openapi::api::core::v1::PodTemplateSpec>,
+) -> Option<&str> {
+    template?
+        .metadata
+        .as_ref()?
+        .annotations
+        .as_ref()?
+        .get(TEMPLATE_ANNOTATION)
+        .map(String::as_str)
+}
+
+/// The label selector of a workload, as a list query; `None` when it is
+/// empty or uses an operator the list query cannot express.
+fn pod_selector(
+    selector: &k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector,
+) -> Option<String> {
+    let mut terms: Vec<String> = selector
+        .match_labels
+        .iter()
+        .flatten()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    for expression in selector.match_expressions.iter().flatten() {
+        let key = &expression.key;
+        let values = || expression.values.as_deref().unwrap_or_default().join(",");
+        terms.push(match expression.operator.as_str() {
+            "In" => format!("{key} in ({})", values()),
+            "NotIn" => format!("{key} notin ({})", values()),
+            "Exists" => key.clone(),
+            "DoesNotExist" => format!("!{key}"),
+            _ => return None,
+        });
+    }
+    (!terms.is_empty()).then(|| terms.join(","))
+}
+
+/// Whether `pods`, the live pods of one workload that wants `wanted` of
+/// them, all run a template naming `certificate` and are ready: no old pod
+/// is left, even beside a surged new one.
+fn pods_on(pods: &[k8s_openapi::api::core::v1::Pod], certificate: &str, wanted: i32) -> bool {
+    let live: Vec<_> = pods
+        .iter()
+        .filter(|pod| {
+            !pod.status
+                .as_ref()
+                .and_then(|status| status.phase.as_deref())
+                .is_some_and(|phase| phase == "Succeeded" || phase == "Failed")
+        })
+        .collect();
+    let on = |pod: &&k8s_openapi::api::core::v1::Pod| {
+        pod.metadata.deletion_timestamp.is_none()
+            && pod
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(TEMPLATE_ANNOTATION))
+                .is_some_and(|named| named == certificate)
+            && pod
+                .status
+                .as_ref()
+                .and_then(|status| status.conditions.as_ref())
+                .is_some_and(|conditions| {
+                    conditions
+                        .iter()
+                        .any(|condition| condition.type_ == "Ready" && condition.status == "True")
+                })
+    };
+    live.iter().all(on) && i32::try_from(live.len()).unwrap_or(i32::MAX) >= wanted
 }
 
 /// Why a StatefulSet does not roll every pod on a template change.
@@ -874,6 +1047,15 @@ mod tests {
             restarted.push((release.to_owned(), certificate.to_owned()));
             Ok(())
         }
+
+        fn rolled_out(&self, _: &str, release: &str, certificate: &str) -> Result<bool> {
+            anyhow::ensure!(!self.down.get(), "the cluster is unreachable");
+            Ok(self
+                .restarted
+                .borrow()
+                .iter()
+                .any(|(name, rolled)| name == release && rolled == certificate))
+        }
     }
 
     impl Memory {
@@ -1021,7 +1203,7 @@ mod tests {
         web.grant.dns_names.push("bank.example".into());
         write_identity_secret(&api, "prod", "web", &web, None).unwrap();
 
-        let mut found = installed_identities(&api, "prod").unwrap();
+        let mut found = installed_identities(&api, &Workloads::default(), "prod").unwrap();
         found.sort_by(|a, b| a.0.cmp(&b.0));
         let [(api_name, api_found), (web_name, web_found)] = found.as_slice() else {
             panic!("two identity Secrets");
@@ -1061,7 +1243,10 @@ mod tests {
                 .is_empty()
         );
 
-        let (_, installed) = installed_identities(&api, "prod").unwrap().pop().unwrap();
+        let (_, installed) = installed_identities(&api, &Workloads::default(), "prod")
+            .unwrap()
+            .pop()
+            .unwrap();
         let renewed = genuine_identity_reloading(Reload::Restart);
         renew_identity_secret(&api, "prod", &installed.unwrap(), &renewed).unwrap();
         // The cluster goes away before the restart.
@@ -1095,7 +1280,10 @@ mod tests {
         );
 
         // An apply over a pending restart keeps it, for its own certificate.
-        let (_, installed) = installed_identities(&api, "prod").unwrap().pop().unwrap();
+        let (_, installed) = installed_identities(&api, &Workloads::default(), "prod")
+            .unwrap()
+            .pop()
+            .unwrap();
         let again = genuine_identity_reloading(Reload::Restart);
         renew_identity_secret(&api, "prod", &installed.unwrap(), &again).unwrap();
         let applied = genuine_identity_reloading(Reload::Restart);
@@ -1109,13 +1297,110 @@ mod tests {
         // A runtime-reload renewal restarts nothing.
         let api = Memory::default();
         write_identity_secret(&api, "prod", "api", &genuine_identity(), None).unwrap();
-        let (_, installed) = installed_identities(&api, "prod").unwrap().pop().unwrap();
+        let (_, installed) = installed_identities(&api, &Workloads::default(), "prod")
+            .unwrap()
+            .pop()
+            .unwrap();
         renew_identity_secret(&api, "prod", &installed.unwrap(), &genuine_identity()).unwrap();
         assert!(
             finish_restarts(&api, &workloads, "prod")
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// A restart-reload certificate stays pending until its workloads have
+    /// rolled out on it: every live pod runs a template naming it, ready,
+    /// with no old pod left beside a surged one.
+    #[test]
+    fn a_restart_is_pending_until_the_rollout_completes() {
+        use k8s_openapi::api::core::v1::{Pod, PodCondition, PodStatus};
+        use tenkai::workload_identity::Reload;
+        let pod = |certificate: &str, ready: bool, phase: &str| Pod {
+            metadata: ObjectMeta {
+                annotations: Some(BTreeMap::from([(
+                    TEMPLATE_ANNOTATION.to_owned(),
+                    certificate.to_owned(),
+                )])),
+                ..ObjectMeta::default()
+            },
+            spec: None,
+            status: Some(PodStatus {
+                phase: Some(phase.into()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".into(),
+                    status: if ready { "True" } else { "False" }.into(),
+                    ..PodCondition::default()
+                }]),
+                ..PodStatus::default()
+            }),
+        };
+        // Selectors by label and by expression become one list query.
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
+            LabelSelector, LabelSelectorRequirement,
+        };
+        let requirement = |key: &str, operator: &str, values: &[&str]| LabelSelectorRequirement {
+            key: key.into(),
+            operator: operator.into(),
+            values: (!values.is_empty()).then(|| values.iter().map(|v| (*v).into()).collect()),
+        };
+        let selector = LabelSelector {
+            match_labels: Some(BTreeMap::from([("app".to_owned(), "api".to_owned())])),
+            match_expressions: Some(vec![
+                requirement("tier", "In", &["web", "edge"]),
+                requirement("canary", "DoesNotExist", &[]),
+            ]),
+        };
+        assert_eq!(
+            pod_selector(&selector).as_deref(),
+            Some("app=api,tier in (web,edge),!canary")
+        );
+        assert_eq!(pod_selector(&LabelSelector::default()), None);
+
+        let new = pod("sha256:a", true, "Running");
+        assert!(pods_on(&[new.clone(), new.clone()], "sha256:a", 2));
+        // Too few, an old one beside a surged one, or one not ready.
+        assert!(!pods_on(std::slice::from_ref(&new), "sha256:a", 2));
+        assert!(!pods_on(
+            &[new.clone(), new.clone(), pod("sha256:old", true, "Running")],
+            "sha256:a",
+            2
+        ));
+        assert!(!pods_on(
+            &[new.clone(), pod("sha256:a", false, "Running")],
+            "sha256:a",
+            2
+        ));
+        // A finished pod is not live.
+        assert!(pods_on(
+            &[
+                new.clone(),
+                new.clone(),
+                pod("sha256:old", false, "Succeeded")
+            ],
+            "sha256:a",
+            2
+        ));
+
+        let api = Memory::default();
+        let workloads = Workloads::default();
+        let issued = genuine_identity_reloading(Reload::Restart);
+        write_identity_secret(&api, "prod", "api", &issued, None).unwrap();
+        let pending = |workloads: &Workloads| {
+            let (_, installed) = installed_identities(&api, workloads, "prod")
+                .unwrap()
+                .pop()
+                .unwrap();
+            installed.unwrap().restart_pending
+        };
+        assert!(pending(&workloads));
+        workloads
+            .restart_for("prod", "api", &certificate_digest(&issued.certificate))
+            .unwrap();
+        assert!(!pending(&workloads));
+        // A rollout that cannot be read is not settled.
+        workloads.down.set(true);
+        assert!(pending(&workloads));
     }
 
     /// A workload that keeps its pods on a template change is refused, so

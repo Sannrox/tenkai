@@ -55,6 +55,13 @@ const NEXT_PROPERTY: &str = "identity_issuer_next";
 /// Environment property with the issuer an issue step replaced: still
 /// trusted in every bundle, no longer issuing.
 const PREVIOUS_PROPERTY: &str = "identity_issuer_previous";
+/// Environment property with the id of the plan whose add step recorded
+/// the next issuer: its approvals prove the next issuer to every runtime.
+const NEXT_PLAN_PROPERTY: &str = "identity_issuer_next_plan";
+/// Environment property with the id of the plan whose issue step replaced
+/// the previous issuer: its approvals prove the previous issuer to a
+/// runtime that joins later.
+const PREVIOUS_PLAN_PROPERTY: &str = "identity_issuer_previous_plan";
 
 /// Which rotation step an issuer activation is (ADR 0046 §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,6 +309,22 @@ pub fn next(env_obj: &Object) -> Result<Option<IssuerKey>> {
     read(env_obj, NEXT_PROPERTY)
 }
 
+/// The id of the plan whose add step recorded the next issuer.
+pub fn next_plan(env_obj: &Object) -> Option<&str> {
+    env_obj
+        .properties
+        .get(NEXT_PLAN_PROPERTY)
+        .map(String::as_str)
+}
+
+/// The id of the plan whose issue step replaced the previous issuer.
+pub fn previous_plan(env_obj: &Object) -> Option<&str> {
+    env_obj
+        .properties
+        .get(PREVIOUS_PLAN_PROPERTY)
+        .map(String::as_str)
+}
+
 /// The issuer the last issue step replaced.
 pub fn previous(env_obj: &Object) -> Result<Option<IssuerKey>> {
     read(env_obj, PREVIOUS_PROPERTY)
@@ -524,6 +547,17 @@ fn require_rotation(
             if is(&current) {
                 return Ok(());
             }
+            let replaces = step
+                .issuer
+                .as_ref()
+                .and_then(|issuer| issuer.replaces.as_ref());
+            ensure!(
+                replaces.is_some_and(|replaces| current
+                    .as_ref()
+                    .is_some_and(|current| current.fingerprint == replaces.fingerprint)),
+                "step {} is stale: it does not replace the current issuer",
+                step.id
+            );
             ensure!(
                 is(&next) && current_generation + 1 == key.generation,
                 "step {} is stale: issuer generation {} ({}) is not the next issuer",
@@ -543,6 +577,7 @@ fn require_rotation(
 pub async fn record_activated(
     ctx: &mut Ctx,
     environment: &str,
+    plan_id: &str,
     steps: &[&crate::plan::Step],
 ) -> Result<()> {
     if steps.is_empty() {
@@ -562,7 +597,20 @@ pub async fn record_activated(
                 .key;
             match step.issuer.as_ref().and_then(|issuer| issuer.phase) {
                 Some(RotationPhase::Issue) => {
-                    changed |= record_issued(&mut env_obj, key)?;
+                    // Checked again under the lease: an instance deployed
+                    // or renewed without the bundle since the plan was made
+                    // keeps the next issuer from issuing.
+                    if next(&env_obj)?.is_some_and(|next| next.fingerprint == key.fingerprint) {
+                        let waiting =
+                            waiting_for_take_up(ctx, &env_obj, key, crate::now_millis() / 1000)
+                                .await?;
+                        ensure!(
+                            waiting.is_empty(),
+                            "the next identity issuer is not taken up yet by {}",
+                            waiting.join(", ")
+                        );
+                    }
+                    changed |= record_issued(&mut env_obj, key, plan_id)?;
                     continue;
                 }
                 Some(RotationPhase::Add) => {
@@ -598,6 +646,11 @@ pub async fn record_activated(
                 _ => ISSUER_PROPERTY,
             };
             write(&mut env_obj, property, &activated);
+            if property == NEXT_PROPERTY {
+                env_obj
+                    .properties
+                    .insert(NEXT_PLAN_PROPERTY.into(), plan_id.into());
+            }
             if candidate(&env_obj)?.is_some_and(|stale| stale.generation <= key.generation) {
                 env_obj.properties.remove(CANDIDATE_PROPERTY);
             }
@@ -622,9 +675,9 @@ pub async fn record_activated(
 }
 
 /// Make the next issuer `key` the current one, keeping the current one as
-/// the previous issuer. Returns whether anything changed: a replay finds
-/// `key` already current.
-fn record_issued(env_obj: &mut Object, key: &IssuerKey) -> Result<bool> {
+/// the previous issuer, proven by `plan_id`. Returns whether anything
+/// changed: a replay finds `key` already current.
+fn record_issued(env_obj: &mut Object, key: &IssuerKey, plan_id: &str) -> Result<bool> {
     if current(env_obj)?.is_some_and(|current| current.fingerprint == key.fingerprint) {
         return Ok(false);
     }
@@ -636,6 +689,10 @@ fn record_issued(env_obj: &mut Object, key: &IssuerKey) -> Result<bool> {
     }
     write(env_obj, ISSUER_PROPERTY, &next);
     env_obj.properties.remove(NEXT_PROPERTY);
+    env_obj.properties.remove(NEXT_PLAN_PROPERTY);
+    env_obj
+        .properties
+        .insert(PREVIOUS_PLAN_PROPERTY.into(), plan_id.into());
     Ok(true)
 }
 
@@ -740,6 +797,7 @@ fn issuer_step(
             key,
             recipient,
             phase,
+            replaces: None,
         }),
         identity: None,
         restore_identity: None,
@@ -753,7 +811,7 @@ fn issuer_step(
 pub fn activation_step(env_obj: &Object, environment: &str) -> Result<crate::plan::Step> {
     if let Some(next) = next(env_obj)? {
         bail!(
-            "{environment} already trusts the next identity issuer generation {} ({}); it becomes current through the issue step, which waits until every instance has taken up the bundle",
+            "{environment} already trusts the next identity issuer generation {} ({}); plan its issue step first",
             next.generation,
             next.fingerprint
         );
@@ -774,14 +832,219 @@ pub fn activation_step(env_obj: &Object, environment: &str) -> Result<crate::pla
     Ok(step)
 }
 
-/// The issue step for `environment`'s next issuer. Planned only once the
-/// take-up gate of ADR 0046 §7 checks it; tests run it directly.
-#[cfg(test)]
-pub(crate) fn issue_step(env_obj: &Object) -> Result<crate::plan::Step> {
+/// The issue step for `environment`'s next issuer, once every instance
+/// with a workload certificate has taken up the bundle that carries it
+/// (ADR 0046 §7). The refusal names the instances still waiting.
+pub async fn issue_step(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+    now_secs: i64,
+) -> Result<crate::plan::Step> {
     let next = next(env_obj)?.context("no next identity issuer")?;
-    let step = issuer_step(next, None, None, Some(RotationPhase::Issue));
+    let waiting = waiting_for_take_up(ctx, env_obj, &next, now_secs).await?;
+    if !waiting.is_empty() {
+        bail!(
+            "the next identity issuer generation {} is not taken up yet by {}; plan the issue step again once they have",
+            next.generation,
+            waiting.join(", ")
+        );
+    }
+    let mut step = issuer_step(next, None, None, Some(RotationPhase::Issue));
+    if let Some(issuer) = &mut step.issuer {
+        issuer.replaces = current(env_obj)?;
+    }
     require_current(env_obj, &step)?;
     Ok(step)
+}
+
+/// How long after a renewed bundle is written a workload that reloads it
+/// itself is taken to have read it: the refresh of mounted Secrets and a
+/// product's reload interval (ADR 0046 §7).
+pub const TAKE_UP_SECS: i64 = 600;
+
+/// The instances of `env_obj` whose deployed release asks for a workload
+/// certificate and that have not yet taken up a bundle with `next`, each
+/// with why. Every deployed release counts until its removal completes,
+/// subscribed or not. Taken up means the runtime reported a certificate
+/// whose bundle holds `next`, with no restart pending (a restart-reload
+/// workload has rolled out on it), written at least [`TAKE_UP_SECS`] ago.
+/// An instance the runtime never reported waits.
+pub async fn waiting_for_take_up(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+    next: &IssuerKey,
+    now_secs: i64,
+) -> Result<Vec<String>> {
+    let reports = crate::certificate_reports::reported(ctx, &env_obj.name).await?;
+    let deployed: std::collections::BTreeMap<&str, &str> = env_obj
+        .properties
+        .iter()
+        .filter_map(|(key, release)| {
+            Some((key.strip_prefix("deployed_release.")?, release.as_str()))
+        })
+        .collect();
+    let mut waiting = Vec::new();
+    // An instance whose deployment is unknown may still run on the old
+    // bundle; it waits until reconciliation settles it.
+    for (key, health) in &env_obj.properties {
+        if let Some(instance) = key.strip_prefix("deployment_health.")
+            && health == "unknown"
+            && !deployed.contains_key(instance)
+        {
+            waiting.push(format!("{instance} (deployment state unknown)"));
+        }
+    }
+    for (instance, release) in deployed {
+        // Only a manifest read and found without an identity is skipped;
+        // one that cannot be read waits.
+        let manifest = crate::plan::readable_manifest(ctx, release).await?;
+        if manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.deploy.identity.is_none())
+        {
+            continue;
+        }
+        // Evidence from before the instance's last deployment describes a
+        // certificate it may no longer hold. An observation in the same
+        // second may precede it, so only a later second counts.
+        let deployed_at = env_obj
+            .properties
+            .get(&format!("{}{instance}", crate::environment::DEPLOYMENT_AT))
+            .and_then(|at| at.parse::<i64>().ok())
+            .unwrap_or(0);
+        let why = match reports.get(instance) {
+            _ if manifest.is_none() => Some("release manifest unreadable"),
+            None => Some("no certificate reported"),
+            Some(report) if deployed_at > 0 && report.observed_at <= deployed_at / 1000 => {
+                Some("not reported since its last deployment")
+            }
+            Some(report) if !report.trust.contains(&next.fingerprint) => {
+                Some("bundle without the next issuer")
+            }
+            Some(report) if report.restart_pending => Some("restart pending"),
+            Some(report) if report.not_before + 60 + TAKE_UP_SECS > now_secs => {
+                Some("bundle written too recently")
+            }
+            Some(_) => None,
+        };
+        if let Some(why) = why {
+            waiting.push(format!("{instance} ({why})"));
+        }
+    }
+    Ok(waiting)
+}
+
+/// An approved rotation step (ADR 0046 §7), as the server hands it to
+/// every runtime of the environment: the add step proves the next issuer,
+/// the issue step the issuer it replaced. Each runtime trusts them without
+/// the server naming them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssuerProof {
+    pub plan: crate::plan::Plan,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvals: Vec<crate::plan_approval::ApprovalEnvelope>,
+    /// On an issue plan: the issuer as the server holds it now, with the
+    /// wraps re-wraps added since the plan. Not trusted on its own: a
+    /// runtime uses only its wraps, and only when it is the approved key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<IssuerKey>,
+}
+
+/// The issuers `proof` shows, once this runtime's local approval policy
+/// accepts the plan: an add step's next issuer, or the issuer an issue step
+/// replaced and the one it made issuing. The plan must be of `environment`
+/// with that one step. A proof stays valid after its approvals expire, as
+/// long as their signers are still valid now.
+pub fn verify_proof(
+    policy: Option<&crate::host_apply::HostApprovalPolicy>,
+    environment: &str,
+    proof: &IssuerProof,
+    now_ms: i64,
+) -> Result<Proven> {
+    ensure!(
+        proof.plan.environment == environment,
+        "the issuer proof is a plan of {}, not {environment}",
+        proof.plan.environment
+    );
+    let [step] = proof.plan.steps.as_slice() else {
+        bail!("the issuer proof is not a plan with one step");
+    };
+    let issuer = step
+        .issuer
+        .as_ref()
+        .filter(|_| step.rewrap.is_none())
+        .context("the issuer proof is not a rotation step")?;
+    let proven = match (issuer.phase, &issuer.replaces) {
+        (Some(RotationPhase::Add), None) => Proven {
+            trusted: issuer.key.clone(),
+            issuing: None,
+        },
+        (Some(RotationPhase::Issue), Some(replaced)) => {
+            check_replaced(&issuer.key, replaced)?;
+            // The latest wraps of the approved key, if the server sent it.
+            let issuing = proof
+                .current
+                .as_ref()
+                .filter(|current| {
+                    current.generation == issuer.key.generation
+                        && current.fingerprint == issuer.key.fingerprint
+                        && current.certificate == issuer.key.certificate
+                })
+                .unwrap_or(&issuer.key);
+            Proven {
+                trusted: replaced.clone(),
+                issuing: Some(issuing.clone()),
+            }
+        }
+        _ => bail!("the issuer proof is not an add or issue step"),
+    };
+    // Trust evidence outlives the approvals' own expiry, so a runtime that
+    // joins after them still learns a rotated issuer: the approvals of
+    // signers this policy still holds valid must have met the quorum at
+    // some time up to now, at the latest one's issue or now.
+    let signed: Vec<_> = proof
+        .approvals
+        .iter()
+        .filter(|envelope| policy.is_some_and(|policy| policy.signer_valid(envelope, now_ms)))
+        .cloned()
+        .collect();
+    let approved_at = |at: i64| {
+        crate::runtime_local_approval::require_step(policy, &proof.plan, step, &signed, at)
+    };
+    let earlier = signed
+        .iter()
+        .map(|envelope| envelope.statement.issued_at)
+        .filter(|at| *at < now_ms);
+    if !earlier.into_iter().any(|at| approved_at(at).is_ok()) {
+        approved_at(now_ms)?;
+    }
+    proven.trusted.check_public()?;
+    if let Some(issuing) = &proven.issuing {
+        issuing.check_public()?;
+    }
+    Ok(proven)
+}
+
+/// What a verified [`IssuerProof`] shows: an issuer to keep in every
+/// bundle, and, for an issue plan, the issuer the server recorded as
+/// issuing, which a runtime that can open it renews from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proven {
+    pub trusted: IssuerKey,
+    pub issuing: Option<IssuerKey>,
+}
+
+/// Refuse an issue step whose `replaced` issuer is not one generation
+/// below `key`.
+pub fn check_replaced(key: &IssuerKey, replaced: &IssuerKey) -> Result<()> {
+    ensure!(
+        replaced.generation.checked_add(1) == Some(key.generation),
+        "the issue step replaces issuer generation {}, not the one below {}",
+        replaced.generation,
+        key.generation
+    );
+    replaced.check_public()
 }
 
 /// The step that wraps the recorded issuer key for `recipient` (ADR 0045
@@ -911,6 +1174,14 @@ fn cached_trusted(sealing_dir: &std::path::Path, environment: &str) -> Result<Ve
     Ok(trusted)
 }
 
+/// Whether this runtime already trusts the issuer `fingerprint` for
+/// `environment`.
+pub fn trusts(sealing_dir: &std::path::Path, environment: &str, fingerprint: &str) -> Result<bool> {
+    Ok(cached_trusted(sealing_dir, environment)?
+        .iter()
+        .any(|kept| kept.fingerprint == fingerprint))
+}
+
 /// The certificates a bundle issued by `issuing` carries after it: each
 /// verified issuer one generation before or after it, so the previous and
 /// the next issuer of a rotation.
@@ -1010,7 +1281,9 @@ mod tests {
             .await
             .unwrap();
         let step = activation_step(&env_obj(ctx).await, "prod").unwrap();
-        record_activated(ctx, "prod", &[&step]).await.unwrap();
+        record_activated(ctx, "prod", "plan-test", &[&step])
+            .await
+            .unwrap();
         key
     }
 
@@ -1058,9 +1331,14 @@ mod tests {
         // A second plan made for generation 1 before the first applied.
         let error = format!(
             "{:#}",
-            record_activated(&mut ctx, "prod", &[&activation(&runtime.candidate(1))])
-                .await
-                .unwrap_err()
+            record_activated(
+                &mut ctx,
+                "prod",
+                "plan-test",
+                &[&activation(&runtime.candidate(1))]
+            )
+            .await
+            .unwrap_err()
         );
         assert!(error.contains("stale"), "{error}");
         // One that skips a generation.
@@ -1087,8 +1365,12 @@ mod tests {
             .unwrap();
         let add = activation_step(&env_obj(&mut ctx).await, "prod").unwrap();
         assert_eq!(add.issuer.as_ref().unwrap().phase, Some(RotationPhase::Add));
-        record_activated(&mut ctx, "prod", &[&add]).await.unwrap();
-        record_activated(&mut ctx, "prod", &[&add]).await.unwrap();
+        record_activated(&mut ctx, "prod", "plan-test", &[&add])
+            .await
+            .unwrap();
+        record_activated(&mut ctx, "prod", "plan-test", &[&add])
+            .await
+            .unwrap();
         let object = env_obj(&mut ctx).await;
         assert_eq!(current(&object).unwrap(), Some(first.clone()));
         assert_eq!(next(&object).unwrap(), Some(second.clone()));
@@ -1104,22 +1386,155 @@ mod tests {
             activation_step(&env_obj(&mut ctx).await, "prod").unwrap_err()
         );
         assert!(error.contains("already trusts the next"), "{error}");
-        let issue = issue_step(&env_obj(&mut ctx).await).unwrap();
+        let object = env_obj(&mut ctx).await;
+        let issue = issue_step(&mut ctx, &object, now()).await.unwrap();
         assert_eq!(
             issue.issuer.as_ref().unwrap().phase,
             Some(RotationPhase::Issue)
         );
-        record_activated(&mut ctx, "prod", &[&issue]).await.unwrap();
-        record_activated(&mut ctx, "prod", &[&issue]).await.unwrap();
+        record_activated(&mut ctx, "prod", "plan-test", &[&issue])
+            .await
+            .unwrap();
+        record_activated(&mut ctx, "prod", "plan-test", &[&issue])
+            .await
+            .unwrap();
         let object = env_obj(&mut ctx).await;
         assert_eq!(current(&object).unwrap(), Some(second));
-        assert_eq!(previous(&object).unwrap(), Some(first));
+        assert_eq!(previous(&object).unwrap(), Some(first.clone()));
+        assert_eq!(previous_plan(&object), Some("plan-test"));
+        let named = issue.issuer.as_ref().unwrap().replaces.as_ref().unwrap();
+        assert_eq!(named.fingerprint, first.fingerprint);
         assert_eq!(next(&object).unwrap(), None);
         let status = status(&object).unwrap();
         assert!(status.next.is_none() && status.previous.is_some());
         // The add step applied after the issue step changes nothing.
-        record_activated(&mut ctx, "prod", &[&add]).await.unwrap();
+        record_activated(&mut ctx, "prod", "plan-test", &[&add])
+            .await
+            .unwrap();
         assert_eq!(next(&env_obj(&mut ctx).await).unwrap(), None);
+    }
+
+    /// A runtime trusts a next issuer only through an add plan its own
+    /// local policy approves, and a replaced one only through an approved
+    /// issue plan: a key swapped into the approved plan, a plan of another
+    /// environment, another kind of step or missing approvals are refused.
+    #[test]
+    fn a_runtime_trusts_rotated_issuers_only_through_approved_plans() {
+        use crate::approval_policy::{QuorumPurpose, QuorumRule};
+        let fixture = crate::host_apply::fixture::HostFixture::new(
+            &[("alice", &["ops"])],
+            vec![QuorumRule {
+                purpose: QuorumPurpose::ExecutePlan,
+                n: 1,
+                groups: vec!["ops".into()],
+                exclude_requester: false,
+                min_criticality: None,
+            }],
+        );
+        let runtime = Runtime::new("proof");
+        let now_ms = crate::now_millis();
+        let next = runtime.candidate(2);
+        let plan = |environment: &str, phase: Option<RotationPhase>| {
+            let mut step = issuer_step(next.clone(), None, None, phase);
+            step.id = format!("plan:{environment}:step:0");
+            crate::plan::Plan {
+                format_version: crate::plan::PLAN_FORMAT_VERSION,
+                id: format!("plan:{environment}"),
+                content_id: "content".into(),
+                environment: environment.into(),
+                created_at: now_ms,
+                inputs: Vec::new(),
+                steps: vec![step],
+                state: crate::plan::PlanState::Succeeded,
+                gates_skipped: None,
+                status_detail: String::new(),
+                maintenance_blocked: false,
+                prior_warnings: Vec::new(),
+                recalled_recovery_reason: None,
+                credential_runway: None,
+            }
+        };
+        let proof = |plan: crate::plan::Plan| IssuerProof {
+            approvals: vec![fixture.approve(&plan, 0, now_ms)],
+            plan,
+            current: None,
+        };
+        let policy = Some(&fixture.trust.policy);
+        let approved = proof(plan("prod", Some(RotationPhase::Add)));
+        assert_eq!(
+            verify_proof(policy, "prod", &approved, now_ms).unwrap(),
+            Proven {
+                trusted: next.clone(),
+                issuing: None
+            }
+        );
+
+        let mut swapped = approved.clone();
+        swapped.plan.steps[0].issuer.as_mut().unwrap().key = runtime.candidate(2);
+        assert!(verify_proof(policy, "prod", &swapped, now_ms).is_err());
+        assert!(verify_proof(policy, "staging", &approved, now_ms).is_err());
+        let first = proof(plan("prod", None));
+        assert!(verify_proof(policy, "prod", &first, now_ms).is_err());
+        let unapproved = IssuerProof {
+            approvals: Vec::new(),
+            ..approved.clone()
+        };
+        assert!(verify_proof(policy, "prod", &unapproved, now_ms).is_err());
+        assert!(verify_proof(None, "prod", &approved, now_ms).is_err());
+        // Past the approvals' expiry the proof still holds, but not once the
+        // signer has left the policy.
+        let year_later = now_ms + 365 * 24 * 3600 * 1000;
+        verify_proof(policy, "prod", &approved, year_later).unwrap();
+        let mut revoked = fixture.trust.policy.clone();
+        revoked.signers.clear();
+        assert!(verify_proof(Some(&revoked), "prod", &approved, year_later).is_err());
+
+        // An approved issue step proves the issuer it replaced, and only one
+        // generation back; a swapped one breaks the approval.
+        let replaced = runtime.candidate(1);
+        let issue = |replaces: IssuerKey| {
+            let mut plan = plan("prod", Some(RotationPhase::Issue));
+            plan.steps[0].issuer.as_mut().unwrap().replaces = Some(replaces);
+            plan
+        };
+        let approved_issue = proof(issue(replaced.clone()));
+        assert_eq!(
+            verify_proof(policy, "prod", &approved_issue, now_ms).unwrap(),
+            Proven {
+                trusted: replaced.clone(),
+                issuing: Some(next.clone())
+            }
+        );
+        // The server's current copy lends only its wraps, and only when it
+        // is the approved key.
+        let mut rewrapped = next.clone();
+        rewrapped
+            .sealed_key
+            .wraps
+            .extend(Runtime::new("rewrapped").candidate(2).sealed_key.wraps);
+        let with_current = |current: IssuerKey| IssuerProof {
+            current: Some(current),
+            ..approved_issue.clone()
+        };
+        assert_eq!(
+            verify_proof(policy, "prod", &with_current(rewrapped.clone()), now_ms)
+                .unwrap()
+                .issuing,
+            Some(rewrapped)
+        );
+        assert_eq!(
+            verify_proof(policy, "prod", &with_current(runtime.candidate(2)), now_ms)
+                .unwrap()
+                .issuing,
+            Some(next.clone())
+        );
+        let mut swapped = approved_issue.clone();
+        swapped.plan.steps[0].issuer.as_mut().unwrap().replaces = Some(runtime.candidate(1));
+        assert!(verify_proof(policy, "prod", &swapped, now_ms).is_err());
+        let skipped = proof(issue(runtime.candidate(3)));
+        assert!(verify_proof(policy, "prod", &skipped, now_ms).is_err());
+        let bare_issue = proof(plan("prod", Some(RotationPhase::Issue)));
+        assert!(verify_proof(policy, "prod", &bare_issue, now_ms).is_err());
     }
 
     /// A runtime keeps each issuer an approved step verified, and a bundle
@@ -1240,8 +1655,12 @@ mod tests {
         assert_eq!(wanted_generation(&env_obj(&mut ctx).await).unwrap(), None);
 
         let step = activation_step(&env_obj(&mut ctx).await, "prod").unwrap();
-        record_activated(&mut ctx, "prod", &[&step]).await.unwrap();
-        record_activated(&mut ctx, "prod", &[&step]).await.unwrap();
+        record_activated(&mut ctx, "prod", "plan-test", &[&step])
+            .await
+            .unwrap();
+        record_activated(&mut ctx, "prod", "plan-test", &[&step])
+            .await
+            .unwrap();
         let object = env_obj(&mut ctx).await;
         assert_eq!(current(&object).unwrap(), Some(kept));
         assert_eq!(candidate(&object).unwrap(), None);
@@ -1308,7 +1727,9 @@ mod tests {
         .await
         .unwrap();
 
-        record_activated(&mut ctx, "prod", &[&step]).await.unwrap();
+        record_activated(&mut ctx, "prod", "plan-test", &[&step])
+            .await
+            .unwrap();
         let object = env_obj(&mut ctx).await;
         let recorded = current(&object).unwrap().unwrap();
         assert_eq!(recorded.fingerprint, approved.fingerprint);

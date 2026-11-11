@@ -788,6 +788,13 @@ pub struct RuntimeWork {
     /// `workload_identity` capability: an older one would refuse the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issuer_candidate: Option<crate::identity_issuer::CandidateRequest>,
+    /// The approved rotation plans that prove the next issuer, while it
+    /// waits for its issue step, and the previous issuer, while it is
+    /// kept, so this runtime trusts both in every bundle it issues (ADR
+    /// 0046 §7). On idle and claimed work alike, and only for a runtime
+    /// that names `issuer_take_up`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issuer_proofs: Vec<crate::identity_issuer::IssuerProof>,
 }
 
 fn idle_work(environment: &str) -> RuntimeWork {
@@ -797,6 +804,7 @@ fn idle_work(environment: &str) -> RuntimeWork {
         claim: None,
         approvals: Vec::new(),
         issuer_candidate: None,
+        issuer_proofs: Vec::new(),
     }
 }
 
@@ -830,6 +838,7 @@ async fn delivered_work(
         claim: Some(claim),
         approvals,
         issuer_candidate: None,
+        issuer_proofs: Vec::new(),
     })
 }
 
@@ -1054,6 +1063,10 @@ pub struct RuntimeCaller<'a> {
     /// steps with a rotation phase (ADR 0046 §7), which an older runtime
     /// refuses to decode.
     pub issuer_rotation: bool,
+    /// The agent named the `issuer_take_up` capability: it reads the next
+    /// issuer's approved add plan in idle work (ADR 0046 §7), which an
+    /// older runtime refuses to decode.
+    pub issuer_take_up: bool,
 }
 
 /// The capability a runtime names to be offered identity issuer work.
@@ -1062,6 +1075,14 @@ pub const WORKLOAD_IDENTITY_CAPABILITY: &str = "workload_identity";
 pub const PEER_GRANTS_CAPABILITY: &str = "peer_grants";
 /// The capability a runtime names to be offered issuer rotation steps.
 pub const ISSUER_ROTATION_CAPABILITY: &str = "issuer_rotation";
+/// The capability a runtime names to be handed the next issuer's proof.
+pub const ISSUER_TAKE_UP_CAPABILITY: &str = "issuer_take_up";
+/// The header a server sends on runtime work naming what it accepts, so a
+/// runtime keeps to what an older server decodes.
+pub const SERVER_CAPABILITIES_HEADER: &str = "x-tenkai-server-capabilities";
+/// The server admits certificate reports with `trust`, `restart_pending`
+/// and `observed_at` (ADR 0046 §7).
+pub const CERTIFICATE_OBSERVATIONS_CAPABILITY: &str = "certificate_observations";
 
 impl<'a> From<Option<&'a str>> for RuntimeCaller<'a> {
     fn from(instance: Option<&'a str>) -> Self {
@@ -1189,7 +1210,55 @@ impl RuntimeDeliveryOperations {
         if caller.workload_identity && work.plan.is_none() {
             work.issuer_candidate = self.issuer_candidate_request(environment).await?;
         }
+        // With claimed work too: a runtime must trust both issuers before
+        // a step issues a certificate.
+        if caller.issuer_take_up {
+            work.issuer_proofs = self.issuer_proofs(environment).await;
+        }
         Ok(work)
+    }
+
+    /// The approved add plan of `environment`'s next issuer, while one
+    /// waits. Optional: a runtime that misses it keeps the bundles it has,
+    /// and the next idle poll retries.
+    async fn issuer_proofs(&self, environment: &str) -> Vec<crate::identity_issuer::IssuerProof> {
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Vec::new();
+        };
+        let proofs = async {
+            let env_obj = crate::environment::environment(&mut ctx, environment).await?;
+            // The issue plan travels with the issuer as it is now, so a
+            // runtime wrapped since opens it.
+            let plan_ids = [
+                (crate::identity_issuer::next_plan(&env_obj), None),
+                (
+                    crate::identity_issuer::previous_plan(&env_obj),
+                    crate::identity_issuer::current(&env_obj)?,
+                ),
+            ];
+            let mut proofs = Vec::new();
+            for (plan_id, current) in plan_ids {
+                let Some(plan_id) = plan_id else {
+                    continue;
+                };
+                let plan = crate::plan::load(&mut ctx, plan_id).await?;
+                let mut approvals =
+                    crate::plan_approval::list_collected_envelopes(&mut ctx, &plan.id).await?;
+                let mut seen = std::collections::BTreeSet::new();
+                approvals.retain(|envelope| seen.insert(envelope.signature.clone()));
+                proofs.push(crate::identity_issuer::IssuerProof {
+                    plan,
+                    approvals,
+                    current,
+                });
+            }
+            anyhow::Ok(proofs)
+        }
+        .await;
+        proofs.unwrap_or_else(|error| {
+            eprintln!("reading the identity issuer proofs of {environment} failed: {error:#}");
+            Vec::new()
+        })
     }
 
     /// What an idle runtime that names `workload_identity` should generate:
@@ -1308,6 +1377,15 @@ impl RuntimeDeliveryOperations {
         if !caller.issuer_rotation && plan.steps.iter().any(rotates) {
             return self.idle_after_lapsed(environment, &plan.id).await;
         }
+        // And for an issue step naming the issuer it replaces.
+        let replaces = |step: &crate::plan::Step| {
+            step.issuer
+                .as_ref()
+                .is_some_and(|issuer| issuer.replaces.is_some())
+        };
+        if !caller.issuer_take_up && plan.steps.iter().any(replaces) {
+            return self.idle_after_lapsed(environment, &plan.id).await;
+        }
         // A re-wrap step or a removal deploys nothing, so it needs no
         // deployment preflight.
         for step in plan
@@ -1362,6 +1440,7 @@ impl RuntimeDeliveryOperations {
                     claim: Some(claim),
                     approvals: Vec::new(),
                     issuer_candidate: None,
+                    issuer_proofs: Vec::new(),
                 }),
                 _ => Err(RuntimeDeliveryError::Unavailable(refusal.to_string())),
             };
@@ -1625,7 +1704,7 @@ impl RuntimeDeliveryOperations {
             .iter()
             .filter(|step| step.issuer.is_some() && step.rewrap.is_none())
             .collect();
-        crate::identity_issuer::record_activated(&mut ctx, environment, &activated)
+        crate::identity_issuer::record_activated(&mut ctx, environment, &plan.id, &activated)
             .await
             .map_err(|error| {
                 RuntimeDeliveryError::Unavailable(format!(
@@ -3311,6 +3390,7 @@ mod tests {
                 workload_identity: false,
                 peer_grants: false,
                 issuer_rotation: false,
+                issuer_take_up: false,
             };
             operations.admit(None, &caller, environment)
         };
@@ -3359,6 +3439,7 @@ mod tests {
                         workload_identity: false,
                         peer_grants: false,
                         issuer_rotation: false,
+                        issuer_take_up: false,
                     },
                     "prod",
                     &request,
@@ -3540,6 +3621,7 @@ mod tests {
                             workload_identity: false,
                             peer_grants: false,
                             issuer_rotation: false,
+                            issuer_take_up: false,
                         },
                         "prod",
                         &request,
@@ -3625,6 +3707,7 @@ mod tests {
                         workload_identity: false,
                         peer_grants: false,
                         issuer_rotation: false,
+                        issuer_take_up: false,
                     },
                     "prod",
                     RuntimeInventoryReport {
@@ -3920,6 +4003,7 @@ mod tests {
             workload_identity: true,
             peer_grants: true,
             issuer_rotation: true,
+            issuer_take_up: true,
             ..RuntimeCaller::default()
         };
         // The static runtime holds no wrap of the issuer key.
@@ -4010,6 +4094,7 @@ mod tests {
             workload_identity: true,
             peer_grants: true,
             issuer_rotation: true,
+            issuer_take_up: true,
             ..RuntimeCaller::default()
         };
         for caller in [RuntimeCaller::from(Some("instance-b")), capable] {
@@ -4080,8 +4165,10 @@ mod tests {
     /// Run the issue step of a rotation whose add step was recorded.
     async fn issue_next(ctx: &mut Ctx) {
         let env_obj = crate::environment::environment(ctx, "prod").await.unwrap();
-        let issue = crate::identity_issuer::issue_step(&env_obj).unwrap();
-        crate::identity_issuer::record_activated(ctx, "prod", &[&issue])
+        let issue = crate::identity_issuer::issue_step(ctx, &env_obj, crate::now_millis() / 1000)
+            .await
+            .unwrap();
+        crate::identity_issuer::record_activated(ctx, "prod", "plan-test", &[&issue])
             .await
             .unwrap();
     }
@@ -4124,7 +4211,7 @@ mod tests {
             let mut plan = crate::plan::create_from_steps(&mut ctx, "prod", vec![step.clone()])
                 .await
                 .unwrap();
-            crate::identity_issuer::record_activated(&mut ctx, "prod", &[&step])
+            crate::identity_issuer::record_activated(&mut ctx, "prod", "plan-test", &[&step])
                 .await
                 .unwrap();
             if generation == 2 {
@@ -4217,7 +4304,7 @@ mod tests {
                         .unwrap(),
                 );
             }
-            crate::identity_issuer::record_activated(&mut ctx, "prod", &[&step])
+            crate::identity_issuer::record_activated(&mut ctx, "prod", "plan-test", &[&step])
                 .await
                 .unwrap();
             if generation == 2 {
@@ -4239,6 +4326,88 @@ mod tests {
             "{}",
             stored.status_detail
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// While a next issuer waits, idle work can hand out its approved add
+    /// plan with the approvals collected for it; once it issues, the issue
+    /// plan instead; without a rotation there is none.
+    #[tokio::test]
+    async fn issuer_proofs_are_the_approved_rotation_plans() {
+        let (operations, port) = operations();
+        let mut ctx = port.ctx.clone().unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::environment::env_add(&mut ctx, "prod", "issuer")
+            .await
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-next-proof-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = crate::sealing_key::SealingKey::open_or_generate(&dir).unwrap();
+        let mut add_plan = None;
+        for generation in 1..=2 {
+            crate::identity_issuer::request_candidate(&mut ctx, "prod")
+                .await
+                .unwrap();
+            let key = crate::identity_issuer::generate(
+                "prod",
+                generation,
+                runtime.public(),
+                crate::now_millis() / 1000,
+            )
+            .unwrap();
+            let own = runtime.fingerprint();
+            crate::identity_issuer::store_candidate(&mut ctx, "prod", key, || Ok(Some(own)))
+                .await
+                .unwrap();
+            let env_obj = crate::environment::environment(&mut ctx, "prod")
+                .await
+                .unwrap();
+            let step = crate::identity_issuer::activation_step(&env_obj, "prod").unwrap();
+            let plan = crate::plan::create_from_steps(&mut ctx, "prod", vec![step.clone()])
+                .await
+                .unwrap();
+            crate::identity_issuer::record_activated(&mut ctx, "prod", &plan.id, &[&step])
+                .await
+                .unwrap();
+            add_plan = Some(plan);
+        }
+        let add_plan = add_plan.unwrap();
+        let ids = |proofs: Vec<crate::identity_issuer::IssuerProof>| {
+            proofs
+                .into_iter()
+                .map(|proof| proof.plan.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(operations.issuer_proofs("prod").await), [add_plan.id]);
+        assert!(operations.issuer_proofs("staging").await.is_empty());
+        // Once the next issuer issues, its issue plan proves the issuer it
+        // replaced, for a runtime that joins later.
+        let env_obj = crate::environment::environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+        let step =
+            crate::identity_issuer::issue_step(&mut ctx, &env_obj, crate::now_millis() / 1000)
+                .await
+                .unwrap();
+        let issue_plan = crate::plan::create_from_steps(&mut ctx, "prod", vec![step.clone()])
+            .await
+            .unwrap();
+        crate::identity_issuer::record_activated(&mut ctx, "prod", &issue_plan.id, &[&step])
+            .await
+            .unwrap();
+        let proofs = operations.issuer_proofs("prod").await;
+        let env_obj = crate::environment::environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+        assert_eq!(
+            proofs[0].current,
+            crate::identity_issuer::current(&env_obj).unwrap()
+        );
+        assert_eq!(ids(proofs), [issue_plan.id]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4504,6 +4673,7 @@ mod tests {
                     workload_identity: false,
                     peer_grants: false,
                     issuer_rotation: false,
+                    issuer_take_up: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -4620,6 +4790,7 @@ mod tests {
                     workload_identity: false,
                     peer_grants: false,
                     issuer_rotation: false,
+                    issuer_take_up: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -4657,6 +4828,7 @@ mod tests {
                     workload_identity: false,
                     peer_grants: false,
                     issuer_rotation: false,
+                    issuer_take_up: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
