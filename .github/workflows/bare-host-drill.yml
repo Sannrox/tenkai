@@ -49,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install polkit
-        run: sudo apt-get update && sudo apt-get install -y polkitd
+        run: scripts/apt-install.sh polkitd
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         if: inputs.release_tag == ''
         with:

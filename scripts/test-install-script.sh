@@ -209,9 +209,10 @@ container_test() {
   for image in ubuntu:22.04 debian:12 \
     registry.access.redhat.com/ubi8/ubi-minimal registry.access.redhat.com/ubi9/ubi-minimal; do
     printf '== %s\n' "$image"
-    docker run --rm --platform linux/amd64 -v "${tmp}/containers:/release:ro" "$image" sh -ec '
+    docker run --rm --platform linux/amd64 -v "${tmp}/containers:/release:ro" \
+      -v "${ROOT}/scripts/apt-install.sh:/apt-install.sh:ro" "$image" sh -ec '
       if ! command -v curl >/dev/null 2>&1; then
-        apt-get update -qq >/dev/null && apt-get install -y -qq curl >/dev/null
+        sh /apt-install.sh curl >/dev/null
       fi
       release=/release/v'"$VERSION"'
       sh "${release}/install.sh" --base-url file:///release --role server --with-host-applier
