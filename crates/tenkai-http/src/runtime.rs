@@ -285,6 +285,10 @@ fn runtime_caller<'a>(
             headers,
             tenkai::runtime_delivery::ISSUER_TAKE_UP_CAPABILITY,
         ),
+        issuer_removal: names_capability(
+            headers,
+            tenkai::runtime_delivery::ISSUER_REMOVAL_CAPABILITY,
+        ),
     }
 }
 

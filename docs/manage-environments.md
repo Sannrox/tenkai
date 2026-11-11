@@ -196,8 +196,10 @@ tenkaictl --target remote identity-issuer rewrap prod --recipient sha256:<hex> -
   like any plan. The runtime that runs it refuses a key with any other
   fingerprint, and the server records the issuer only if its generation is
   the next one, so a stale plan fails and the issuer stays.
-- With an issuer already current, rotation takes two approved steps, so no
-  valid peer fails (ADR 0046 §7).
+- With an issuer already current, rotation takes three approved steps, so
+  no valid peer fails (ADR 0046 §7). Each `plan` builds the step after the
+  last one the server recorded, so a rotation interrupted anywhere resumes
+  there and never repeats a step.
   - **Add**: the first `plan` after `prepare` builds it. The server records
     the candidate as the next issuer and hands the approved add plan to every
     runtime of the environment. Each runtime trusts the next issuer only once
@@ -224,7 +226,22 @@ tenkaictl --target remote identity-issuer rewrap prod --recipient sha256:<hex> -
     the previous issuer; a runtime that joins later trusts it through the
     approved issue plan. Certificates of the replaced issuer renew from the
     next one as they fall due.
-  - `status` shows the next and previous issuers. A `host` certificate's
+  - **Remove**: the next `plan` builds it once no deployed instance whose
+    release asks for a certificate may still hold a live one from the
+    previous issuer: each reported, since its last deployment, a
+    certificate from the current issuer taken up as for the issue step (no
+    restart pending, written at least 10 minutes earlier). An expired
+    report does not count, since an offline runtime may have renewed it
+    from the old issuer. Until then `plan`
+    refuses and names each instance. The server checks again when it
+    records the step. Each runtime then drops the previous issuer through
+    the approved remove plan, and its next renewal pass re-issues every
+    bundle that still carries it. A new `prepare` is planned only after the
+    remove step. Upgrade every runtime of the environment before approving
+    the remove step: a runtime that predates it keeps the removed issuer in
+    the bundles it writes.
+  - `status` shows the next and previous issuers, the step each awaits,
+    and the instances that step waits for. A `host` certificate's
     bundle gets an issuer only once the host's own approval policy accepts
     the plan that added or replaced it: a host whose policy does not
     approve the rotation plans holds the issue step back. A `host`

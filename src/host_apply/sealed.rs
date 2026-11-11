@@ -267,11 +267,15 @@ impl HostSealedValues {
         } else {
             proven
                 .iter()
-                .filter(|proven| {
-                    proven.trusted.generation == recorded.issuer_generation
-                        && proven.trusted.fingerprint == recorded.issuer_fingerprint
+                .filter_map(|proven| match proven {
+                    Proven::Issued { replaced, issuing }
+                        if replaced.generation == recorded.issuer_generation
+                            && replaced.fingerprint == recorded.issuer_fingerprint =>
+                    {
+                        Some(issuing)
+                    }
+                    _ => None,
                 })
-                .filter_map(|proven| proven.issuing.as_ref())
                 .find(|issuing| first.as_ref() == Some(&issuing.fingerprint))
                 .map(|issuing| IdentityGrant {
                     issuer_generation: issuing.generation,
@@ -330,13 +334,9 @@ impl HostIdentity {
 fn check_bundle(issued: IssuedIdentity, proven: &[Proven], now_ms: i64) -> Result<IssuedIdentity> {
     let trust = crate::workload_identity::check_issued_trust(&issued, now_ms / 1000)?;
     for fingerprint in trust.iter().skip(1) {
-        let approved = proven.iter().any(|proven| {
-            proven.trusted.fingerprint == *fingerprint
-                && proven
-                    .trusted
-                    .generation
-                    .abs_diff(issued.grant.issuer_generation)
-                    == 1
+        let approved = proven.iter().filter_map(Proven::trusted).any(|trusted| {
+            trusted.fingerprint == *fingerprint
+                && trusted.generation.abs_diff(issued.grant.issuer_generation) == 1
         });
         if !approved {
             bail!(

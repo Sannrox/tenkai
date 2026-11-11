@@ -4396,6 +4396,177 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A rotation resumes from what the server recorded (ADR 0046 §7): after
+    /// any step, planning again yields the step after it and never one
+    /// already recorded, a replayed completion changes nothing, and the
+    /// remove step waits until no instance holds a live certificate of the
+    /// old issuer, checked again when it is recorded.
+    #[tokio::test]
+    async fn a_rotation_resumes_at_the_next_step_and_removes_only_an_unused_issuer() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-rotation-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        publish_compat_release(
+            &mut ctx,
+            &root,
+            "api",
+            "[deploy.identity]\ncertificate = \"server\"\nreload = \"runtime\"\n",
+        )
+        .await;
+        let actor = crate::auth_context::test_management_context("env-rotation");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
+        let sealing = root.join("sealing");
+        std::fs::create_dir_all(&sealing).unwrap();
+        let public = crate::sealing_key::SealingKey::open_or_generate(&sealing)
+            .unwrap()
+            .public()
+            .clone();
+        let now = crate::now_millis() / 1000;
+        let first = crate::identity_issuer::generate("local", 1, &public, now).unwrap();
+        let second = crate::identity_issuer::generate("local", 2, &public, now).unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        for (property, key) in [
+            ("identity_issuer", &first),
+            ("identity_issuer_next", &second),
+        ] {
+            env.properties
+                .insert(property.into(), serde_json::to_string(key).unwrap());
+        }
+        ctx.put(env).await.unwrap();
+        crate::environment::reconcile_deployment(&mut ctx, "local", "api", Some("1.0.0"))
+            .await
+            .unwrap();
+        let mut not_after = now + 24 * 3600;
+        let mut report = |trust: Vec<&str>| {
+            not_after += 1;
+            crate::certificate_reports::CertificateReport {
+                schema: crate::certificate_reports::CERTIFICATE_REPORT_SCHEMA.into(),
+                environment: "local".into(),
+                instance: "api".into(),
+                not_before: now - crate::identity_issuer::TAKE_UP_SECS - 120,
+                not_after,
+                last_renewal: None,
+                trust: trust.into_iter().map(Into::into).collect(),
+                restart_pending: false,
+                observed_at: now + 1,
+            }
+        };
+        async fn planned(ctx: &mut Ctx, now: i64) -> anyhow::Result<crate::plan::Step> {
+            let env = crate::environment::environment(ctx, "local").await.unwrap();
+            crate::identity_issuer::rotation_step(ctx, &env, now).await
+        }
+        let phase = |step: &crate::plan::Step| step.issuer.as_ref().unwrap().phase;
+        use crate::identity_issuer::RotationPhase;
+
+        // Taken up: the plan is the issue step, recorded once.
+        let taken_up = report(vec![&first.fingerprint, &second.fingerprint]);
+        crate::certificate_reports::admit(&mut ctx, "local", &[taken_up])
+            .await
+            .unwrap();
+        let issue = planned(&mut ctx, now).await.unwrap();
+        assert_eq!(phase(&issue), Some(RotationPhase::Issue));
+        crate::identity_issuer::record_activated(&mut ctx, "local", "plan-issue", &[&issue])
+            .await
+            .unwrap();
+
+        // Resumed after the issue step: the plan is the remove step, refused
+        // while the certificate from the first issuer is live.
+        let refused = format!("{:#}", planned(&mut ctx, now).await.unwrap_err());
+        assert!(
+            refused.contains("api (certificate from an earlier issuer"),
+            "{refused}"
+        );
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        let waiting = crate::identity_issuer::rotation_waiting(&mut ctx, &env, now)
+            .await
+            .unwrap();
+        assert_eq!(waiting.len(), 1, "{waiting:?}");
+        // Renewed but not yet rolled out: replicas may still present the
+        // old certificate.
+        let rolling = crate::certificate_reports::CertificateReport {
+            restart_pending: true,
+            ..report(vec![&second.fingerprint, &first.fingerprint])
+        };
+        crate::certificate_reports::admit(&mut ctx, "local", &[rolling])
+            .await
+            .unwrap();
+        let refused = format!("{:#}", planned(&mut ctx, now).await.unwrap_err());
+        assert!(refused.contains("api (restart pending)"), "{refused}");
+        let renewed = report(vec![&second.fingerprint, &first.fingerprint]);
+        crate::certificate_reports::admit(&mut ctx, "local", &[renewed])
+            .await
+            .unwrap();
+        let remove = planned(&mut ctx, now).await.unwrap();
+        assert_eq!(phase(&remove), Some(RotationPhase::Remove));
+        assert_eq!(remove.issuer.as_ref().unwrap().key, first);
+
+        // Recording checks again: a deployment since the report voids it.
+        let deployment = format!("{}api", crate::environment::DEPLOYMENT_AT);
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties
+            .insert(deployment.clone(), ((now + 1) * 1000 + 999).to_string());
+        ctx.put(env).await.unwrap();
+        let refused =
+            crate::identity_issuer::record_activated(&mut ctx, "local", "plan-remove", &[&remove])
+                .await
+                .unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("not reported since its last deployment"),
+            "{refused:#}"
+        );
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.remove(&deployment);
+        ctx.put(env).await.unwrap();
+        crate::identity_issuer::record_activated(&mut ctx, "local", "plan-remove", &[&remove])
+            .await
+            .unwrap();
+
+        // Replays of both steps change nothing, and the rotation is done.
+        let before = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        for step in [&issue, &remove] {
+            crate::identity_issuer::record_activated(&mut ctx, "local", "plan-replay", &[step])
+                .await
+                .unwrap();
+        }
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert_eq!(env.properties, before.properties);
+        assert_eq!(crate::identity_issuer::current(&env).unwrap(), Some(second));
+        assert_eq!(crate::identity_issuer::previous(&env).unwrap(), None);
+        assert_eq!(
+            crate::identity_issuer::removed_plan(&env),
+            Some("plan-remove")
+        );
+        // A runtime that missed the promotion still learns it first.
+        assert_eq!(
+            crate::identity_issuer::previous_plan(&env),
+            Some("plan-issue")
+        );
+        let refused = format!("{:#}", planned(&mut ctx, now).await.unwrap_err());
+        assert!(refused.contains("prepare one first"), "{refused}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Peers come only from bindings (ADR 0046 §5): rebinding moves the
     /// grant on both sides in one plan, and an instance without an edge is
     /// never an allowed caller.

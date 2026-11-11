@@ -243,9 +243,13 @@ from `secret rewrap`: the runtime that opens the issuer key need not open
 the sealed values. A lost issuer is rotated, not recovered.
 
 Rotating an existing issuer (ADR 0046 §7) adds `issuer.phase` to the step:
-`add` records `issuer.key` as the next issuer, and `issue` makes the next
-issuer current and keeps the replaced one as the previous issuer. Each is a
-compare-and-set, and a replay changes nothing. The runtime keeps each key it
+`add` records `issuer.key` as the next issuer, `issue` makes the next
+issuer current and keeps the replaced one as the previous issuer, and
+`remove` names the previous issuer as `issuer.key` and stops trusting it.
+Each is a compare-and-set, and a replay changes nothing. The server records
+a remove step only once every deployed instance with a certificate
+reported one from the current issuer, taken up as for the issue step. Running it opens
+nothing and changes nothing on the runtime. The runtime keeps each key it
 opens for an `add` or `issue` step, and every certificate it issues for a
 Helm target carries the issuer one generation before and after the issuing
 one in its trust bundle (`ca.pem`), after the issuing issuer. A certificate
@@ -257,13 +261,23 @@ and the host applier checks them against its own approval policy
 
 Work for a runtime that names `issuer_take_up`, idle or claimed, carries
 `issuer_proofs`, each an approved rotation plan (`plan`) and its
-`approvals`: the add plan while a next issuer waits, and the issue plan
-while the issuer it replaced is kept. The issue step names that issuer in
+`approvals`: the add plan while a next issuer waits, the issue plan
+until the next issue step, and the remove plan once the replaced issuer is
+removed, until the next issue step. A runtime that missed the promotion
+reads the issue plan first and the remove plan after it. The issue step names that issuer in
 `replaces`. The runtime trusts the add step's key, or the
 issue step's `replaces` one generation below its key, only if its local
 approval policy accepts the plan and the plan is of this environment with
 that single step. A plan with `replaces` goes only to a runtime that names
-`issuer_take_up`. Running the issue step only keeps both issuers. The
+`issuer_take_up`, and a plan with a `remove` step, or the remove plan's
+proof, only to one that names `issuer_removal`. The server does not track
+which runtimes name it: a runtime that does not keeps the removed issuer
+in the bundles it writes, so approve a remove step only once every runtime
+of the environment names `issuer_removal`. A runtime that verifies a remove plan drops its
+issuer, and every generation below it, from the issuers it trusts and from
+its kept proofs, never trusts them again, and renews each certificate whose
+bundle still carries it. A replayed older plan changes nothing. It
+refuses a remove plan for the issuer it issues from, or a later one. Running the issue step only keeps both issuers. The
 server hands out the issue plan once it recorded the step; from then on a
 runtime that can open the next issuer renews from it, and a certificate
 granted by the replaced generation, whose issuer the runtime trusts,
