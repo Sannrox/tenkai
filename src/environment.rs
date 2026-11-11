@@ -1740,6 +1740,11 @@ pub struct EnvironmentInspectReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub identity_issuer: Option<crate::identity_issuer::IssuerStatus>,
+    /// The instances the next issuer rotation step waits for, each with why
+    /// (ADR 0046 §7). Beside `identity_issuer`, whose shape older clients
+    /// decode strictly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identity_issuer_waiting: Vec<String>,
 }
 
 /// Inspect copy of declared/derived criticality. Lives here so this module
@@ -2249,6 +2254,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             latest_failures: Vec::new(),
             sealed_recovery_warning: None,
             identity_issuer: None,
+            identity_issuer_waiting: Vec::new(),
         });
     }
     Ok(fleet_status_from_inspects(reports))
@@ -2321,6 +2327,15 @@ async fn inspect_environment_base(
         crate::sealed_secret::list_from_object(&env_obj, false)?.recovery_warning();
     let identity_issuer =
         Some(crate::identity_issuer::status(&env_obj)?).filter(|status| !status.is_empty());
+    // Progress is optional here: an unreadable report shows as such instead
+    // of failing the inspection.
+    let identity_issuer_waiting = if identity_issuer.is_some() {
+        crate::identity_issuer::rotation_waiting(ctx, &env_obj, crate::now_millis() / 1000)
+            .await
+            .unwrap_or_else(|error| vec![format!("rotation progress unreadable: {error:#}")])
+    } else {
+        Vec::new()
+    };
     Ok(EnvironmentInspectReport {
         name: env_obj.name,
         id: env_obj.id,
@@ -2352,6 +2367,7 @@ async fn inspect_environment_base(
         latest_failures,
         sealed_recovery_warning,
         identity_issuer,
+        identity_issuer_waiting,
     })
 }
 

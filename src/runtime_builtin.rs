@@ -529,6 +529,12 @@ impl Run<'_> {
                         "re-wrapped identity issuer generation {} for {}",
                         key.generation, rewrap.fingerprint
                     ),
+                    None if issuer.phase == Some(crate::identity_issuer::RotationPhase::Remove) => {
+                        format!(
+                            "removing identity issuer generation {} with key {}",
+                            key.generation, key.fingerprint
+                        )
+                    }
                     None => format!(
                         "verified identity issuer generation {} with key {}",
                         key.generation, key.fingerprint
@@ -1157,6 +1163,14 @@ impl BuiltinConfig {
         issuer: &IssuerStep,
         rewrap: Option<&RewrapStep>,
     ) -> Result<Vec<crate::sealed_secret::RecipientWrap>> {
+        // A remove step changes nothing here: the server checks it under
+        // the environment lease when it records it, and each runtime drops
+        // the issuer once it reads the recorded plan, so a refused step
+        // never drops trust a live certificate needs.
+        if issuer.phase == Some(crate::identity_issuer::RotationPhase::Remove) {
+            issuer.key.check_public()?;
+            return Ok(Vec::new());
+        }
         let dir = self.sealing_dir.as_deref().context(
             "the step opens the identity issuer key, and this runtime has no sealing key (enroll with --credential-file)",
         )?;
@@ -1732,17 +1746,34 @@ fn issue_with_bundle(
     crate::workload_identity::issue_trusting(grant, issuer, key, &certificates, now_secs)
 }
 
-/// The trust bundle certificates of the issuing issuer should carry, as
-/// fingerprints with the issuer first, and the issuer's generation. None
-/// while this runtime has verified no issuer or cannot read its cache; a
-/// due renewal then fails visibly instead.
-fn expected_trust(dir: &Path, environment: &str, bundle: Bundle) -> Option<(u64, Vec<String>)> {
+/// What the trust bundles of certificates of the issuing issuer should
+/// hold.
+struct ExpectedTrust {
+    /// The issuing issuer's generation.
+    generation: u64,
+    /// Fingerprints every bundle carries, the issuing issuer first.
+    trust: Vec<String>,
+    /// Fingerprints an approved remove plan dropped, which none carries.
+    removed: Vec<String>,
+}
+
+/// The trust bundles of the issuing issuer's certificates, as this runtime
+/// knows them. None while it has verified no issuer or cannot read its
+/// cache; a due renewal then fails visibly instead.
+fn expected_trust(dir: &Path, environment: &str, bundle: Bundle) -> Option<ExpectedTrust> {
     let issuer = crate::identity_issuer::cached_verified(dir, environment).ok()??;
     let trusted = trusted_issuers(dir, environment, &issuer, bundle).ok()?;
-    let fingerprints = std::iter::once(issuer.fingerprint)
+    let removed = crate::identity_issuer::cached_removed(dir, environment)
+        .ok()?
+        .fingerprints;
+    let trust = std::iter::once(issuer.fingerprint)
         .chain(trusted.into_iter().map(|trusted| trusted.fingerprint))
         .collect();
-    Some((issuer.generation, fingerprints))
+    Some(ExpectedTrust {
+        generation: issuer.generation,
+        trust,
+        removed,
+    })
 }
 
 /// The issuers a `bundle` issued by `issuer` carries after it.
@@ -1758,19 +1789,25 @@ fn trusted_issuers(
     }
 }
 
-/// Whether `identity`, issued by the issuing issuer, lacks an issuer its
-/// trust bundle should carry: a rotation added one. A bundle that holds
-/// more is left alone, so two runtimes that know different issuers never
-/// take turns re-issuing it.
+/// Whether `identity`'s trust bundle is not what a rotation made it: issued
+/// by the issuing issuer and lacking an issuer a rotation added, or
+/// holding one a remove plan dropped. A bundle that holds more is otherwise
+/// left alone, so two runtimes that know different issuers never take
+/// turns re-issuing it.
 fn bundle_stale(
     identity: &crate::workload_identity::InstalledIdentity,
-    expected: Option<&(u64, Vec<String>)>,
+    expected: Option<&ExpectedTrust>,
 ) -> bool {
-    expected.is_some_and(|(generation, trust)| {
-        identity.grant.issuer_generation == *generation
-            && trust
+    expected.is_some_and(|expected| {
+        (identity.grant.issuer_generation == expected.generation
+            && expected
+                .trust
                 .iter()
-                .any(|fingerprint| !identity.trust.contains(fingerprint))
+                .any(|fingerprint| !identity.trust.contains(fingerprint)))
+            || identity
+                .trust
+                .iter()
+                .any(|fingerprint| expected.removed.contains(fingerprint))
     })
 }
 
@@ -2708,6 +2745,62 @@ mod tests {
             },
             issued.grant
         );
+
+        // Running the remove step drops nothing; once the server recorded
+        // it, which the runtime reads from the remove plan, the next pass
+        // re-issues every bundle without the removed issuer, and only once.
+        let remove = IssuerStep {
+            key: replaced_key(&dir, &issued),
+            recipient: None,
+            phase: Some(crate::identity_issuer::RotationPhase::Remove),
+            replaces: None,
+        };
+        case.config.run_issuer(ENVIRONMENT, &remove, None).unwrap();
+        assert!(
+            crate::identity_issuer::trusts(&dir, ENVIRONMENT, &issued.grant.issuer_fingerprint)
+                .unwrap()
+        );
+        crate::identity_issuer::cache_removed(&dir, ENVIRONMENT, &remove.key).unwrap();
+        let renewed = renew_identities(&case.config, ENVIRONMENT, later)
+            .unwrap()
+            .renewals;
+        renewed[0].outcome.as_ref().unwrap();
+        let alone = held.0.lock().unwrap()[0].clone();
+        let installed = crate::workload_identity::InstalledIdentity::read(
+            ENVIRONMENT,
+            "api",
+            &alone.certificate,
+            &alone.ca,
+            &serde_json::to_vec(&alone.grant).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(installed.trust, std::slice::from_ref(&next.fingerprint));
+        assert!(
+            renew_identities(&case.config, ENVIRONMENT, later)
+                .unwrap()
+                .renewals
+                .is_empty()
+        );
+        // The issuer this runtime issues from is never removed.
+        assert!(crate::identity_issuer::cache_removed(&dir, ENVIRONMENT, &next).is_err());
+    }
+
+    /// The first-generation issuer this runtime trusts beside `issued`'s.
+    fn replaced_key(
+        dir: &Path,
+        issued: &crate::workload_identity::IssuedIdentity,
+    ) -> crate::identity_issuer::IssuerKey {
+        crate::identity_issuer::trust_bundle(
+            dir,
+            ENVIRONMENT,
+            &crate::identity_issuer::cached_verified(dir, ENVIRONMENT)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|kept| kept.fingerprint == issued.grant.issuer_fingerprint)
+        .unwrap()
     }
 
     /// A restart-reload certificate falls due later by its environment's

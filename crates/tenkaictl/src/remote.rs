@@ -313,7 +313,10 @@ pub(crate) async fn run(
                     );
                 }
                 if let Some(issuer) = report.identity_issuer {
-                    println!("{}", crate::output::issuer_line(&env, &issuer));
+                    println!(
+                        "{}",
+                        crate::output::issuer_line(&env, &issuer, &report.identity_issuer_waiting)
+                    );
                 }
             }
             if rows.is_empty() {

@@ -236,7 +236,11 @@ pub(crate) fn print_spec_drift(drift: &tenkai::spec_drift::SpecDriftView) {
 }
 
 /// One `status` line for an environment's identity issuer (ADR 0046 §2).
-pub(crate) fn issuer_line(env: &str, issuer: &tenkai::identity_issuer::IssuerStatus) -> String {
+pub(crate) fn issuer_line(
+    env: &str,
+    issuer: &tenkai::identity_issuer::IssuerStatus,
+    waiting: &[String],
+) -> String {
     let mut line = match &issuer.current {
         Some(current) if current.recipients.is_empty() => format!(
             "{env} identity issuer generation {} {} has no recipient left; prepare a new one",
@@ -266,9 +270,12 @@ pub(crate) fn issuer_line(env: &str, issuer: &tenkai::identity_issuer::IssuerSta
     }
     if let Some(previous) = &issuer.previous {
         line.push_str(&format!(
-            "; previous generation {} {} is still trusted",
+            "; previous generation {} {} is still trusted and awaits an approved remove step",
             previous.generation, previous.fingerprint
         ));
+    }
+    if !waiting.is_empty() {
+        line.push_str(&format!("; that step waits for {}", waiting.join(", ")));
     }
     line
 }

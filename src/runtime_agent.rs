@@ -971,11 +971,12 @@ impl RuntimeClient {
             request = request.header(
                 "x-tenkai-runtime-capabilities",
                 format!(
-                    "{},{},{},{}",
+                    "{},{},{},{},{}",
                     crate::runtime_delivery::WORKLOAD_IDENTITY_CAPABILITY,
                     crate::runtime_delivery::PEER_GRANTS_CAPABILITY,
                     crate::runtime_delivery::ISSUER_ROTATION_CAPABILITY,
-                    crate::runtime_delivery::ISSUER_TAKE_UP_CAPABILITY
+                    crate::runtime_delivery::ISSUER_TAKE_UP_CAPABILITY,
+                    crate::runtime_delivery::ISSUER_REMOVAL_CAPABILITY
                 ),
             );
         }
@@ -1134,7 +1135,16 @@ impl RuntimeClient {
             proof,
             crate::now_millis(),
         )?;
-        for key in std::iter::once(&proven.trusted).chain(&proven.issuing) {
+        let issuing = match &proven {
+            crate::identity_issuer::Proven::Removed(removed) => {
+                // No bundle this runtime writes carries it again; the
+                // renewal pass replaces those that still do.
+                return crate::identity_issuer::cache_removed(dir, &self.environment, removed);
+            }
+            crate::identity_issuer::Proven::Next(_) => None,
+            crate::identity_issuer::Proven::Issued { issuing, .. } => Some(issuing),
+        };
+        for key in proven.trusted().into_iter().chain(issuing) {
             if !crate::identity_issuer::trusts(dir, &self.environment, &key.fingerprint)? {
                 crate::identity_issuer::cache_trusted(dir, &self.environment, key)?;
             }
@@ -1144,7 +1154,7 @@ impl RuntimeClient {
         // The server hands out an issue plan only once it recorded the
         // step, so the next issuer now issues: renew from it if this
         // runtime can open it.
-        let Some(issuing) = &proven.issuing else {
+        let Some(issuing) = issuing else {
             return Ok(());
         };
         let behind = crate::identity_issuer::cached_verified(dir, &self.environment)?

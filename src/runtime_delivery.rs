@@ -1067,6 +1067,10 @@ pub struct RuntimeCaller<'a> {
     /// issuer's approved add plan in idle work (ADR 0046 §7), which an
     /// older runtime refuses to decode.
     pub issuer_take_up: bool,
+    /// The agent named the `issuer_removal` capability: it reads remove
+    /// steps and the remove plan's proof (ADR 0046 §7), which an older
+    /// runtime refuses to decode.
+    pub issuer_removal: bool,
 }
 
 /// The capability a runtime names to be offered identity issuer work.
@@ -1077,6 +1081,8 @@ pub const PEER_GRANTS_CAPABILITY: &str = "peer_grants";
 pub const ISSUER_ROTATION_CAPABILITY: &str = "issuer_rotation";
 /// The capability a runtime names to be handed the next issuer's proof.
 pub const ISSUER_TAKE_UP_CAPABILITY: &str = "issuer_take_up";
+/// The capability a runtime names to be offered issuer remove steps.
+pub const ISSUER_REMOVAL_CAPABILITY: &str = "issuer_removal";
 /// The header a server sends on runtime work naming what it accepts, so a
 /// runtime keeps to what an older server decodes.
 pub const SERVER_CAPABILITIES_HEADER: &str = "x-tenkai-server-capabilities";
@@ -1213,7 +1219,7 @@ impl RuntimeDeliveryOperations {
         // With claimed work too: a runtime must trust both issuers before
         // a step issues a certificate.
         if caller.issuer_take_up {
-            work.issuer_proofs = self.issuer_proofs(environment).await;
+            work.issuer_proofs = self.issuer_proofs(environment, caller.issuer_removal).await;
         }
         Ok(work)
     }
@@ -1221,7 +1227,11 @@ impl RuntimeDeliveryOperations {
     /// The approved add plan of `environment`'s next issuer, while one
     /// waits. Optional: a runtime that misses it keeps the bundles it has,
     /// and the next idle poll retries.
-    async fn issuer_proofs(&self, environment: &str) -> Vec<crate::identity_issuer::IssuerProof> {
+    async fn issuer_proofs(
+        &self,
+        environment: &str,
+        removal: bool,
+    ) -> Vec<crate::identity_issuer::IssuerProof> {
         let Some(mut ctx) = self.reconciler.application_ctx() else {
             return Vec::new();
         };
@@ -1229,11 +1239,17 @@ impl RuntimeDeliveryOperations {
             let env_obj = crate::environment::environment(&mut ctx, environment).await?;
             // The issue plan travels with the issuer as it is now, so a
             // runtime wrapped since opens it.
+            // The remove plan tells each runtime to drop the issuer it
+            // removed from its bundles.
             let plan_ids = [
                 (crate::identity_issuer::next_plan(&env_obj), None),
                 (
                     crate::identity_issuer::previous_plan(&env_obj),
                     crate::identity_issuer::current(&env_obj)?,
+                ),
+                (
+                    crate::identity_issuer::removed_plan(&env_obj).filter(|_| removal),
+                    None,
                 ),
             ];
             let mut proofs = Vec::new();
@@ -1384,6 +1400,15 @@ impl RuntimeDeliveryOperations {
                 .is_some_and(|issuer| issuer.replaces.is_some())
         };
         if !caller.issuer_take_up && plan.steps.iter().any(replaces) {
+            return self.idle_after_lapsed(environment, &plan.id).await;
+        }
+        // And for a remove step, whose phase an older runtime cannot read.
+        let removes = |step: &crate::plan::Step| {
+            step.issuer.as_ref().is_some_and(|issuer| {
+                issuer.phase == Some(crate::identity_issuer::RotationPhase::Remove)
+            })
+        };
+        if !caller.issuer_removal && plan.steps.iter().any(removes) {
             return self.idle_after_lapsed(environment, &plan.id).await;
         }
         // A re-wrap step or a removal deploys nothing, so it needs no
@@ -2306,6 +2331,9 @@ fn recovery_claimable(
         .steps
         .iter()
         .filter_map(|step| step.issuer.as_ref())
+        // A remove step opens nothing: it names the old issuer only by its
+        // public half, so a lost key never blocks its removal.
+        .filter(|issuer| issuer.phase != Some(crate::identity_issuer::RotationPhase::Remove))
         .all(|issuer| {
             issuer
                 .key
@@ -3049,6 +3077,31 @@ mod tests {
         let plain = plan(step(Vec::new()));
         assert!(recovery_claimable(&plain, Some(&other), None));
         assert!(recovery_claimable(&plain, None, None));
+        // A remove step needs no wrap of the issuer it removes.
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-removal-claim-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sealing = crate::sealing_key::SealingKey::open_or_generate(&dir).unwrap();
+        let mut lost = crate::identity_issuer::generate(
+            "prod",
+            1,
+            sealing.public(),
+            crate::now_millis() / 1000,
+        )
+        .unwrap();
+        lost.sealed_key.wraps.clear();
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut removal = plain.clone();
+        removal.steps[0].issuer = Some(crate::plan::IssuerStep {
+            key: lost,
+            recipient: None,
+            phase: Some(crate::identity_issuer::RotationPhase::Remove),
+            replaces: None,
+        });
+        assert!(recovery_claimable(&removal, Some(&other), None));
     }
 
     /// A recipient revoked after the runtime fetched its key gets no wraps
@@ -3391,6 +3444,7 @@ mod tests {
                 peer_grants: false,
                 issuer_rotation: false,
                 issuer_take_up: false,
+                issuer_removal: false,
             };
             operations.admit(None, &caller, environment)
         };
@@ -3440,6 +3494,7 @@ mod tests {
                         peer_grants: false,
                         issuer_rotation: false,
                         issuer_take_up: false,
+                        issuer_removal: false,
                     },
                     "prod",
                     &request,
@@ -3622,6 +3677,7 @@ mod tests {
                             peer_grants: false,
                             issuer_rotation: false,
                             issuer_take_up: false,
+                            issuer_removal: false,
                         },
                         "prod",
                         &request,
@@ -3708,6 +3764,7 @@ mod tests {
                         peer_grants: false,
                         issuer_rotation: false,
                         issuer_take_up: false,
+                        issuer_removal: false,
                     },
                     "prod",
                     RuntimeInventoryReport {
@@ -4004,6 +4061,7 @@ mod tests {
             peer_grants: true,
             issuer_rotation: true,
             issuer_take_up: true,
+            issuer_removal: true,
             ..RuntimeCaller::default()
         };
         // The static runtime holds no wrap of the issuer key.
@@ -4095,6 +4153,7 @@ mod tests {
             peer_grants: true,
             issuer_rotation: true,
             issuer_take_up: true,
+            issuer_removal: true,
             ..RuntimeCaller::default()
         };
         for caller in [RuntimeCaller::from(Some("instance-b")), capable] {
@@ -4382,8 +4441,11 @@ mod tests {
                 .map(|proof| proof.plan.id)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(ids(operations.issuer_proofs("prod").await), [add_plan.id]);
-        assert!(operations.issuer_proofs("staging").await.is_empty());
+        assert_eq!(
+            ids(operations.issuer_proofs("prod", true).await),
+            [add_plan.id]
+        );
+        assert!(operations.issuer_proofs("staging", true).await.is_empty());
         // Once the next issuer issues, its issue plan proves the issuer it
         // replaced, for a runtime that joins later.
         let env_obj = crate::environment::environment(&mut ctx, "prod")
@@ -4399,7 +4461,7 @@ mod tests {
         crate::identity_issuer::record_activated(&mut ctx, "prod", &issue_plan.id, &[&step])
             .await
             .unwrap();
-        let proofs = operations.issuer_proofs("prod").await;
+        let proofs = operations.issuer_proofs("prod", true).await;
         let env_obj = crate::environment::environment(&mut ctx, "prod")
             .await
             .unwrap();
@@ -4674,6 +4736,7 @@ mod tests {
                     peer_grants: false,
                     issuer_rotation: false,
                     issuer_take_up: false,
+                    issuer_removal: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -4791,6 +4854,7 @@ mod tests {
                     peer_grants: false,
                     issuer_rotation: false,
                     issuer_take_up: false,
+                    issuer_removal: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -4829,6 +4893,7 @@ mod tests {
                     peer_grants: false,
                     issuer_rotation: false,
                     issuer_take_up: false,
+                    issuer_removal: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {

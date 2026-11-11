@@ -60,8 +60,13 @@ const PREVIOUS_PROPERTY: &str = "identity_issuer_previous";
 const NEXT_PLAN_PROPERTY: &str = "identity_issuer_next_plan";
 /// Environment property with the id of the plan whose issue step replaced
 /// the previous issuer: its approvals prove the previous issuer to a
-/// runtime that joins later.
+/// runtime that joins later, and the current one to a runtime that missed
+/// the promotion. Kept after the remove step, until the next issue step.
 const PREVIOUS_PLAN_PROPERTY: &str = "identity_issuer_previous_plan";
+/// Environment property with the id of the plan whose remove step stopped
+/// trusting the previous issuer: its approvals tell every runtime to drop
+/// it from its bundles. Kept until the next issue step.
+const REMOVED_PLAN_PROPERTY: &str = "identity_issuer_removed_plan";
 
 /// Which rotation step an issuer activation is (ADR 0046 §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +77,9 @@ pub enum RotationPhase {
     /// Make the next issuer the current one; the current one stays trusted
     /// as the previous issuer.
     Issue,
+    /// Stop trusting the previous issuer, once no certificate it signed is
+    /// live: no bundle carries it any more.
+    Remove,
 }
 
 /// How long an issuer certificate is valid. The issuer is replaced by an
@@ -149,7 +157,8 @@ pub struct IssuerStatus {
     /// The next issuer an add step recorded, waiting for the issue step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<IssuerSummary>,
-    /// The issuer the last issue step replaced, still trusted.
+    /// The issuer the last issue step replaced, still trusted until its
+    /// remove step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous: Option<IssuerSummary>,
 }
@@ -322,6 +331,14 @@ pub fn previous_plan(env_obj: &Object) -> Option<&str> {
     env_obj
         .properties
         .get(PREVIOUS_PLAN_PROPERTY)
+        .map(String::as_str)
+}
+
+/// The id of the plan whose remove step dropped the previous issuer.
+pub fn removed_plan(env_obj: &Object) -> Option<&str> {
+    env_obj
+        .properties
+        .get(REMOVED_PLAN_PROPERTY)
         .map(String::as_str)
 }
 
@@ -566,6 +583,19 @@ fn require_rotation(
                 key.fingerprint
             );
         }
+        RotationPhase::Remove => {
+            // A replay finds the generation below the current one removed.
+            let removed = previous(env_obj)?.is_none()
+                && removed_plan(env_obj).is_some()
+                && key.generation + 1 == current_generation;
+            ensure!(
+                is(&previous(env_obj)?) || removed,
+                "step {} is stale: issuer generation {} ({}) is not the previous issuer",
+                step.id,
+                key.generation,
+                key.fingerprint
+            );
+        }
     }
     Ok(())
 }
@@ -611,6 +641,28 @@ pub async fn record_activated(
                         );
                     }
                     changed |= record_issued(&mut env_obj, key, plan_id)?;
+                    continue;
+                }
+                Some(RotationPhase::Remove) => {
+                    if previous(&env_obj)?.is_some_and(|kept| kept.fingerprint == key.fingerprint) {
+                        // Checked again under the lease: a certificate the
+                        // previous issuer signed must not lose its trust.
+                        let waiting =
+                            waiting_for_removal(ctx, &env_obj, crate::now_millis() / 1000).await?;
+                        ensure!(
+                            waiting.is_empty(),
+                            "the previous identity issuer still has live certificates at {}",
+                            waiting.join(", ")
+                        );
+                        // The issue plan stays: a runtime that missed the
+                        // promotion learns the current issuer from it before
+                        // the remove plan drops the old one.
+                        env_obj.properties.remove(PREVIOUS_PROPERTY);
+                        env_obj
+                            .properties
+                            .insert(REMOVED_PLAN_PROPERTY.into(), plan_id.into());
+                        changed = true;
+                    }
                     continue;
                 }
                 Some(RotationPhase::Add) => {
@@ -690,6 +742,7 @@ fn record_issued(env_obj: &mut Object, key: &IssuerKey, plan_id: &str) -> Result
     write(env_obj, ISSUER_PROPERTY, &next);
     env_obj.properties.remove(NEXT_PROPERTY);
     env_obj.properties.remove(NEXT_PLAN_PROPERTY);
+    env_obj.properties.remove(REMOVED_PLAN_PROPERTY);
     env_obj
         .properties
         .insert(PREVIOUS_PLAN_PROPERTY.into(), plan_id.into());
@@ -807,13 +860,21 @@ fn issuer_step(
 /// The step that activates `environment`'s uploaded candidate: as the
 /// first issuer, or, when one exists, as the next issuer (the add step of
 /// ADR 0046 §7). Refused while there is no candidate, once it no longer is
-/// the next generation, or while a next issuer waits for its issue step.
+/// the next generation, or while an earlier rotation waits for its issue or
+/// remove step.
 pub fn activation_step(env_obj: &Object, environment: &str) -> Result<crate::plan::Step> {
     if let Some(next) = next(env_obj)? {
         bail!(
             "{environment} already trusts the next identity issuer generation {} ({}); plan its issue step first",
             next.generation,
             next.fingerprint
+        );
+    }
+    if let Some(previous) = previous(env_obj)? {
+        bail!(
+            "{environment} still trusts the previous identity issuer generation {} ({}); plan its remove step first",
+            previous.generation,
+            previous.fingerprint
         );
     }
     let candidate = candidate(env_obj)?.with_context(|| {
@@ -857,6 +918,64 @@ pub async fn issue_step(
     Ok(step)
 }
 
+/// The remove step for `environment`'s previous issuer, once no instance
+/// may still hold a live certificate it signed (ADR 0046 §7). The refusal
+/// names the instances that may.
+pub async fn remove_step(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+    now_secs: i64,
+) -> Result<crate::plan::Step> {
+    let previous = previous(env_obj)?.context("no previous identity issuer")?;
+    let waiting = waiting_for_removal(ctx, env_obj, now_secs).await?;
+    if !waiting.is_empty() {
+        bail!(
+            "the previous identity issuer generation {} may still sign a live certificate at {}; plan the remove step again once they renewed",
+            previous.generation,
+            waiting.join(", ")
+        );
+    }
+    let step = issuer_step(previous, None, None, Some(RotationPhase::Remove));
+    require_current(env_obj, &step)?;
+    Ok(step)
+}
+
+/// The next step of `environment`'s issuer lifecycle, read from what the
+/// server recorded, so a rotation interrupted anywhere resumes at the step
+/// after the last one recorded: the issue step while a next issuer waits,
+/// the remove step while a previous one is kept, and otherwise the
+/// activation of the uploaded candidate.
+pub async fn rotation_step(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+    now_secs: i64,
+) -> Result<crate::plan::Step> {
+    if next(env_obj)?.is_some() {
+        return issue_step(ctx, env_obj, now_secs).await;
+    }
+    if previous(env_obj)?.is_some() {
+        return remove_step(ctx, env_obj, now_secs).await;
+    }
+    activation_step(env_obj, &env_obj.name)
+}
+
+/// What keeps the next rotation step from being planned: the instances
+/// that have not taken up the next issuer, or that may still hold a live
+/// certificate of the previous one. Empty when nothing waits.
+pub async fn rotation_waiting(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+    now_secs: i64,
+) -> Result<Vec<String>> {
+    if let Some(next) = next(env_obj)? {
+        return waiting_for_take_up(ctx, env_obj, &next, now_secs).await;
+    }
+    if previous(env_obj)?.is_some() {
+        return waiting_for_removal(ctx, env_obj, now_secs).await;
+    }
+    Ok(Vec::new())
+}
+
 /// How long after a renewed bundle is written a workload that reloads it
 /// itself is taken to have read it: the refresh of mounted Secrets and a
 /// product's reload interval (ADR 0046 §7).
@@ -864,16 +983,68 @@ pub const TAKE_UP_SECS: i64 = 600;
 
 /// The instances of `env_obj` whose deployed release asks for a workload
 /// certificate and that have not yet taken up a bundle with `next`, each
-/// with why. Every deployed release counts until its removal completes,
-/// subscribed or not. Taken up means the runtime reported a certificate
-/// whose bundle holds `next`, with no restart pending (a restart-reload
-/// workload has rolled out on it), written at least [`TAKE_UP_SECS`] ago.
-/// An instance the runtime never reported waits.
+/// with why. Taken up means the runtime reported a certificate whose bundle
+/// holds `next`, with no restart pending (a restart-reload workload has
+/// rolled out on it), written at least [`TAKE_UP_SECS`] ago.
 pub async fn waiting_for_take_up(
     ctx: &mut Ctx,
     env_obj: &Object,
     next: &IssuerKey,
     now_secs: i64,
+) -> Result<Vec<String>> {
+    waiting_instances(ctx, env_obj, |report| {
+        if !report.trust.contains(&next.fingerprint) {
+            Some("bundle without the next issuer".into())
+        } else if report.restart_pending {
+            Some("restart pending".into())
+        } else if report.not_before + 60 + TAKE_UP_SECS > now_secs {
+            Some("bundle written too recently".into())
+        } else {
+            None
+        }
+    })
+    .await
+}
+
+/// The instances of `env_obj` whose deployed release asks for a workload
+/// certificate and that may still hold a live one from an issuer other
+/// than the current one, each with why. Only a report of a certificate
+/// from the current issuer clears an instance, taken up as for
+/// the issue step: no restart pending, written at least [`TAKE_UP_SECS`]
+/// ago, so no running replica still presents the old one.
+pub async fn waiting_for_removal(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+    now_secs: i64,
+) -> Result<Vec<String>> {
+    let current = current(env_obj)?.context("no identity issuer")?;
+    // An expired report proves nothing: a runtime offline since may have
+    // renewed from the old issuer. Only a report of the current one counts.
+    waiting_instances(ctx, env_obj, |report| match report.trust.first() {
+        None => Some("issuer not reported".into()),
+        Some(issuer) if *issuer != current.fingerprint => Some(format!(
+            "certificate from an earlier issuer valid until {}",
+            report.not_after
+        )),
+        Some(_) if report.restart_pending => Some("restart pending".into()),
+        Some(_) if report.not_before + 60 + TAKE_UP_SECS > now_secs => {
+            Some("certificate written too recently".into())
+        }
+        Some(_) => None,
+    })
+    .await
+}
+
+/// The instances of `env_obj` whose deployed release asks for a workload
+/// certificate and whose latest report `why` refuses, each with why. Every
+/// deployed release counts until its removal completes, subscribed or not.
+/// An instance whose deployment state is unknown, whose manifest cannot be
+/// read, that the runtime never reported, or that it has not reported since
+/// its last deployment waits too.
+async fn waiting_instances(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+    why: impl Fn(&crate::certificate_reports::CertificateReport) -> Option<String>,
 ) -> Result<Vec<String>> {
     let reports = crate::certificate_reports::reported(ctx, &env_obj.name).await?;
     let deployed: std::collections::BTreeMap<&str, &str> = env_obj
@@ -884,8 +1055,8 @@ pub async fn waiting_for_take_up(
         })
         .collect();
     let mut waiting = Vec::new();
-    // An instance whose deployment is unknown may still run on the old
-    // bundle; it waits until reconciliation settles it.
+    // An instance whose deployment is unknown may still run on an old
+    // certificate; it waits until reconciliation settles it.
     for (key, health) in &env_obj.properties {
         if let Some(instance) = key.strip_prefix("deployment_health.")
             && health == "unknown"
@@ -912,23 +1083,16 @@ pub async fn waiting_for_take_up(
             .get(&format!("{}{instance}", crate::environment::DEPLOYMENT_AT))
             .and_then(|at| at.parse::<i64>().ok())
             .unwrap_or(0);
-        let why = match reports.get(instance) {
-            _ if manifest.is_none() => Some("release manifest unreadable"),
-            None => Some("no certificate reported"),
+        let refused = match reports.get(instance) {
+            _ if manifest.is_none() => Some("release manifest unreadable".into()),
+            None => Some("no certificate reported".into()),
             Some(report) if deployed_at > 0 && report.observed_at <= deployed_at / 1000 => {
-                Some("not reported since its last deployment")
+                Some("not reported since its last deployment".into())
             }
-            Some(report) if !report.trust.contains(&next.fingerprint) => {
-                Some("bundle without the next issuer")
-            }
-            Some(report) if report.restart_pending => Some("restart pending"),
-            Some(report) if report.not_before + 60 + TAKE_UP_SECS > now_secs => {
-                Some("bundle written too recently")
-            }
-            Some(_) => None,
+            Some(report) => why(report),
         };
-        if let Some(why) = why {
-            waiting.push(format!("{instance} ({why})"));
+        if let Some(refused) = refused {
+            waiting.push(format!("{instance} ({refused})"));
         }
     }
     Ok(waiting)
@@ -976,10 +1140,8 @@ pub fn verify_proof(
         .filter(|_| step.rewrap.is_none())
         .context("the issuer proof is not a rotation step")?;
     let proven = match (issuer.phase, &issuer.replaces) {
-        (Some(RotationPhase::Add), None) => Proven {
-            trusted: issuer.key.clone(),
-            issuing: None,
-        },
+        (Some(RotationPhase::Add), None) => Proven::Next(issuer.key.clone()),
+        (Some(RotationPhase::Remove), None) => Proven::Removed(issuer.key.clone()),
         (Some(RotationPhase::Issue), Some(replaced)) => {
             check_replaced(&issuer.key, replaced)?;
             // The latest wraps of the approved key, if the server sent it.
@@ -992,12 +1154,12 @@ pub fn verify_proof(
                         && current.certificate == issuer.key.certificate
                 })
                 .unwrap_or(&issuer.key);
-            Proven {
-                trusted: replaced.clone(),
-                issuing: Some(issuing.clone()),
+            Proven::Issued {
+                replaced: replaced.clone(),
+                issuing: issuing.clone(),
             }
         }
-        _ => bail!("the issuer proof is not an add or issue step"),
+        _ => bail!("the issuer proof is not an add, issue or remove step"),
     };
     // Trust evidence outlives the approvals' own expiry, so a runtime that
     // joins after them still learns a rotated issuer: the approvals of
@@ -1019,20 +1181,48 @@ pub fn verify_proof(
     if !earlier.into_iter().any(|at| approved_at(at).is_ok()) {
         approved_at(now_ms)?;
     }
-    proven.trusted.check_public()?;
-    if let Some(issuing) = &proven.issuing {
-        issuing.check_public()?;
+    match &proven {
+        Proven::Next(key) | Proven::Removed(key) => key.check_public()?,
+        Proven::Issued { replaced, issuing } => {
+            replaced.check_public()?;
+            issuing.check_public()?;
+        }
     }
     Ok(proven)
 }
 
-/// What a verified [`IssuerProof`] shows: an issuer to keep in every
-/// bundle, and, for an issue plan, the issuer the server recorded as
-/// issuing, which a runtime that can open it renews from.
+/// What a verified [`IssuerProof`] shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Proven {
-    pub trusted: IssuerKey,
-    pub issuing: Option<IssuerKey>,
+pub enum Proven {
+    /// An add plan: the next issuer, kept in every bundle.
+    Next(IssuerKey),
+    /// An issue plan: the issuer it replaced, kept in every bundle, and the
+    /// one the server recorded as issuing, which a runtime that can open it
+    /// renews from.
+    Issued {
+        replaced: IssuerKey,
+        issuing: IssuerKey,
+    },
+    /// A remove plan: the issuer no bundle carries any more.
+    Removed(IssuerKey),
+}
+
+impl Proven {
+    /// The issuer bundles keep beside the issuing one, if the plan keeps one.
+    pub fn trusted(&self) -> Option<&IssuerKey> {
+        match self {
+            Self::Next(key) | Self::Issued { replaced: key, .. } => Some(key),
+            Self::Removed(_) => None,
+        }
+    }
+
+    /// The issuer an issue plan made issuing.
+    pub fn issuing(&self) -> Option<&IssuerKey> {
+        match self {
+            Self::Issued { issuing, .. } => Some(issuing),
+            _ => None,
+        }
+    }
 }
 
 /// Refuse an issue step whose `replaced` issuer is not one generation
@@ -1079,7 +1269,9 @@ fn cached_issuer_path(
 
 /// Keep `issuer`, which an approved step just verified, for renewal. A
 /// later generation replaces an earlier one, never the reverse, also when
-/// two runtime processes share the sealing directory during a restart.
+/// two runtime processes share the sealing directory during a restart. An
+/// issuer a remove plan dropped is never kept, so a replayed older proof
+/// cannot resume issuance from it.
 pub fn cache_verified(
     sealing_dir: &std::path::Path,
     environment: &str,
@@ -1090,6 +1282,9 @@ pub fn cache_verified(
     let path = cached_issuer_path(sealing_dir, environment)?;
     let lock = path.with_extension("lock");
     crate::fenced_mutation::with_mutation_lock(&lock, || {
+        if cached_removed(sealing_dir, environment)?.drops(issuer) {
+            return Ok(());
+        }
         if let Some(cached) = cached_verified(sealing_dir, environment)?
             && (cached.generation > issuer.generation || &cached == issuer)
         {
@@ -1100,7 +1295,9 @@ pub fn cache_verified(
     })?
 }
 
-/// The issuer [`cache_verified`] kept for `environment`, if any.
+/// The issuer [`cache_verified`] kept for `environment`, if any. None once
+/// a remove plan dropped it, which a removal racing [`cache_verified`] can
+/// leave on disk: renewal then fails visibly instead of issuing from it.
 pub fn cached_verified(
     sealing_dir: &std::path::Path,
     environment: &str,
@@ -1114,6 +1311,9 @@ pub fn cached_verified(
     let issuer: IssuerKey =
         serde_json::from_slice(&bytes).with_context(|| format!("reading {}", path.display()))?;
     issuer.check_public()?;
+    if cached_removed(sealing_dir, environment)?.drops(&issuer) {
+        return Ok(None);
+    }
     Ok(Some(issuer))
 }
 
@@ -1125,9 +1325,97 @@ fn trusted_path(sealing_dir: &std::path::Path, environment: &str) -> Result<std:
     Ok(sealing_dir.join(format!("identity-issuer-trusted-{environment}.json")))
 }
 
+fn removed_path(sealing_dir: &std::path::Path, environment: &str) -> Result<std::path::PathBuf> {
+    crate::ontology::validate_identifier("environment", environment)?;
+    Ok(sealing_dir.join(format!("identity-issuer-removed-{environment}.json")))
+}
+
+/// What approved remove plans dropped for `environment` (ADR 0046 §7).
+/// Generations only rise, so `through` is the removal boundary: no issuer
+/// at or below it is trusted again, whatever older proofs replay.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Removed {
+    /// The highest removed generation.
+    pub through: u64,
+    /// The newest removed fingerprints, so a bundle that still carries one
+    /// is re-issued.
+    pub fingerprints: Vec<String>,
+}
+
+impl Removed {
+    /// Whether `issuer` is at or below the boundary.
+    pub fn drops(&self, issuer: &IssuerKey) -> bool {
+        !self.fingerprints.is_empty() && issuer.generation <= self.through
+    }
+}
+
+/// The issuers approved remove plans dropped for `environment`.
+pub fn cached_removed(sealing_dir: &std::path::Path, environment: &str) -> Result<Removed> {
+    let path = removed_path(sealing_dir, environment)?;
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).with_context(|| format!("reading {}", path.display()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Removed::default()),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// Stop trusting `issuer`, which an approved remove plan dropped (ADR 0046
+/// §7), and every generation below it: they leave the trusted issuers and
+/// their proofs, and are never kept again. Refused at or above the issuer
+/// this runtime issues from. Idempotent, and a replayed older plan changes
+/// nothing.
+pub fn cache_removed(
+    sealing_dir: &std::path::Path,
+    environment: &str,
+    issuer: &IssuerKey,
+) -> Result<()> {
+    ensure!(
+        cached_verified(sealing_dir, environment)?
+            .is_none_or(|issuing| issuer.generation < issuing.generation),
+        "the remove plan names issuer generation {}, which this runtime still issues from",
+        issuer.generation
+    );
+    let path = trusted_path(sealing_dir, environment)?;
+    let lock = path.with_extension("lock");
+    crate::fenced_mutation::with_mutation_lock(&lock, || {
+        let mut removed = cached_removed(sealing_dir, environment)?;
+        if !removed.drops(issuer) {
+            removed.through = issuer.generation;
+            removed.fingerprints.push(issuer.fingerprint.clone());
+            // Only the newest few matter: older bundles have long expired.
+            let excess = removed.fingerprints.len().saturating_sub(MAX_REMOVED);
+            removed.fingerprints.drain(..excess);
+            let removed_path = removed_path(sealing_dir, environment)?;
+            crate::atomic_state::write_file(
+                &removed_path,
+                &serde_json::to_vec_pretty(&removed)?,
+                Some(0o600),
+            )
+            .with_context(|| format!("writing {}", removed_path.display()))?;
+        }
+        let mut trusted = stored_trusted(sealing_dir, environment)?;
+        if trusted.iter().any(|kept| removed.drops(kept)) {
+            trusted.retain(|kept| !removed.drops(kept));
+            crate::atomic_state::write_file(
+                &path,
+                &serde_json::to_vec_pretty(&trusted)?,
+                Some(0o600),
+            )
+            .with_context(|| format!("writing {}", path.display()))?;
+        }
+        anyhow::Ok(())
+    })??;
+    prune_proofs(sealing_dir, environment)
+}
+
+/// How many removed fingerprints a runtime remembers.
+const MAX_REMOVED: usize = 8;
+
 /// Keep `issuer`, which an approved step or issuance just verified, as one
 /// the trust bundles of `environment` may carry (ADR 0046 §7). Only the
-/// newest few generations are kept.
+/// newest few generations are kept, and never one a remove plan dropped.
 pub fn cache_trusted(
     sealing_dir: &std::path::Path,
     environment: &str,
@@ -1141,6 +1429,7 @@ pub fn cache_trusted(
         if trusted
             .iter()
             .any(|kept| kept.fingerprint == issuer.fingerprint)
+            || cached_removed(sealing_dir, environment)?.drops(issuer)
         {
             return Ok(());
         }
@@ -1158,8 +1447,18 @@ pub fn cache_trusted(
     })?
 }
 
-/// The issuers [`cache_trusted`] kept for `environment`, oldest first.
+/// The issuers [`cache_trusted`] kept for `environment`, oldest first,
+/// without any a remove plan dropped: a crash inside [`cache_removed`] can
+/// leave one in the file, and the durable removal still wins.
 fn cached_trusted(sealing_dir: &std::path::Path, environment: &str) -> Result<Vec<IssuerKey>> {
+    let removed = cached_removed(sealing_dir, environment)?;
+    let mut trusted = stored_trusted(sealing_dir, environment)?;
+    trusted.retain(|kept| !removed.drops(kept));
+    Ok(trusted)
+}
+
+/// The trusted-issuer file of `environment` as written.
+fn stored_trusted(sealing_dir: &std::path::Path, environment: &str) -> Result<Vec<IssuerKey>> {
     let path = trusted_path(sealing_dir, environment)?;
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -1255,6 +1554,29 @@ pub fn cache_proof(
                     .any(|trusted| trusted.fingerprint == key.fingerprint)
             })
         });
+        crate::atomic_state::write_file(&path, &serde_json::to_vec_pretty(&proofs)?, Some(0o600))
+            .with_context(|| format!("writing {}", path.display()))
+    })?
+}
+
+/// Drop the kept proofs whose issuer is no longer trusted.
+fn prune_proofs(sealing_dir: &std::path::Path, environment: &str) -> Result<()> {
+    let path = proofs_path(sealing_dir, environment)?;
+    let lock = path.with_extension("lock");
+    crate::fenced_mutation::with_mutation_lock(&lock, || {
+        let mut proofs = cached_proofs(sealing_dir, environment)?;
+        let before = proofs.len();
+        let trusted = cached_trusted(sealing_dir, environment)?;
+        proofs.retain(|kept| {
+            proof_trusts(kept).is_some_and(|key| {
+                trusted
+                    .iter()
+                    .any(|trusted| trusted.fingerprint == key.fingerprint)
+            })
+        });
+        if proofs.len() == before {
+            return Ok(());
+        }
         crate::atomic_state::write_file(&path, &serde_json::to_vec_pretty(&proofs)?, Some(0o600))
             .with_context(|| format!("writing {}", path.display()))
     })?
@@ -1601,10 +1923,7 @@ mod tests {
         let approved = proof(plan("prod", Some(RotationPhase::Add)));
         assert_eq!(
             verify_proof(policy, "prod", &approved, now_ms).unwrap(),
-            Proven {
-                trusted: next.clone(),
-                issuing: None
-            }
+            Proven::Next(next.clone())
         );
 
         let mut swapped = approved.clone();
@@ -1642,9 +1961,9 @@ mod tests {
         let approved_issue = proof(issue(replaced.clone()));
         assert_eq!(
             verify_proof(policy, "prod", &approved_issue, now_ms).unwrap(),
-            Proven {
-                trusted: replaced.clone(),
-                issuing: Some(next.clone())
+            Proven::Issued {
+                replaced: replaced.clone(),
+                issuing: next.clone()
             }
         );
         // The server's current copy lends only its wraps, and only when it
@@ -1661,14 +1980,14 @@ mod tests {
         assert_eq!(
             verify_proof(policy, "prod", &with_current(rewrapped.clone()), now_ms)
                 .unwrap()
-                .issuing,
-            Some(rewrapped)
+                .issuing(),
+            Some(&rewrapped)
         );
         assert_eq!(
             verify_proof(policy, "prod", &with_current(runtime.candidate(2)), now_ms)
                 .unwrap()
-                .issuing,
-            Some(next.clone())
+                .issuing(),
+            Some(&next)
         );
         let mut swapped = approved_issue.clone();
         swapped.plan.steps[0].issuer.as_mut().unwrap().replaces = Some(runtime.candidate(1));
@@ -1810,6 +2129,108 @@ mod tests {
                 .grant,
             grant(&first)
         );
+    }
+
+    /// An approved remove plan drops its issuer from this runtime's bundles
+    /// and kept proofs for good, and never the issuer it issues from.
+    #[test]
+    fn a_removed_issuer_leaves_the_bundles_for_good() {
+        let fixture = ops_fixture();
+        let runtime = Runtime::new("removed");
+        let dir = runtime.dir.as_path();
+        let now_ms = crate::now_millis();
+        let (first, second) = (runtime.candidate(1), runtime.candidate(2));
+        cache_verified(dir, "prod", &second).unwrap();
+        cache_trusted(dir, "prod", &first).unwrap();
+        let promoted = approved(
+            &fixture,
+            rotation_plan(
+                "prod",
+                &second,
+                Some(RotationPhase::Issue),
+                Some(&first),
+                now_ms,
+            ),
+            now_ms,
+        );
+        cache_proof(dir, "prod", &promoted).unwrap();
+        assert_eq!(
+            host_trust_bundle(dir, "prod", &second).unwrap(),
+            std::slice::from_ref(&first)
+        );
+        let removal = approved(
+            &fixture,
+            rotation_plan("prod", &first, Some(RotationPhase::Remove), None, now_ms),
+            now_ms,
+        );
+        let policy = Some(&fixture.trust.policy);
+        assert_eq!(
+            verify_proof(policy, "prod", &removal, now_ms).unwrap(),
+            Proven::Removed(first.clone())
+        );
+        let mut swapped = removal.clone();
+        swapped.plan.steps[0].issuer.as_mut().unwrap().key = runtime.candidate(1);
+        assert!(verify_proof(policy, "prod", &swapped, now_ms).is_err());
+
+        // A crash after only the removal was written: no bundle carries it.
+        std::fs::write(
+            removed_path(dir, "prod").unwrap(),
+            serde_json::to_vec(&Removed {
+                through: first.generation,
+                fingerprints: vec![first.fingerprint.clone()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(host_trust_bundle(dir, "prod", &second).unwrap().is_empty());
+        assert!(stored_trusted(dir, "prod").unwrap().contains(&first));
+
+        cache_removed(dir, "prod", &first).unwrap();
+        assert!(!stored_trusted(dir, "prod").unwrap().contains(&first));
+        cache_removed(dir, "prod", &first).unwrap();
+        assert!(trust_bundle(dir, "prod", &second).unwrap().is_empty());
+        assert!(cached_proofs(dir, "prod").unwrap().is_empty());
+        // A late copy of the issue plan does not bring it back.
+        cache_trusted(dir, "prod", &first).unwrap();
+        assert!(!trusts(dir, "prod", &first.fingerprint).unwrap());
+        assert_eq!(
+            cached_removed(dir, "prod").unwrap().fingerprints,
+            std::slice::from_ref(&first.fingerprint)
+        );
+        assert!(cache_removed(dir, "prod", &second).is_err());
+        // Replayed older removals neither move the boundary nor evict the
+        // newest removal, so the removed issuer stays out for good.
+        for generation in [0, 1].repeat(MAX_REMOVED) {
+            cache_removed(dir, "prod", &runtime.candidate(generation)).unwrap();
+        }
+        let removed = cached_removed(dir, "prod").unwrap();
+        assert_eq!(removed.through, first.generation);
+        assert_eq!(
+            removed.fingerprints,
+            std::slice::from_ref(&first.fingerprint)
+        );
+        cache_trusted(dir, "prod", &runtime.candidate(1)).unwrap();
+        assert!(trust_bundle(dir, "prod", &second).unwrap().is_empty());
+
+        // A runtime that recorded the removal before any issuer never
+        // issues from the removed one, even when an older proof replays.
+        let fresh = Runtime::new("removed-fresh");
+        cache_removed(&fresh.dir, "prod", &first).unwrap();
+        cache_verified(&fresh.dir, "prod", &first).unwrap();
+        assert_eq!(cached_verified(&fresh.dir, "prod").unwrap(), None);
+        // Nor does one whose removal raced a write of the issuing key.
+        let raced = Runtime::new("removed-raced");
+        cache_verified(&raced.dir, "prod", &first).unwrap();
+        std::fs::write(
+            removed_path(&raced.dir, "prod").unwrap(),
+            serde_json::to_vec(&Removed {
+                through: first.generation,
+                fingerprints: vec![first.fingerprint.clone()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cached_verified(&raced.dir, "prod").unwrap(), None);
     }
 
     /// A runtime keeps each issuer an approved step verified, and a bundle

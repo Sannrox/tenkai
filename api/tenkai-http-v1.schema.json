@@ -2610,6 +2610,13 @@
           "$ref": "#/$defs/IssuerStatus",
           "description": "The workload identity issuer, its requested generation and its\nuploaded candidate (ADR 0046 §2), when any is set. Never a key."
         },
+        "identity_issuer_waiting": {
+          "description": "The instances the next issuer rotation step waits for, each with why\n(ADR 0046 §7). Beside `identity_issuer`, whose shape older clients\ndecode strictly.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "latest_failures": {
           "description": "Latest failed or rolled back attempt per instance (#1054).",
           "items": {
@@ -4129,7 +4136,7 @@
               "type": "null"
             }
           ],
-          "description": "The issuer the last issue step replaced, still trusted."
+          "description": "The issuer the last issue step replaced, still trusted until its\nremove step."
         },
         "requested": {
           "description": "The generation `prepare` asked a candidate for.",

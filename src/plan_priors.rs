@@ -422,6 +422,7 @@ mod tests {
             latest_failures: Vec::new(),
             sealed_recovery_warning: None,
             identity_issuer: None,
+            identity_issuer_waiting: Vec::new(),
         };
         annotate_plan_with_priors(
             &mut plan,
@@ -576,6 +577,7 @@ mod tests {
             latest_failures: Vec::new(),
             sealed_recovery_warning: None,
             identity_issuer: None,
+            identity_issuer_waiting: Vec::new(),
         };
         let config = PriorConfig {
             enabled: true,
