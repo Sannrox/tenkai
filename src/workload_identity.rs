@@ -488,6 +488,9 @@ pub struct InstalledIdentity {
     /// Fingerprints of the issuers its trust bundle holds, the granted
     /// issuer first (ADR 0046 §7).
     pub trust: Vec<String>,
+    /// A restart-reload workload has not yet been rolled onto this
+    /// certificate. Set by the adapter that reads it.
+    pub restart_pending: bool,
 }
 
 impl InstalledIdentity {
@@ -519,6 +522,7 @@ impl InstalledIdentity {
             not_before: leaf.not_before,
             not_after: leaf.not_after,
             trust: leaf.trust,
+            restart_pending: false,
         })
     }
 

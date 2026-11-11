@@ -1154,8 +1154,15 @@ impl BuiltinConfig {
         // it issues beside the current issuer carries it (ADR 0046 §7).
         // Not optional: the step must not report success with the bundles
         // left behind.
+        // An issue step also keeps the issuer it replaces. The runtime
+        // renews from the next issuer only once the server has recorded the
+        // step, which it learns from the issue plan in idle work.
         if issuer.phase.is_some() {
             crate::identity_issuer::cache_trusted(dir, environment, key)?;
+        }
+        if let Some(replaced) = &issuer.replaces {
+            crate::identity_issuer::check_replaced(key, replaced)?;
+            crate::identity_issuer::cache_trusted(dir, environment, replaced)?;
         }
         let Some(rewrap) = rewrap else {
             return Ok(Vec::new());
@@ -1388,6 +1395,9 @@ pub struct HeldCertificate {
     pub instance: String,
     pub not_before: i64,
     pub not_after: i64,
+    /// Its trust bundle's issuer fingerprints, the issuing one first.
+    pub trust: Vec<String>,
+    pub restart_pending: bool,
 }
 
 impl HeldCertificate {
@@ -1396,6 +1406,8 @@ impl HeldCertificate {
             instance: identity.instance.clone(),
             not_before: identity.not_before,
             not_after: identity.not_after,
+            trust: identity.trust.clone(),
+            restart_pending: identity.restart_pending,
         }
     }
 }
@@ -1578,6 +1590,10 @@ pub fn renew_and_audit(
             instance: held.instance,
             not_before: held.not_before,
             not_after: held.not_after,
+            trust: held.trust,
+            restart_pending: held.restart_pending,
+            // Stamped when the agent sends it.
+            observed_at: 0,
         })
         .collect())
 }
@@ -1627,7 +1643,10 @@ fn renew_host(
     Ok(now_secs + crate::workload_identity::WORKLOAD_CERTIFICATE_TTL_SECS)
 }
 
-/// Re-issue `identity`'s recorded grant from the cached issuer.
+/// Re-issue `identity`'s recorded grant from the cached issuer. A grant of
+/// the generation an approved issue step replaced moves to the cached
+/// issuer unchanged otherwise, as ADR 0046 §7 renews it from the next
+/// issuer; its old issuer must be one this runtime trusts.
 fn renew_one(
     dir: &Path,
     environment: &str,
@@ -1638,19 +1657,30 @@ fn renew_one(
     let issuer = crate::identity_issuer::cached_verified(dir, environment)?.context(
         "this runtime has verified no identity issuer yet; it renews once it applies a step that grants a certificate",
     )?;
-    let grant = &identity.grant;
-    if grant.issuer_generation != issuer.generation {
+    let granted = &identity.grant;
+    // The same issuer exactly, or the one generation below that this
+    // runtime trusts; a grant naming anything else is not one it issued.
+    let same = granted.issuer_generation == issuer.generation
+        && granted.issuer_fingerprint == issuer.fingerprint;
+    let replaced = granted.issuer_generation.checked_add(1) == Some(issuer.generation)
+        && crate::identity_issuer::trusts(dir, environment, &granted.issuer_fingerprint)?;
+    if !same && !replaced {
         bail!(
             "the certificate was issued by issuer generation {}, and this runtime holds generation {}; it needs a new approved issuance",
-            grant.issuer_generation,
+            granted.issuer_generation,
             issuer.generation
         );
     }
+    let grant = crate::workload_identity::IdentityGrant {
+        issuer_generation: issuer.generation,
+        issuer_fingerprint: issuer.fingerprint.clone(),
+        ..granted.clone()
+    };
     let key = issuer.open(environment, &SealedOpener::load(dir)?)?;
     if !bundle {
-        return crate::workload_identity::issue(grant, &issuer, key, now_secs);
+        return crate::workload_identity::issue(&grant, &issuer, key, now_secs);
     }
-    issue_with_bundle(dir, environment, grant, &issuer, key, now_secs)
+    issue_with_bundle(dir, environment, &grant, &issuer, key, now_secs)
 }
 
 /// Issue `grant` from `issuer` with the trust bundle of the issuers this
@@ -2526,6 +2556,7 @@ mod tests {
     /// An approved add step puts the next issuer in every bundle: the next
     /// renewal pass re-issues a restart-reload certificate at once, with
     /// the issuing issuer first and the next one after it, and only once.
+    /// After the issue step, renewal moves the grant to the next issuer.
     #[test]
     fn an_added_issuer_reaches_every_bundle_on_the_next_pass() {
         let mut case = identity_case();
@@ -2559,6 +2590,7 @@ mod tests {
             key: next.clone(),
             recipient: None,
             phase: Some(crate::identity_issuer::RotationPhase::Add),
+            replaces: None,
         };
         case.config.run_issuer(ENVIRONMENT, &add, None).unwrap();
 
@@ -2578,13 +2610,61 @@ mod tests {
         .unwrap();
         assert_eq!(
             installed.trust,
-            [issued.grant.issuer_fingerprint.clone(), next.fingerprint]
+            [
+                issued.grant.issuer_fingerprint.clone(),
+                next.fingerprint.clone()
+            ]
         );
+        // A grant naming the issuer's generation but another key, such as
+        // one written into the target beside a forged CA, is not renewed.
+        let mut forged = installed.clone();
+        forged.grant.issuer_fingerprint = next.fingerprint.clone();
+        let refused = renew_one(&dir, ENVIRONMENT, &forged, now, true).unwrap_err();
+        assert!(format!("{refused:#}").contains("needs a new approved issuance"));
         assert!(
             renew_identities(&case.config, ENVIRONMENT, now)
                 .unwrap()
                 .renewals
                 .is_empty()
+        );
+
+        // Once the next issuer issues, a certificate of the replaced
+        // generation renews from it with the same grant otherwise.
+        let replaced = crate::identity_issuer::cached_verified(&dir, ENVIRONMENT)
+            .unwrap()
+            .unwrap();
+        let issue = IssuerStep {
+            key: next.clone(),
+            recipient: None,
+            phase: Some(crate::identity_issuer::RotationPhase::Issue),
+            replaces: Some(replaced),
+        };
+        case.config.run_issuer(ENVIRONMENT, &issue, None).unwrap();
+        // Running the step does not switch issuance; the server's record of
+        // it, which the runtime reads from the issue plan, does.
+        assert_eq!(
+            crate::identity_issuer::cached_verified(&dir, ENVIRONMENT)
+                .unwrap()
+                .unwrap()
+                .generation,
+            1
+        );
+        crate::identity_issuer::cache_verified(&dir, ENVIRONMENT, &next).unwrap();
+        let later = now + crate::workload_identity::WORKLOAD_CERTIFICATE_TTL_SECS;
+        let renewed = renew_identities(&case.config, ENVIRONMENT, later)
+            .unwrap()
+            .renewals;
+        renewed[0].outcome.as_ref().unwrap();
+        let carried = held.0.lock().unwrap()[0].grant.clone();
+        assert_eq!(carried.issuer_generation, 2);
+        assert_eq!(carried.issuer_fingerprint, next.fingerprint);
+        assert_eq!(
+            crate::workload_identity::IdentityGrant {
+                issuer_generation: issued.grant.issuer_generation,
+                issuer_fingerprint: issued.grant.issuer_fingerprint.clone(),
+                ..carried
+            },
+            issued.grant
         );
     }
 

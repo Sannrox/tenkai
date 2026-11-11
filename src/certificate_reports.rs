@@ -12,7 +12,11 @@
 //! digest, so writing one again writes the same bytes and needs no lock. A
 //! report is stored only when it is further on than the stored one of its
 //! instance ([`progress`]), so a late or repeated report never moves an
-//! instance back; the one it supersedes is then removed.
+//! instance back; the one it supersedes is then removed. Of two reports of
+//! one certificate, the later observed wins, whatever order they arrive in.
+//! The take-up fields (`trust`, `restart_pending`, `observed_at`) are
+//! stored as properties beside the report JSON, which keeps the shape an
+//! older server decodes, so a rollback still reads every report.
 
 use std::collections::BTreeMap;
 
@@ -42,6 +46,22 @@ pub struct CertificateReport {
     /// The last renewal attempt the runtime audited for this instance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_renewal: Option<RenewalEvent>,
+    /// Fingerprints of the issuers the certificate's trust bundle holds,
+    /// the issuing one first (ADR 0046 §7).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trust: Vec<String>,
+    /// A restart-reload workload has not yet been rolled onto the
+    /// certificate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restart_pending: bool,
+    /// When the runtime observed this state, in Unix seconds; 0 from a
+    /// runtime that does not stamp it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub observed_at: i64,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 /// One renewal attempt, as the runtime audits it.
@@ -97,10 +117,15 @@ impl CertificateReport {
     }
 }
 
-/// How far on a report is: a later certificate, then a later attempt.
-fn progress(report: &CertificateReport) -> (i64, i64) {
+/// How far on a report is: a later certificate, then a later observation,
+/// then a pending restart, then a later attempt. Observation comes before
+/// the attempt, which only the reporting runtime audits. Of two observed in
+/// the same second, a pending restart wins, so a tie never clears it.
+fn progress(report: &CertificateReport) -> (i64, i64, bool, i64) {
     (
         report.not_after,
+        report.observed_at,
+        report.restart_pending,
         report
             .last_renewal
             .as_ref()
@@ -164,6 +189,19 @@ pub async fn admit(
                 report.instance
             );
         }
+        if report.trust.len() > crate::workload_identity::MAX_BUNDLE_ISSUERS
+            || report.trust.iter().any(|fingerprint| {
+                crate::sealing_key::normalize_fingerprint(fingerprint)
+                    .ok()
+                    .as_ref()
+                    != Some(fingerprint)
+            })
+        {
+            bail!(
+                "certificate report of {} carries an invalid trust bundle",
+                report.instance
+            );
+        }
         if !seen.insert(report.instance.as_str()) {
             bail!("the report carries two certificates of {}", report.instance);
         }
@@ -182,6 +220,14 @@ pub async fn admit(
         }
         let json = serde_json::to_string(report)?;
         let id = report_id(environment, &report.instance, &json);
+        // The stored report keeps the shape an older server decodes; the
+        // take-up fields sit beside it (ADR 0046 §7).
+        let legacy = serde_json::to_string(&CertificateReport {
+            trust: Vec::new(),
+            restart_pending: false,
+            observed_at: 0,
+            ..report.clone()
+        })?;
         if ctx.get(&id).await?.is_some() {
             continue;
         }
@@ -197,7 +243,10 @@ pub async fn admit(
             properties: std::collections::HashMap::from([
                 ("environment".into(), environment.into()),
                 ("instance".into(), report.instance.clone()),
-                ("report".into(), json),
+                ("report".into(), legacy),
+                ("trust".into(), report.trust.join(",")),
+                ("restart_pending".into(), report.restart_pending.to_string()),
+                ("observed_at".into(), report.observed_at.to_string()),
             ]),
             created: now,
             updated: now,
@@ -214,6 +263,24 @@ pub async fn admit(
     Ok(stored)
 }
 
+/// Read the take-up fields stored beside `report`; absent on a report an
+/// older server stored, which keeps the defaults.
+fn take_up_fields(
+    report: &mut CertificateReport,
+    properties: &std::collections::HashMap<String, String>,
+) {
+    if let Some(trust) = properties.get("trust").filter(|trust| !trust.is_empty()) {
+        report.trust = trust.split(',').map(str::to_owned).collect();
+    }
+    report.restart_pending |= properties.get("restart_pending").map(String::as_str) == Some("true");
+    if let Some(at) = properties.get("observed_at").and_then(|at| at.parse().ok()) {
+        report.observed_at = at;
+    }
+}
+
+/// A stored report's place: its progress, then its id.
+type StoredOrder = ((i64, i64, bool, i64), String);
+
 /// The furthest stored report of each instance in `environment`, and the
 /// ids of the reports they supersede. Equal progress is broken by id, so
 /// every reader picks the same report.
@@ -228,14 +295,15 @@ async fn load(
             environment,
         )
         .await?;
-    let mut best: BTreeMap<String, (CertificateReport, String)> = BTreeMap::new();
+    let mut best: BTreeMap<String, (CertificateReport, StoredOrder)> = BTreeMap::new();
     let mut superseded = Vec::new();
     for object in objects {
         let Some(json) = object.properties.get("report") else {
             continue;
         };
-        let report: CertificateReport = serde_json::from_str(json)
+        let mut report: CertificateReport = serde_json::from_str(json)
             .with_context(|| format!("parsing the certificate report {}", object.id))?;
+        take_up_fields(&mut report, &object.properties);
         if report.environment != environment
             || object.properties.get("instance") != Some(&report.instance)
         {
@@ -244,13 +312,11 @@ async fn load(
                 object.id
             );
         }
-        let key = (progress(&report), object.id.clone());
+        let key = (progress(&report), object.id);
         match best.get(&report.instance) {
-            Some((current, id)) if (progress(current), id.clone()) >= key => {
-                superseded.push(object.id);
-            }
+            Some((_, current)) if *current >= key => superseded.push(key.1),
             _ => {
-                if let Some((_, id)) = best.insert(report.instance.clone(), (report, object.id)) {
+                if let Some((_, (_, id))) = best.insert(report.instance.clone(), (report, key)) {
                     superseded.push(id);
                 }
             }
@@ -288,6 +354,9 @@ mod tests {
                 instance: "api".into(),
                 outcome,
             }),
+            trust: Vec::new(),
+            restart_pending: false,
+            observed_at: 0,
         }
     }
 
@@ -331,8 +400,9 @@ mod tests {
         assert!(status.renewal_failure.is_none());
     }
 
-    /// A late or repeated report never moves an instance back, and one
-    /// report per instance remains.
+    /// A late or repeated report never moves an instance back, a later
+    /// observation of the same certificate replaces it, and one report per
+    /// instance remains.
     #[tokio::test]
     async fn a_late_report_never_moves_a_certificate_back() {
         let database = std::env::temp_dir().join(format!(
@@ -385,6 +455,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(objects.len(), 1, "{objects:?}");
+
+        // A later observation of the same certificate replaces the stored
+        // one either way; an earlier one arriving late does not.
+        let observed = |at: i64, restart_pending: bool| CertificateReport {
+            observed_at: at,
+            restart_pending,
+            ..renewed.clone()
+        };
+        for later in [observed(10, false), observed(20, true), observed(30, false)] {
+            assert_eq!(
+                admit(&mut ctx, "prod", std::slice::from_ref(&later))
+                    .await
+                    .unwrap(),
+                ["api"]
+            );
+            assert_eq!(reported(&mut ctx, "prod").await.unwrap()["api"], later);
+        }
+        let pending = observed(40, true);
+        admit(&mut ctx, "prod", std::slice::from_ref(&pending))
+            .await
+            .unwrap();
+        // Settled in the same second, even after a later attempt, does not
+        // clear it.
+        let settled_with_attempt = CertificateReport {
+            last_renewal: Some(RenewalEvent {
+                at: 95_000,
+                instance: "api".into(),
+                outcome: RenewalOutcome::Failed {
+                    reason: "unreachable".into(),
+                },
+            }),
+            ..observed(40, false)
+        };
+        for late in [
+            observed(35, false),
+            observed(40, false),
+            settled_with_attempt,
+        ] {
+            assert!(admit(&mut ctx, "prod", &[late]).await.unwrap().is_empty());
+        }
+        assert_eq!(reported(&mut ctx, "prod").await.unwrap()["api"], pending);
+        // The stored JSON keeps the shape an older server decodes.
+        let stored = ctx
+            .find_by_property(
+                crate::ontology::KIND_WORKLOAD_CERTIFICATE,
+                "instance",
+                "api",
+            )
+            .await
+            .unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&stored[0].properties["report"]).unwrap();
+        for field in ["trust", "restart_pending", "observed_at"] {
+            assert!(raw.get(field).is_none(), "{raw}");
+        }
 
         let foreign = CertificateReport {
             environment: "other".into(),

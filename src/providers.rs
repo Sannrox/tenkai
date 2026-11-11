@@ -496,6 +496,7 @@ pub fn environment_configuration_digest(environment: &Object) -> String {
                 "deployed_release.",
                 "deployment_health.",
                 "deployment_error.",
+                "deployment_at.",
                 "deployment_unknown_",
             ]
             .iter()

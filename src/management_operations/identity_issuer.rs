@@ -50,8 +50,17 @@ impl ManagementOperations {
         let env_obj = crate::environment::environment(&mut ctx, environment)
             .await
             .map_err(map_plan_lifecycle_error)?;
-        let step = crate::identity_issuer::activation_step(&env_obj, environment)
-            .map_err(|error| ManagementError::BadRequest(format!("{error:#}")))?;
+        // With a next issuer waiting, the plan is its issue step, which
+        // waits for every instance to take up the bundle (ADR 0046 §7).
+        let step = if crate::identity_issuer::next(&env_obj)
+            .map_err(map_plan_lifecycle_error)?
+            .is_some()
+        {
+            crate::identity_issuer::issue_step(&mut ctx, &env_obj, crate::now_millis() / 1000).await
+        } else {
+            crate::identity_issuer::activation_step(&env_obj, environment)
+        }
+        .map_err(|error| ManagementError::BadRequest(format!("{error:#}")))?;
         let issuer = step.issuer.as_ref().expect("activation steps carry a key");
         let message_key = format!(
             "generation {} with key {}",

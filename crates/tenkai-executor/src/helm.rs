@@ -124,7 +124,7 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
             return Ok(Vec::new());
         };
         let api = LiveSecrets::connect_existing(cluster_config)?;
-        helm_secrets::installed_identities(&api, target.environment)
+        helm_secrets::installed_identities(&api, &api, target.environment)
     }
 
     fn renew_identity(

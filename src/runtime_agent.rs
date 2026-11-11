@@ -279,6 +279,15 @@ impl From<PathBuf> for StepExecutor {
 /// far inside that.
 const RENEWAL_PASS_INTERVAL_MS: i64 = 60_000;
 
+/// How long an unchanged certificate report goes unsent. Sending it again
+/// stamps a fresh observation, which the issuer take-up gate needs after a
+/// deployment (ADR 0046 §7).
+const CERTIFICATE_REPORT_REFRESH_SECS: i64 = 300;
+
+/// The digest of a certificate report the server stored, and when it was
+/// observed, in Unix seconds.
+type ReportSent = (Vec<u8>, i64);
+
 #[derive(Clone)]
 pub struct RuntimeClient {
     base_url: String,
@@ -305,10 +314,14 @@ pub struct RuntimeClient {
     /// so a fast poll does not list the target every time. In memory only:
     /// what is due is read from the target, and a restart just runs a pass.
     renewal_pass_at: std::sync::Arc<std::sync::atomic::AtomicI64>,
-    /// Digest of the last certificate report the server stored, so an
-    /// unchanged one is not sent again. In memory only: the server admits
-    /// a repeated report as a no-op, so a restart just sends it again.
-    certificates_reported: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    /// Digest of the last certificate report the server stored and when,
+    /// so an unchanged one is not sent again until it is
+    /// [`CERTIFICATE_REPORT_REFRESH_SECS`] old. In memory only: the server
+    /// admits a repeated report as a no-op, so a restart just sends it again.
+    certificates_reported: std::sync::Arc<std::sync::Mutex<Option<ReportSent>>>,
+    /// The last pull's server admits the take-up fields of a certificate
+    /// report; an older one refuses them, so they are left out.
+    server_observations: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The host preflight config whose checks runner attestation carries.
     preflight: Option<PathBuf>,
     /// Local approval policy and trust roots, installed on this host
@@ -362,6 +375,7 @@ impl RuntimeClient {
             restart: Default::default(),
             renewal_pass_at: Default::default(),
             certificates_reported: Default::default(),
+            server_observations: Default::default(),
             preflight: None,
             local_policy: None,
         })
@@ -576,6 +590,11 @@ impl RuntimeClient {
             && let Err(error) = self.offer_issuer_candidate(request).await
         {
             eprintln!("identity issuer candidate failed (retrying next poll): {error:#}");
+        }
+        for proof in &work.issuer_proofs {
+            if let Err(error) = self.trust_issuer_proof(proof) {
+                eprintln!("trusting an identity issuer failed (retrying next poll): {error:#}");
+            }
         }
         let approvals = work.approvals;
         let (Some(plan), Some(claim)) = (work.plan, work.claim) else {
@@ -952,14 +971,29 @@ impl RuntimeClient {
             request = request.header(
                 "x-tenkai-runtime-capabilities",
                 format!(
-                    "{},{},{}",
+                    "{},{},{},{}",
                     crate::runtime_delivery::WORKLOAD_IDENTITY_CAPABILITY,
                     crate::runtime_delivery::PEER_GRANTS_CAPABILITY,
-                    crate::runtime_delivery::ISSUER_ROTATION_CAPABILITY
+                    crate::runtime_delivery::ISSUER_ROTATION_CAPABILITY,
+                    crate::runtime_delivery::ISSUER_TAKE_UP_CAPABILITY
                 ),
             );
         }
-        decode_response(request.send().await?, "pulling runtime work").await
+        let response = request.send().await?;
+        // What the server admits is read on every pull, so a server rolled
+        // back to an older version is followed within one poll.
+        let observations = response
+            .headers()
+            .get(crate::runtime_delivery::SERVER_CAPABILITIES_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|names| {
+                names.split(',').any(|name| {
+                    name.trim() == crate::runtime_delivery::CERTIFICATE_OBSERVATIONS_CAPABILITY
+                })
+            });
+        self.server_observations
+            .store(observations, std::sync::atomic::Ordering::SeqCst);
+        decode_response(response, "pulling runtime work").await
     }
 
     /// Renew the workload certificates of this environment that are due, at
@@ -996,7 +1030,7 @@ impl RuntimeClient {
         .await;
         match pass {
             Ok(Ok(reports)) => {
-                if let Err(error) = self.report_certificates(reports).await {
+                if let Err(error) = self.report_certificates(reports, now / 1000).await {
                     eprintln!("workload certificate report failed (retrying): {error:#}");
                 }
             }
@@ -1009,19 +1043,42 @@ impl RuntimeClient {
 
     /// Send the certificate state of the last pass to the server, in
     /// batches the server admits, unless the server already stored exactly
-    /// this state. Each batch is admitted on its own, so a batch sent again
-    /// after a later one failed is a no-op.
+    /// this state. A state sent is stamped with when it was observed, so the
+    /// server keeps the later of two observations however they arrive.
     async fn report_certificates(
         &self,
-        certificates: Vec<crate::certificate_reports::CertificateReport>,
+        mut certificates: Vec<crate::certificate_reports::CertificateReport>,
+        observed_at: i64,
     ) -> Result<()> {
         if certificates.is_empty() {
             return Ok(());
         }
+        let observations = self
+            .server_observations
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if !observations {
+            for certificate in &mut certificates {
+                certificate.trust.clear();
+                certificate.restart_pending = false;
+            }
+        }
         let digest =
             <sha2::Sha256 as sha2::Digest>::digest(serde_json::to_vec(&certificates)?).to_vec();
-        if self.certificates_reported.lock().unwrap().as_deref() == Some(digest.as_slice()) {
+        if self
+            .certificates_reported
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(sent, at)| {
+                *sent == digest && observed_at < at + CERTIFICATE_REPORT_REFRESH_SECS
+            })
+        {
             return Ok(());
+        }
+        if observations {
+            for certificate in &mut certificates {
+                certificate.observed_at = observed_at;
+            }
         }
         for batch in certificates.chunks(crate::certificate_reports::MAX_REPORTS) {
             let report = crate::runtime_delivery::RuntimeCertificatesReport {
@@ -1050,7 +1107,7 @@ impl RuntimeClient {
             let _: crate::runtime_delivery::RuntimeCertificatesResponse =
                 decode_response(response, "reporting workload certificates").await?;
         }
-        *self.certificates_reported.lock().unwrap() = Some(digest);
+        *self.certificates_reported.lock().unwrap() = Some((digest, observed_at));
         Ok(())
     }
 
@@ -1058,6 +1115,49 @@ impl RuntimeClient {
     /// the built-in executor with a sealing key opens the issuer key.
     fn workload_identity(&self) -> bool {
         matches!(&self.executor, StepExecutor::Builtin(config) if config.sealing_dir.is_some())
+    }
+
+    /// Trust the issuers `proof` shows once this runtime's own local policy
+    /// approves its rotation plan (ADR 0046 §7), so every bundle this
+    /// runtime issues carries them, and renew from an issuer the server
+    /// recorded as issuing. Already trusted: nothing to do.
+    fn trust_issuer_proof(&self, proof: &crate::identity_issuer::IssuerProof) -> Result<()> {
+        let StepExecutor::Builtin(config) = &self.executor else {
+            return Ok(());
+        };
+        let Some(dir) = config.sealing_dir.as_deref() else {
+            return Ok(());
+        };
+        let proven = crate::identity_issuer::verify_proof(
+            self.local_policy.as_ref(),
+            &self.environment,
+            proof,
+            crate::now_millis(),
+        )?;
+        for key in std::iter::once(&proven.trusted).chain(&proven.issuing) {
+            if !crate::identity_issuer::trusts(dir, &self.environment, &key.fingerprint)? {
+                crate::identity_issuer::cache_trusted(dir, &self.environment, key)?;
+            }
+        }
+        // The server hands out an issue plan only once it recorded the
+        // step, so the next issuer now issues: renew from it if this
+        // runtime can open it.
+        let Some(issuing) = &proven.issuing else {
+            return Ok(());
+        };
+        let behind = crate::identity_issuer::cached_verified(dir, &self.environment)?
+            .is_none_or(|cached| cached.generation < issuing.generation);
+        if behind
+            && issuing
+                .open(
+                    &self.environment,
+                    &crate::sealed_secret::SealedOpener::load(dir)?,
+                )
+                .is_ok()
+        {
+            crate::identity_issuer::cache_verified(dir, &self.environment, issuing)?;
+        }
+        Ok(())
     }
 
     /// Generate an identity issuer candidate sealed to this runtime's own
@@ -1828,5 +1928,89 @@ mod tests {
             "attested after each 428, in the schema it named"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A runtime sends the take-up fields of a certificate report only
+    /// while the server's last work response says it admits them: an older
+    /// server, or one rolled back, gets the shape it decodes.
+    #[tokio::test]
+    async fn certificate_reports_keep_to_what_the_server_admits() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let admits = Arc::new(AtomicBool::new(false));
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let app = {
+            let (admits, bodies) = (admits.clone(), bodies.clone());
+            axum::Router::new()
+                .route(
+                    "/v1/runtime/environments/prod/work",
+                    axum::routing::get(move || {
+                        let admits = admits.clone();
+                        async move {
+                            let mut response = axum::response::IntoResponse::into_response(
+                                axum::Json(serde_json::json!({
+                                    "environment": "prod", "plan": null, "claim": null
+                                })),
+                            );
+                            if admits.load(Ordering::SeqCst) {
+                                response.headers_mut().insert(
+                                    crate::runtime_delivery::SERVER_CAPABILITIES_HEADER,
+                                    axum::http::HeaderValue::from_static(
+                                        crate::runtime_delivery::CERTIFICATE_OBSERVATIONS_CAPABILITY,
+                                    ),
+                                );
+                            }
+                            response
+                        }
+                    }),
+                )
+                .route(
+                    "/v1/runtime/environments/prod/certificates",
+                    axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                        let bodies = bodies.clone();
+                        async move {
+                            bodies.lock().unwrap().push(body);
+                            axum::Json(serde_json::json!({ "stored": [] }))
+                        }
+                    }),
+                )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let client = RuntimeClient::new(
+            format!("http://{address}"),
+            "prod",
+            "tkc_bearer",
+            PathBuf::from("/bin/true"),
+        )
+        .unwrap();
+        let report = crate::certificate_reports::CertificateReport {
+            schema: crate::certificate_reports::CERTIFICATE_REPORT_SCHEMA.into(),
+            environment: "prod".into(),
+            instance: "api".into(),
+            not_before: 1_000,
+            not_after: 2_000,
+            last_renewal: None,
+            trust: vec![format!("sha256:{}", "ab".repeat(32))],
+            restart_pending: true,
+            observed_at: 0,
+        };
+        for admitted in [false, true] {
+            admits.store(admitted, Ordering::SeqCst);
+            client.pull().await.unwrap();
+            client
+                .report_certificates(vec![report.clone()], 1_500)
+                .await
+                .unwrap();
+        }
+        let sent = bodies.lock().unwrap();
+        let fields = |body: &serde_json::Value| {
+            let report = &body["certificates"][0];
+            ["trust", "restart_pending", "observed_at"].map(|field| report.get(field).is_some())
+        };
+        assert_eq!(sent.len(), 2, "the new shape is sent at once: {sent:?}");
+        assert_eq!(fields(&sent[0]), [false; 3]);
+        assert_eq!(fields(&sent[1]), [true; 3]);
     }
 }
