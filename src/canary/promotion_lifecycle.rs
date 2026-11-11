@@ -997,6 +997,13 @@ where
     }
     .await;
     let unlock = release_promotion_lock(ctx, &lock).await;
+    finish_locked(result, unlock)
+}
+
+/// Combine a locked mutation's outcome with releasing its promotion lock.
+/// Callers that hold the lock without `guarded_promotion` (channel head
+/// removal) report both failures the same way.
+pub(crate) fn finish_locked<T>(result: Result<T>, unlock: Result<()>) -> Result<T> {
     match (result, unlock) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), Ok(())) => Err(error),

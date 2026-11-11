@@ -16,7 +16,8 @@ use rusqlite::{
 
 use crate::embedded::PropertyIndexQuery;
 use crate::ontology::{
-    KIND_CHANNEL, KIND_ENVIRONMENT, KIND_PLAN, KIND_RELEASE, NS, env_id, release_id,
+    CHANNEL_REVISION_FLOOR, KIND_CHANNEL, KIND_ENVIRONMENT, KIND_PLAN, KIND_RELEASE, NS, env_id,
+    release_id,
 };
 use crate::pb::graph_action::{ActionResult, ActionTypeDef};
 use crate::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};

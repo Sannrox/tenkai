@@ -1,7 +1,9 @@
 use postgres::Transaction;
 use prost::Message;
 use tenkai::feedback_observation::FeedbackObservation;
-use tenkai::ontology::{KIND_CHANNEL, KIND_ENVIRONMENT, KIND_PLAN, KIND_RELEASE, NS, env_id};
+use tenkai::ontology::{
+    CHANNEL_REVISION_FLOOR, KIND_CHANNEL, KIND_ENVIRONMENT, KIND_PLAN, KIND_RELEASE, NS, env_id,
+};
 use tenkai::pb::graph_action::{ActionResult, ActionTypeDef};
 use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use tenkai::plan::Plan;
@@ -1061,7 +1063,10 @@ fn catalog_put_in(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {
     match object.kind.as_str() {
         KIND_ENVIRONMENT => upsert_environment(tx, object)?,
         KIND_RELEASE => upsert_release(tx, object)?,
-        KIND_CHANNEL => upsert_channel(tx, object)?,
+        KIND_CHANNEL => {
+            let object = upsert_channel(tx, object)?;
+            return upsert_catalog_sidecar(tx, &object);
+        }
         KIND_PLAN => upsert_plan(tx, object)?,
         _ => {}
     }
@@ -1214,7 +1219,21 @@ fn upsert_release(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {
     Ok(())
 }
 
-fn upsert_channel(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {
+/// The revision a removed channel head reached, kept on the headless
+/// catalog object (#1174).
+pub(super) fn channel_revision_floor(tx: &mut Transaction<'_>, id: &str) -> Result<Option<u64>> {
+    Ok(tx
+        .query_opt(
+            "SELECT value FROM catalog_object_properties WHERE object_id=$1 AND key=$2",
+            &[&id, &CHANNEL_REVISION_FLOOR],
+        )
+        .map_err(pg)?
+        .and_then(|row| row.get::<_, String>(0).parse().ok()))
+}
+
+/// Write the typed channel row and return the object for the sidecar: a
+/// headless channel (#1174) carries the revision floor its row reached.
+fn upsert_channel(tx: &mut Transaction<'_>, object: &Object) -> Result<Object> {
     let product = object
         .properties
         .get("product")
@@ -1231,26 +1250,42 @@ fn upsert_channel(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {
         .get("current_release")
         .cloned()
         .unwrap_or_default();
-    let release_exists = !release.is_empty()
-        && tx
-            .query_opt("SELECT 1 FROM releases WHERE id=$1", &[&release])
-            .map_err(pg)?
-            .is_some();
-    if !release_exists {
-        return Ok(());
-    }
-    let revision = tx
+    let typed = tx
         .query_opt("SELECT revision FROM channels WHERE id=$1", &[&object.id])
         .map_err(pg)?
-        .map(|row| row.get::<_, i64>(0) + 1)
-        .unwrap_or(1);
+        .map(|row| row.get::<_, i64>(0) as u64);
+    let floor = match typed {
+        Some(revision) => Some(revision),
+        None => channel_revision_floor(tx, &object.id)?,
+    };
+    if release.is_empty() {
+        // A removed head (#1174) leaves no typed row; reads fall back to the
+        // catalog object. Leaving the row would overlay the old release.
+        tx.execute("DELETE FROM channels WHERE id=$1", &[&object.id])
+            .map_err(pg)?;
+        let mut headless = object.clone();
+        if let Some(floor) = floor {
+            headless
+                .properties
+                .insert(CHANNEL_REVISION_FLOOR.into(), floor.to_string());
+        }
+        return Ok(headless);
+    }
+    let release_exists = tx
+        .query_opt("SELECT 1 FROM releases WHERE id=$1", &[&release])
+        .map_err(pg)?
+        .is_some();
+    if !release_exists {
+        return Ok(object.clone());
+    }
+    let revision = (floor.unwrap_or(0) + 1) as i64;
     tx.execute(
         "INSERT INTO channels(id,product,name,release_id,revision) VALUES($1,$2,$3,$4,$5)
          ON CONFLICT(id) DO UPDATE SET release_id=EXCLUDED.release_id, revision=EXCLUDED.revision",
         &[&object.id, &product, &name, &release, &revision],
     )
     .map_err(pg)?;
-    Ok(())
+    Ok(object.clone())
 }
 
 fn upsert_plan(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {

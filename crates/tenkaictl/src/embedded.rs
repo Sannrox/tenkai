@@ -86,6 +86,29 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
             )
             .await
         }
+        Command::Channel {
+            command:
+                crate::catalog_args::ChannelCommand::Remove {
+                    product,
+                    channel,
+                    expected_head,
+                },
+        } => {
+            let actor = crate::authorization::embedded_management_actor()?;
+            let removed = tenkai::catalog::remove_channel_head(
+                &mut ctx,
+                &actor,
+                &product,
+                &channel,
+                expected_head.as_deref(),
+            )
+            .await?;
+            match removed {
+                Some(head) => println!("removed {head} from channel {product}/{channel}"),
+                None => println!("channel {product}/{channel} has no head"),
+            }
+            Ok(())
+        }
         Command::Fleet { command } => {
             crate::embedded_fleet::run(&mut ctx, command, &database, output).await
         }

@@ -247,6 +247,20 @@ pub(crate) async fn run(
             crate::remote_hold::channel(&client, &product, &channel, action).await?;
             Ok(())
         }
+        Command::Channel {
+            command:
+                crate::catalog_args::ChannelCommand::Remove {
+                    product,
+                    channel,
+                    expected_head,
+                },
+        } => {
+            let result = client
+                .remove_channel_head(&product, &channel, expected_head.as_deref())
+                .await?;
+            println!("{}", result.message);
+            Ok(())
+        }
         Command::Env {
             command:
                 EnvCommand::Add {

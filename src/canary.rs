@@ -380,7 +380,9 @@ pub use promotion_lifecycle::{
     active_policy, authorize_promotion, configure, confirm_policy_active, set_designated,
     unlock_promotion,
 };
-pub(crate) use promotion_lifecycle::{claim_promotion_lock, fenced_put, release_promotion_lock};
+pub(crate) use promotion_lifecycle::{
+    claim_promotion_lock, fenced_put, finish_locked, release_promotion_lock,
+};
 
 mod attempt_lifecycle;
 

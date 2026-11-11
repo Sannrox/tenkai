@@ -23,6 +23,10 @@ Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
   decision, audit record (including `principal_id` and `principal_kind`), and
   head mutation share the adapter's atomic commit boundary; a transport must
   not acknowledge a partial result.
+- **Channel remove** clears one product's head on one channel through the
+  same publish capability and promotion lock. It does not recall the release,
+  uninstall instances, or clear a delivery hold. An in-flight wave is not
+  refused; it fails closed if the head no longer matches.
 - **Recall** is an ordered, authenticated mutation (`tenkaictl release recall`)
   that makes subsequent lookup and planning fail closed. The first-writer
   `tenkai.release_recall` claim records who recalled the release; the release
@@ -73,7 +77,7 @@ A remote API may add wire-version negotiation, authentication, rate limits, and
 pagination, but must translate into this contract without exposing database rows
 or sekai objects. Compatibility is additive within v1. Removing fields, changing
 digest meaning, or changing failure semantics requires a new contract version
-and dual-version conformance fixtures. Remote publish, promote, subscribe, and
+and dual-version conformance fixtures. Remote publish, promote, channel remove, subscribe, and
 recall use the [management lifecycle](management-lifecycle.md) header
 ([ADR 0030](decisions/0030-remote-management-lifecycle.md)); they do not reuse
 spoke runtime RPCs.

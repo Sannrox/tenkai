@@ -161,12 +161,28 @@ pub(super) fn upsert_channel_in(tx: &Transaction<'_>, object: &Object) -> Result
             |row| row.get(0),
         )
         .optional()?;
-    let next = revision.map(|value| value + 1).unwrap_or(1);
-    let release_exists = !release.is_empty()
-        && tx
-            .query_row("SELECT 1 FROM releases WHERE id=?1", [&release], |_| Ok(()))
-            .optional()?
-            .is_some();
+    let floor = match revision {
+        Some(revision) => Some(revision),
+        None => channel_revision_floor(tx, &object.id)?,
+    };
+    if release.is_empty() {
+        // A removed head (#1174) leaves no typed row; reads fall back to the
+        // catalog object, which keeps the revision floor.
+        tx.execute("DELETE FROM channels WHERE id=?1", [&object.id])?;
+        let mut headless = object.clone();
+        if let Some(floor) = floor {
+            headless
+                .properties
+                .insert(CHANNEL_REVISION_FLOOR.into(), floor.to_string());
+        }
+        upsert_catalog_in(tx, &headless)?;
+        return Ok(());
+    }
+    let next = floor.map(|value| value + 1).unwrap_or(1);
+    let release_exists = tx
+        .query_row("SELECT 1 FROM releases WHERE id=?1", [&release], |_| Ok(()))
+        .optional()?
+        .is_some();
     if !release_exists {
         upsert_catalog_in(tx, object)?;
         return Ok(());
@@ -182,6 +198,19 @@ pub(super) fn upsert_channel_in(tx: &Transaction<'_>, object: &Object) -> Result
     )?;
     replace_catalog_properties(tx, object)?;
     Ok(())
+}
+
+/// The revision a removed channel head reached, kept on the headless
+/// catalog object (#1174).
+pub(super) fn channel_revision_floor(tx: &Transaction<'_>, id: &str) -> Result<Option<u64>> {
+    let value: Option<String> = tx
+        .query_row(
+            "SELECT value FROM catalog_object_properties WHERE object_id=?1 AND key=?2",
+            params![id, CHANNEL_REVISION_FLOOR],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value.and_then(|value| value.parse().ok()))
 }
 
 pub(super) fn upsert_plan_in(tx: &Transaction<'_>, object: &Object) -> Result<()> {

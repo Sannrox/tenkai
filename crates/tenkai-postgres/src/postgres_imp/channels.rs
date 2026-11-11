@@ -79,7 +79,11 @@ impl Inner {
                     }
                     revision as u64 + 1
                 }
-                None if channel.revision == 0 => 1,
+                // A channel without a typed row starts above the revision its
+                // removed head reached (#1174), so no earlier record matches.
+                None if channel.revision == 0 => {
+                    super::catalog_graph::channel_revision_floor(tx, &channel.id)?.unwrap_or(0) + 1
+                }
                 None => {
                     return Err(StoreError::RevisionConflict {
                         kind: "channel",

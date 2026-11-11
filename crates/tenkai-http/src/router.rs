@@ -35,9 +35,9 @@ use super::lifecycle::{
     import_derived_criticality, install_model_evaluation_trust, plan_environment,
     plan_identity_issuer, prepare_identity_issuer, promote_release, publish_release,
     recall_release, record_model_evaluation_evidence, record_software_compatibility_evidence,
-    release_channel_hold, release_environment_hold, retire_environment, retry_failed_target,
-    rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment, set_channel_hold,
-    set_environment_hold, set_product_criticality, software_compatibility_report,
+    release_channel_hold, release_environment_hold, remove_channel_head, retire_environment,
+    retry_failed_target, rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment,
+    set_channel_hold, set_environment_hold, set_product_criticality, software_compatibility_report,
     subscribe_environment, unsubscribe_environment,
 };
 use super::package_migration::{
@@ -364,6 +364,10 @@ pub fn router(
         .route(
             "/v1/products/{product}/channels/{channel}/hold/release",
             post(release_channel_hold),
+        )
+        .route(
+            "/v1/products/{product}/channels/{channel}/remove",
+            post(remove_channel_head),
         )
         .route(
             "/v1/runtime/environments/{environment}/work",

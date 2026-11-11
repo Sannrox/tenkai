@@ -113,6 +113,7 @@ pub enum ManagementLifecycleOperation {
     Retry,
     ChannelHold,
     ChannelRelease,
+    ChannelRemove,
     Register,
     Configure,
 }
@@ -135,6 +136,7 @@ impl ManagementLifecycleOperation {
             Self::Retry => "retry",
             Self::ChannelHold => "channel_hold",
             Self::ChannelRelease => "channel_release",
+            Self::ChannelRemove => "channel_remove",
             Self::Register => "register",
             Self::Configure => "configure",
         }
@@ -150,6 +152,7 @@ impl ManagementLifecycleOperation {
                 | Self::Recall
                 | Self::ChannelHold
                 | Self::ChannelRelease
+                | Self::ChannelRemove
                 | Self::Register
         )
     }
@@ -223,6 +226,7 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "retry" => Ok(ManagementLifecycleOperation::Retry),
         "channel_hold" => Ok(ManagementLifecycleOperation::ChannelHold),
         "channel_release" => Ok(ManagementLifecycleOperation::ChannelRelease),
+        "channel_remove" => Ok(ManagementLifecycleOperation::ChannelRemove),
         "register" => Ok(ManagementLifecycleOperation::Register),
         "configure" => Ok(ManagementLifecycleOperation::Configure),
         other => bail!("unknown management lifecycle operation {other:?}"),
@@ -648,6 +652,18 @@ pub struct ChannelHoldRequest {
     pub operation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Body of `POST /v1/products/{product}/channels/{channel}/remove`.
+/// `expected_head` (`<product>@<version>`) refuses the removal when another
+/// release heads the channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelRemoveRequest {
+    pub version: u32,
+    pub operation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1127,6 +1143,28 @@ pub fn admit_channel_hold(
         granted_environment,
     )?;
     require_route_operation(admitted.operation, expected)?;
+    Ok(admitted)
+}
+
+pub fn admit_channel_remove(
+    request: &ChannelRemoveRequest,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: None,
+            expected_generation: None,
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(
+        admitted.operation,
+        ManagementLifecycleOperation::ChannelRemove,
+    )?;
     Ok(admitted)
 }
 
@@ -1869,6 +1907,21 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(runtime.contains("runtime credentials"), "{runtime}");
+
+        let remove = ChannelRemoveRequest {
+            version: 1,
+            operation: "channel_remove".into(),
+            expected_head: None,
+        };
+        admit_channel_remove(&remove, PrincipalKind::Management, None).unwrap();
+        let runtime = admit_channel_remove(&remove, PrincipalKind::Runtime, None)
+            .unwrap_err()
+            .to_string();
+        assert!(runtime.contains("runtime credentials"), "{runtime}");
+        let scoped = admit_channel_remove(&remove, PrincipalKind::Management, Some("stage"))
+            .unwrap_err()
+            .to_string();
+        assert!(scoped.contains("cannot call catalog-wide"), "{scoped}");
     }
 
     #[test]
