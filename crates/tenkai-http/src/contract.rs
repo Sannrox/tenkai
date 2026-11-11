@@ -827,6 +827,8 @@ pub fn http_contract() -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     /// Response fields the server omits when unset are optional, never `null`.
@@ -953,6 +955,127 @@ mod tests {
             contract["$defs"]["ChangeEventPage"]["properties"]["events"]["items"]["$ref"],
             "#/$defs/ChangeEvent"
         );
+    }
+
+    /// Response-only types that still refuse unknown fields, and why.
+    /// Every other result accepts them, so a newer server can add a field
+    /// without breaking older clients (#1172). Requests stay strict.
+    const STRICT_RESPONSE_TYPES: &[(&str, &str)] = &[
+        (
+            "BackupStatus",
+            "status.json, which backup runs read and rewrite",
+        ),
+        ("BackupFailure", "part of status.json"),
+        (
+            "BackupManifest",
+            "the stored backup manifest a restore verifies",
+        ),
+        (
+            "DrillEvidence",
+            "keeps the signed drill statement bytes exactly",
+        ),
+        (
+            "ImportJob",
+            "the import job file, which import steps rewrite",
+        ),
+        (
+            "ScanEvidence",
+            "scanner output stored in the import job file",
+        ),
+        ("ExportEvent", "the export audit trail"),
+        (
+            "MigrationRecord",
+            "the stored, digest-bound migration record",
+        ),
+        ("CheckpointReceipt", "part of the migration record"),
+        (
+            "ModuleActivationReceipt",
+            "digest-bound by its receipt_digest",
+        ),
+        (
+            "QuorumRule",
+            "the approval policy file a plan is approved against",
+        ),
+    ];
+
+    /// The `$defs` names `roots` reach, following `$ref`s.
+    fn reachable(defs: &Value, roots: impl IntoIterator<Item = Value>) -> BTreeSet<String> {
+        fn refs(value: &Value, out: &mut Vec<String>) {
+            match value {
+                Value::Object(map) => {
+                    if let Some(Value::String(target)) = map.get("$ref") {
+                        out.extend(target.rsplit('/').next().map(str::to_string));
+                    }
+                    map.values().for_each(|value| refs(value, out));
+                }
+                Value::Array(items) => items.iter().for_each(|value| refs(value, out)),
+                _ => {}
+            }
+        }
+        let mut todo = Vec::new();
+        roots.into_iter().for_each(|root| refs(&root, &mut todo));
+        let mut seen = BTreeSet::new();
+        while let Some(name) = todo.pop() {
+            if seen.insert(name.clone()) {
+                refs(&defs[&name], &mut todo);
+            }
+        }
+        seen
+    }
+
+    /// A result type refuses unknown fields only with a recorded reason, so
+    /// adding a response field stays additive.
+    #[test]
+    fn results_accept_unknown_fields_unless_recorded() {
+        let contract = http_contract();
+        let defs = &contract["$defs"];
+        let routes = contract["routes"].as_array().expect("routes");
+        let responses = reachable(defs, routes.iter().map(|route| route["response"].clone()));
+        let requests = reachable(defs, routes.iter().map(|route| route["request"].clone()));
+        let strict: BTreeSet<&str> = responses
+            .difference(&requests)
+            .filter(|name| defs[name.as_str()]["additionalProperties"] == json!(false))
+            .map(String::as_str)
+            .collect();
+        let recorded: BTreeSet<&str> = STRICT_RESPONSE_TYPES
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(
+            strict, recorded,
+            "record why a result refuses unknown fields, or drop the entry"
+        );
+        for result in ["ManagementLifecycleResult", "PackageMigrationResult"] {
+            assert_ne!(
+                defs[result]["additionalProperties"],
+                json!(false),
+                "{result}"
+            );
+        }
+    }
+
+    /// An older client decodes a result from a newer server that added a
+    /// field, and keeps the fields it knows.
+    #[test]
+    fn a_result_with_an_added_field_still_decodes() {
+        let lifecycle: tenkai::management_lifecycle::ManagementLifecycleResult =
+            serde_json::from_value(json!({
+                "version": 1,
+                "operation": "promote",
+                "message": "promoted",
+                "digest": "sha256:aa",
+                "added_later": {"any": "shape"},
+            }))
+            .unwrap();
+        assert_eq!(lifecycle.digest.as_deref(), Some("sha256:aa"));
+        let request =
+            serde_json::from_value::<tenkai::management_lifecycle::PromoteRequest>(json!({
+                "version": 1,
+                "operation": "promote",
+                "spec": "api@1.0.0",
+                "added_later": true,
+            }));
+        assert!(request.is_err(), "requests still refuse unknown fields");
     }
 
     const CHECKED_IN: &str = include_str!("../../../api/tenkai-http-v1.schema.json");

@@ -117,9 +117,9 @@ pub struct CandidateRequest {
     pub generation: u64,
 }
 
-/// The issuer as `env inspect` and `status` show it. Never a key.
+/// The issuer as `env inspect` and `status` show it. Never a key. A view:
+/// clients ignore fields they do not know (#1172).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct IssuerSummary {
     pub generation: u64,
     pub fingerprint: String,
@@ -142,9 +142,9 @@ impl From<&IssuerKey> for IssuerSummary {
     }
 }
 
-/// The issuer state of an environment for inspection.
+/// The issuer state of an environment for inspection. A view: clients
+/// ignore fields they do not know (#1172).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct IssuerStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<IssuerSummary>,
