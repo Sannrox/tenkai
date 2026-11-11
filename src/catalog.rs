@@ -868,6 +868,80 @@ pub async fn promote_expecting(
     .await
 }
 
+/// Clear the head of `product`'s `channel`, so the channel stops delivering
+/// it. Returns the removed head as `<product>@<version>`, or `None` when the
+/// channel had no head (a repeat is a no-op). `expected_head` refuses the
+/// removal when another release heads the channel by then. Installed
+/// instances, delivery holds and promotion history stay.
+pub async fn remove_channel_head(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    product: &str,
+    channel: &str,
+    expected_head: Option<&str>,
+) -> Result<Option<String>> {
+    actor
+        .require_delivery_capability(DeliveryCapability::Publish)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    validate_identifier("product", product)?;
+    validate_identifier("channel", channel)?;
+    let expected = match expected_head {
+        Some(expected) => {
+            let Some((expected_product, version)) = expected.split_once('@') else {
+                bail!("expected head must be <product>@<version>, got {expected:?}");
+            };
+            if expected_product != product {
+                bail!("expected head {expected} names another product than {product}");
+            }
+            validate_identifier("version", version)?;
+            Some(release_id(product, version))
+        }
+        None => None,
+    };
+    let owner = format!(
+        "removal:{}:{product}/{channel}:{}",
+        actor.principal_id(),
+        crate::now_millis()
+    );
+    let lock = crate::canary::claim_promotion_lock(ctx, product, channel, &owner).await?;
+    let result = async {
+        let cid = channel_id(product, channel);
+        let Some(existing) = ctx.get(&cid).await? else {
+            return Ok(None);
+        };
+        let current = existing
+            .properties
+            .get("current_release")
+            .cloned()
+            .unwrap_or_default();
+        // An empty channel already holds the requested end state, so a
+        // retry after a lost response succeeds even with `expected_head`.
+        if current.is_empty() {
+            return Ok(None);
+        }
+        if let Some(expected) = expected.as_deref()
+            && current != expected
+        {
+            bail!(
+                "channel {product}/{channel} currently names {current}; refusing to remove {expected}"
+            );
+        }
+        let removed = existing
+            .properties
+            .get("current_version")
+            .map(|version| format!("{product}@{version}"))
+            .unwrap_or(current);
+        let mut headless = existing;
+        headless.properties.remove("current_version");
+        headless.properties.remove("current_release");
+        crate::canary::fenced_put(ctx, std::slice::from_ref(&lock), headless).await?;
+        Ok(Some(removed))
+    }
+    .await;
+    let unlock = crate::canary::release_promotion_lock(ctx, &lock).await;
+    crate::canary::finish_locked(result, unlock)
+}
+
 /// The manifest digest of the published release `spec`, as `sha256:<hex>`.
 pub(crate) async fn release_digest(ctx: &mut Ctx, spec: &str) -> Result<String> {
     let Some((name, version)) = spec.split_once('@') else {
@@ -2178,6 +2252,118 @@ media_type = "{}"
             env.properties.get("deployed.api").map(String::as_str),
             Some("1.0.0")
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Clearing one channel head (#1174) leaves other channels, the release,
+    /// a delivery hold, and the health-gate overlay; a stale `expected_head`
+    /// is refused; a repeat is a no-op; the emptied channel takes a promote.
+    #[tokio::test]
+    async fn remove_channel_head_clears_one_head_and_keeps_the_rest() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-catalog-remove-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let options = PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        };
+        for version in ["1.0.0", "1.1.0"] {
+            std::fs::write(
+                root.join("tenkai.toml"),
+                format!(
+                    "[product]\nname = \"api\"\nversion = \"{version}\"\n\n[deploy]\ninstall = \"true\"\n"
+                ),
+            )
+            .unwrap();
+            publish(&mut ctx, &root.join("tenkai.toml"), &options)
+                .await
+                .unwrap();
+        }
+        let actor = crate::auth_context::test_management_context("channel-remove");
+        promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        promote(&mut ctx, &actor, "api@1.0.0", "beta")
+            .await
+            .unwrap();
+        let overlay = crate::health_gate::HealthGateSpec {
+            slo: vec![crate::manifest::SloGate {
+                name: "error_rate".into(),
+                query: "error_rate".into(),
+                op: crate::manifest::SloComparator::Lte,
+                threshold: 0.01,
+            }],
+            bake_window_seconds: 5,
+            on_fail: Some(crate::manifest::GateFailPolicy::Halt),
+        };
+        crate::health_gate::set_channel_health_gates(&mut ctx, "api", "stable", &overlay)
+            .await
+            .unwrap();
+        let scope = crate::delivery_hold::HoldScope::channel("api", "stable");
+        let hold = crate::delivery_hold::set(&mut ctx, &scope, "pause", "carol")
+            .await
+            .unwrap();
+
+        let denied = remove_channel_head(&mut ctx, &actor, "api", "stable", Some("api@1.1.0"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(denied.contains("refusing to remove"), "{denied}");
+
+        let removed = remove_channel_head(&mut ctx, &actor, "api", "stable", Some("api@1.0.0"))
+            .await
+            .unwrap();
+        assert_eq!(removed.as_deref(), Some("api@1.0.0"));
+        let repeat = remove_channel_head(&mut ctx, &actor, "api", "stable", Some("api@1.0.0"))
+            .await
+            .unwrap();
+        assert_eq!(repeat, None);
+
+        let channels = list_channels(&mut ctx).await.unwrap();
+        let stable = channels
+            .iter()
+            .find(|channel| channel.name == "stable")
+            .expect("stable stays listed");
+        assert!(stable.head.is_empty(), "{stable:?}");
+        assert_eq!(stable.hold.as_ref(), Some(&hold));
+        let beta = channels
+            .iter()
+            .find(|channel| channel.name == "beta")
+            .expect("beta");
+        assert_eq!(beta.head, crate::ontology::release_id("api", "1.0.0"));
+        let stored = ctx
+            .get(&channel_id("api", "stable"))
+            .await
+            .unwrap()
+            .expect("channel object stays");
+        assert!(
+            stored
+                .properties
+                .contains_key(crate::health_gate::CHANNEL_HEALTH_GATES_PROPERTY),
+            "{stored:?}"
+        );
+        assert!(
+            ctx.get(&release_id("api", "1.0.0"))
+                .await
+                .unwrap()
+                .is_some(),
+            "release stays published"
+        );
+
+        promote(&mut ctx, &actor, "api@1.1.0", "stable")
+            .await
+            .unwrap();
+        let channels = list_channels(&mut ctx).await.unwrap();
+        let stable = channels
+            .iter()
+            .find(|channel| channel.name == "stable")
+            .unwrap();
+        assert_eq!(stable.head, crate::ontology::release_id("api", "1.1.0"));
         let _ = std::fs::remove_dir_all(root);
     }
 }

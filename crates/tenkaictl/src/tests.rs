@@ -6,6 +6,7 @@ use crate::args::{
     Cli, Command, DarkSiteCommand, KeysCommand, RemediateCommand, SecretCommand,
     SpokeStandbyCommand, Target,
 };
+use crate::catalog_args::ChannelCommand;
 use crate::env_args::{EnvCommand, MaintenanceCommand, OverlayCommand};
 use crate::topology_args::TopologyCommand;
 use crate::wave_args::WaveCommand;
@@ -186,6 +187,35 @@ fn parses_dark_site_ready_and_rollback() {
             }
         }
     ));
+}
+
+#[test]
+fn parses_channel_remove_expected_head() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "channel",
+        "remove",
+        "api",
+        "stable",
+        "--expected-head",
+        "api@1.0.0",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Channel {
+            command:
+                ChannelCommand::Remove {
+                    product,
+                    channel,
+                    expected_head,
+                },
+        } => {
+            assert_eq!(product, "api");
+            assert_eq!(channel, "stable");
+            assert_eq!(expected_head.as_deref(), Some("api@1.0.0"));
+        }
+        _ => panic!("expected channel remove"),
+    }
 }
 
 #[test]

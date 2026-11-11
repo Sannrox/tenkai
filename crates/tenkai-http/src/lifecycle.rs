@@ -557,6 +557,29 @@ pub(super) async fn release_channel_hold(
     )
 }
 
+/// Removes a product's head from one channel (#1174).
+pub(super) async fn remove_channel_head(
+    State(state): State<Arc<AppState>>,
+    Path((product, channel)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .remove_channel_head(&credential, &product, &channel, request)
+            .await,
+    )
+}
+
 pub(super) async fn set_product_criticality(
     State(state): State<Arc<AppState>>,
     Path(product): Path<String>,

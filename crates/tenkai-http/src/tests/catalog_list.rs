@@ -571,3 +571,115 @@ async fn promote_returns_its_digest_and_honours_an_expected_head() {
     assert_eq!(stable_head(&app).await, "tenkai:release:api@1.0.0");
     let _ = std::fs::remove_dir_all(root);
 }
+
+async fn remove_stable(
+    app: &Router,
+    expected_head: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/products/api/channels/stable/remove")
+                .header("authorization", "Bearer management-secret")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&tenkai::management_lifecycle::ChannelRemoveRequest {
+                        version: 1,
+                        operation: "channel_remove".into(),
+                        expected_head: expected_head.map(str::to_string),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+/// Removing a channel head stops the channel naming a release, is a no-op on
+/// repeat, honours `expected_head`, and leaves the channel promotable (#1174).
+#[tokio::test]
+async fn remove_clears_a_channel_head_once() {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-catalog-channel-remove-{}-{}",
+        std::process::id(),
+        tenkai::now_millis()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (app, _) = catalog_router(&root).await;
+    for version in ["1.0.0", "1.1.0"] {
+        publish(&app, &signed_catalog_fixture(&root, version)).await;
+    }
+    promote(&app, "api@1.0.0", "stable").await;
+    promote(&app, "api@1.0.0", "beta").await;
+
+    // A stale expectation is refused and names the current head.
+    let (status, refused) = remove_stable(&app, Some("api@1.1.0")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(refused.to_string().contains("api@1.0.0"), "{refused}");
+    assert_eq!(stable_head(&app).await, "tenkai:release:api@1.0.0");
+
+    // An expected head of another product is refused before any effect.
+    let (status, other) = remove_stable(&app, Some("web@1.0.0")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{other}");
+    assert_eq!(stable_head(&app).await, "tenkai:release:api@1.0.0");
+
+    let (status, removed) = remove_stable(&app, Some("api@1.0.0")).await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert_eq!(removed["operation"], "channel_remove");
+    assert_eq!(removed["resource"], "api/stable");
+    assert!(
+        removed["message"].as_str().unwrap().contains("api@1.0.0"),
+        "{removed}"
+    );
+    let (_, channels) = get_json(&app, "/v1/channels", Some("management-secret")).await;
+    let items = channels["items"].as_array().unwrap();
+    let stable = items
+        .iter()
+        .find(|item| item["name"] == "stable")
+        .expect("stable stays listed");
+    assert_eq!(stable["head"], "");
+    let beta = items
+        .iter()
+        .find(|item| item["name"] == "beta")
+        .expect("beta");
+    assert_eq!(beta["head"], "tenkai:release:api@1.0.0");
+    let (_, releases) = get_json(&app, "/v1/releases", Some("management-secret")).await;
+    assert!(
+        releases["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "tenkai:release:api@1.0.0"),
+        "{releases}"
+    );
+
+    // A retry after a lost response succeeds and repeats the event, so a
+    // crash between the head write and the event is recovered by retrying.
+    let (status, repeat) = remove_stable(&app, Some("api@1.0.0")).await;
+    assert_eq!(status, StatusCode::OK, "{repeat}");
+    let (_, events) = get_json(&app, "/v1/events", Some("management-secret")).await;
+    let removals: Vec<_> = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "channel_head_removed")
+        .collect();
+    assert_eq!(removals.len(), 2, "{events}");
+    assert!(
+        removals
+            .iter()
+            .all(|event| event["resource"] == "api/stable"),
+        "{events}"
+    );
+
+    // The emptied channel takes a new head.
+    promote(&app, "api@1.1.0", "stable").await;
+    assert_eq!(stable_head(&app).await, "tenkai:release:api@1.1.0");
+    let _ = std::fs::remove_dir_all(root);
+}

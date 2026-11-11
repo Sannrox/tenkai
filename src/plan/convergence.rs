@@ -3996,6 +3996,73 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A channel whose head was removed (#1174) stops delivery: an
+    /// environment that has the product keeps it, one without it gets no
+    /// install.
+    #[tokio::test]
+    async fn a_removed_channel_head_plans_neither_install_nor_removal() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-channel-remove-plan-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        let dir = root.join("app");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tenkai.toml"),
+            "[product]\nname = \"app\"\nversion = \"1.0.0\"\n[deploy]\ninstall = \"true\"\n",
+        )
+        .unwrap();
+        crate::catalog::publish(
+            &mut ctx,
+            &dir.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("channel-remove-plan");
+        // Not installed: the removed head is never installed.
+        crate::catalog::promote(&mut ctx, &actor, "app@1.0.0", "stable")
+            .await
+            .unwrap();
+        subscribe(&mut ctx, "local", "app", "stable").await.unwrap();
+        let removed = crate::catalog::remove_channel_head(&mut ctx, &actor, "app", "stable", None)
+            .await
+            .unwrap();
+        assert_eq!(removed.as_deref(), Some("app@1.0.0"));
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+
+        // Installed: the instance stays until the environment unsubscribes.
+        crate::catalog::promote(&mut ctx, &actor, "app@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::environment::reconcile_deployment(&mut ctx, "local", "app", Some("1.0.0"))
+            .await
+            .unwrap();
+        let removed = crate::catalog::remove_channel_head(&mut ctx, &actor, "app", "stable", None)
+            .await
+            .unwrap();
+        assert_eq!(removed.as_deref(), Some("app@1.0.0"));
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert_eq!(
+            env.properties.get("deployed.app").map(String::as_str),
+            Some("1.0.0")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn optional_requirement_does_not_hold_on_reconcile() {
         let root = std::env::temp_dir().join(format!(

@@ -426,6 +426,29 @@ impl RemoteClient {
         .await
     }
 
+    /// Removes `product`'s head from `channel`; `expected_head`
+    /// (`<product>@<version>`) refuses it when another release heads it.
+    pub async fn remove_channel_head(
+        &self,
+        product: &str,
+        channel: &str,
+        expected_head: Option<&str>,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/products/{product}/channels/{channel}/remove"),
+            Some(&tenkai::management_lifecycle::ChannelRemoveRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation:
+                    tenkai::management_lifecycle::ManagementLifecycleOperation::ChannelRemove
+                        .as_str()
+                        .into(),
+                expected_head: expected_head.map(str::to_owned),
+            }),
+        )
+        .await
+    }
+
     pub async fn rollback_environment(
         &self,
         environment: &str,

@@ -105,6 +105,10 @@ pub fn release_recall_id(release_id: &str) -> String {
 pub fn channel_id(product: &str, channel: &str) -> String {
     format!("tenkai:channel:{product}/{channel}")
 }
+/// Property a headless channel object carries with the typed revision its
+/// removed head reached (#1174). Stores restart the revision above it, so a
+/// channel record read before the removal stays fenced.
+pub const CHANNEL_REVISION_FLOOR: &str = "revision_floor";
 pub fn env_id(name: &str) -> String {
     format!("tenkai:env:{name}")
 }

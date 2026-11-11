@@ -31,7 +31,7 @@ use tenkai::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryRe
 use tenkai::fleet::FleetStatusReport;
 use tenkai::host_identity::AuthSession;
 use tenkai::management_lifecycle::{
-    ApplyRequest, ApproveRequest, ChannelHoldRequest, DeliveryHoldRequest,
+    ApplyRequest, ApproveRequest, ChannelHoldRequest, ChannelRemoveRequest, DeliveryHoldRequest,
     ManagementLifecycleResult, PlanRequest, PromoteHttpRequest, PublishRequest, RecallRequest,
     RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
     UnsubscribeRequest,
@@ -698,6 +698,13 @@ pub fn http_contract() -> Value {
             path: "/v1/products/{product}/channels/{channel}/hold/release",
             auth: Auth::Management,
             request: Some(schema::<ChannelHoldRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/products/{product}/channels/{channel}/remove",
+            auth: Auth::Publish,
+            request: Some(schema::<ChannelRemoveRequest>(&mut g)),
             response: lifecycle.clone(),
         },
         Route {

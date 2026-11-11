@@ -28,9 +28,10 @@ use crate::environment_dependencies::EnvironmentDependencies;
 use crate::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryResult};
 use crate::host_identity::AuthSession;
 use crate::management_lifecycle::{
-    self, ApplyRequest, ApproveRequest, ChannelHoldRequest, DeliveryHoldRequest,
-    ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest, PromoteRequest,
-    PublishRequest, RecallRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
+    self, ApplyRequest, ApproveRequest, ChannelHoldRequest, ChannelRemoveRequest,
+    DeliveryHoldRequest, ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest,
+    PromoteRequest, PublishRequest, RecallRequest, RetryFailedTargetRequest, RollbackRequest,
+    SubscribeRequest,
 };
 use crate::observed_runtime::EnvironmentRuntimeReport;
 use crate::package_migration::{
@@ -2181,6 +2182,60 @@ impl ManagementOperations {
         .await
     }
 
+    /// Remove `product`'s head from `channel`: the channel stops delivering
+    /// it, installed instances stay until their environments unsubscribe.
+    /// A channel without a head succeeds too. Every success appends a
+    /// change event, like promote, so a retry after a crash between the
+    /// head write and the event still delivers it (at least once).
+    pub async fn remove_channel_head(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+        request: ChannelRemoveRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.channel_remove")?;
+        Self::require_capability(&context, DeliveryCapability::Publish)?;
+        Self::require_channel_binding(&context, channel)?;
+        Self::require_product_grant(&context, product)?;
+        management_lifecycle::admit_channel_remove(
+            &request,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.channel_remove.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let removed = crate::catalog::remove_channel_head(
+            &mut ctx,
+            &context,
+            product,
+            channel,
+            request.expected_head.as_deref(),
+        )
+        .await
+        .map_err(map_catalog_error)?;
+        self.audit(actor, "catalog.channel_remove.completed")?;
+        let resource = format!("{product}/{channel}");
+        self.record_change(
+            &context,
+            crate::change_stream::ChangeEventKind::ChannelHeadRemoved,
+            &resource,
+            None,
+        )?;
+        let message = match &removed {
+            Some(head) => format!("removed {head} from channel {resource}"),
+            None => format!("channel {resource} has no head"),
+        };
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::ChannelRemove,
+            message,
+            Some(resource),
+        ))
+    }
+
     async fn mutate_channel_hold(
         &self,
         credential: &CredentialMaterial,
@@ -2985,6 +3040,7 @@ fn map_catalog_error(error: anyhow::Error) -> ManagementError {
     let message = format!("{error:#}");
     if message.contains("already published")
         || message.contains("refusing to replace")
+        || message.contains("refusing to remove")
         || message.contains("no delivery hold")
         || message.contains("no held failed target")
     {

@@ -4,6 +4,7 @@ use crate::ontology::plan_id;
 use crate::plan::{Action, DesiredStateInput, PLAN_FORMAT_VERSION, PlanState, Step};
 use crate::storage::OperationalStore;
 use prost::Message;
+use std::collections::HashMap;
 
 #[test]
 fn create_once_conflict_is_store_already_exists() {
@@ -354,4 +355,128 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
         recalled_recovery_reason: None,
         credential_runway: None,
     }
+}
+
+/// A channel whose head is cleared (#1174) reads back headless and keeps no
+/// typed row naming the old release (development fixtures join on it).
+#[test]
+fn a_cleared_channel_head_reads_back_headless() {
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-1174-headless-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let store = SqliteStore::open(&path).unwrap();
+    let release = crate::ontology::release_id("api", "1.0.0");
+    store
+        .put(Object {
+            id: release.clone(),
+            kind: crate::ontology::KIND_RELEASE.into(),
+            name: "api@1.0.0".into(),
+            properties: HashMap::from([
+                ("product".into(), "api".into()),
+                ("version".into(), "1.0.0".into()),
+                ("digest".into(), "a".repeat(64)),
+            ]),
+            ..Object::default()
+        })
+        .unwrap();
+    let channel = |head: Option<&str>| {
+        let mut properties = HashMap::from([
+            ("product".to_string(), "api".to_string()),
+            ("channel".to_string(), "stable".to_string()),
+        ]);
+        if let Some(head) = head {
+            properties.insert("current_version".into(), "1.0.0".into());
+            properties.insert("current_release".into(), head.into());
+        }
+        Object {
+            id: crate::ontology::channel_id("api", "stable"),
+            kind: KIND_CHANNEL.into(),
+            name: "api/stable".into(),
+            properties,
+            ..Object::default()
+        }
+    };
+    store.put(channel(Some(&release))).unwrap();
+    let id = crate::ontology::channel_id("api", "stable");
+    let headed = store.channel_record(&id).unwrap().expect("typed row");
+    store.put(channel(None)).unwrap();
+    assert!(store.channel_record(&id).unwrap().is_none());
+
+    let read = store
+        .get(&crate::ontology::channel_id("api", "stable"))
+        .unwrap()
+        .expect("channel stays");
+    assert!(!read.properties.contains_key("current_release"), "{read:?}");
+    assert_eq!(
+        read.properties.get(crate::ontology::CHANNEL_REVISION_FLOOR),
+        Some(&headed.revision.to_string()),
+        "{read:?}"
+    );
+    let listed = store.list_channels().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(
+        !listed[0].properties.contains_key("current_release"),
+        "{listed:?}"
+    );
+
+    store.put(channel(Some(&release))).unwrap();
+    let restored = store.channel_record(&id).unwrap().expect("typed row");
+    assert_eq!(restored.revision, headed.revision + 1);
+    let _ = std::fs::remove_file(path);
+}
+
+/// A channel record read before its head was removed (#1174) is refused by
+/// the revision check, before and after a fresh promote recreates the row.
+#[test]
+fn a_record_from_before_a_head_removal_stays_fenced() {
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-1174-fenced-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let store = SqliteStore::open(&path).unwrap();
+    let release = crate::ontology::release_id("api", "1.0.0");
+    store
+        .put(Object {
+            id: release.clone(),
+            kind: crate::ontology::KIND_RELEASE.into(),
+            name: "api@1.0.0".into(),
+            properties: HashMap::from([
+                ("product".into(), "api".into()),
+                ("version".into(), "1.0.0".into()),
+                ("digest".into(), "b".repeat(64)),
+            ]),
+            ..Object::default()
+        })
+        .unwrap();
+    let id = crate::ontology::channel_id("api", "stable");
+    let fresh = crate::storage::ChannelRecord {
+        id: id.clone(),
+        product: "api".into(),
+        name: "stable".into(),
+        release_id: release,
+        revision: 0,
+    };
+    let stale = store.promote_channel(&fresh).unwrap();
+    assert_eq!(stale.revision, 1);
+    store
+        .put(Object {
+            id: id.clone(),
+            kind: KIND_CHANNEL.into(),
+            name: "api/stable".into(),
+            properties: HashMap::from([
+                ("product".into(), "api".into()),
+                ("channel".into(), "stable".into()),
+            ]),
+            ..Object::default()
+        })
+        .unwrap();
+
+    assert!(store.promote_channel(&stale).is_err());
+    let promoted = store.promote_channel(&fresh).unwrap();
+    assert_eq!(promoted.revision, 2);
+    assert!(store.promote_channel(&stale).is_err());
+    let _ = std::fs::remove_file(path);
 }

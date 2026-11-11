@@ -553,6 +553,7 @@
         "release_published",
         "release_promoted",
         "release_recalled",
+        "channel_head_removed",
         "compatibility_result_recorded",
         "trust_threshold_crossed"
       ],
@@ -643,6 +644,31 @@
       },
       "required": [
         "items"
+      ],
+      "type": "object"
+    },
+    "ChannelRemoveRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/products/{product}/channels/{channel}/remove`.\n`expected_head` (`<product>@<version>`) refuses the removal when another\nrelease heads the channel.",
+      "properties": {
+        "expected_head": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation"
       ],
       "type": "object"
     },
@@ -7976,6 +8002,17 @@
       "path": "/v1/products/{product}/channels/{channel}/hold/release",
       "request": {
         "$ref": "#/$defs/ChannelHoldRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "publish",
+      "method": "POST",
+      "path": "/v1/products/{product}/channels/{channel}/remove",
+      "request": {
+        "$ref": "#/$defs/ChannelRemoveRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"

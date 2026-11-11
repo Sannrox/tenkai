@@ -547,6 +547,27 @@ clear, and failed-target retry require `--generation`.
 A failed target stays held until an explicit retry. Remote and embedded
 operators plan that retry with `tenkaictl env retry <env> <product> --reason …`.
 
+### Channel removal
+
+Removing a channel's head stops that channel delivering the product, without
+recalling the release or touching other channels:
+
+```bash
+tenkaictl channel remove hello-local stable --expected-head hello-local@1.2.0
+```
+
+- Subscribed environments that already run the product keep it. Unsubscribe
+  an environment to remove its instance.
+- Subscribed environments without it get no install until a new promote.
+- Channel holds stay, and promoting onto the emptied channel works as usual.
+- An active wave stops at its next step, which re-checks the channel head.
+- `--expected-head` refuses the removal when another release heads the
+  channel. A channel without a head succeeds, so a retry is safe.
+
+Removal requires the publish credential, like promote, and appends an audit
+event and a `channel_head_removed` change event. A retry appends the event
+again, so a crash before the first event is recovered by retrying.
+
 ## Maintenance windows
 
 Recurring windows are configured per environment with an IANA timezone, ISO

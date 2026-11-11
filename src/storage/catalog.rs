@@ -97,7 +97,21 @@ impl SqliteStore {
                 }
                 revision + 1
             }
-            None if channel.revision == 0 => 1,
+            // A channel without a typed row starts above the revision its
+            // removed head reached (#1174), so no earlier record matches.
+            None if channel.revision == 0 => {
+                let floor: Option<String> = tx
+                    .query_row(
+                        "SELECT value FROM catalog_object_properties WHERE object_id=?1 AND key=?2",
+                        params![channel.id, crate::ontology::CHANNEL_REVISION_FLOOR],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                floor
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(0)
+                    + 1
+            }
             None => {
                 return Err(StoreError::RevisionConflict {
                     kind: "channel",

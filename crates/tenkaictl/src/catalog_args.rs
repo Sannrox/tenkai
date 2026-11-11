@@ -51,6 +51,15 @@ pub(crate) enum ChannelCommand {
         #[command(subcommand)]
         action: crate::env_args::HoldAction,
     },
+    /// Stop this channel delivering the product. Installed instances stay
+    /// until their environments unsubscribe.
+    Remove {
+        product: String,
+        channel: String,
+        /// Refuse unless the channel still heads this `<product>@<version>`.
+        #[arg(long)]
+        expected_head: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
