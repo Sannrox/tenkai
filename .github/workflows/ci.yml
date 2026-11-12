@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release-*']
   pull_request:
   schedule:
     - cron: "27 3 * * 1"
@@ -219,7 +219,7 @@ jobs:
         with:
           fetch-depth: 0
       # Pull requests run this only when they touch executors, server
-      # configuration or the build; pushes to main and the schedule always do.
+      # configuration or the build; pushes to main or release-* and the schedule always do.
       - name: Scope
         id: scope
         env:

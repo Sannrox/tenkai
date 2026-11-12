@@ -41,7 +41,11 @@ grep -F 'git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"' "$workflo
 grep -F 'sha="$(git rev-parse "${TAG}^{commit}")"' "$workflow" >/dev/null || fail "${workflow} must resolve the tagged commit"
 grep -F 'bash "${MAIN_TREE}/scripts/verify-release-tag.sh" verify-signed "$TAG" "$sha"' "$workflow" >/dev/null || fail "${workflow} must verify the tag with main's verifier against the tagged commit"
 grep -F 'RELEASE_TAG_FINGERPRINTS="${MAIN_TREE}/security/release-tag-fingerprints"' "$workflow" >/dev/null || fail "${workflow} must verify against main's allowed keys"
-grep -F 'git merge-base --is-ancestor "$sha" refs/remotes/origin/main' "$workflow" >/dev/null || fail "${workflow} must require the tagged commit on main"
+grep -F 'bash "${MAIN_TREE}/scripts/verify-release-tag.sh" maintenance-line "$TAG"' "$workflow" >/dev/null || fail "${workflow} must resolve the matching maintenance line from main's verifier"
+grep -F 'git fetch --force origin "+refs/heads/${line}:refs/remotes/origin/${line}"' "$workflow" >/dev/null || fail "${workflow} must fetch the matching maintenance line when it exists"
+grep -F 'bash "${MAIN_TREE}/scripts/verify-release-tag.sh" require-ancestry "$TAG" "$sha"' "$workflow" >/dev/null || fail "${workflow} must require the tagged commit on main or the matching maintenance line"
+grep -F 'if [[ "$LINE" != main ]]; then' "$workflow" >/dev/null || fail "${workflow} must not mark a previous maintenance line as latest"
+grep -F "branches: [main, 'release-*']" "$ROOT/.github/workflows/ci.yml" >/dev/null || fail "ci.yml must run on pushes to release-*"
 if grep -E 'github\.sha|github\.ref_name|GITHUB_SHA|GITHUB_REF_NAME|github\.event_name' "$workflow" >/dev/null; then
   fail "${workflow} must use the tagged commit and tag input, not the event SHA or ref name"
 fi

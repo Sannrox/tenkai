@@ -4348,6 +4348,18 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// Unix seconds strictly after `instance`'s last deployment. Reports at
+    /// or before that second do not count as take-up.
+    fn observed_after_deployment(env: &crate::pb::sekai::Object, instance: &str, now: i64) -> i64 {
+        env.properties
+            .get(&format!("{}{instance}", crate::environment::DEPLOYMENT_AT))
+            .and_then(|at| at.parse::<i64>().ok())
+            .map(|ms| ms / 1000)
+            .unwrap_or(now)
+            .max(now)
+            + 1
+    }
+
     /// The issue step of a rotation waits until every deployed instance
     /// whose release asks for a certificate took up the bundle with the
     /// next issuer (ADR 0046 §7), and names each one still waiting and why.
@@ -4397,6 +4409,15 @@ mod tests {
         crate::environment::reconcile_deployment(&mut ctx, "local", "api", Some("1.0.0"))
             .await
             .unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.insert(
+            format!("{}api", crate::environment::DEPLOYMENT_AT),
+            ((now + 2) * 1000).to_string(),
+        );
+        ctx.put(env.clone()).await.unwrap();
+        let observed_at = observed_after_deployment(&env, "api", now);
 
         async fn refusal(ctx: &mut Ctx, now: i64) -> String {
             let env = crate::environment::environment(ctx, "local").await.unwrap();
@@ -4424,7 +4445,7 @@ mod tests {
                 last_renewal: None,
                 trust,
                 restart_pending: false,
-                observed_at: now + 1,
+                observed_at,
             }
         };
         let both = vec![current.fingerprint.clone(), next.fingerprint.clone()];
@@ -4456,7 +4477,7 @@ mod tests {
             .unwrap();
         let deployment = format!("{}api", crate::environment::DEPLOYMENT_AT);
         env.properties
-            .insert(deployment.clone(), ((now + 1) * 1000 + 999).to_string());
+            .insert(deployment.clone(), (observed_at * 1000 + 999).to_string());
         ctx.put(env.clone()).await.unwrap();
         assert!(
             refusal(&mut ctx, now)
@@ -4565,6 +4586,15 @@ mod tests {
         crate::environment::reconcile_deployment(&mut ctx, "local", "api", Some("1.0.0"))
             .await
             .unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.insert(
+            format!("{}api", crate::environment::DEPLOYMENT_AT),
+            ((now + 2) * 1000).to_string(),
+        );
+        ctx.put(env.clone()).await.unwrap();
+        let observed_at = observed_after_deployment(&env, "api", now);
         let mut not_after = now + 24 * 3600;
         let mut report = |trust: Vec<&str>| {
             not_after += 1;
@@ -4577,7 +4607,7 @@ mod tests {
                 last_renewal: None,
                 trust: trust.into_iter().map(Into::into).collect(),
                 restart_pending: false,
-                observed_at: now + 1,
+                observed_at,
             }
         };
         async fn planned(ctx: &mut Ctx, now: i64) -> anyhow::Result<crate::plan::Step> {
@@ -4637,7 +4667,7 @@ mod tests {
             .await
             .unwrap();
         env.properties
-            .insert(deployment.clone(), ((now + 1) * 1000 + 999).to_string());
+            .insert(deployment.clone(), (observed_at * 1000 + 999).to_string());
         ctx.put(env).await.unwrap();
         let refused =
             crate::identity_issuer::record_activated(&mut ctx, "local", "plan-remove", &[&remove])

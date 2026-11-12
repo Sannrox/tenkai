@@ -1656,7 +1656,16 @@ mod tests {
                 .is_empty()
         );
 
-        let rotated = seal(&target, b"n3w", &[first.clone(), second.clone()]).unwrap();
+        // Ciphertext is stored as standard base64. A 3-byte value like "n3w"
+        // collides with that encoding often enough to fail this scan without
+        // a leak.
+        let rotated_plain = "rotated-plain-value-v1";
+        let rotated = seal(
+            &target,
+            rotated_plain.as_bytes(),
+            &[first.clone(), second.clone()],
+        )
+        .unwrap();
         change(&mut ctx, set(&rotated)).await.unwrap();
         let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
         assert_eq!(plan.steps.len(), 1, "{:?}", plan.steps);
@@ -1696,7 +1705,7 @@ mod tests {
         let stored = serde_json::to_string(&env.properties).unwrap()
             + &serde_json::to_string(&listed).unwrap()
             + &serde_json::to_string(&plan).unwrap();
-        for plain in ["s3cret", "n3w", &STANDARD.encode("n3w")] {
+        for plain in ["s3cret", rotated_plain, &STANDARD.encode(rotated_plain)] {
             assert!(!stored.contains(plain), "{plain} leaked");
         }
 

@@ -8,6 +8,11 @@
 #       The local tag object is annotated, signed by a key listed in
 #       security/release-tag-fingerprints, resolves to the commit, and equals
 #       the workspace version. Lightweight and unsigned tags are refused.
+#   scripts/verify-release-tag.sh maintenance-line <tag>
+#       The matching release-* branch for the tag's version.
+#   scripts/verify-release-tag.sh require-ancestry <tag> <commit-sha>
+#       The commit is on origin/main or the matching origin/release-* line.
+#       Prints that line name (main or release-*) to stdout.
 #   scripts/verify-release-tag.sh self-test
 #
 # Release tags are vX.Y.Z or the pre-release vX.Y.Z-rc.N (N >= 1). Numbers
@@ -41,6 +46,43 @@ verify_release_tag() {
   [[ "$actual" =~ ^[0-9a-f]{40}$ ]] || fail "tag ${tag} did not resolve to a commit"
   [[ "$actual" == "$expected_commit" ]] || fail "tag ${tag} resolves to ${actual}, expected ${expected_commit}"
   printf 'Release tag %s resolves to triggering commit %s\n' "$tag" "$expected_commit"
+}
+
+# release-<major>.<minor> before 1.0, release-<major> after. Hyphen, not the
+# release/<version> bump branch.
+maintenance_line() {
+  local tag="$1" version major rest minor
+  [[ "$tag" =~ $RELEASE_TAG_PATTERN ]] || fail "invalid release tag: ${tag}"
+  version="${tag#v}"
+  version="${version%%-*}"
+  major="${version%%.*}"
+  rest="${version#*.}"
+  minor="${rest%%.*}"
+  if [[ "$major" == 0 ]]; then
+    printf 'release-%s.%s\n' "$major" "$minor"
+  else
+    printf 'release-%s\n' "$major"
+  fi
+}
+
+# origin/main wins when the commit is on it, so tags on main stay latest.
+require_ancestry() {
+  local tag="$1" sha="$2" line line_ref
+  [[ "$tag" =~ $RELEASE_TAG_PATTERN ]] || fail "invalid release tag: ${tag}"
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail "expected commit must be a full lowercase SHA"
+  git rev-parse --verify -q refs/remotes/origin/main >/dev/null || fail "missing origin/main"
+  if git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
+    printf 'main\n'
+    return
+  fi
+  line="$(maintenance_line "$tag")"
+  line_ref="refs/remotes/origin/${line}"
+  if git rev-parse --verify -q "$line_ref" >/dev/null \
+    && git merge-base --is-ancestor "$sha" "$line_ref"; then
+    printf '%s\n' "$line"
+    return
+  fi
+  fail "tag ${tag} commit ${sha} is not on main or ${line}"
 }
 
 # The root package version; workspace crates move in lockstep with it.
@@ -146,8 +188,104 @@ self_test() {
     expect_failure "invalid release tag" "$malformed" "$second" "$remote"
     expect_signed_failure "invalid release tag" "$malformed" "$second"
   done
+  ancestry_self_test "$tmp"
   signed_self_test "$tmp"
   printf 'release tag self-test passed\n'
+}
+
+expect_ancestry_failure() {
+  local message="$1" output
+  shift
+  if output="$(bash "$SCRIPT_PATH" require-ancestry "$@" 2>&1)"; then
+    fail "expected ancestry failure containing: ${message}"
+  fi
+  [[ "$output" == *"$message"* ]] || fail "ancestry check failed without expected message: ${message} (got: ${output})"
+}
+
+expect_line() {
+  local tag="$1" expected="$2" actual
+  actual="$(bash "$SCRIPT_PATH" maintenance-line "$tag")"
+  [[ "$actual" == "$expected" ]] || fail "maintenance-line ${tag}: expected ${expected}, got ${actual}"
+}
+
+# Matching-line ancestry against injected origin refs. Named failure: a tag
+# reachable only from a non-matching release-* branch, or from any other
+# branch, must not release.
+ancestry_self_test() {
+  local tmp="$1" work a main_tip line_05 line_04 other line_1 accepted output
+  work="${tmp}/ancestry"
+  git init -q "$work"
+  git -C "$work" config user.name "Release tag self-test"
+  git -C "$work" config user.email "release-tag-self-test@example.invalid"
+  git -C "$work" config commit.gpgsign false
+  git -C "$work" config tag.gpgSign false
+  printf 'A\n' >"${work}/source"
+  git -C "$work" add source
+  git -C "$work" commit -q -m A
+  a="$(git -C "$work" rev-parse HEAD)"
+  printf 'main\n' >"${work}/source"
+  git -C "$work" commit -qam main
+  git -C "$work" branch -M main
+  main_tip="$(git -C "$work" rev-parse HEAD)"
+
+  git -C "$work" checkout -q -b release-0.5 "$a"
+  printf '0.5\n' >"${work}/source"
+  git -C "$work" commit -qam '0.5 line'
+  line_05="$(git -C "$work" rev-parse HEAD)"
+
+  git -C "$work" checkout -q -b release-0.4 "$a"
+  printf '0.4\n' >"${work}/source"
+  git -C "$work" commit -qam '0.4 line'
+  line_04="$(git -C "$work" rev-parse HEAD)"
+
+  git -C "$work" checkout -q -b other "$a"
+  printf 'other\n' >"${work}/source"
+  git -C "$work" commit -qam other
+  other="$(git -C "$work" rev-parse HEAD)"
+
+  git -C "$work" checkout -q -b release-1 "$a"
+  printf '1.x\n' >"${work}/source"
+  git -C "$work" commit -qam '1.x line'
+  line_1="$(git -C "$work" rev-parse HEAD)"
+
+  git -C "$work" update-ref refs/remotes/origin/main "$main_tip"
+  git -C "$work" update-ref refs/remotes/origin/release-0.5 "$line_05"
+  git -C "$work" update-ref refs/remotes/origin/release-0.4 "$line_04"
+  git -C "$work" update-ref refs/remotes/origin/other "$other"
+  git -C "$work" update-ref refs/remotes/origin/release-1 "$line_1"
+
+  expect_line v0.5.1 release-0.5
+  expect_line v0.5.1-rc.2 release-0.5
+  expect_line v0.0.1 release-0.0
+  expect_line v1.2.3 release-1
+  expect_line v1.0.0-rc.1 release-1
+  if output="$(bash "$SCRIPT_PATH" maintenance-line v1.2.3-beta.1 2>&1)"; then
+    fail "maintenance-line accepted an invalid tag"
+  fi
+  [[ "$output" == *"invalid release tag"* ]] || fail "maintenance-line rejected without invalid tag message"
+
+  accepted="$(cd "$work" && bash "$SCRIPT_PATH" require-ancestry v0.5.1 "$main_tip")"
+  [[ "$accepted" == main ]] || fail "v0.5.1 on main: expected main, got ${accepted}"
+  accepted="$(cd "$work" && bash "$SCRIPT_PATH" require-ancestry v0.5.1 "$a")"
+  [[ "$accepted" == main ]] || fail "fork point on main: expected main, got ${accepted}"
+  accepted="$(cd "$work" && bash "$SCRIPT_PATH" require-ancestry v1.2.3 "$main_tip")"
+  [[ "$accepted" == main ]] || fail "v1.2.3 on main: expected main, got ${accepted}"
+  accepted="$(cd "$work" && bash "$SCRIPT_PATH" require-ancestry v0.5.1-rc.1 "$main_tip")"
+  [[ "$accepted" == main ]] || fail "rc on main: expected main, got ${accepted}"
+
+  accepted="$(cd "$work" && bash "$SCRIPT_PATH" require-ancestry v0.5.2 "$line_05")"
+  [[ "$accepted" == release-0.5 ]] || fail "matching 0.x line: expected release-0.5, got ${accepted}"
+  accepted="$(cd "$work" && bash "$SCRIPT_PATH" require-ancestry v0.5.2-rc.1 "$line_05")"
+  [[ "$accepted" == release-0.5 ]] || fail "matching 0.x rc: expected release-0.5, got ${accepted}"
+  accepted="$(cd "$work" && bash "$SCRIPT_PATH" require-ancestry v1.2.3 "$line_1")"
+  [[ "$accepted" == release-1 ]] || fail "matching 1.x line: expected release-1, got ${accepted}"
+
+  (cd "$work" && expect_ancestry_failure "is not on main or release-0.5" v0.5.1 "$line_04")
+  (cd "$work" && expect_ancestry_failure "is not on main or release-0.5" v0.5.1 "$line_1")
+  (cd "$work" && expect_ancestry_failure "is not on main or release-1" v1.2.3 "$line_05")
+  (cd "$work" && expect_ancestry_failure "is not on main or release-0.5" v0.5.1 "$other")
+  (cd "$work" && expect_ancestry_failure "is not on main or release-1" v1.2.3 "$other")
+  (cd "$work" && expect_ancestry_failure "invalid release tag" v1.2.3-beta.1 "$main_tip")
 }
 
 # Signed-tag checks against a throwaway key and repository. GNUPGHOME and the
@@ -239,11 +377,21 @@ case "${1:-}" in
     [[ $# -eq 2 ]] || fail "usage: $0 verify-signed <tag> <commit-sha>"
     verify_signed_tag "$1" "$2"
     ;;
+  maintenance-line)
+    shift
+    [[ $# -eq 1 ]] || fail "usage: $0 maintenance-line <tag>"
+    maintenance_line "$1"
+    ;;
+  require-ancestry)
+    shift
+    [[ $# -eq 2 ]] || fail "usage: $0 require-ancestry <tag> <commit-sha>"
+    require_ancestry "$1" "$2"
+    ;;
   self-test)
     [[ $# -eq 1 ]] || fail "usage: $0 self-test"
     self_test
     ;;
   *)
-    fail "usage: $0 {verify <tag> <commit-sha> [remote]|verify-signed <tag> <commit-sha>|self-test}"
+    fail "usage: $0 {verify <tag> <commit-sha> [remote]|verify-signed <tag> <commit-sha>|maintenance-line <tag>|require-ancestry <tag> <commit-sha>|self-test}"
     ;;
 esac

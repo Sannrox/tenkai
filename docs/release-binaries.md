@@ -204,9 +204,10 @@ run that is not from main, checks out the tag, and runs main's
 `scripts/verify-release-tag.sh verify-signed` against main's
 `security/release-tag-fingerprints` (public key in
 `security/release-tag-key.asc`): the tag must be annotated, signed by an
-allowed key, resolve to a commit on main, and equal the tagged commit's
-workspace version. Lightweight and unsigned tags stop the workflow before
-anything is built. The tag's CHANGELOG section must exist and carry its
+allowed key, resolve to a commit on main or the matching `release-*`
+line, and equal the tagged commit's workspace version. Lightweight and
+unsigned tags stop the workflow before anything is built. The tag's
+CHANGELOG section must exist and carry its
 `Gate flags:` line. Manifest `git_sha` is that tagged commit.
 
 The workflow then builds the five community hosts with `--workspace --features tenkai-server/ui`
