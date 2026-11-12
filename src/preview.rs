@@ -231,26 +231,6 @@ pub async fn provision(
     ))
 }
 
-pub async fn teardown_due(ctx: &mut Ctx, env: &str, now: i64) -> Result<Option<TeardownEvidence>> {
-    validate_identifier("environment", env)?;
-    let Some(object) = ctx.get(&env_id(env)).await? else {
-        return Ok(None);
-    };
-    if !is_preview(&object) {
-        return Ok(None);
-    }
-    let preview = stored_inspect(&object)?;
-    if preview.status == STATUS_TORN_DOWN {
-        return Ok(None);
-    }
-    if preview.expires_at > now {
-        return Ok(None);
-    }
-    Ok(Some(
-        persist_teardown(ctx, object, TEARDOWN_EXPIRED, now).await?,
-    ))
-}
-
 /// Preview residue that must stay Current: already torn down, or expiry
 /// teardown just recorded. Non-preview environments are never terminal residue.
 pub async fn is_terminal_residue(ctx: &mut Ctx, env: &str, now: i64) -> Result<bool> {
@@ -620,24 +600,24 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            teardown_due(&mut ctx, "review", 4_999)
+            !is_terminal_residue(&mut ctx, "review", 4_999)
                 .await
                 .unwrap()
-                .is_none()
         );
-        let evidence = teardown_due(&mut ctx, "review", 5_000)
-            .await
-            .unwrap()
-            .expect("expired preview");
-        assert_eq!(evidence.reason, TEARDOWN_EXPIRED);
-        assert_eq!(evidence.pin_digest, pin.pin_digest);
-        assert_eq!(evidence.plan_digest, pin.plan_digest().unwrap());
+        assert!(
+            is_terminal_residue(&mut ctx, "review", 5_000)
+                .await
+                .unwrap()
+        );
         let stored = crate::environment::environment(&mut ctx, "review")
             .await
             .unwrap();
         let inspect = inspect_from_object(&stored).unwrap().unwrap();
         assert_eq!(inspect.status, STATUS_TORN_DOWN);
         assert_eq!(inspect.teardown_reason.as_deref(), Some(TEARDOWN_EXPIRED));
+        assert_eq!(inspect.teardown_at, Some(5_000));
+        assert_eq!(inspect.pin_digest, pin.pin_digest);
+        assert_eq!(inspect.plan_digest, pin.plan_digest().unwrap());
         let plan = crate::plan::create(&mut ctx, "review")
             .await
             .unwrap_err()
@@ -664,10 +644,9 @@ mod tests {
             .insert(PROP_STATUS.into(), STATUS_ACTIVE.into());
         ctx.put(object).await.unwrap();
         assert!(
-            teardown_due(&mut ctx, "local", 10_000)
+            !is_terminal_residue(&mut ctx, "local", 10_000)
                 .await
                 .unwrap()
-                .is_none()
         );
         let stored = crate::environment::environment(&mut ctx, "local")
             .await

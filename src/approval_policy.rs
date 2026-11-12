@@ -11,15 +11,11 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::plan::{Action, Plan, PlanState};
-use crate::plan_approval::{
-    APPROVAL_SCHEMA, ApprovalEnvelope, ApprovalStatement, VerificationEvidence, canonical_bytes,
-};
+use crate::plan_approval::{ApprovalEnvelope, ApprovalStatement, VerificationEvidence};
 
 /// Environment property storing the canonical path of the policy TOML file.
 pub const PLAN_APPROVAL_POLICY_PROPERTY: &str = "plan_approval_policy";
@@ -1003,14 +999,7 @@ fn sign_auto_approval(
         policy_evidence_id: evidence_id,
         policy_digest: policy.digest()?,
     };
-    let bytes = canonical_bytes(&statement)?;
-    let signature = crate::signer::ContentSigner::sign(&signer, &bytes)?;
-    let envelope = ApprovalEnvelope {
-        schema: APPROVAL_SCHEMA.into(),
-        key_id: crate::signer::ContentSigner::key_id(&signer).to_string(),
-        statement,
-        signature: STANDARD.encode(signature),
-    };
+    let envelope = crate::signer::sign_approval(&signer, statement)?;
     write_text_owner_only(approval_out, &serde_json::to_string_pretty(&envelope)?)?;
     Ok(())
 }
@@ -1128,6 +1117,9 @@ mod tests {
     use super::*;
     use crate::plan::{DesiredStateInput, PLAN_FORMAT_VERSION, PlanState, ReleasePin, Step};
     use crate::plan_approval::verify;
+    use crate::plan_approval::{APPROVAL_SCHEMA, canonical_bytes};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
     use ed25519_dalek::Signer as _;
     use ed25519_dalek::SigningKey;
 

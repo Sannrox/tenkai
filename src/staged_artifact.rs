@@ -369,10 +369,6 @@ pub fn load_agent_definition(path: &Path) -> Result<AgentDefinitionDocument> {
     load_validated_json(path, "agent_definition", AgentDefinitionDocument::validate)
 }
 
-pub fn document_digest<T: Serialize>(doc: &T) -> Result<String> {
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(doc)?)))
-}
-
 /// Stages a validated JSON document atomically under a state path.
 pub struct LocalStagedArtifactExecutor {
     state_path: PathBuf,
@@ -394,21 +390,8 @@ impl LocalStagedArtifactExecutor {
         Ok(expected_digest.into())
     }
 
-    pub fn apply_serializable<T: Serialize>(&self, doc: &T) -> Result<String> {
-        let bytes = serde_json::to_vec_pretty(doc)?;
-        let digest = format!("{:x}", Sha256::digest(&bytes));
-        self.apply_json_bytes(&bytes, &digest)
-    }
-
     pub fn remove(&self) -> Result<()> {
         crate::atomic_state::remove_if_exists(&self.state_path)
-    }
-
-    pub fn observe_digest(&self) -> Result<Option<String>> {
-        match crate::atomic_state::read_optional(&self.state_path)? {
-            Some(bytes) => Ok(Some(format!("{:x}", Sha256::digest(bytes)))),
-            None => Ok(None),
-        }
     }
 }
 
@@ -460,33 +443,6 @@ pub fn state_path_for(kind: ProductKind, base: &Path, product: &str) -> PathBuf 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn policy_bundle_apply_observe_remove() {
-        let root = std::env::temp_dir().join(format!(
-            "tenkai-policy-{}-{}",
-            std::process::id(),
-            crate::now_millis()
-        ));
-        let executor = LocalStagedArtifactExecutor::new(root.join("active.json"));
-        let doc = PolicyBundleDocument {
-            version: 1,
-            policies: vec![PolicyEntry {
-                id: "deploy-allow".into(),
-                effect: "allow".into(),
-                action: "deploy".into(),
-            }],
-        };
-        doc.validate().unwrap();
-        let digest = executor.apply_serializable(&doc).unwrap();
-        assert_eq!(
-            executor.observe_digest().unwrap().as_deref(),
-            Some(digest.as_str())
-        );
-        executor.remove().unwrap();
-        assert!(executor.observe_digest().unwrap().is_none());
-        let _ = std::fs::remove_dir_all(root);
-    }
 
     #[test]
     fn eval_suite_and_agent_validate() {
@@ -633,8 +589,10 @@ document = "policy.json"
             &root.join("state"),
             "deploy-policy",
         );
-        assert!(state.exists());
         assert!(state.to_string_lossy().contains("policy_bundle"));
+        let staged: PolicyBundleDocument =
+            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        assert_eq!(staged.policies[0].id, "allow-deploy");
         deactivate(
             ProductKind::PolicyBundle,
             &root.join("state"),

@@ -80,25 +80,20 @@ impl ClientConfig {
     /// treated as no user file (`sudo -u tenkai` often inherits another
     /// account's `HOME` / `XDG_CONFIG_HOME`).
     pub(crate) fn load() -> Result<Self> {
-        let mut config = ClientConfig::default();
-        if let Some(system) = load_file(&system_config_path())? {
-            config.merge(system);
-        }
-        if let Ok(user) = user_config_path()
-            && let Some(user) = load_user_file(&user)?
-        {
-            config.merge(user);
-        }
-        Ok(config)
+        let user = user_config_path().ok();
+        Self::load_from_paths(&system_config_path(), user.as_deref())
     }
 
-    #[cfg(test)]
-    pub(crate) fn load_from_paths(system: &Path, user: &Path) -> Result<Self> {
+    /// [`ClientConfig::load`] with explicit paths; `None` means no user
+    /// config directory is available.
+    fn load_from_paths(system: &Path, user: Option<&Path>) -> Result<Self> {
         let mut config = ClientConfig::default();
         if let Some(system) = load_file(system)? {
             config.merge(system);
         }
-        if let Some(user) = load_user_file(user)? {
+        if let Some(user) = user
+            && let Some(user) = load_user_file(user)?
+        {
             config.merge(user);
         }
         Ok(config)
@@ -447,12 +442,13 @@ mod tests {
         assert!(cli.token_file.is_none());
     }
 
+    /// Process-unique scratch directory with a short name, so `dir/tenkai.sock`
+    /// stays under the Unix socket path limit (104 bytes on macOS).
     fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "tenkai-client-config-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("tcc-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -489,7 +485,7 @@ target = "embedded"
 default_environment = "lab"
 "#,
         );
-        let config = ClientConfig::load_from_paths(&system, &user).unwrap();
+        let config = ClientConfig::load_from_paths(&system, Some(&user)).unwrap();
         assert_eq!(config.target, Some(Target::Embedded));
         assert_eq!(config.server_url.as_deref(), Some("http://127.0.0.1:8080"));
         assert_eq!(config.default_environment.as_deref(), Some("lab"));
@@ -499,7 +495,7 @@ default_environment = "lab"
         );
 
         let missing = dir.join("missing.toml");
-        let only_system = ClientConfig::load_from_paths(&system, &missing).unwrap();
+        let only_system = ClientConfig::load_from_paths(&system, Some(&missing)).unwrap();
         assert_eq!(only_system.target, Some(Target::Remote));
         assert_eq!(only_system.default_environment.as_deref(), Some("edge"));
     }
@@ -523,7 +519,7 @@ token_file = "/etc/tenkai/management.token"
 server_url = "http://other.example:8080"
 "#,
         );
-        let config = ClientConfig::load_from_paths(&system, &user).unwrap();
+        let config = ClientConfig::load_from_paths(&system, Some(&user)).unwrap();
         assert_eq!(
             config.server_url.as_deref(),
             Some("http://other.example:8080")
@@ -536,7 +532,7 @@ server_url = "http://other.example:8080"
 default_environment = "lab"
 "#,
         );
-        let same_server = ClientConfig::load_from_paths(&system, &user).unwrap();
+        let same_server = ClientConfig::load_from_paths(&system, Some(&user)).unwrap();
         assert_eq!(
             same_server.token_file.as_deref(),
             Some(Path::new("/etc/tenkai/management.token"))
@@ -575,12 +571,12 @@ default_environment = "lab"
         write(&path, "token = \"secret\"\n");
         let err = format!(
             "{:#}",
-            ClientConfig::load_from_paths(&path, &dir.join("missing")).unwrap_err()
+            ClientConfig::load_from_paths(&path, Some(&dir.join("missing"))).unwrap_err()
         );
         assert!(err.contains("unknown") || err.contains("token"), "{err}");
 
         write(&path, "target = \"cluster\"\n");
-        let err = ClientConfig::load_from_paths(&path, &dir.join("missing"))
+        let err = ClientConfig::load_from_paths(&path, Some(&dir.join("missing")))
             .unwrap_err()
             .to_string();
         assert!(err.contains("embedded"), "{err}");
@@ -608,7 +604,7 @@ default_environment = "lab"
         write(&user, "target = \"remote\"\n");
         fs::set_permissions(&user, fs::Permissions::from_mode(0o000)).unwrap();
         let missing = dir.join("missing.toml");
-        let config = ClientConfig::load_from_paths(&missing, &user).unwrap();
+        let config = ClientConfig::load_from_paths(&missing, Some(&user)).unwrap();
         assert_eq!(config, ClientConfig::default());
         fs::set_permissions(&user, fs::Permissions::from_mode(0o600)).unwrap();
     }
@@ -625,7 +621,7 @@ default_environment = "lab"
         let system = dir.join("client.toml");
         write(&system, "target = \"remote\"\n");
         fs::set_permissions(&system, fs::Permissions::from_mode(0o000)).unwrap();
-        let err = ClientConfig::load_from_paths(&system, &dir.join("missing"))
+        let err = ClientConfig::load_from_paths(&system, Some(&dir.join("missing")))
             .unwrap_err()
             .to_string();
         fs::set_permissions(&system, fs::Permissions::from_mode(0o600)).unwrap();
@@ -640,7 +636,7 @@ default_environment = "lab"
         let path = dir.join("client.toml");
         write(&path, "target = \"remote\"\n");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
-        let err = ClientConfig::load_from_paths(&path, &dir.join("missing"))
+        let err = ClientConfig::load_from_paths(&path, Some(&dir.join("missing")))
             .unwrap_err()
             .to_string();
         assert!(err.contains("writable"), "{err}");
