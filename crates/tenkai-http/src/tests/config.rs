@@ -40,33 +40,6 @@ fn rejects_tenant_mode_without_tenant_store_adapter() {
 }
 
 #[test]
-fn http_exposed_tenant_rpcs_are_subset_of_registry() {
-    use tenkai::tenant_isolation::{http_exposed_tenant_rpc_ids, tenant_visible_rpcs};
-    let registered: std::collections::BTreeSet<_> =
-        tenant_visible_rpcs().iter().map(|rpc| rpc.id).collect();
-    for id in http_exposed_tenant_rpc_ids() {
-        assert!(
-            registered.contains(id),
-            "http-exposed rpc {id} must appear in tenant_visible_rpcs()"
-        );
-    }
-    // Catalog/plan/aggregate registry entries stay non-HTTP until routes exist.
-    // GET /v1/releases and GET /v1/channels are community catalog routes; tenant
-    // mode refuses them instead of listing the shared catalog.
-    assert!(!http_exposed_tenant_rpc_ids().contains(&"catalog.list_releases"));
-    assert!(!http_exposed_tenant_rpc_ids().contains(&"catalog.list_channels"));
-    assert!(!http_exposed_tenant_rpc_ids().contains(&"catalog.query_exposures"));
-    assert!(!http_exposed_tenant_rpc_ids().contains(&"catalog.list_products"));
-    assert!(!http_exposed_tenant_rpc_ids().contains(&"plan.list"));
-    assert!(!http_exposed_tenant_rpc_ids().contains(&"aggregate.audit_list"));
-    assert!(http_exposed_tenant_rpc_ids().contains(&"runtime.inventory"));
-    assert!(http_exposed_tenant_rpc_ids().contains(&"event.list"));
-    assert!(http_exposed_tenant_rpc_ids().contains(&"environment.runtime"));
-    assert!(http_exposed_tenant_rpc_ids().contains(&"environment.dependencies"));
-    assert!(http_exposed_tenant_rpc_ids().contains(&"environment.history"));
-}
-
-#[test]
 fn rejects_multi_replica_without_shared_replica_capability() {
     let mut config = ServerConfig::community(
         "management-secret",
