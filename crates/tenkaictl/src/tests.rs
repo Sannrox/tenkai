@@ -368,6 +368,72 @@ fn status_without_target_or_env_stays_unspecified() {
 }
 
 #[test]
+fn parses_apply_cancel_env_and_reason() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "apply",
+        "cancel",
+        "prod",
+        "--reason",
+        "stop the rollout",
+        "--generation",
+        "4",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Apply {
+            command: Some(crate::args::ApplyCommand::Cancel {
+                ref env,
+                ref reason,
+                generation: Some(4),
+                no_hold: false,
+            }),
+            ..
+        } if env == "prod" && reason.as_deref() == Some("stop the rollout")
+    ));
+}
+
+#[test]
+fn apply_cancel_parses_no_hold() {
+    let cli = Cli::try_parse_from(["tenkaictl", "apply", "cancel", "prod", "--no-hold"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Apply {
+            command: Some(crate::args::ApplyCommand::Cancel { no_hold: true, .. }),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn rollback_no_hold_requires_reason() {
+    assert!(
+        Cli::try_parse_from(["tenkaictl", "rollback", "api", "--env", "prod", "--no-hold"])
+            .is_err()
+    );
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "rollback",
+        "api",
+        "--env",
+        "prod",
+        "--no-hold",
+        "--reason",
+        "resume",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Rollback {
+            no_hold: true,
+            ref reason,
+            ..
+        } if reason.as_deref() == Some("resume")
+    ));
+}
+
+#[test]
 fn parses_explain_env_and_instance() {
     let cli = Cli::try_parse_from(["tenkaictl", "explain", "prod", "api"]).unwrap();
     assert!(matches!(

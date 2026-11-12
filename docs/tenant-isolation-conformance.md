@@ -110,7 +110,7 @@ Community catalog and remote management lifecycle routes (`GET /v1/releases`,
 `POST /v1/products/{product}/recall-range/close`,
 `POST /v1/environments/{environment}/subscriptions`,
 `POST /v1/environments/{environment}/plans`, `POST /v1/plans/{plan_id}/approve`,
-`POST /v1/plans/{plan_id}/apply`, `POST /v1/environments/{environment}/rollback`)
+`POST /v1/plans/{plan_id}/apply`, `POST /v1/environments/{environment}/apply/cancel`, `POST /v1/environments/{environment}/rollback`)
 are not tenant HTTP RPCs. Tenant-mode hosts refuse them rather than reading or
 writing a shared catalog. The environment retirement route uses the isolated
 tenant operational registry and is supported in tenant mode.

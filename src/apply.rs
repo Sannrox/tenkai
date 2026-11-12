@@ -17,6 +17,7 @@ use crate::plan::{self, Action, Plan, PlanState, ReleasePin, Step};
 use crate::routing::RoutingConfigExecutor as _;
 use anyhow::{Context as _, Result, bail};
 
+mod cancel;
 mod execution_admission;
 mod execution_attempt;
 mod execution_lease;
@@ -32,6 +33,10 @@ mod runtime_release;
 mod start_admission;
 mod step_lifecycle;
 
+pub(crate) use cancel::hold_after_rollback;
+pub use cancel::{
+    CancelApplyReport, ROLLBACK_REASON as ROLLBACK_HOLD_REASON, request as cancel_apply,
+};
 pub(crate) use execution_admission::{CandidateAdmission, classify_candidate};
 pub(crate) use execution_lease::{
     ENVIRONMENT_LEASE_NAMESPACE, EnvironmentLease, claim_environment,
@@ -395,6 +400,23 @@ async fn execute_locked(
         } else {
             StepOutcomeStatus::Blocked
         };
+        if status == StepOutcomeStatus::Succeeded
+            && !stored_plan.steps.is_empty()
+            && stored_plan
+                .steps
+                .iter()
+                .all(|step| step.action == Action::Rollback)
+        {
+            let actor = options.requester.as_deref().unwrap_or("apply");
+            cancel::hold_after_rollback(
+                ctx,
+                &stored_plan.environment,
+                actor,
+                lease.generation,
+                &lease.fencing_token,
+            )
+            .await?;
+        }
         return Ok(stored_plan
             .steps
             .iter()
@@ -427,8 +449,9 @@ async fn execute_locked(
         Vec::new()
     };
     let mut completion = plan_completion::ExecutionCompletion::new();
+    let mut remaining = steps.into_iter();
 
-    for step in steps {
+    while let Some(step) = remaining.next() {
         if let Err(error) = refresh_environment_lease(ctx, lease).await {
             let detail = format!("refreshing environment apply lease failed: {error}");
             if is_execution_fence_lost(&error) {
@@ -437,6 +460,14 @@ async fn execute_locked(
             }
             plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, &detail).await?;
             return Err(error.context(detail));
+        }
+        if cancel::matches_lease(ctx, lease).await? {
+            completion.skip_remaining(
+                std::iter::once(step).chain(remaining),
+                cancel::skip_detail(),
+                cancel::plan_detail(),
+            );
+            break;
         }
         let recalled_recovery = stored_plan
             .recalled_recovery_reason
@@ -476,9 +507,26 @@ async fn execute_locked(
         }
     }
 
-    completion
+    let rollback_only = stored_plan
+        .steps
+        .iter()
+        .all(|step| step.action == Action::Rollback)
+        && !stored_plan.steps.is_empty();
+    if rollback_only && completion.all_succeeded() {
+        let actor = options.requester.as_deref().unwrap_or("apply");
+        cancel::hold_after_rollback(
+            ctx,
+            &stored_plan.environment,
+            actor,
+            lease.generation,
+            &lease.fencing_token,
+        )
+        .await?;
+    }
+    let outcomes = completion
         .finish(ctx, lease, &mut stored_plan, skip_gates)
-        .await
+        .await?;
+    Ok(outcomes)
 }
 
 #[cfg(test)]

@@ -571,6 +571,23 @@ pub(crate) async fn complete_runtime_work(
                 ))
             })
             .collect::<Vec<_>>();
+        if ctx.is_embedded()
+            && completion.succeeded
+            && !stored.steps.is_empty()
+            && stored
+                .steps
+                .iter()
+                .all(|step| step.action == crate::plan::Action::Rollback)
+        {
+            crate::apply::hold_after_rollback(
+                ctx,
+                environment,
+                "runtime",
+                lease.generation,
+                &lease.fencing_token,
+            )
+            .await?;
+        }
         if let Some(environment) = environment_object {
             if !ctx.is_embedded() {
                 ctx.guarded_update(

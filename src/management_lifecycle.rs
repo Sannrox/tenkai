@@ -120,6 +120,7 @@ pub enum ManagementLifecycleOperation {
     ChannelRemove,
     Register,
     Configure,
+    Cancel,
 }
 
 impl ManagementLifecycleOperation {
@@ -147,6 +148,7 @@ impl ManagementLifecycleOperation {
             Self::ChannelRemove => "channel_remove",
             Self::Register => "register",
             Self::Configure => "configure",
+            Self::Cancel => "cancel",
         }
     }
 
@@ -188,6 +190,7 @@ impl ManagementLifecycleOperation {
                 | Self::HoldThresholdClear
                 | Self::Retry
                 | Self::Configure
+                | Self::Cancel
         )
     }
 }
@@ -245,6 +248,7 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "channel_remove" => Ok(ManagementLifecycleOperation::ChannelRemove),
         "register" => Ok(ManagementLifecycleOperation::Register),
         "configure" => Ok(ManagementLifecycleOperation::Configure),
+        "cancel" => Ok(ManagementLifecycleOperation::Cancel),
         other => bail!("unknown management lifecycle operation {other:?}"),
     }
 }
@@ -1167,6 +1171,29 @@ pub fn admit_apply(
     )?;
     require_approval_files(&request.approval, &request.trust_roots)?;
     Ok(admitted)
+}
+
+pub fn admit_cancel_apply(
+    request: &DeliveryHoldRequest,
+    path_environment: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_path_environment("cancel", &request.environment, path_environment)?;
+    if let Some(reason) = request.reason.as_deref()
+        && reason.trim().is_empty()
+    {
+        bail!("cancel reason must not be empty when set");
+    }
+    admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        ManagementLifecycleOperation::Cancel,
+        kind,
+        granted_environment,
+    )
 }
 
 pub fn admit_rollback(

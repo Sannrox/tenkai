@@ -2962,6 +2962,52 @@ impl ManagementOperations {
         Ok(result)
     }
 
+    pub async fn cancel_apply(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: DeliveryHoldRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "plan.apply.cancel")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_cancel_apply(
+            &request,
+            environment,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "plan.apply.cancel.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let report = crate::apply::cancel_apply(
+            &mut ctx,
+            environment,
+            Some(request.expected_generation),
+            request.reason.as_deref(),
+            actor,
+        )
+        .await
+        .map_err(map_plan_lifecycle_error)?;
+        self.audit(actor, "plan.apply.cancel.completed")?;
+        if report.matched {
+            self.record_change(
+                &context,
+                crate::change_stream::ChangeEventKind::HoldSet,
+                environment,
+                Some(environment),
+            )?;
+        }
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Cancel,
+            report.message,
+            Some(environment.into()),
+        ))
+    }
+
     pub async fn rollback_environment(
         &self,
         credential: &CredentialMaterial,

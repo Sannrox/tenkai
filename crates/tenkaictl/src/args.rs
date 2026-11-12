@@ -67,6 +67,22 @@ pub(crate) enum OutputFormat {
     JsonV1,
 }
 
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ApplyCommand {
+    /// Ask the lease holder to stop after the current step and hold the environment.
+    Cancel {
+        env: String,
+        #[arg(long)]
+        reason: Option<String>,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
+        /// Refused. Cancel always holds the environment.
+        #[arg(long)]
+        no_hold: bool,
+    },
+}
+
 #[derive(Subcommand)]
 pub(crate) enum RecoveryCommand {
     /// Write a versioned allowlisted diagnostic for one plan.
@@ -313,8 +329,11 @@ pub(crate) enum Command {
         generation: Option<u64>,
     },
     /// Execute a stored plan: gates, install, health probe, auto-rollback.
+    #[command(args_conflicts_with_subcommands = true)]
     Apply {
-        plan_id: String,
+        #[command(subcommand)]
+        command: Option<ApplyCommand>,
+        plan_id: Option<String>,
         #[command(flatten)]
         approval: ApprovalFileFlags,
         /// Bypass eval gates (recorded like any other apply).
@@ -402,6 +421,12 @@ pub(crate) enum Command {
         /// Current fencing generation; required with --target remote.
         #[arg(long)]
         generation: Option<u64>,
+        /// Skip the post-rollback environment hold. Only when this command also executes the plan.
+        #[arg(long, requires = "reason")]
+        no_hold: bool,
+        /// Reason for `--no-hold`.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Bounce the currently deployed release of a product without changing version.
     Restart {

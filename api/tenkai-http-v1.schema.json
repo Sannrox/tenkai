@@ -8307,6 +8307,17 @@
     {
       "auth": "management",
       "method": "POST",
+      "path": "/v1/environments/{environment}/apply/cancel",
+      "request": {
+        "$ref": "#/$defs/DeliveryHoldRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
       "path": "/v1/environments/{environment}/rollback",
       "request": {
         "$ref": "#/$defs/RollbackRequest"

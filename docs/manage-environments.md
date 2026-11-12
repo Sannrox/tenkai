@@ -526,8 +526,19 @@ tenkaictl env webhooks clear lab
 Hold pauses new execution without unsubscribing, recalling, or opening a
 maintenance window. The reconciler still plans and reports `held`; `apply`
 refuses a held plan and a pull-only runtime receives no work. In-flight
-applies finish, and rollback-only plans are never held. `env inspect`,
-`env list`, and `status` report the hold.
+applies finish the step they are in. Rollback-only plans are never refused
+by a hold. `env inspect`, `env list`, and `status` report the hold.
+
+`tenkaictl apply cancel <env> [--reason] [--generation]` asks the apply-lease
+holder to stop after the current step and sets this hold (default reason
+`apply cancelled`). `--no-hold` is refused. A cancel aimed at an older
+generation is a no-op. Remote mode is
+`POST /v1/environments/{environment}/apply/cancel` with `expected_generation`.
+Clear the hold with `env hold <env> clear` before the next apply.
+
+A successful rollback of a release that did not fail sets the same hold so
+reconcile does not plan the channel head. `--no-hold --reason` opts out when
+that command also executes the plan.
 
 ```bash
 tenkaictl env hold prod set --reason "change freeze"

@@ -597,6 +597,13 @@ pub fn http_contract() -> Value {
         },
         Route {
             method: "POST",
+            path: "/v1/environments/{environment}/apply/cancel",
+            auth: Auth::Management,
+            request: Some(schema::<DeliveryHoldRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
             path: "/v1/environments/{environment}/rollback",
             auth: Auth::Management,
             request: Some(schema::<RollbackRequest>(&mut g)),

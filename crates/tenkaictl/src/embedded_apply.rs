@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use tenkai::command_result::{CommandName, CommandResultV1, RetryGuidance};
 use tenkai::{apply, client, plan};
 
-use crate::args::{Command, OutputFormat, RecoveryCommand};
+use crate::args::{ApplyCommand, Command, OutputFormat, RecoveryCommand};
 use crate::authorization::execution_authorization;
 use crate::output::{print_machine_result, print_steps, reported_machine_failure};
 
@@ -50,12 +50,45 @@ pub(crate) async fn run(
             }
         }
         Command::Apply {
+            command:
+                Some(ApplyCommand::Cancel {
+                    env,
+                    reason,
+                    generation,
+                    no_hold,
+                }),
+            ..
+        } => {
+            if no_hold {
+                bail!("cancel always holds the environment; `--no-hold` is refused");
+            }
+            let actor = crate::authorization::embedded_management_actor()?;
+            let report = apply::cancel_apply(
+                ctx,
+                &env,
+                generation,
+                reason.as_deref(),
+                actor.principal_id(),
+            )
+            .await?;
+            if output == OutputFormat::JsonV1 {
+                print_machine_result(
+                    &CommandResultV1::succeeded(CommandName::ApplyCancel)
+                        .resource("environment", env),
+                )?;
+            } else {
+                println!("{}", report.message);
+            }
+        }
+        Command::Apply {
+            command: None,
             plan_id,
             approval,
             skip_gates,
             emergency_reason,
             generation: _,
         } => {
+            let plan_id = plan_id.ok_or_else(|| anyhow::anyhow!("apply requires a plan id"))?;
             let stored = plan::load(ctx, &plan_id).await?;
             if output == OutputFormat::JsonV1 {
                 CommandResultV1::succeeded(CommandName::Apply)

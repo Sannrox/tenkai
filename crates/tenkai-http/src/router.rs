@@ -31,7 +31,7 @@ use super::inspect::{
     oidc_client, openmetrics, plan_approvals, query_exposures, ready, reconcile, take_backup,
 };
 use super::lifecycle::{
-    apply_plan, approve_plan, cancel_environment_freeze, channel_hold,
+    apply_plan, approve_plan, cancel_apply, cancel_environment_freeze, channel_hold,
     clear_environment_failure_threshold, clear_product_criticality, close_recall_range,
     environment_hold, import_derived_criticality, install_model_evaluation_trust, plan_environment,
     plan_identity_issuer, prepare_identity_issuer, promote_release, publish_release,
@@ -355,6 +355,10 @@ pub fn router(
         .route("/v1/plans/{plan_id}/approvals", get(plan_approvals))
         .route("/v1/plans/{plan_id}/approve", post(approve_plan))
         .route("/v1/plans/{plan_id}/apply", post(apply_plan))
+        .route(
+            "/v1/environments/{environment}/apply/cancel",
+            post(cancel_apply),
+        )
         .route(
             "/v1/environments/{environment}/rollback",
             post(rollback_environment),
