@@ -1,10 +1,13 @@
-//! Report-only comparison of applied spec versus the live target (#1028).
+//! Report-only comparison of applied spec versus the live target (#1028),
+//! and desired-versus-live target changes recorded on a Plan step (#1077).
 //!
 //! Drift never becomes a Plan. Secret and env values are never recorded.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -76,6 +79,385 @@ pub struct SpecDriftObject {
     /// Cheap top-level names: `containers`, `images`, `env`. Never values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<String>,
+}
+
+/// Digest spelling when planning saw no live object.
+pub const ABSENT_LIVE_DIGEST: &str = "absent";
+/// Operator-facing field values longer than this become a digest.
+pub const TARGET_FIELD_CAP: usize = 128;
+
+/// Desired-versus-live change for one object, stored on a Plan step (#1077).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TargetChange {
+    pub kind: String,
+    pub name: String,
+    /// Operator-owned fields that differ. Empty when live already matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<TargetFieldChange>,
+    /// Digest of the live object as planning saw it. `absent` when none.
+    pub live_digest: String,
+}
+
+/// One named field of a [`TargetChange`]. Secret values are never stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TargetFieldChange {
+    pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+}
+
+/// Compare a desired render with the live object. Secret data is digested.
+pub fn compare_desired_live(
+    kind: &str,
+    name: &str,
+    desired: &Value,
+    live: Option<&Value>,
+) -> TargetChange {
+    let live_digest = match live {
+        None => ABSENT_LIVE_DIGEST.to_string(),
+        Some(live) => digest_bytes(&canonical_object(kind, live)),
+    };
+    let fields = match live {
+        None => vec![TargetFieldChange {
+            field: "object".into(),
+            from: None,
+            to: Some("present".into()),
+        }],
+        Some(live) => diff_canonical(kind, desired, live),
+    };
+    TargetChange {
+        kind: kind.into(),
+        name: name.into(),
+        fields,
+        live_digest,
+    }
+}
+
+/// First planned object whose live digest no longer matches.
+pub fn stale_object<'a>(
+    planned: &'a [TargetChange],
+    live: &[TargetChange],
+) -> Option<&'a TargetChange> {
+    for planned in planned {
+        let digest = live
+            .iter()
+            .find(|change| change.kind == planned.kind && change.name == planned.name)
+            .map(|change| change.live_digest.as_str())
+            .unwrap_or(ABSENT_LIVE_DIGEST);
+        if digest != planned.live_digest {
+            return Some(planned);
+        }
+    }
+    None
+}
+
+/// Operator-facing reason to refuse a step whose recorded live target moved.
+/// `live` is `None` when the executor that recorded the snapshot is missing.
+pub fn stale_step_detail(
+    step_id: &str,
+    planned: &[TargetChange],
+    live: Option<Result<Vec<TargetChange>, String>>,
+) -> Option<String> {
+    match live {
+        None => Some(format!(
+            "step {step_id} is stale: the executor that recorded target changes is not installed"
+        )),
+        Some(Err(error)) => Some(format!(
+            "step {step_id} is stale: could not re-observe the target: {error}"
+        )),
+        Some(Ok(live)) => stale_object(planned, &live).map(|object| {
+            format!(
+                "step {step_id} is stale: {} {} changed since planning",
+                object.kind, object.name
+            )
+        }),
+    }
+}
+
+fn canonical_object(kind: &str, object: &Value) -> Value {
+    match kind {
+        "Secret" | "SealedSecret" => json!({ "data": secret_data_digests(object) }),
+        "ConfigMap" => json!({
+            "data": object.get("data").cloned().unwrap_or(Value::Null),
+            "binaryData": digest_map_field(object, "binaryData"),
+        }),
+        "Service" => json!({
+            "ports": service_ports(object),
+            "selector": object.pointer("/spec/selector").cloned().unwrap_or(Value::Null),
+        }),
+        "Role" => json!({ "rules": object.pointer("/rules").cloned().unwrap_or(Value::Null) }),
+        "RoleBinding" => json!({
+            "roleRef": object.get("roleRef").cloned().unwrap_or(Value::Null),
+            "subjects": object.get("subjects").cloned().unwrap_or(Value::Null),
+        }),
+        "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet" | "Job" | "CronJob" => {
+            plan_workload(object)
+        }
+        "file" => json!({ "content": object.get("content").cloned().unwrap_or(Value::Null) }),
+        _ => json!({ "spec": object.get("spec").cloned().unwrap_or(Value::Null) }),
+    }
+}
+
+/// Digest Secret `data` (base64) and `stringData` (plain) to the same bytes.
+/// `stringData` wins on a colliding key, matching Kubernetes apply.
+fn secret_data_digests(object: &Value) -> BTreeMap<String, String> {
+    let mut entries = BTreeMap::new();
+    if let Some(data) = object.get("data").and_then(Value::as_object) {
+        for (key, value) in data {
+            entries.insert(key.clone(), digest_secret_data_value(value));
+        }
+    }
+    if let Some(string_data) = object.get("stringData").and_then(Value::as_object) {
+        for (key, value) in string_data {
+            let digest = match value.as_str() {
+                Some(raw) => digest_raw(raw.as_bytes()),
+                None => digest_bytes(value),
+            };
+            entries.insert(key.clone(), digest);
+        }
+    }
+    entries
+}
+
+fn digest_secret_data_value(value: &Value) -> String {
+    match value.as_str() {
+        Some(raw) => match STANDARD.decode(raw) {
+            Ok(bytes) => digest_raw(&bytes),
+            Err(_) => digest_raw(raw.as_bytes()),
+        },
+        None => digest_bytes(value),
+    }
+}
+
+fn digest_map_field(object: &Value, field: &str) -> BTreeMap<String, String> {
+    let mut entries = BTreeMap::new();
+    let Some(data) = object.get(field).and_then(Value::as_object) else {
+        return entries;
+    };
+    for (key, value) in data {
+        let digest = match value.as_str() {
+            Some(raw) => digest_raw(raw.as_bytes()),
+            None => digest_bytes(value),
+        };
+        entries.insert(key.clone(), digest);
+    }
+    entries
+}
+
+fn plan_workload(object: &Value) -> Value {
+    let spec = object.get("spec").unwrap_or(&Value::Null);
+    json!({
+        "replicas": spec.get("replicas").cloned().unwrap_or(Value::Null),
+        "schedule": spec.get("schedule").cloned().unwrap_or(Value::Null),
+        "containers": plan_containers(pod_spec(object), "containers"),
+        "initContainers": plan_containers(pod_spec(object), "initContainers"),
+        "volumes": plan_volumes(pod_spec(object)),
+    })
+}
+
+fn pod_spec(object: &Value) -> Option<&Value> {
+    object
+        .pointer("/spec/jobTemplate/spec/template/spec")
+        .or_else(|| object.pointer("/spec/template/spec"))
+}
+
+fn plan_containers(spec: Option<&Value>, key: &str) -> Vec<Value> {
+    let mut containers = spec
+        .and_then(|spec| spec.get(key))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|container| {
+            json!({
+                "name": container.get("name").and_then(Value::as_str).unwrap_or(""),
+                "image": container.get("image").and_then(Value::as_str).unwrap_or(""),
+                "command": container.get("command").cloned().unwrap_or(Value::Null),
+                "args": container.get("args").cloned().unwrap_or(Value::Null),
+                "env": plan_env(container),
+                "volumeMounts": plan_volume_mounts(container),
+            })
+        })
+        .collect::<Vec<_>>();
+    containers.sort_by(|left, right| {
+        left.get("name")
+            .and_then(Value::as_str)
+            .cmp(&right.get("name").and_then(Value::as_str))
+    });
+    containers
+}
+
+fn plan_env(container: &Value) -> Vec<Value> {
+    let mut env = container
+        .get("env")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|entry| {
+            json!({
+                "name": entry.get("name").and_then(Value::as_str).unwrap_or(""),
+                "value": entry.get("value").and_then(Value::as_str).map(digest_text),
+                "valueFrom": entry.get("valueFrom").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect::<Vec<_>>();
+    env.sort_by(|left, right| {
+        left.get("name")
+            .and_then(Value::as_str)
+            .cmp(&right.get("name").and_then(Value::as_str))
+    });
+    env
+}
+
+fn digest_text(value: &str) -> String {
+    digest_raw(value.as_bytes())
+}
+
+fn plan_volume_mounts(container: &Value) -> Vec<Value> {
+    let mut mounts = container
+        .get("volumeMounts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|mount| {
+            json!({
+                "name": mount.get("name").and_then(Value::as_str).unwrap_or(""),
+                "mountPath": mount.get("mountPath").and_then(Value::as_str).unwrap_or(""),
+            })
+        })
+        .collect::<Vec<_>>();
+    mounts.sort_by(|left, right| {
+        left.get("name")
+            .and_then(Value::as_str)
+            .cmp(&right.get("name").and_then(Value::as_str))
+    });
+    mounts
+}
+
+fn plan_volumes(spec: Option<&Value>) -> Vec<Value> {
+    let mut volumes = spec
+        .and_then(|spec| spec.get("volumes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|volume| {
+            json!({
+                "name": volume.get("name").and_then(Value::as_str).unwrap_or(""),
+                "source": volume_source(volume),
+            })
+        })
+        .collect::<Vec<_>>();
+    volumes.sort_by(|left, right| {
+        left.get("name")
+            .and_then(Value::as_str)
+            .cmp(&right.get("name").and_then(Value::as_str))
+    });
+    volumes
+}
+
+fn volume_source(volume: &Value) -> Value {
+    if let Some(name) = volume.pointer("/secret/secretName") {
+        return json!({"secret": name});
+    }
+    if let Some(name) = volume.pointer("/configMap/name") {
+        return json!({"configMap": name});
+    }
+    if let Some(name) = volume.pointer("/persistentVolumeClaim/claimName") {
+        return json!({"persistentVolumeClaim": name});
+    }
+    if volume.get("emptyDir").is_some() {
+        return json!({"emptyDir": true});
+    }
+    if let Some(path) = volume.pointer("/hostPath/path") {
+        return json!({"hostPath": path});
+    }
+    json!(
+        volume
+            .as_object()
+            .and_then(|map| map.keys().find(|key| *key != "name"))
+            .cloned()
+    )
+}
+
+fn service_ports(object: &Value) -> Value {
+    let mut ports = object
+        .pointer("/spec/ports")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|port| {
+            json!({
+                "name": port.get("name").and_then(Value::as_str).unwrap_or(""),
+                "port": port.get("port").cloned().unwrap_or(Value::Null),
+                "targetPort": port.get("targetPort").cloned().unwrap_or(Value::Null),
+                "protocol": port.get("protocol").and_then(Value::as_str).unwrap_or("TCP"),
+            })
+        })
+        .collect::<Vec<_>>();
+    ports.sort_by(|left, right| {
+        left.get("port")
+            .map(ToString::to_string)
+            .cmp(&right.get("port").map(ToString::to_string))
+    });
+    json!(ports)
+}
+
+fn diff_canonical(kind: &str, desired: &Value, live: &Value) -> Vec<TargetFieldChange> {
+    let desired_canon = canonical_object(kind, desired);
+    let live_canon = canonical_object(kind, live);
+    if desired_canon == live_canon {
+        return Vec::new();
+    }
+    let Some(desired_map) = desired_canon.as_object() else {
+        return vec![field_change(
+            "spec",
+            Some(&live_canon),
+            Some(&desired_canon),
+        )];
+    };
+    let live_map = live_canon.as_object();
+    let mut fields = Vec::new();
+    for (key, to) in desired_map {
+        let from = live_map.and_then(|map| map.get(key));
+        if from != Some(to) {
+            fields.push(field_change(key, from, Some(to)));
+        }
+    }
+    if let Some(live_map) = live_map {
+        for (key, from) in live_map {
+            if !desired_map.contains_key(key) {
+                fields.push(field_change(key, Some(from), None));
+            }
+        }
+    }
+    if fields.is_empty() {
+        fields.push(field_change(
+            "spec",
+            Some(&live_canon),
+            Some(&desired_canon),
+        ));
+    }
+    fields
+}
+
+fn field_change(field: &str, from: Option<&Value>, to: Option<&Value>) -> TargetFieldChange {
+    TargetFieldChange {
+        field: field.into(),
+        from: from.map(display_field),
+        to: to.map(display_field),
+    }
+}
+
+fn display_field(value: &Value) -> String {
+    let raw = match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    if raw.len() <= TARGET_FIELD_CAP {
+        return raw;
+    }
+    format!("sha256:{}", digest_bytes(&json!(raw)))
 }
 
 /// Digest of the operator-owned pod-template fields Tenkai compares.
@@ -294,9 +676,12 @@ fn container_env_names(spec: &Value) -> Vec<(String, Vec<String>)> {
 }
 
 fn digest_bytes(value: &Value) -> String {
-    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    digest_raw(&serde_json::to_vec(value).unwrap_or_default())
+}
+
+fn digest_raw(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    hasher.update(bytes);
     format!("{:x}", hasher.finalize())
 }
 
@@ -438,5 +823,205 @@ mod tests {
         let encoded = serde_json::to_string(&report).unwrap();
         assert!(!encoded.contains("hand-patch"), "{encoded}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_service_port_change_is_named() {
+        let desired = json!({
+            "kind": "Service",
+            "metadata": {"name": "web"},
+            "spec": {"ports": [{"port": 80, "targetPort": 8080}]}
+        });
+        let live = json!({
+            "kind": "Service",
+            "metadata": {"name": "web"},
+            "spec": {"ports": [{"port": 8080, "targetPort": 8080}]}
+        });
+        let change = compare_desired_live("Service", "web", &desired, Some(&live));
+        assert_eq!(change.fields.len(), 1);
+        assert_eq!(change.fields[0].field, "ports");
+        let from = change.fields[0].from.as_deref().unwrap();
+        let to = change.fields[0].to.as_deref().unwrap();
+        assert!(from.contains("8080"), "{from}");
+        assert!(to.contains("80"), "{to}");
+        let again = compare_desired_live("Service", "web", &desired, Some(&live));
+        assert_eq!(change, again);
+        let selector_live = json!({
+            "kind": "Service",
+            "metadata": {"name": "web"},
+            "spec": {"ports": [{"port": 80, "targetPort": 8080}], "selector": {"app": "old"}}
+        });
+        let selector_desired = json!({
+            "kind": "Service",
+            "metadata": {"name": "web"},
+            "spec": {"ports": [{"port": 80, "targetPort": 8080}], "selector": {"app": "web"}}
+        });
+        let selector =
+            compare_desired_live("Service", "web", &selector_desired, Some(&selector_live));
+        assert_eq!(selector.fields[0].field, "selector");
+    }
+
+    #[test]
+    fn a_secret_change_shows_only_a_digest() {
+        let desired = json!({
+            "kind": "Secret",
+            "metadata": {"name": "token"},
+            "data": {"password": "c2VjcmV0LXZhbHVl"}
+        });
+        let live = json!({
+            "kind": "Secret",
+            "metadata": {"name": "token"},
+            "data": {"password": "b2xkLXZhbHVl"}
+        });
+        let change = compare_desired_live("Secret", "token", &desired, Some(&live));
+        assert_eq!(change.fields[0].field, "data");
+        let encoded = serde_json::to_string(&change).unwrap();
+        assert!(!encoded.contains("c2VjcmV0LXZhbHVl"), "{encoded}");
+        assert!(!encoded.contains("b2xkLXZhbHVl"), "{encoded}");
+        assert!(!encoded.contains("secret-value"), "{encoded}");
+    }
+
+    #[test]
+    fn string_data_and_data_of_the_same_secret_match() {
+        let desired = json!({"stringData": {"password": "secret-value"}});
+        let live = json!({"data": {"password": "c2VjcmV0LXZhbHVl"}});
+        let change = compare_desired_live("Secret", "token", &desired, Some(&live));
+        assert!(change.fields.is_empty(), "{change:?}");
+        let encoded = serde_json::to_string(&change).unwrap();
+        assert!(!encoded.contains("secret-value"), "{encoded}");
+    }
+
+    #[test]
+    fn an_env_value_change_is_digested() {
+        let desired = json!({
+            "spec": {"template": {"spec": {"containers": [{
+                "name": "app",
+                "image": "app:1",
+                "env": [{"name": "TOKEN", "value": "next"}]
+            }]}}}
+        });
+        let live = json!({
+            "spec": {"template": {"spec": {"containers": [{
+                "name": "app",
+                "image": "app:1",
+                "env": [{"name": "TOKEN", "value": "prev"}]
+            }]}}}
+        });
+        let change = compare_desired_live("Deployment", "web", &desired, Some(&live));
+        assert_eq!(change.fields[0].field, "containers");
+        let encoded = serde_json::to_string(&change).unwrap();
+        assert!(!encoded.contains("next"), "{encoded}");
+        assert!(!encoded.contains("prev"), "{encoded}");
+        assert!(
+            stale_object(std::slice::from_ref(&change), std::slice::from_ref(&change)).is_none()
+        );
+        let moved = compare_desired_live("Deployment", "web", &desired, Some(&live));
+        assert_eq!(change.live_digest, moved.live_digest);
+        let other_live = json!({
+            "spec": {"template": {"spec": {"containers": [{
+                "name": "app",
+                "image": "app:1",
+                "env": [{"name": "TOKEN", "value": "other"}]
+            }]}}}
+        });
+        let now = compare_desired_live("Deployment", "web", &desired, Some(&other_live));
+        assert!(stale_object(std::slice::from_ref(&change), std::slice::from_ref(&now)).is_some());
+    }
+
+    #[test]
+    fn a_dropped_volume_is_named() {
+        let desired = json!({
+            "spec": {"template": {"spec": {
+                "containers": [{"name": "app", "image": "app:1"}],
+                "volumes": [{"name": "config", "configMap": {"name": "app"}}]
+            }}}
+        });
+        let live = json!({
+            "spec": {"template": {"spec": {
+                "containers": [{"name": "app", "image": "app:1"}],
+                "volumes": [
+                    {"name": "config", "configMap": {"name": "app"}},
+                    {"name": "cache", "emptyDir": {}}
+                ]
+            }}}
+        });
+        let change = compare_desired_live("Deployment", "web", &desired, Some(&live));
+        assert_eq!(change.fields[0].field, "volumes");
+        let from = change.fields[0].from.as_deref().unwrap();
+        assert!(from.contains("cache"), "{from}");
+    }
+
+    #[test]
+    fn a_role_rule_change_is_named() {
+        let desired = json!({"rules": [{"verbs": ["get"], "resources": ["pods"]}]});
+        let live = json!({"rules": [{"verbs": ["*"], "resources": ["pods"]}]});
+        let change = compare_desired_live("Role", "reader", &desired, Some(&live));
+        assert_eq!(change.fields[0].field, "rules");
+        assert!(change.fields[0].from.as_deref().unwrap().contains('*'));
+    }
+
+    #[test]
+    fn a_cronjob_template_image_change_is_named() {
+        let desired = json!({
+            "spec": {
+                "schedule": "0 * * * *",
+                "jobTemplate": {"spec": {"template": {"spec": {
+                    "containers": [{"name": "job", "image": "job:2"}]
+                }}}}
+            }
+        });
+        let live = json!({
+            "spec": {
+                "schedule": "0 * * * *",
+                "jobTemplate": {"spec": {"template": {"spec": {
+                    "containers": [{"name": "job", "image": "job:1"}]
+                }}}}
+            }
+        });
+        let change = compare_desired_live("CronJob", "nightly", &desired, Some(&live));
+        assert_eq!(change.fields[0].field, "containers");
+        assert!(change.fields[0].to.as_deref().unwrap().contains("job:2"));
+    }
+
+    #[test]
+    fn a_moved_live_digest_is_stale() {
+        let desired = json!({"kind": "Service", "metadata": {"name": "web"}, "spec": {"ports": [{"port": 80}]}});
+        let live = json!({"kind": "Service", "metadata": {"name": "web"}, "spec": {"ports": [{"port": 8080}]}});
+        let planned = compare_desired_live("Service", "web", &desired, Some(&live));
+        let moved = json!({"kind": "Service", "metadata": {"name": "web"}, "spec": {"ports": [{"port": 9090}]}});
+        let now = compare_desired_live("Service", "web", &desired, Some(&moved));
+        let stale = stale_object(std::slice::from_ref(&planned), std::slice::from_ref(&now));
+        assert_eq!(stale.map(|change| change.name.as_str()), Some("web"));
+        assert!(
+            stale_object(
+                std::slice::from_ref(&planned),
+                std::slice::from_ref(&planned)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_configmap_data_change_is_named() {
+        let desired = json!({"data": {"note": "next"}});
+        let live = json!({"data": {"note": "prev"}});
+        let change = compare_desired_live("ConfigMap", "cfg", &desired, Some(&live));
+        assert_eq!(change.fields[0].field, "data");
+        assert_eq!(
+            change.fields[0].from.as_deref(),
+            Some("{\"note\":\"prev\"}")
+        );
+        assert_eq!(change.fields[0].to.as_deref(), Some("{\"note\":\"next\"}"));
+    }
+
+    #[test]
+    fn a_long_field_value_is_capped_to_a_digest() {
+        let long = "x".repeat(TARGET_FIELD_CAP + 8);
+        let desired = json!({"data": {"note": long}});
+        let live = json!({"data": {"note": "short"}});
+        let change = compare_desired_live("ConfigMap", "cfg", &desired, Some(&live));
+        let to = change.fields[0].to.as_deref().unwrap();
+        assert!(to.starts_with("sha256:"), "{to}");
+        assert!(!to.contains("xxxxxxxx"), "{to}");
     }
 }

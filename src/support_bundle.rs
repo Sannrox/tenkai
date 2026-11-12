@@ -927,6 +927,7 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
                 issuer: None,
                 identity: None,
                 restore_identity: None,
+                target_changes: Vec::new(),
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,

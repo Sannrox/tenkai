@@ -443,6 +443,7 @@ mod tests {
             issuer: None,
             identity: None,
             restore_identity: None,
+            target_changes: Vec::new(),
         };
         let mut running = plan::create_from_steps(&mut ctx, "local", vec![step])
             .await
@@ -522,6 +523,7 @@ mod tests {
                     issuer: None,
                     identity: None,
                     restore_identity: None,
+                    target_changes: Vec::new(),
                 };
                 let old = plan::create_from_steps(&mut ctx, "local", vec![step.clone()])
                     .await

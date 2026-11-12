@@ -398,6 +398,15 @@ pub trait SoftwareExecutor: Send + Sync {
         let _ = request;
         Ok(crate::spec_drift::SpecDriftView::unknown())
     }
+    /// Desired-versus-live target objects for a Plan step (#1077). Default is
+    /// none: this adapter does not render a target.
+    fn render_target_changes(
+        &self,
+        request: &SoftwareApplyRequest,
+    ) -> Result<Vec<crate::spec_drift::TargetChange>> {
+        let _ = request;
+        Ok(Vec::new())
+    }
     /// Apply one generation and return wall time per phase. Default times `apply`.
     fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
         let started = Instant::now();
@@ -426,6 +435,8 @@ pub struct FakeSoftwareExecutor {
     documents: Mutex<Vec<String>>,
     fail_apply: bool,
     apply_delay: std::time::Duration,
+    desired_objects: Mutex<BTreeMap<(String, String), serde_json::Value>>,
+    live_objects: Mutex<BTreeMap<(String, String), serde_json::Value>>,
 }
 
 impl FakeSoftwareExecutor {
@@ -450,6 +461,38 @@ impl FakeSoftwareExecutor {
     /// Canonical dependency documents delivered with each apply, empty when none.
     pub fn applied_documents(&self) -> Vec<String> {
         self.documents.lock().expect("fake software mutex").clone()
+    }
+
+    /// Desired and live objects this fake compares when planning (#1077).
+    pub fn set_object(
+        &self,
+        kind: &str,
+        name: &str,
+        desired: serde_json::Value,
+        live: Option<serde_json::Value>,
+    ) {
+        let key = (kind.to_string(), name.to_string());
+        self.desired_objects
+            .lock()
+            .expect("fake software mutex")
+            .insert(key.clone(), desired);
+        let mut live_objects = self.live_objects.lock().expect("fake software mutex");
+        match live {
+            Some(live) => {
+                live_objects.insert(key, live);
+            }
+            None => {
+                live_objects.remove(&key);
+            }
+        }
+    }
+
+    /// Replace the live object planning already compared.
+    pub fn set_live(&self, kind: &str, name: &str, live: serde_json::Value) {
+        self.live_objects
+            .lock()
+            .expect("fake software mutex")
+            .insert((kind.to_string(), name.to_string()), live);
     }
 }
 
@@ -497,6 +540,25 @@ impl SoftwareExecutor for FakeSoftwareExecutor {
         } else {
             Ok(SoftwareObserveStatus::Absent)
         }
+    }
+
+    fn render_target_changes(
+        &self,
+        request: &SoftwareApplyRequest,
+    ) -> Result<Vec<crate::spec_drift::TargetChange>> {
+        validate_request(request)?;
+        let desired = self
+            .desired_objects
+            .lock()
+            .expect("fake software mutex")
+            .clone();
+        let live = self.live_objects.lock().expect("fake software mutex");
+        Ok(desired
+            .iter()
+            .map(|(key, desired)| {
+                crate::spec_drift::compare_desired_live(&key.0, &key.1, desired, live.get(key))
+            })
+            .collect())
     }
 }
 

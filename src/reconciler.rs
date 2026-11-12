@@ -515,6 +515,7 @@ mod tests {
             issuer: None,
             identity: None,
             restore_identity: None,
+            target_changes: Vec::new(),
         }];
         sealed_test_plan(env, created_at, state, inputs, steps)
     }
@@ -585,6 +586,7 @@ mod tests {
             issuer: None,
             identity: None,
             restore_identity: None,
+            target_changes: Vec::new(),
         };
         sealed_test_plan(env, created_at, PlanState::Computed, Vec::new(), vec![step])
     }

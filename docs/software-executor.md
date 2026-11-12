@@ -32,7 +32,7 @@ out of scope here. Custom-resource operators are refused.
 
 | Type | Role |
 | --- | --- |
-| `SoftwareExecutor` | apply / remove / observe / restart, plus `cleanup_failed_apply` (defaults to remove) and report-only `observe_spec_drift` (#1028) |
+| `SoftwareExecutor` | apply / remove / observe / restart, plus `cleanup_failed_apply` (defaults to remove), report-only `observe_spec_drift` (#1028), and `render_target_changes` for plan-time desired-versus-live diffs (#1077) |
 | `SoftwareExecutors` | the process default plus adapters for declared kinds; resolves one per release |
 | `FakeSoftwareExecutor` | CI without cluster |
 | `HelmSoftwareExecutor` | Helm chart path (`tenkai-executor`) |
@@ -216,9 +216,11 @@ then `kubectl rollout restart` of Deployments/StatefulSets labeled
 after apply.
 Reconcile may emit a Restart plan when Helm/Kubernetes observe is `Absent` or
 `Mismatched`, recorded apply health is `unhealthy`, or environment overlays
-changed since the last apply. `tenkaictl plan` does not probe live targets or
-execute `deploy.health`, but it does emit Restart when Tenkai-owned overlays
-are stale.
+changed since the last apply. `tenkaictl plan` does not execute `deploy.health`,
+but it does emit Restart when Tenkai-owned overlays are stale. Executors that
+implement `render_target_changes` also record a desired-versus-live diff on
+each step; `tenkaictl plan` prints it, the plan digest covers it, and apply
+refuses the step as stale if the live object moved.
 
 ## In-process Kubernetes enablement (#376)
 

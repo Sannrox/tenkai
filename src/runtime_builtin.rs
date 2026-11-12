@@ -148,6 +148,18 @@ pub(crate) async fn execute_step(
             target.phase_error(SoftwareDeployPhase::Apply, &error.to_string())
         )));
     }
+    if !step.target_changes.is_empty() {
+        let live = target.executor.as_ref().map(|executor| {
+            executor
+                .render_target_changes(&target.request)
+                .map_err(|error| error.to_string())
+        });
+        if let Some(detail) =
+            crate::spec_drift::stale_step_detail(&step.id, &step.target_changes, live)
+        {
+            return Ok(receipt(Err(detail)));
+        }
+    }
 
     // A removal runs the release's own executor, or its `deploy.uninstall`,
     // and is never restored (ADR 0049).
@@ -1903,6 +1915,7 @@ mod tests {
             issuer: None,
             identity: None,
             restore_identity: None,
+            target_changes: Vec::new(),
         };
         Case {
             config: BuiltinConfig {

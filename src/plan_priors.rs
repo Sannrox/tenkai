@@ -369,6 +369,7 @@ mod tests {
             issuer: None,
             identity: None,
             restore_identity: None,
+            target_changes: Vec::new(),
         }
     }
 

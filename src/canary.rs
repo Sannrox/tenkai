@@ -502,6 +502,7 @@ mod tests {
                 issuer: None,
                 identity: None,
                 restore_identity: None,
+                target_changes: Vec::new(),
             }],
             state,
             gates_skipped: Some(false),

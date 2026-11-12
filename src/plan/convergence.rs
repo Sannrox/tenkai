@@ -1506,12 +1506,58 @@ async fn compute_snapshot_with_policy(
                 issuer: None,
                 identity,
                 restore_identity,
+                target_changes: Vec::new(),
             })
         })
         .collect::<Result<Vec<_>>>()?;
     crate::environment::persist_dependency_holds(ctx, env, &hold_sets, &hold_clears).await?;
     persist_spec_drift(ctx, env, &env_obj, &spec_drift_keys).await?;
     Ok((inputs, steps))
+}
+
+async fn attach_target_changes(
+    ctx: &mut Ctx,
+    env: &str,
+    env_obj: &crate::pb::sekai::Object,
+    executors: &crate::software_executor::SoftwareExecutors,
+    steps: &mut [Step],
+) -> Result<()> {
+    for step in steps.iter_mut() {
+        if !step.deploys_release() || step.action == Action::Remove {
+            continue;
+        }
+        let Some(manifest) = readable_manifest(ctx, &step.release_id).await? else {
+            continue;
+        };
+        // Catalog-only planning must not require the apply-time adapter: a
+        // missing or uninstalled executor leaves the step without a snapshot.
+        let Some(executor) = observe_executor(executors, &manifest).ok().flatten() else {
+            continue;
+        };
+        let request = crate::software_executor::request_from_parts(
+            step.product.clone(),
+            step.to.clone(),
+            env.to_string(),
+            &step.workdir,
+            step.release_id.clone(),
+        );
+        let mut request = crate::software_executor::with_overlays(
+            request,
+            crate::environment::product_overlays(env_obj, &step.product).unwrap_or_default(),
+        );
+        request.instance = step.instance.clone();
+        request.config_digest = crate::sealed_secret::instance_config_digest(
+            env_obj,
+            &request.config_digest,
+            step.instance_name(),
+        );
+        request.cluster_config_path =
+            crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;
+        request.secret_dir_path =
+            crate::software_executor::secret_dir_from_properties(&env_obj.properties)?;
+        step.target_changes = executor.render_target_changes(&request)?;
+    }
+    Ok(())
 }
 
 async fn persist_spec_drift(
@@ -2565,6 +2611,8 @@ async fn create_with_content(
         admit_step_overlay_schema(ctx, env, step).await?;
     }
     refuse_unadmitted_callers(ctx, env, &steps).await?;
+    let env_obj = crate::environment::active_environment(ctx, env).await?;
+    attach_target_changes(ctx, env, &env_obj, executors, &mut steps).await?;
     let mut plan = assemble_plan(env, inputs, &mut steps, recalled_recovery_reason)?;
     // Optional advisory priors (default off). Never hard-block or change steps.
     if let Ok(inspect) = inspect_environment(ctx, env).await {
@@ -2734,6 +2782,7 @@ pub(super) async fn rollback_step_with_recovery(
         issuer: None,
         identity,
         restore_identity,
+        target_changes: Vec::new(),
     })
 }
 
@@ -2783,6 +2832,7 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
         issuer: None,
         identity,
         restore_identity: None,
+        target_changes: Vec::new(),
     })
 }
 
@@ -2869,6 +2919,7 @@ pub(super) async fn rewrap_steps(
                 fingerprint: fingerprint.clone(),
                 recovered,
             }),
+            target_changes: Vec::new(),
         });
     }
     Ok((steps, undeployed))
@@ -5460,6 +5511,140 @@ anti_affinity = "host"
         assert_eq!(plan.steps[0].to, "1.1.0");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_records_a_service_port_change_and_refuses_a_moved_target() {
+        use crate::software_executor::{
+            FakeSoftwareExecutor, SoftwareExecutorKind, SoftwareExecutors,
+        };
+        use serde_json::json;
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-target-change-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let dir = root.join("1.1.0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tenkai.toml"),
+            r#"
+[product]
+name = "api"
+version = "1.1.0"
+
+[deploy]
+install = "true"
+executor = "kubernetes-inprocess"
+"#,
+        )
+        .unwrap();
+        crate::catalog::publish(
+            &mut ctx,
+            &dir.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("target-change");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.1.0", "stable")
+            .await
+            .unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
+        let executor = std::sync::Arc::new(FakeSoftwareExecutor::new());
+        let desired = json!({
+            "kind": "Service",
+            "metadata": {"name": "web"},
+            "spec": {"ports": [{"port": 80, "targetPort": 8080}]}
+        });
+        let live = json!({
+            "kind": "Service",
+            "metadata": {"name": "web"},
+            "spec": {"ports": [{"port": 8080, "targetPort": 8080}]}
+        });
+        executor.set_object("Service", "web", desired.clone(), Some(live));
+        let secret_desired = json!({
+            "kind": "Secret",
+            "metadata": {"name": "token"},
+            "data": {"password": "c2VjcmV0LXZhbHVl"}
+        });
+        let secret_live = json!({
+            "kind": "Secret",
+            "metadata": {"name": "token"},
+            "data": {"password": "b2xkLXZhbHVl"}
+        });
+        executor.set_object("Secret", "token", secret_desired, Some(secret_live));
+        let executors = SoftwareExecutors::default()
+            .with_adapter(SoftwareExecutorKind::KubernetesInProcess, executor.clone());
+        let plan = crate::plan::create_with(&mut ctx, "local", &executors)
+            .await
+            .unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        let again = crate::plan::create_with(&mut ctx, "local", &executors)
+            .await
+            .unwrap();
+        assert_eq!(plan.steps[0].target_changes, again.steps[0].target_changes);
+        let service = plan.steps[0]
+            .target_changes
+            .iter()
+            .find(|change| change.kind == "Service")
+            .expect("service change");
+        assert_eq!(service.name, "web");
+        assert_eq!(service.fields[0].field, "ports");
+        let from = service.fields[0].from.as_deref().unwrap();
+        let to = service.fields[0].to.as_deref().unwrap();
+        assert!(from.contains("8080"), "{from}");
+        assert!(to.contains("80"), "{to}");
+        let secret = plan.steps[0]
+            .target_changes
+            .iter()
+            .find(|change| change.kind == "Secret")
+            .expect("secret change");
+        let encoded = serde_json::to_string(secret).unwrap();
+        assert!(!encoded.contains("c2VjcmV0LXZhbHVl"), "{encoded}");
+        assert!(!encoded.contains("secret-value"), "{encoded}");
+        executor.set_live(
+            "Service",
+            "web",
+            json!({
+                "kind": "Service",
+                "metadata": {"name": "web"},
+                "spec": {"ports": [{"port": 9090, "targetPort": 8080}]}
+            }),
+        );
+        let outcomes = crate::apply::execute_with_options(
+            &mut ctx,
+            &plan.id,
+            crate::apply::ExecutionOptions {
+                skip_gates: true,
+                emergency_reason: None,
+                authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
+                    reason: "target-change fixture",
+                },
+                software_executors: executors,
+                model_runtime_executor: None,
+                worker_lifecycle: None,
+                artifact_registry: None,
+                delivery_adapter: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcomes[0].status, "failed");
+        assert!(
+            outcomes[0].detail.contains("stale") && outcomes[0].detail.contains("Service web"),
+            "{}",
+            outcomes[0].detail
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     async fn published_software(ctx: &mut Ctx, root: &std::path::Path, version: &str) {

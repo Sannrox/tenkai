@@ -1104,6 +1104,34 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
         Ok(tenkai::spec_drift::SpecDriftView::from_objects(objects))
     }
 
+    fn render_target_changes(
+        &self,
+        request: &SoftwareApplyRequest,
+    ) -> Result<Vec<tenkai::spec_drift::TargetChange>> {
+        validate_request(request)?;
+        let Ok(cluster_config) = Self::require_cluster_config(request) else {
+            return Ok(Vec::new());
+        };
+        let manifests = kubernetes_manifests_dir(&request.workdir)?;
+        let files = list_manifest_files(&manifests)?;
+        let mut changes = Vec::new();
+        for path in &files {
+            for desired in parse_manifest_objects(path, request.instance_name())? {
+                let (kind, name) = object_identity(&desired)?;
+                let live =
+                    self.api
+                        .observe_object(cluster_config, &request.environment, &name, &kind)?;
+                changes.push(tenkai::spec_drift::compare_desired_live(
+                    &kind,
+                    &name,
+                    &desired,
+                    live.as_ref(),
+                ));
+            }
+        }
+        Ok(changes)
+    }
+
     fn support_workloads(
         &self,
         environment: &str,

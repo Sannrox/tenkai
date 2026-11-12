@@ -3712,6 +3712,7 @@ install = "true"
                 issuer: None,
                 identity: None,
                 restore_identity: None,
+                target_changes: Vec::new(),
             }],
             state: PlanState::Computed,
             gates_skipped: None,

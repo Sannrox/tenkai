@@ -144,6 +144,34 @@ pub(super) async fn execute(
         return Box::pin(execute_removal(ctx, step_context, step, &content)).await;
     }
 
+    if !step.target_changes.is_empty() {
+        let request = product_execution::software_request(ctx, &content, String::new()).await?;
+        let live = adapters
+            .software
+            .resolve(content.manifest.deploy.executor)?
+            .map(|executor| {
+                executor
+                    .render_target_changes(&request)
+                    .map_err(|error| error.to_string())
+            });
+        if let Some(detail) =
+            crate::spec_drift::stale_step_detail(&step.id, &step.target_changes, live)
+        {
+            let mut outcome = Outcome::new(step.clone(), StepOutcomeStatus::Failed, detail);
+            record(
+                ctx,
+                started_at_ms,
+                lease,
+                environment,
+                plan_id,
+                &mut outcome,
+                crate::environment::DeploymentTransition::Unknown,
+            )
+            .await?;
+            return Ok(outcome);
+        }
+    }
+
     let mut outgoing_removed = false;
     if step.action == Action::Rollback
         && let Some(outgoing) = restore_content.as_ref()

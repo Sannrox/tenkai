@@ -52,6 +52,7 @@ async fn compatible_migration_approves_executes_resumes_and_rolls_back() {
             issuer: None,
             identity: None,
             restore_identity: None,
+            target_changes: Vec::new(),
         }],
     )
     .await
