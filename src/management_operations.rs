@@ -30,10 +30,11 @@ use crate::host_identity::AuthSession;
 use crate::instance_explain::InstanceExplainReport;
 use crate::management_lifecycle::{
     self, ApplyRequest, ApproveRequest, ChannelAdmitRequest, ChannelConfigureRequest,
-    ChannelHoldRequest, ChannelRemoveRequest, DeliveryFailureThresholdRequest,
-    DeliveryFreezeRequest, DeliveryHoldRequest, ManagementLifecycleOperation,
-    ManagementLifecycleResult, PlanRequest, PromoteRequest, PublishRequest, RecallRequest,
-    RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
+    ChannelExposureGraceRequest, ChannelHoldRequest, ChannelRemoveRequest,
+    DeliveryFailureThresholdRequest, DeliveryFreezeRequest, DeliveryHoldRequest,
+    ExposureGraceRequest, ExposureWaiverClearRequest, ExposureWaiverRequest,
+    ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest, PromoteRequest,
+    PublishRequest, RecallRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
 };
 use crate::observed_runtime::EnvironmentRuntimeReport;
 use crate::package_migration::{
@@ -1599,6 +1600,42 @@ impl ManagementOperations {
         Ok(())
     }
 
+    /// Restricted credentials may waive only their products. Channel bindings
+    /// and global/component scopes are catalog-wide and stay forbidden.
+    fn require_waiver_product_grant(
+        context: &AuthenticatedRequestContext,
+        scope: crate::exposure::WaiverScopeKind,
+        product: Option<&str>,
+        release_id: Option<&str>,
+    ) -> Result<(), ManagementError> {
+        if !context.channel_bindings().is_empty() {
+            return Err(ManagementError::Forbidden(
+                "channel-restricted credentials cannot set catalog-wide waivers".into(),
+            ));
+        }
+        if context.product_bindings().is_empty() {
+            return Ok(());
+        }
+        let product = match scope {
+            crate::exposure::WaiverScopeKind::Product => product.filter(|value| !value.is_empty()),
+            crate::exposure::WaiverScopeKind::Release => {
+                release_id.and_then(product_from_release_id)
+            }
+            crate::exposure::WaiverScopeKind::Component
+            | crate::exposure::WaiverScopeKind::Global => {
+                return Err(ManagementError::Forbidden(
+                    "product-restricted credentials cannot set catalog-wide waivers".into(),
+                ));
+            }
+        };
+        let Some(product) = product else {
+            return Err(ManagementError::BadRequest(
+                "waiver is outside the publication grant".into(),
+            ));
+        };
+        Self::require_product_grant(context, product)
+    }
+
     pub async fn promote_release(
         &self,
         credential: &CredentialMaterial,
@@ -2643,6 +2680,192 @@ impl ManagementOperations {
         ))
     }
 
+    pub async fn set_exposure_waiver(
+        &self,
+        credential: &CredentialMaterial,
+        request: ExposureWaiverRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.waiver_set")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_exposure_waiver(
+            &request,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let scope =
+            crate::exposure::WaiverScopeKind::parse(&request.scope).map_err(map_catalog_error)?;
+        Self::require_waiver_product_grant(
+            &context,
+            scope,
+            request.product.as_deref(),
+            request.release_id.as_deref(),
+        )?;
+        let actor = context.audit_principal();
+        self.audit(&actor, "catalog.waiver_set.requested")?;
+        let now_ms = crate::now_millis();
+        let waiver = crate::exposure::ExposureWaiver {
+            advisory_id: request.advisory_id.clone(),
+            scope,
+            release_id: request.release_id.clone(),
+            product: request.product.clone(),
+            component: request.component.clone(),
+            category: crate::exposure::WaiverCategory::parse(&request.category)
+                .map_err(map_catalog_error)?,
+            reason: request.reason.clone(),
+            actor: actor.clone(),
+            expires_at: crate::exposure::parse_expiry(&request.expires, now_ms)
+                .map_err(map_catalog_error)?,
+        };
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::exposure::set_waiver(&mut ctx, waiver, now_ms)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(&actor, "catalog.waiver_set.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::WaiverSet,
+            format!(
+                "waived {} at {} until {}",
+                request.advisory_id, request.scope, request.expires
+            ),
+            Some(request.advisory_id),
+        ))
+    }
+
+    pub async fn clear_exposure_waiver(
+        &self,
+        credential: &CredentialMaterial,
+        request: ExposureWaiverClearRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.waiver_clear")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_exposure_waiver_clear(
+            &request,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let scope =
+            crate::exposure::WaiverScopeKind::parse(&request.scope).map_err(map_catalog_error)?;
+        Self::require_waiver_product_grant(
+            &context,
+            scope,
+            request.product.as_deref(),
+            request.release_id.as_deref(),
+        )?;
+        let actor = context.audit_principal();
+        self.audit(&actor, "catalog.waiver_clear.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::exposure::clear_waiver(
+            &mut ctx,
+            crate::exposure::ExposureWaiver {
+                advisory_id: request.advisory_id.clone(),
+                scope,
+                release_id: request.release_id.clone(),
+                product: request.product.clone(),
+                component: request.component.clone(),
+                category: crate::exposure::WaiverCategory::FalsePositive,
+                reason: request.reason.clone(),
+                actor: actor.clone(),
+                expires_at: crate::now_millis().saturating_add(1),
+            },
+            crate::now_millis(),
+        )
+        .await
+        .map_err(map_catalog_error)?;
+        self.audit(&actor, "catalog.waiver_clear.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::WaiverClear,
+            format!(
+                "cleared {} waiver for {}",
+                request.scope, request.advisory_id
+            ),
+            Some(request.advisory_id),
+        ))
+    }
+
+    pub async fn configure_environment_exposure_grace(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: ExposureGraceRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "delivery.exposure_grace")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_exposure_grace(
+            &request,
+            environment,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(&context, environment, request.expected_generation)
+            .await?;
+        let actor = context.audit_principal();
+        self.audit(&actor, "delivery.exposure_grace.requested")?;
+        let grace = crate::exposure::parse_grace(&request.grace).map_err(map_catalog_error)?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let expected = request.expected_generation;
+        crate::exposure::configure_environment_grace(&mut ctx, environment, grace, |superseded| {
+            management_lifecycle::require_expected_generation(expected, superseded)
+        })
+        .await
+        .map_err(map_catalog_error)?;
+        self.audit(&actor, "delivery.exposure_grace.completed")?;
+        let message = match grace {
+            Some(ms) => format!("exposure grace {ms}ms for {environment}"),
+            None => format!("exposure grace off for {environment}"),
+        };
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::ExposureGrace,
+            message,
+            Some(environment.to_string()),
+        ))
+    }
+
+    pub async fn configure_channel_exposure_grace(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+        request: ChannelExposureGraceRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.channel_exposure_grace")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        Self::require_channel_binding(&context, channel)?;
+        Self::require_product_grant(&context, product)?;
+        management_lifecycle::admit_channel_exposure_grace(
+            &request,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = context.audit_principal();
+        self.audit(&actor, "catalog.channel_exposure_grace.requested")?;
+        let grace = crate::exposure::parse_grace(&request.grace).map_err(map_catalog_error)?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::exposure::configure_channel_grace(&mut ctx, product, channel, grace)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(&actor, "catalog.channel_exposure_grace.completed")?;
+        let resource = format!("{product}/{channel}");
+        let message = match grace {
+            Some(ms) => format!("exposure grace {ms}ms for {resource}"),
+            None => format!("exposure grace off for {resource}"),
+        };
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::ChannelExposureGrace,
+            message,
+            Some(resource),
+        ))
+    }
+
     async fn mutate_channel_hold(
         &self,
         credential: &CredentialMaterial,
@@ -3462,6 +3685,15 @@ fn map_tenant_error(error: TenantEnvironmentError) -> ManagementError {
         TenantEnvironmentError::Denied(message) => ManagementError::Forbidden(message),
         TenantEnvironmentError::Internal(message) => ManagementError::Internal(message),
     }
+}
+
+fn product_from_release_id(release_id: &str) -> Option<&str> {
+    release_id
+        .strip_prefix("tenkai:release:")
+        .and_then(|rest| rest.split_once('@'))
+        .map(|(product, _)| product)
+        .or_else(|| release_id.split_once('@').map(|(product, _)| product))
+        .filter(|product| !product.is_empty())
 }
 
 fn map_lifecycle_error(error: anyhow::Error) -> ManagementError {
@@ -4319,6 +4551,64 @@ mod tests {
                 .await
                 .unwrap_err(),
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Product-restricted Management may waive its products; global and
+    /// foreign-release scopes stay forbidden.
+    #[tokio::test]
+    async fn product_restricted_management_cannot_set_global_or_foreign_waivers() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-waiver-grant-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = catalog_ops(&root, grant_auth([DeliveryCapability::Management], [])).await;
+        let credential = grant_credential();
+        let global = ExposureWaiverRequest {
+            version: 1,
+            operation: "waiver_set".into(),
+            advisory_id: "TENKAI-2026-1".into(),
+            scope: "global".into(),
+            category: "false_positive".into(),
+            reason: "scanner noise".into(),
+            expires: "7d".into(),
+            release_id: None,
+            product: None,
+            component: None,
+        };
+        assert!(
+            matches!(
+                ops.set_exposure_waiver(&credential, global.clone()).await,
+                Err(ManagementError::Forbidden(_))
+            ),
+            "global waiver must stay catalog-wide"
+        );
+        let mut foreign = global.clone();
+        foreign.scope = "release".into();
+        foreign.release_id = Some("tenkai:release:other@1.0.0".into());
+        assert!(matches!(
+            ops.set_exposure_waiver(&credential, foreign).await,
+            Err(ManagementError::Forbidden(_))
+        ));
+        let mut own = global.clone();
+        own.scope = "release".into();
+        own.release_id = Some("tenkai:release:api@1.0.0".into());
+        ops.set_exposure_waiver(&credential, own.clone())
+            .await
+            .unwrap();
+        let channel_root = root.join("channel");
+        std::fs::create_dir_all(&channel_root).unwrap();
+        let channel_ops = catalog_ops(
+            &channel_root,
+            grant_auth([DeliveryCapability::Management], ["stable"]),
+        )
+        .await;
+        assert!(matches!(
+            channel_ops.set_exposure_waiver(&credential, own).await,
+            Err(ManagementError::Forbidden(_))
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 

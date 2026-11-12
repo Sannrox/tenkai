@@ -634,6 +634,92 @@ pub(crate) async fn run(
                 println!("{}", serde_json::to_string_pretty(&result)?);
                 Ok(())
             }
+            crate::args::ExposureCommand::Waive {
+                advisory,
+                scope,
+                category,
+                reason,
+                expires,
+                release,
+                product,
+                component,
+            } => {
+                let result = client
+                    .set_exposure_waiver(tenkai::management_lifecycle::ExposureWaiverRequest {
+                        version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                        operation:
+                            tenkai::management_lifecycle::ManagementLifecycleOperation::WaiverSet
+                                .as_str()
+                                .into(),
+                        advisory_id: advisory,
+                        scope,
+                        category,
+                        reason,
+                        expires,
+                        release_id: release,
+                        product,
+                        component,
+                    })
+                    .await?;
+                println!("{}", result.message);
+                Ok(())
+            }
+            crate::args::ExposureCommand::Unwaive {
+                advisory,
+                scope,
+                reason,
+                release,
+                product,
+                component,
+            } => {
+                let result = client
+                    .clear_exposure_waiver(
+                        tenkai::management_lifecycle::ExposureWaiverClearRequest {
+                            version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                            operation:
+                                tenkai::management_lifecycle::ManagementLifecycleOperation::WaiverClear
+                                    .as_str()
+                                    .into(),
+                            advisory_id: advisory,
+                            scope,
+                            reason,
+                            release_id: release,
+                            product,
+                            component,
+                        },
+                    )
+                    .await?;
+                println!("{}", result.message);
+                Ok(())
+            }
+            crate::args::ExposureCommand::Grace {
+                grace,
+                env,
+                generation,
+                product,
+                channel,
+            } => {
+                let result = match (env, product, channel) {
+                    (Some(env), None, None) => {
+                        let generation = generation.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "remote exposure grace on an environment requires --generation"
+                            )
+                        })?;
+                        client
+                            .configure_environment_exposure_grace(&env, &grace, generation)
+                            .await?
+                    }
+                    (None, Some(product), Some(channel)) => {
+                        client
+                            .configure_channel_exposure_grace(&product, &channel, &grace)
+                            .await?
+                    }
+                    _ => bail!("exposure grace requires --env or --product and --channel"),
+                };
+                println!("{}", result.message);
+                Ok(())
+            }
         },
         Command::Criticality { command } => match command {
             crate::args::DerivedCriticalityCommand::Import { envelope, .. } => {

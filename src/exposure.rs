@@ -1,5 +1,5 @@
-//! Per-release component inventory, advisory-feed import, and exposure query
-//! (#692, #645).
+//! Per-release component inventory, advisory-feed import, exposure query,
+//! advisory waivers, and grace (#692, #645, #1064).
 //!
 //! A signed release may declare `[inventory] document = "..."`; that file is
 //! part of the content digest, stored next to the release, and refused when
@@ -53,6 +53,7 @@ pub const KIND_DEPLOYED_EXPOSURE: &str = "tenkai.deployed_exposure";
 pub const KIND_EXPOSURE_ASSESSMENT: &str = "tenkai.exposure_assessment";
 
 mod deployed;
+mod waiver;
 
 #[cfg(test)]
 use deployed::reassess_loaded;
@@ -61,6 +62,14 @@ use deployed::{
     reassess_under_lease,
 };
 pub use deployed::{DeployedExposure, open_environment_exposures, reassess_deployed};
+pub use waiver::{
+    ExposureWaiver, GRACE_MS_PROPERTY, KIND_EXPOSURE_WAIVER, KIND_EXPOSURE_WAIVER_AUDIT,
+    WaiverCategory, WaiverScopeKind, annotate_matches, clear as clear_waiver,
+    configure_channel as configure_channel_grace,
+    configure_environment as configure_environment_grace,
+    copy_channel_properties as copy_channel_grace, in_grace, matching as matching_waiver,
+    parse_expiry, parse_grace, set as set_waiver,
+};
 
 const FEED_ID: &str = "tenkai:advisory-feed";
 const ALIAS_LEASE_NAMESPACE: &str = "tenkai/advisory-feed";
@@ -174,6 +183,9 @@ pub struct MatchedExposure {
     pub component_version: String,
     pub release: String,
     pub release_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub waiver: Option<ExposureWaiver>,
 }
 
 /// Imported feed age and the releases it currently flags.
@@ -630,7 +642,11 @@ pub async fn inspect(ctx: &mut Ctx) -> Result<AdvisoryFeedStatus> {
         generated_at,
         age_ms: now.saturating_sub(generated_at),
         advisory_count: feed.advisories.len(),
-        matches: match_advisories(ctx).await?,
+        matches: {
+            let mut matches = match_advisories(ctx).await?;
+            waiver::annotate_matches(ctx, &mut matches, now).await?;
+            matches
+        },
     })
 }
 
@@ -682,6 +698,7 @@ pub async fn match_advisories(ctx: &mut Ctx) -> Result<Vec<MatchedExposure>> {
                         component_version: component.version.clone(),
                         release: spec.clone(),
                         release_id: release.id.clone(),
+                        waiver: None,
                     });
                 }
             }
@@ -769,12 +786,44 @@ pub async fn plan_gate(ctx: &mut Ctx, environment: &str, steps: &[Step]) -> Resu
         ));
     }
     let matched = match_advisories(ctx).await?;
+    let now_ms = crate::now_millis();
     for step in steps.iter().filter(deploys) {
-        if let Some(hit) = matched
+        let mut blocking: Option<&MatchedExposure> = None;
+        for hit in matched
             .iter()
             .filter(|entry| entry.release_id == step.release_id && entry.severity >= threshold)
-            .min_by(|left, right| left.advisory_id.cmp(&right.advisory_id))
         {
+            if waiver::matching(
+                ctx,
+                &hit.advisory_id,
+                &hit.release_id,
+                &step.product,
+                &hit.component,
+                now_ms,
+            )
+            .await?
+            .is_some()
+            {
+                continue;
+            }
+            if waiver::in_grace(
+                ctx,
+                environment,
+                &step.product,
+                &hit.release_id,
+                &hit.advisory_id,
+                now_ms,
+            )
+            .await?
+            {
+                continue;
+            }
+            blocking = Some(match blocking {
+                Some(current) if current.advisory_id <= hit.advisory_id => current,
+                _ => hit,
+            });
+        }
+        if let Some(hit) = blocking {
             return Ok(Some(format!(
                 "exposure_unmitigated: {} {} on {} matches {} ({})",
                 hit.component,
@@ -1725,6 +1774,255 @@ document = "sbom.json"
                 .unwrap(),
             None
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn upgrade_step(version: &str) -> Step {
+        Step {
+            id: String::new(),
+            order: 0,
+            product: "api".into(),
+            instance: String::new(),
+            action: crate::plan::Action::Upgrade,
+            from: None,
+            to: version.into(),
+            release_id: release_id("api", version),
+            release_digest: "fixture".into(),
+            artifact_digest: "fixture".into(),
+            workdir: ".".into(),
+            host: None,
+            sealed: Vec::new(),
+            restore: None,
+            rewrap: None,
+            issuer: None,
+            identity: None,
+            restore_identity: None,
+            target_changes: Vec::new(),
+        }
+    }
+
+    async fn block_high(ctx: &mut Ctx, environment: &str) {
+        let mut env = crate::environment::environment(ctx, environment)
+            .await
+            .unwrap();
+        env.properties
+            .insert(BLOCK_SEVERITY_PROPERTY.into(), "high".into());
+        ctx.put(env).await.unwrap();
+    }
+
+    async fn stamp_first_seen(ctx: &mut Ctx, version: &str, advisory_id: &str, first_seen_at: i64) {
+        let rid = release_id("api", version);
+        ctx.put(Object {
+            id: format!("tenkai:exposure:{rid}:{advisory_id}"),
+            kind: KIND_DEPLOYED_EXPOSURE.into(),
+            name: format!("api@{version} {advisory_id}"),
+            namespace: crate::ontology::NS.into(),
+            external_id: String::new(),
+            properties: HashMap::from([
+                ("release".into(), format!("api@{version}")),
+                ("release_id".into(), rid),
+                ("advisory_id".into(), advisory_id.into()),
+                ("severity".into(), "high".into()),
+                ("component".into(), "openssl".into()),
+                ("component_version".into(), "1.1.1".into()),
+                ("first_seen_at".into(), first_seen_at.to_string()),
+                ("last_seen_generation".into(), "1".into()),
+            ]),
+            created: first_seen_at,
+            updated: first_seen_at,
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Release-scoped waiver admits that release; a sibling with the same
+    /// advisory still refuses.
+    #[tokio::test]
+    async fn release_scoped_waiver_admits_only_that_release() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-waiver-scope-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.1.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        import_advisory_feed(
+            &mut ctx,
+            feed_document(vec![matched_advisory()], 0),
+            crate::now_millis(),
+        )
+        .await
+        .unwrap();
+        block_high(&mut ctx, "hub").await;
+        let now_ms = crate::now_millis();
+        set_waiver(
+            &mut ctx,
+            ExposureWaiver {
+                advisory_id: "TENKAI-2026-1".into(),
+                scope: WaiverScopeKind::Release,
+                release_id: Some(release_id("api", "1.0.0")),
+                product: None,
+                component: None,
+                category: WaiverCategory::FalsePositive,
+                reason: "scanner noise".into(),
+                actor: "operator".into(),
+                expires_at: now_ms + 86_400_000,
+            },
+            now_ms,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            plan_gate(&mut ctx, "hub", &[upgrade_step("1.0.0")])
+                .await
+                .unwrap(),
+            None
+        );
+        let sibling = plan_gate(&mut ctx, "hub", &[upgrade_step("1.1.0")])
+            .await
+            .unwrap()
+            .expect("sibling still blocked");
+        assert!(
+            sibling.starts_with("exposure_unmitigated:") && sibling.contains("api@1.1.0"),
+            "{sibling}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An expired waiver does not admit, even when it is the only match.
+    #[tokio::test]
+    async fn expired_waiver_refuses_the_plan() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-waiver-expiry-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        import_advisory_feed(
+            &mut ctx,
+            feed_document(vec![matched_advisory()], 0),
+            crate::now_millis(),
+        )
+        .await
+        .unwrap();
+        block_high(&mut ctx, "hub").await;
+        let now_ms = crate::now_millis();
+        set_waiver(
+            &mut ctx,
+            ExposureWaiver {
+                advisory_id: "TENKAI-2026-1".into(),
+                scope: WaiverScopeKind::Release,
+                release_id: Some(release_id("api", "1.0.0")),
+                product: None,
+                component: None,
+                category: WaiverCategory::FalsePositive,
+                reason: "scanner noise".into(),
+                actor: "operator".into(),
+                expires_at: now_ms + 86_400_000,
+            },
+            now_ms,
+        )
+        .await
+        .unwrap();
+        let id = format!(
+            "tenkai:exposure_waiver:release:{}:TENKAI-2026-1",
+            release_id("api", "1.0.0")
+        );
+        let mut stored = ctx.get(&id).await.unwrap().unwrap();
+        stored
+            .properties
+            .insert("expires_at".into(), (now_ms - 1).to_string());
+        ctx.put(stored).await.unwrap();
+        let blocked = plan_gate(&mut ctx, "hub", &[upgrade_step("1.0.0")])
+            .await
+            .unwrap()
+            .expect("expired waiver");
+        assert!(blocked.starts_with("exposure_unmitigated:"), "{blocked}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Grace admits while counted time since first-seen is inside the window,
+    /// then refuses. Missing first-seen is not grace.
+    #[tokio::test]
+    async fn grace_admits_until_first_seen_age_elapses() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-grace-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        import_advisory_feed(
+            &mut ctx,
+            feed_document(vec![matched_advisory()], 0),
+            crate::now_millis(),
+        )
+        .await
+        .unwrap();
+        block_high(&mut ctx, "hub").await;
+        configure_environment_grace(&mut ctx, "hub", Some(10_000), |_| Ok(()))
+            .await
+            .unwrap();
+        let missing = plan_gate(&mut ctx, "hub", &[upgrade_step("1.0.0")])
+            .await
+            .unwrap()
+            .expect("missing first-seen");
+        assert!(missing.starts_with("exposure_unmitigated:"), "{missing}");
+        let now = crate::now_millis();
+        stamp_first_seen(&mut ctx, "1.0.0", "TENKAI-2026-1", now - 1_000).await;
+        assert_eq!(
+            plan_gate(&mut ctx, "hub", &[upgrade_step("1.0.0")])
+                .await
+                .unwrap(),
+            None
+        );
+        stamp_first_seen(&mut ctx, "1.0.0", "TENKAI-2026-1", now - 60_000).await;
+        let elapsed = plan_gate(&mut ctx, "hub", &[upgrade_step("1.0.0")])
+            .await
+            .unwrap()
+            .expect("grace elapsed");
+        assert!(elapsed.starts_with("exposure_unmitigated:"), "{elapsed}");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -58,6 +58,9 @@
 //! - [`upgrade_pace`] spreads upgrades to a newly promoted channel head over a
 //!   duration, from durable state any replica can recompute, and records early
 //!   admission as an audited exemption.
+//! - [`exposure`] matches signed inventories against a local advisory feed,
+//!   waives findings at a named scope until expiry, and admits a grace window
+//!   counted from the durable first-seen stamp.
 //! - [`health_gate`] evaluates post-apply Prometheus-compatible SLO queries
 //!   after activation succeeds and before recording Succeeded, persists release
 //!   evidence, and either halts or restores a previously signed pin without

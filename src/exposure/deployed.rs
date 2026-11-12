@@ -534,6 +534,28 @@ async fn auto_recall_new_matches(
         if record.closed_at.is_some() || record.auto_recalled_at.is_some() {
             continue;
         }
+        let now_ms = crate::now_millis();
+        let product = matched
+            .release
+            .split_once('@')
+            .map(|(product, _)| product)
+            .unwrap_or("");
+        // An unexpired waiver and an open grace window report the finding
+        // without auto-recall. Re-evaluating after expiry is a later feed
+        // import or re-assessment; this pass does not start a timer.
+        if crate::exposure::matching_waiver(
+            ctx,
+            &matched.advisory_id,
+            &matched.release_id,
+            product,
+            &matched.component,
+            now_ms,
+        )
+        .await?
+        .is_some()
+        {
+            continue;
+        }
         let mut should_recall = false;
         for (env_name, release_ids) in scoped {
             if !release_ids.contains(&matched.release_id) {
@@ -542,6 +564,15 @@ async fn auto_recall_new_matches(
             if thresholds
                 .get(env_name)
                 .is_some_and(|threshold| matched.severity >= *threshold)
+                && !crate::exposure::in_grace(
+                    ctx,
+                    env_name,
+                    product,
+                    &matched.release_id,
+                    &matched.advisory_id,
+                    now_ms,
+                )
+                .await?
             {
                 should_recall = true;
                 break;

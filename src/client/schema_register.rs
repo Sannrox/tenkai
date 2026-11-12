@@ -454,6 +454,62 @@ pub fn known_object_types() -> Vec<ObjectType> {
             ],
         ),
         object_type(
+            crate::exposure::KIND_EXPOSURE_WAIVER,
+            "An operator waiver for one advisory at a named scope",
+            vec![
+                prop("advisory_id", true, "Advisory id from the imported feed"),
+                prop("scope", true, "release|component|product|global"),
+                prop(
+                    "release_id",
+                    false,
+                    "Release id for a release-scoped waiver",
+                ),
+                prop("product", false, "Product name for a product-scoped waiver"),
+                prop(
+                    "component",
+                    false,
+                    "Component name for a component-scoped waiver",
+                ),
+                prop(
+                    "category",
+                    true,
+                    "false_positive|mitigated|upstream_dependency",
+                ),
+                prop("reason", true, "Why the finding is waived"),
+                prop("actor", true, "Principal that set the waiver"),
+                prop("expires_at", true, "Unix-ms expiry; required"),
+            ],
+        ),
+        object_type(
+            crate::exposure::KIND_EXPOSURE_WAIVER_AUDIT,
+            "An immutable advisory-waiver set or clear event",
+            vec![
+                prop("action", true, "set|clear"),
+                prop("advisory_id", true, "Advisory id"),
+                prop("scope", true, "release|component|product|global"),
+                prop(
+                    "release_id",
+                    false,
+                    "Release id for a release-scoped waiver",
+                ),
+                prop("product", false, "Product name for a product-scoped waiver"),
+                prop(
+                    "component",
+                    false,
+                    "Component name for a component-scoped waiver",
+                ),
+                prop(
+                    "category",
+                    false,
+                    "false_positive|mitigated|upstream_dependency on set",
+                ),
+                prop("reason", true, "Waiver reason"),
+                prop("actor", true, "Principal that set or cleared the waiver"),
+                prop("expires_at", false, "Unix-ms expiry recorded on set"),
+                prop("at", true, "Unix-ms timestamp of the transition"),
+            ],
+        ),
+        object_type(
             crate::exposure::KIND_EXPOSURE_ASSESSMENT,
             "Completion marker for one advisory-feed generation's deployed re-assessment",
             vec![
@@ -580,6 +636,11 @@ pub fn known_object_types() -> Vec<ObjectType> {
                     "promoted_at",
                     false,
                     "Unix-ms stamp when the current head was set",
+                ),
+                prop(
+                    crate::exposure::GRACE_MS_PROPERTY,
+                    false,
+                    "Grace window in milliseconds before an advisory finding refuses a plan",
                 ),
             ],
         ),

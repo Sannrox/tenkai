@@ -634,6 +634,30 @@
       ],
       "type": "object"
     },
+    "ChannelExposureGraceRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/products/{product}/channels/{channel}/exposure-grace`.",
+      "properties": {
+        "grace": {
+          "description": "Duration (`30`, `250ms`, `2m`, `24h`) or `off`. A bare number is seconds.",
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "grace"
+      ],
+      "type": "object"
+    },
     "ChannelHoldRequest": {
       "additionalProperties": false,
       "properties": {
@@ -3838,6 +3862,40 @@
       ],
       "type": "object"
     },
+    "ExposureGraceRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/environments/{environment}/exposure-grace`.",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "grace": {
+          "description": "Duration (`30`, `250ms`, `2m`, `24h`) or `off`. A bare number is seconds.",
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation",
+        "grace"
+      ],
+      "type": "object"
+    },
     "ExposureQueryRequest": {
       "description": "Query parameters for `GET /v1/exposures` and `tenkaictl exposure query`.",
       "properties": {
@@ -3876,6 +3934,155 @@
         "component",
         "range",
         "matches"
+      ],
+      "type": "object"
+    },
+    "ExposureWaiver": {
+      "description": "Active waiver plus the fields query and inspect show.",
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "advisory_id": {
+          "type": "string"
+        },
+        "category": {
+          "$ref": "#/$defs/WaiverCategory"
+        },
+        "component": {
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "product": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "release_id": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/WaiverScopeKind"
+        }
+      },
+      "required": [
+        "advisory_id",
+        "scope",
+        "category",
+        "reason",
+        "actor",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "ExposureWaiverClearRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/exposures/waivers/clear`.",
+      "properties": {
+        "advisory_id": {
+          "type": "string"
+        },
+        "component": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "type": "string"
+        },
+        "product": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "release_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "advisory_id",
+        "scope",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ExposureWaiverRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/exposures/waivers`.",
+      "properties": {
+        "advisory_id": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "component": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expires": {
+          "description": "RFC3339 timestamp or duration (`7d`, `24h`). A bare number is seconds.",
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "product": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "release_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "advisory_id",
+        "scope",
+        "category",
+        "reason",
+        "expires"
       ],
       "type": "object"
     },
@@ -4653,6 +4860,9 @@
         },
         "severity": {
           "$ref": "#/$defs/Severity"
+        },
+        "waiver": {
+          "$ref": "#/$defs/ExposureWaiver"
         }
       },
       "required": [
@@ -7533,6 +7743,25 @@
       ],
       "type": "object"
     },
+    "WaiverCategory": {
+      "description": "Why the operator waived the finding.",
+      "enum": [
+        "false_positive",
+        "mitigated",
+        "upstream_dependency"
+      ],
+      "type": "string"
+    },
+    "WaiverScopeKind": {
+      "description": "How broadly a waiver applies. Narrower ranks higher.",
+      "enum": [
+        "global",
+        "product",
+        "component",
+        "release"
+      ],
+      "type": "string"
+    },
     "WebhookDelivery": {
       "description": "One webhook delivery as `GET .../webhooks/deliveries` reports it.",
       "properties": {
@@ -7923,6 +8152,28 @@
       },
       "response": {
         "$ref": "#/$defs/ExposureQueryResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/exposures/waivers",
+      "request": {
+        "$ref": "#/$defs/ExposureWaiverRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/exposures/waivers/clear",
+      "request": {
+        "$ref": "#/$defs/ExposureWaiverClearRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
       }
     },
     {
@@ -8470,6 +8721,17 @@
     {
       "auth": "management",
       "method": "POST",
+      "path": "/v1/environments/{environment}/exposure-grace",
+      "request": {
+        "$ref": "#/$defs/ExposureGraceRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
       "path": "/v1/environments/{environment}/runtime-enrollments",
       "request": {
         "$ref": "#/$defs/RuntimeEnrollmentRequest"
@@ -8602,6 +8864,17 @@
       "path": "/v1/products/{product}/channels/{channel}/admit",
       "request": {
         "$ref": "#/$defs/ChannelAdmitRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/products/{product}/channels/{channel}/exposure-grace",
+      "request": {
+        "$ref": "#/$defs/ChannelExposureGraceRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"

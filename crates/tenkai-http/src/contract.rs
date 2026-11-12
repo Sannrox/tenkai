@@ -32,12 +32,13 @@ use tenkai::fleet::FleetStatusReport;
 use tenkai::host_identity::AuthSession;
 use tenkai::instance_explain::InstanceExplainReport;
 use tenkai::management_lifecycle::{
-    ApplyRequest, ApproveRequest, ChannelAdmitRequest, ChannelConfigureRequest, ChannelHoldRequest,
-    ChannelRemoveRequest, DeliveryFailureThresholdRequest, DeliveryFreezeRequest,
-    DeliveryHoldRequest, ManagementLifecycleResult, PlanRequest, PromoteHttpRequest,
-    PublishRequest, RecallRangeCloseRequest, RecallRangeRequest, RecallRequest,
-    RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
-    UnsubscribeRequest,
+    ApplyRequest, ApproveRequest, ChannelAdmitRequest, ChannelConfigureRequest,
+    ChannelExposureGraceRequest, ChannelHoldRequest, ChannelRemoveRequest,
+    DeliveryFailureThresholdRequest, DeliveryFreezeRequest, DeliveryHoldRequest,
+    ExposureGraceRequest, ExposureWaiverClearRequest, ExposureWaiverRequest,
+    ManagementLifecycleResult, PlanRequest, PromoteHttpRequest, PublishRequest,
+    RecallRangeCloseRequest, RecallRangeRequest, RecallRequest, RetireEnvironmentRequest,
+    RetryFailedTargetRequest, RollbackRequest, SubscribeRequest, UnsubscribeRequest,
 };
 use tenkai::observed_runtime::EnvironmentRuntimeReport;
 use tenkai::offline_import::{ImportJob, ImportJobList, ImportRequest, StagedBundle};
@@ -302,6 +303,20 @@ pub fn http_contract() -> Value {
             auth: Auth::Read,
             request: Some(schema::<ExposureQueryRequest>(&mut g)),
             response: schema::<ExposureQueryResult>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/exposures/waivers",
+            auth: Auth::Management,
+            request: Some(schema::<ExposureWaiverRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/exposures/waivers/clear",
+            auth: Auth::Management,
+            request: Some(schema::<ExposureWaiverClearRequest>(&mut g)),
+            response: lifecycle.clone(),
         },
         Route {
             method: "GET",
@@ -668,6 +683,13 @@ pub fn http_contract() -> Value {
         },
         Route {
             method: "POST",
+            path: "/v1/environments/{environment}/exposure-grace",
+            auth: Auth::Management,
+            request: Some(schema::<ExposureGraceRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
             path: "/v1/environments/{environment}/runtime-enrollments",
             auth: Auth::Management,
             request: Some(schema::<
@@ -764,6 +786,13 @@ pub fn http_contract() -> Value {
             path: "/v1/products/{product}/channels/{channel}/admit",
             auth: Auth::Management,
             request: Some(schema::<ChannelAdmitRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/products/{product}/channels/{channel}/exposure-grace",
+            auth: Auth::Management,
+            request: Some(schema::<ChannelExposureGraceRequest>(&mut g)),
             response: lifecycle.clone(),
         },
         Route {

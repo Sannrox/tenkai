@@ -598,6 +598,74 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn set_exposure_waiver(
+        &self,
+        request: tenkai::management_lifecycle::ExposureWaiverRequest,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            "/v1/exposures/waivers",
+            Some(&request),
+        )
+        .await
+    }
+
+    pub async fn clear_exposure_waiver(
+        &self,
+        request: tenkai::management_lifecycle::ExposureWaiverClearRequest,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            "/v1/exposures/waivers/clear",
+            Some(&request),
+        )
+        .await
+    }
+
+    pub async fn configure_environment_exposure_grace(
+        &self,
+        environment: &str,
+        grace: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/exposure-grace"),
+            Some(&tenkai::management_lifecycle::ExposureGraceRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation:
+                    tenkai::management_lifecycle::ManagementLifecycleOperation::ExposureGrace
+                        .as_str()
+                        .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                grace: grace.to_string(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn configure_channel_exposure_grace(
+        &self,
+        product: &str,
+        channel: &str,
+        grace: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/products/{product}/channels/{channel}/exposure-grace"),
+            Some(&tenkai::management_lifecycle::ChannelExposureGraceRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation:
+                    tenkai::management_lifecycle::ManagementLifecycleOperation::ChannelExposureGrace
+                        .as_str()
+                        .into(),
+                grace: grace.to_string(),
+            }),
+        )
+        .await
+    }
+
     pub async fn admit_channel_instance(
         &self,
         product: &str,

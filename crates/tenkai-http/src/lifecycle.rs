@@ -755,6 +755,92 @@ pub(super) async fn admit_channel_instance(
     )
 }
 
+pub(super) async fn set_exposure_waiver(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .set_exposure_waiver(&credential, request)
+            .await,
+    )
+}
+
+pub(super) async fn clear_exposure_waiver(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .clear_exposure_waiver(&credential, request)
+            .await,
+    )
+}
+
+pub(super) async fn configure_environment_exposure_grace(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .configure_environment_exposure_grace(&credential, &environment, request)
+            .await,
+    )
+}
+
+pub(super) async fn configure_channel_exposure_grace(
+    State(state): State<Arc<AppState>>,
+    Path((product, channel)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .configure_channel_exposure_grace(&credential, &product, &channel, request)
+            .await,
+    )
+}
+
 /// Removes a product's head from one channel (#1174).
 pub(super) async fn remove_channel_head(
     State(state): State<Arc<AppState>>,
