@@ -42,9 +42,12 @@ grep -F 'sha="$(git rev-parse "${TAG}^{commit}")"' "$workflow" >/dev/null || fai
 grep -F 'bash "${MAIN_TREE}/scripts/verify-release-tag.sh" verify-signed "$TAG" "$sha"' "$workflow" >/dev/null || fail "${workflow} must verify the tag with main's verifier against the tagged commit"
 grep -F 'RELEASE_TAG_FINGERPRINTS="${MAIN_TREE}/security/release-tag-fingerprints"' "$workflow" >/dev/null || fail "${workflow} must verify against main's allowed keys"
 grep -F 'bash "${MAIN_TREE}/scripts/verify-release-tag.sh" maintenance-line "$TAG"' "$workflow" >/dev/null || fail "${workflow} must resolve the matching maintenance line from main's verifier"
+grep -F 'if git ls-remote --exit-code origin "refs/heads/${line}" >/dev/null; then' "$workflow" >/dev/null || fail "${workflow} must probe the exact maintenance-line branch"
 grep -F 'git fetch --force origin "+refs/heads/${line}:refs/remotes/origin/${line}"' "$workflow" >/dev/null || fail "${workflow} must fetch the matching maintenance line when it exists"
 grep -F 'bash "${MAIN_TREE}/scripts/verify-release-tag.sh" require-ancestry "$TAG" "$sha"' "$workflow" >/dev/null || fail "${workflow} must require the tagged commit on main or the matching maintenance line"
-grep -F 'if [[ "$LINE" != main ]]; then' "$workflow" >/dev/null || fail "${workflow} must not mark a previous maintenance line as latest"
+grep -F 'latest="$(bash "${MAIN_TREE}/scripts/verify-release-tag.sh" latest "$TAG")"' "$workflow" >/dev/null || fail "${workflow} must decide latest with main's verifier at publication"
+grep -F -- '--draft --prerelease="$prerelease" --latest=false --verify-tag' "$workflow" >/dev/null || fail "${workflow} must draft without claiming latest"
+grep -F -- '--draft=false --prerelease="$prerelease" --latest="$latest"' "$workflow" >/dev/null || fail "${workflow} must publish with the computed latest flag"
 grep -F "branches: [main, 'release-*']" "$ROOT/.github/workflows/ci.yml" >/dev/null || fail "ci.yml must run on pushes to release-*"
 if grep -E 'github\.sha|github\.ref_name|GITHUB_SHA|GITHUB_REF_NAME|github\.event_name' "$workflow" >/dev/null; then
   fail "${workflow} must use the tagged commit and tag input, not the event SHA or ref name"
@@ -60,7 +63,9 @@ grep -Fq -- '--prerelease="$prerelease" --latest="$latest"' "$workflow" || fail 
 checkouts="$(grep -c 'uses: actions/checkout@' "$workflow")"
 sha_checkouts="$(grep -c 'ref: ${{ needs.verify-tag.outputs.sha }}' "$workflow")"
 head_checks="$(grep -c 'test "$(git rev-parse HEAD)" = "$SHA"' "$workflow")"
-[[ "$checkouts" -eq $((sha_checkouts + 2)) ]] || fail "${workflow} must check out the release commit in every job after verify-tag"
+# Besides the release commit: the tag checkout and main's verifier trees.
+main_checkouts="$(grep -c 'path: main-tree' "$workflow")"
+[[ "$checkouts" -eq $((sha_checkouts + main_checkouts + 1)) ]] || fail "${workflow} must check out the release commit in every job after verify-tag"
 [[ "$head_checks" -eq "$sha_checkouts" ]] || fail "${workflow} must check HEAD after every release-commit checkout"
 
 grep -Fq 'cargo build --release --locked --workspace --features tenkai-server/ui' "$workflow"

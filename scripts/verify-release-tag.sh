@@ -13,6 +13,10 @@
 #   scripts/verify-release-tag.sh require-ancestry <tag> <commit-sha>
 #       The commit is on origin/main or the matching origin/release-* line.
 #       Prints that line name (main or release-*) to stdout.
+#   scripts/verify-release-tag.sh latest <tag> [remote]
+#       Prints true when the tag is final and no final v* tag on the remote
+#       has a higher version, else false. A previous-line release is never
+#       latest, even when its commit is also on main.
 #   scripts/verify-release-tag.sh self-test
 #
 # Release tags are vX.Y.Z or the pre-release vX.Y.Z-rc.N (N >= 1). Numbers
@@ -48,21 +52,11 @@ verify_release_tag() {
   printf 'Release tag %s resolves to triggering commit %s\n' "$tag" "$expected_commit"
 }
 
-# release-<major>.<minor> before 1.0, release-<major> after. Hyphen, not the
-# release/<version> bump branch.
+# release-<major>.<minor> for every version, before and after 1.0. Hyphen,
+# not the release/<version> bump branch.
 maintenance_line() {
-  local tag="$1" version major rest minor
-  [[ "$tag" =~ $RELEASE_TAG_PATTERN ]] || fail "invalid release tag: ${tag}"
-  version="${tag#v}"
-  version="${version%%-*}"
-  major="${version%%.*}"
-  rest="${version#*.}"
-  minor="${rest%%.*}"
-  if [[ "$major" == 0 ]]; then
-    printf 'release-%s.%s\n' "$major" "$minor"
-  else
-    printf 'release-%s\n' "$major"
-  fi
+  [[ "$1" =~ $RELEASE_TAG_PATTERN ]] || fail "invalid release tag: ${1}"
+  printf 'release-%s.%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
 }
 
 # origin/main wins when the commit is on it, so tags on main stay latest.
@@ -83,6 +77,31 @@ require_ancestry() {
     return
   fi
   fail "tag ${tag} commit ${sha} is not on main or ${line}"
+}
+
+# Version order, not ancestry: a line commit can also reach main through a
+# forward-port. Reads the live remote tags at publication, so a newer tag
+# pushed while an older line release builds still wins latest.
+latest_release() {
+  local tag="$1" remote="${2:-origin}" major minor patch rc tags other
+  [[ "$tag" =~ $RELEASE_TAG_PATTERN ]] || fail "invalid release tag: ${tag}"
+  major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" patch="${BASH_REMATCH[3]}" rc="${BASH_REMATCH[4]}"
+  tags="$(git ls-remote --tags --refs "$remote" 'refs/tags/v*')" || fail "could not read release tags"
+  grep -qE "[[:space:]]refs/tags/${tag//./\\.}\$" <<<"$tags" || fail "tag ${tag} was not found"
+  if [[ -n "$rc" ]]; then
+    printf 'false\n'
+    return
+  fi
+  while IFS= read -r other; do
+    [[ "$other" =~ $RELEASE_TAG_PATTERN && -z "${BASH_REMATCH[4]}" ]] || continue
+    if ((BASH_REMATCH[1] > major ||
+      (BASH_REMATCH[1] == major && BASH_REMATCH[2] > minor) ||
+      (BASH_REMATCH[1] == major && BASH_REMATCH[2] == minor && BASH_REMATCH[3] > patch))); then
+      printf 'false\n'
+      return
+    fi
+  done < <(sed -nE 's#^[0-9a-f]+[[:space:]]+refs/tags/##p' <<<"$tags")
+  printf 'true\n'
 }
 
 # The root package version; workspace crates move in lockstep with it.
@@ -212,7 +231,7 @@ expect_line() {
 # reachable only from a non-matching release-* branch, or from any other
 # branch, must not release.
 ancestry_self_test() {
-  local tmp="$1" work a main_tip line_05 line_04 other line_1 accepted output
+  local tmp="$1" work a main_tip line_05 line_04 other line_12 accepted output
   work="${tmp}/ancestry"
   git init -q "$work"
   git -C "$work" config user.name "Release tag self-test"
@@ -243,22 +262,25 @@ ancestry_self_test() {
   git -C "$work" commit -qam other
   other="$(git -C "$work" rev-parse HEAD)"
 
-  git -C "$work" checkout -q -b release-1 "$a"
-  printf '1.x\n' >"${work}/source"
-  git -C "$work" commit -qam '1.x line'
-  line_1="$(git -C "$work" rev-parse HEAD)"
+  git -C "$work" checkout -q -b release-1.2 "$a"
+  printf '1.2\n' >"${work}/source"
+  git -C "$work" commit -qam '1.2 line'
+  line_12="$(git -C "$work" rev-parse HEAD)"
 
   git -C "$work" update-ref refs/remotes/origin/main "$main_tip"
   git -C "$work" update-ref refs/remotes/origin/release-0.5 "$line_05"
   git -C "$work" update-ref refs/remotes/origin/release-0.4 "$line_04"
   git -C "$work" update-ref refs/remotes/origin/other "$other"
-  git -C "$work" update-ref refs/remotes/origin/release-1 "$line_1"
+  git -C "$work" update-ref refs/remotes/origin/release-1.2 "$line_12"
 
   expect_line v0.5.1 release-0.5
   expect_line v0.5.1-rc.2 release-0.5
   expect_line v0.0.1 release-0.0
-  expect_line v1.2.3 release-1
-  expect_line v1.0.0-rc.1 release-1
+  expect_line v0.8.1 release-0.8
+  expect_line v1.2.3 release-1.2
+  expect_line v1.0.0-rc.1 release-1.0
+  expect_line v2.0.1 release-2.0
+  expect_line v10.11.0 release-10.11
   if output="$(bash "$SCRIPT_PATH" maintenance-line v1.2.3-beta.1 2>&1)"; then
     fail "maintenance-line accepted an invalid tag"
   fi
@@ -277,15 +299,34 @@ ancestry_self_test() {
   [[ "$accepted" == release-0.5 ]] || fail "matching 0.x line: expected release-0.5, got ${accepted}"
   accepted="$(cd "$work" && bash "$SCRIPT_PATH" require-ancestry v0.5.2-rc.1 "$line_05")"
   [[ "$accepted" == release-0.5 ]] || fail "matching 0.x rc: expected release-0.5, got ${accepted}"
-  accepted="$(cd "$work" && bash "$SCRIPT_PATH" require-ancestry v1.2.3 "$line_1")"
-  [[ "$accepted" == release-1 ]] || fail "matching 1.x line: expected release-1, got ${accepted}"
+  accepted="$(cd "$work" && bash "$SCRIPT_PATH" require-ancestry v1.2.3 "$line_12")"
+  [[ "$accepted" == release-1.2 ]] || fail "matching 1.x line: expected release-1.2, got ${accepted}"
 
   (cd "$work" && expect_ancestry_failure "is not on main or release-0.5" v0.5.1 "$line_04")
-  (cd "$work" && expect_ancestry_failure "is not on main or release-0.5" v0.5.1 "$line_1")
-  (cd "$work" && expect_ancestry_failure "is not on main or release-1" v1.2.3 "$line_05")
+  (cd "$work" && expect_ancestry_failure "is not on main or release-0.5" v0.5.1 "$line_12")
+  (cd "$work" && expect_ancestry_failure "is not on main or release-1.2" v1.2.3 "$line_05")
+  (cd "$work" && expect_ancestry_failure "is not on main or release-1.3" v1.3.0 "$line_12")
   (cd "$work" && expect_ancestry_failure "is not on main or release-0.5" v0.5.1 "$other")
-  (cd "$work" && expect_ancestry_failure "is not on main or release-1" v1.2.3 "$other")
+  (cd "$work" && expect_ancestry_failure "is not on main or release-1.2" v1.2.3 "$other")
   (cd "$work" && expect_ancestry_failure "invalid release tag" v1.2.3-beta.1 "$main_tip")
+
+  # Named failure: a previous-line patch, even one whose commit is on main,
+  # must not become latest.
+  local tag expected
+  for tag in v0.5.0 v1.2.0 v1.9.0 v2.0.0-rc.1; do
+    git -C "$work" tag "$tag" "$main_tip"
+  done
+  for tag in v0.5.1:false v1.2.1:false v1.9.1-rc.1:false v1.9.1:true v1.10.0:true v2.0.0:true; do
+    expected="${tag#*:}" tag="${tag%%:*}"
+    git -C "$work" tag "$tag" "$main_tip"
+    accepted="$(bash "$SCRIPT_PATH" latest "$tag" "$work")"
+    [[ "$accepted" == "$expected" ]] || fail "latest ${tag}: expected ${expected}, got ${accepted}"
+    git -C "$work" tag -d "$tag" >/dev/null
+  done
+  if output="$(bash "$SCRIPT_PATH" latest v3.0.0 "$work" 2>&1)"; then
+    fail "latest accepted a tag that is not on the remote"
+  fi
+  [[ "$output" == *"was not found"* ]] || fail "latest rejected without missing tag message (got: ${output})"
 }
 
 # Signed-tag checks against a throwaway key and repository. GNUPGHOME and the
@@ -382,6 +423,11 @@ case "${1:-}" in
     [[ $# -eq 1 ]] || fail "usage: $0 maintenance-line <tag>"
     maintenance_line "$1"
     ;;
+  latest)
+    shift
+    [[ $# -ge 1 && $# -le 2 ]] || fail "usage: $0 latest <tag> [remote]"
+    latest_release "$@"
+    ;;
   require-ancestry)
     shift
     [[ $# -eq 2 ]] || fail "usage: $0 require-ancestry <tag> <commit-sha>"
@@ -392,6 +438,6 @@ case "${1:-}" in
     self_test
     ;;
   *)
-    fail "usage: $0 {verify <tag> <commit-sha> [remote]|verify-signed <tag> <commit-sha>|maintenance-line <tag>|require-ancestry <tag> <commit-sha>|self-test}"
+    fail "usage: $0 {verify <tag> <commit-sha> [remote]|verify-signed <tag> <commit-sha>|maintenance-line <tag>|require-ancestry <tag> <commit-sha>|latest <tag> [remote]|self-test}"
     ;;
 esac

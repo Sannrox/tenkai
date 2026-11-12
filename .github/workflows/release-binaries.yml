@@ -37,7 +37,6 @@ jobs:
       tag: ${{ steps.resolve.outputs.tag }}
       sha: ${{ steps.resolve.outputs.sha }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
-      line: ${{ steps.verify.outputs.line }}
     steps:
       - name: Refuse a tagged run that is not from main
         if: inputs.tag != ''
@@ -60,7 +59,7 @@ jobs:
           path: source
           fetch-depth: 0
           fetch-tags: true
-      - name: Verify the signed tag on main
+      - name: Verify the signed tag and its line
         if: inputs.tag != ''
         id: verify
         working-directory: source
@@ -76,11 +75,11 @@ jobs:
             RELEASE_TAG_FINGERPRINTS="${MAIN_TREE}/security/release-tag-fingerprints" \
             bash "${MAIN_TREE}/scripts/verify-release-tag.sh" verify-signed "$TAG" "$sha"
           line="$(bash "${MAIN_TREE}/scripts/verify-release-tag.sh" maintenance-line "$TAG")"
-          if git ls-remote --exit-code --heads origin "$line" >/dev/null 2>&1; then
+          if git ls-remote --exit-code origin "refs/heads/${line}" >/dev/null; then
             git fetch --force origin "+refs/heads/${line}:refs/remotes/origin/${line}"
           fi
           accepted="$(bash "${MAIN_TREE}/scripts/verify-release-tag.sh" require-ancestry "$TAG" "$sha")"
-          echo "line=${accepted}" >>"$GITHUB_OUTPUT"
+          echo "tag ${TAG} commit ${sha} is on ${accepted}"
           test "$(git rev-parse HEAD)" = "$sha"
       - name: Refuse a published release
         if: inputs.tag != ''
@@ -358,6 +357,12 @@ jobs:
     if: needs.verify-tag.outputs.tag != ''
     needs: [attest, verify-tag]
     runs-on: ubuntu-latest
+    # One publication at a time across tags, so the latest decision below
+    # cannot be overtaken by another tag's publish. A third waiting publish
+    # cancels the pending one; re-run it to resume its draft.
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -381,6 +386,11 @@ jobs:
         env:
           SHA: ${{ needs.verify-tag.outputs.sha }}
         run: test "$(git rev-parse HEAD)" = "$SHA"
+      # After the release-commit checkout, which would clean it away.
+      - name: Check out main's release-tag verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: main-tree
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-assets
@@ -391,25 +401,23 @@ jobs:
         run: python3 scripts/release-metadata.py notes "${TAG#v}" >"${RUNNER_TEMP}/notes.md"
       # Draft, attach, then publish. A rerun resumes a draft; a published
       # release is immutable and is never edited. A tag with - publishes a
-      # pre-release that never becomes latest. A previous maintenance line
-      # is never latest either.
+      # pre-release that never becomes latest. A release below the highest
+      # final tag on the remote (a previous maintenance line) is never latest
+      # either. Main's verifier reads the tags right before the publishing
+      # edit, inside the job-wide release-publish group.
       - name: Draft, attach assets, and publish
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.verify-tag.outputs.tag }}
           SHA: ${{ needs.verify-tag.outputs.sha }}
           PRERELEASE: ${{ needs.verify-tag.outputs.prerelease }}
-          LINE: ${{ needs.verify-tag.outputs.line }}
+          MAIN_TREE: ${{ github.workspace }}/main-tree
         run: |
           set -euo pipefail
           notes="${RUNNER_TEMP}/notes.md"
-          [[ "$LINE" == main || "$LINE" == release-* ]] || { echo "invalid release line: ${LINE}" >&2; exit 1; }
-          prerelease=false latest=true
+          prerelease=false
           if [[ "$TAG" == *-* ]]; then
-            prerelease=true latest=false
-          fi
-          if [[ "$LINE" != main ]]; then
-            latest=false
+            prerelease=true
           fi
           [[ "$PRERELEASE" == "$prerelease" ]] || { echo "prerelease output ${PRERELEASE} does not match tag ${TAG}" >&2; exit 1; }
           bash scripts/verify-release-tag.sh verify "$TAG" "$SHA"
@@ -420,9 +428,10 @@ jobs:
               exit 1
               ;;
             missing)
-              gh release create "$TAG" --draft --prerelease="$prerelease" --verify-tag --title "$TAG" --notes-file "$notes"
+              gh release create "$TAG" --draft --prerelease="$prerelease" --latest=false --verify-tag --title "$TAG" --notes-file "$notes"
               ;;
           esac
           bash scripts/verify-release-tag.sh verify "$TAG" "$SHA"
           gh release upload "$TAG" dist/* --clobber
+          latest="$(bash "${MAIN_TREE}/scripts/verify-release-tag.sh" latest "$TAG")"
           gh release edit "$TAG" --notes-file "$notes" --draft=false --prerelease="$prerelease" --latest="$latest"

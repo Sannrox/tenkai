@@ -48,7 +48,7 @@ vX.Y.Z
 
 A tag is never moved, deleted, or reused. The tagged commit must be on
 `main` or on the `release-*` branch that matches the tag's version
-(`v0.5.1` → `release-0.5`; after 1.0, `v1.2.3` → `release-1`). The
+(`v0.8.1` → `release-0.8`, `v2.0.1` → `release-2.0`). The
 workflow refuses any other commit. The release run still starts from
 main's workflow and verifier.
 
@@ -126,8 +126,8 @@ To trust a new tag signing key, add its public key to
 Use a line only when a consumer pins an older Tenkai tag and needs a fix
 without taking `main`. Do not create one in advance.
 
-Name it `release-<major>.<minor>` before 1.0 (`release-0.5`) and
-`release-<major>` after. Create it from the last tag of that line when the
+Name it `release-<major>.<minor>`, one per minor, before and after 1.0
+(`release-0.8`, `release-2.0`). Create it from the last tag of that line when the
 first fix needs it. The hyphen keeps it apart from `release/<version>`
 bump branches.
 
@@ -143,6 +143,11 @@ update.
    forward-port to `main` before the tag.
 3. **Record every backport.** Name the source and destination commits and
    any adaptation.
+
+A line release follows Prepare and Tag with the line as the base: the bump
+branch `release/<version>` is cut from `release-X.Y` and merges back into
+it, and `RELEASE_BRANCH=release-X.Y scripts/changelog-draft.sh` drafts the
+notes since the line's last final tag.
 
 The current line plus at most one previous line. An older line retires
 unless the maintainer decides otherwise. A GitHub Release on a previous

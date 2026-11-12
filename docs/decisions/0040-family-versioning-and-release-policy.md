@@ -140,7 +140,7 @@ and Breaking note fails CI.
    tagged run that is not from main. It verifies the signed annotated tag with
    main's verifier and allowed keys against the tagged commit, requires that
    commit to be on main or on the matching `release-*` maintenance line
-   (`release-<major>.<minor>` before 1.0, `release-<major>` after), and uses
+   (`release-<major>.<minor>`, one per minor, before and after 1.0), and uses
    that commit for the CI gate, packaging, images, manifest `git_sha`, and
    GitHub Release. A GitHub Release on a previous line is never marked
    latest. A failed run is fixed on main and re-run for the same tag. A retry
