@@ -5,6 +5,8 @@
 - Amended: 2026-11-06 ([#915](https://github.com/Sannrox/tenkai/issues/915)),
   §10 tagging (dispatcher from main, tagged commit on main, `-rc.N` first,
   idempotent re-run) and §11 gate-flag range
+- Amended: 2026-11-12 ([#1198](https://github.com/Sannrox/tenkai/issues/1198)),
+  §10.5 ancestry and §10.9 matching `release-*` maintenance lines
 - Issue: [#883](https://github.com/Sannrox/tenkai/issues/883)
 - Owner: Tenkai maintainers
 - Related: [software compatibility](../software-compatibility.md),
@@ -137,12 +139,15 @@ and Breaking note fails CI.
    release workflow runs from main, not from the tagged commit. It refuses a
    tagged run that is not from main. It verifies the signed annotated tag with
    main's verifier and allowed keys against the tagged commit, requires that
-   commit to be on main, and uses that commit for the CI gate, packaging,
-   images, manifest `git_sha`, and GitHub Release. A failed run is fixed on
-   main and re-run for the same tag. A retry picks up fixes to the workflow
-   and to the tag verifier and keys only. Release scripts, CHANGELOG, and
-   sources come from the tagged commit; a bug there needs a new rc or patch.
-   Pull requests and dry runs never mint attestations.
+   commit to be on main or on the matching `release-*` maintenance line
+   (`release-<major>.<minor>` before 1.0, `release-<major>` after), and uses
+   that commit for the CI gate, packaging, images, manifest `git_sha`, and
+   GitHub Release. A GitHub Release on a previous line is never marked
+   latest. A failed run is fixed on main and re-run for the same tag. A retry
+   picks up fixes to the workflow and to the tag verifier and keys only.
+   Release scripts, CHANGELOG, and sources come from the tagged commit; a bug
+   there needs a new rc or patch. Pull requests and dry runs never mint
+   attestations.
 6. **Immutable tags.** A tag is never moved, deleted, or reused. A bad
    published release gets a new patch version. A failed draft is retried for
    the same tag.
@@ -156,11 +161,13 @@ and Breaking note fails CI.
    Every job that uploads, pushes, attests, or publishes refuses a release
    that is already published, so neither a new run nor "Re-run failed jobs"
    on an old one can change it. One run per tag at a time.
-9. **Hotfixes.** Fix on `main` first. The tagged commit must be on main, so a
-   tag whose commit lives only on `release/vX.Y` is not releasable. Cherry-pick
-   onto `release/vX.Y` remains a maintenance line; to release a hotfix, land
-   it on main and tag there. Pre-release patches are `vX.Y.(Z+1)-rc.N` on
-   main.
+9. **Hotfixes.** Fix on `main` first, then backport with `git cherry-pick -x`
+   onto the matching `release-*` line when a consumer pins that line. Create
+   the line from the last tag of that version when the first fix needs it,
+   never in advance. Keep at most the current line plus one previous line. A
+   tag whose commit lives only on a non-matching `release-*` branch, or on
+   any other branch, is not releasable. Pre-release patches are
+   `vX.Y.(Z+1)-rc.N` on the same line as the final tag they precede.
 
 ### 11. Images, channels, and trains
 
@@ -192,8 +199,8 @@ shape.
 - Coding stays unblocked: SHA pins remain valid until a tag exists.
 - A workflow bug no longer burns a final version: fix main and re-run the
   same tag. A bug in tagged sources still needs a new rc or patch.
-- Hotfix tags on `release/v*` are not releasable. The next family release
-  should go through `vX.Y.Z-rc.1` first.
+- A matching `release-*` line can ship a patch without taking `main`. The
+  next family release on `main` should still go through `vX.Y.Z-rc.1` first.
 
 ## Alternatives considered
 
@@ -211,5 +218,9 @@ shape.
 - **Run the release workflow from the tagged commit.** Rejected: tags cannot
   be moved or deleted, so a workflow bug that only shows on a real tag run
   burns that version.
-- **Hotfix tags on `release/v*`.** Rejected: the tagged commit must be on
-  main so main's verifier and keys apply.
+- **Run the release workflow from a maintenance branch.** Rejected: tags
+  cannot be moved, so a workflow bug on that ref burns the version. The run
+  still starts from main; only the ancestry check accepts the matching
+  `release-*` line.
+- **Hotfix tags on `release/v*` (slash).** Rejected: that name collides with
+  `release/<version>` bump branches. Matching lines are `release-*`.

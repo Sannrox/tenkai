@@ -26,9 +26,10 @@ env:
 
 jobs:
   # Resolves the release commit every later job checks out. A tagged run must
-  # come from main: main's verify-release-tag.sh and allowed keys verify the
-  # signed tag against the tagged commit's Cargo.toml, and that commit must be
-  # on main. A dry run resolves the checked-out commit and verifies nothing.
+  # start from main: main's verify-release-tag.sh and allowed keys verify the
+  # signed tag against the tagged commit's Cargo.toml. That commit must be on
+  # main or the matching release-* line. A dry run resolves the checked-out
+  # commit and verifies nothing.
   verify-tag:
     name: Verify signed tag
     runs-on: ubuntu-latest
@@ -36,6 +37,7 @@ jobs:
       tag: ${{ steps.resolve.outputs.tag }}
       sha: ${{ steps.resolve.outputs.sha }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
+      line: ${{ steps.verify.outputs.line }}
     steps:
       - name: Refuse a tagged run that is not from main
         if: inputs.tag != ''
@@ -60,6 +62,7 @@ jobs:
           fetch-tags: true
       - name: Verify the signed tag on main
         if: inputs.tag != ''
+        id: verify
         working-directory: source
         env:
           TAG: ${{ inputs.tag }}
@@ -72,7 +75,12 @@ jobs:
             RELEASE_TAG_KEY="${MAIN_TREE}/security/release-tag-key.asc" \
             RELEASE_TAG_FINGERPRINTS="${MAIN_TREE}/security/release-tag-fingerprints" \
             bash "${MAIN_TREE}/scripts/verify-release-tag.sh" verify-signed "$TAG" "$sha"
-          git merge-base --is-ancestor "$sha" refs/remotes/origin/main || { echo "tag ${TAG} commit ${sha} is not on main" >&2; exit 1; }
+          line="$(bash "${MAIN_TREE}/scripts/verify-release-tag.sh" maintenance-line "$TAG")"
+          if git ls-remote --exit-code --heads origin "$line" >/dev/null 2>&1; then
+            git fetch --force origin "+refs/heads/${line}:refs/remotes/origin/${line}"
+          fi
+          accepted="$(bash "${MAIN_TREE}/scripts/verify-release-tag.sh" require-ancestry "$TAG" "$sha")"
+          echo "line=${accepted}" >>"$GITHUB_OUTPUT"
           test "$(git rev-parse HEAD)" = "$sha"
       - name: Refuse a published release
         if: inputs.tag != ''
@@ -383,19 +391,25 @@ jobs:
         run: python3 scripts/release-metadata.py notes "${TAG#v}" >"${RUNNER_TEMP}/notes.md"
       # Draft, attach, then publish. A rerun resumes a draft; a published
       # release is immutable and is never edited. A tag with - publishes a
-      # pre-release that never becomes latest.
+      # pre-release that never becomes latest. A previous maintenance line
+      # is never latest either.
       - name: Draft, attach assets, and publish
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.verify-tag.outputs.tag }}
           SHA: ${{ needs.verify-tag.outputs.sha }}
           PRERELEASE: ${{ needs.verify-tag.outputs.prerelease }}
+          LINE: ${{ needs.verify-tag.outputs.line }}
         run: |
           set -euo pipefail
           notes="${RUNNER_TEMP}/notes.md"
+          [[ "$LINE" == main || "$LINE" == release-* ]] || { echo "invalid release line: ${LINE}" >&2; exit 1; }
           prerelease=false latest=true
           if [[ "$TAG" == *-* ]]; then
             prerelease=true latest=false
+          fi
+          if [[ "$LINE" != main ]]; then
+            latest=false
           fi
           [[ "$PRERELEASE" == "$prerelease" ]] || { echo "prerelease output ${PRERELEASE} does not match tag ${TAG}" >&2; exit 1; }
           bash scripts/verify-release-tag.sh verify "$TAG" "$SHA"

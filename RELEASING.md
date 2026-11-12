@@ -39,14 +39,18 @@ and signed release identity.
 
 ## Tag
 
-Create an annotated, signed tag on the merged release commit on `main`:
+Create an annotated, signed tag on the merged release commit on `main`, or
+on the matching maintenance line:
 
 ```text
 vX.Y.Z
 ```
 
 A tag is never moved, deleted, or reused. The tagged commit must be on
-`main`; the workflow refuses any other commit.
+`main` or on the `release-*` branch that matches the tag's version
+(`v0.5.1` → `release-0.5`; after 1.0, `v1.2.3` → `release-1`). The
+workflow refuses any other commit. The release run still starts from
+main's workflow and verifier.
 
 ## Release candidates
 
@@ -61,9 +65,8 @@ Cut `vX.Y.Z-rc.N` (N from 1, no leading zeros) before the final tag:
 
 A failed release candidate costs only an rc number. A final tag on a commit
 whose workspace version is still `X.Y.Z-rc.N` is refused. The workflow
-accepts no other suffix (no `-beta.N` yet). Fix on `main` first. The tagged
-commit must be on `main`, so a tag whose commit lives only on `release/vX.Y`
-is not releasable.
+accepts no other suffix (no `-beta.N` yet). Fix on `main` first, then
+backport to a matching line when a pinned older version needs it.
 
 ## Start, retry, and dry-run
 
@@ -78,7 +81,7 @@ It then:
 - checks out the tag and fetches the annotated tag object
 - verifies the signed tag with main's `scripts/verify-release-tag.sh` and
   main's allowed keys against the tagged commit's `Cargo.toml`
-- requires the tagged commit to be on `main`
+- requires the tagged commit to be on `main` or the matching `release-*` line
 - builds the hosts, writes a CycloneDX SBOM, attests provenance and the SBOM,
   and writes the manifest `git_sha` from that commit
 - drafts the GitHub Release with `gh release create <tag> --verify-tag` from
@@ -117,6 +120,37 @@ commit.
 To trust a new tag signing key, add its public key to
 `security/release-tag-key.asc` and its fingerprint to
 `security/release-tag-fingerprints` in a reviewed pull request.
+
+## Maintenance lines
+
+Use a line only when a consumer pins an older Tenkai tag and needs a fix
+without taking `main`. Do not create one in advance.
+
+Name it `release-<major>.<minor>` before 1.0 (`release-0.5`) and
+`release-<major>` after. Create it from the last tag of that line when the
+first fix needs it. The hyphen keeps it apart from `release/<version>`
+bump branches.
+
+Eligible changes are critical bug fixes (data loss, corruption, panic,
+crash, hang), security fixes, and prerequisites for a required dependency
+update.
+
+1. **Upstream first.** Land the fix on `main`, then open one pull request
+   per supported line, newest to oldest, with `git cherry-pick -x`. A
+   rewrite for the older code says so in the pull request. A skipped line
+   is explained on the source pull request.
+2. **Urgent exception.** The fix may land on the line first. Track the
+   forward-port to `main` before the tag.
+3. **Record every backport.** Name the source and destination commits and
+   any adaptation.
+
+The current line plus at most one previous line. An older line retires
+unless the maintainer decides otherwise. A GitHub Release on a previous
+line is never marked latest.
+
+`ci.yml` runs on pushes to `release-*` so the tagged commit has a CI run.
+Branch protection for `release-*` is a maintainer action; this procedure
+does not create a line.
 
 Provenance and binary layout: [release binaries](docs/release-binaries.md),
 [release signing](docs/release-signing.md),
