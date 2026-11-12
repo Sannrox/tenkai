@@ -89,6 +89,8 @@ The script:
   [host applier](host-releases.md#install) as root, owned by root, at fixed
   paths, and refuses when any of their directories, or one above them, is a
   symbolic link or writable by anyone but root. It starts nothing;
+- `--role host-applier` installs only those applier files, never writes
+  `--prefix` or `client.toml`, and does not refuse a self-upgrade home;
 - with `--role server`, writes `/etc/tenkai/client.toml` (`target = "remote"`,
   loopback URL) and a root-only `/etc/tenkai/management.token` unless they
   already exist, so `sudo tenkaictl status --env <env>` talks to the server
@@ -355,6 +357,23 @@ rollback is finished by running it again. The backup is restored at most
 once and only over a store the new version migrated, so a repeated rollback
 never overwrites what the older server wrote since. One self-upgrade
 command at a time holds a home.
+
+`self-upgrade` does not install the host applier. After the server is
+ready, upgrade the applier, its unit and its rule as root (linux-x86_64):
+
+```bash
+curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh \
+  | sudo sh -s -- --role host-applier
+```
+
+That rename-installs the three files at the same paths as
+`--with-host-applier` and leaves the self-upgrade home unchanged. Repeat it
+to finish an interrupted upgrade. Restart the server afterwards so
+`/readyz` lists the new `host_applier:<version>`. To roll the applier back
+with the server, run `--role host-applier` for the previous release after
+`self-upgrade rollback`, then restart. An applier on an older minor than
+the server is named on `/readyz` and refuses to plan host steps until it is
+upgraded; fencing and recovery still use the host executor.
 
 Converting an existing install whose unit runs a packaged `tenkai-server` to
 the `<home>/current` layout is a first install: run `self-upgrade apply`

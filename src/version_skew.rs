@@ -27,6 +27,21 @@ pub fn skew(server: &str, other: &str) -> Option<&'static str> {
     })
 }
 
+/// Why a host applier at `applier` must not run host steps this `server`
+/// would plan. Same minor (`current`) or newer (`ahead`) is fine. One or
+/// more minors behind, another major, or an unreadable version is not.
+pub fn applier_blocks_host_plans(server: &str, applier: &str) -> Option<String> {
+    match skew(server, applier) {
+        Some("current") | Some("ahead") => None,
+        Some(kind) => Some(format!(
+            "host applier {applier} is {kind} relative to server {server}; upgrade it with install.sh --role host-applier"
+        )),
+        None => Some(format!(
+            "host applier version {applier:?} is not comparable to server {server}; upgrade it with install.sh --role host-applier"
+        )),
+    }
+}
+
 fn major_minor(version: &str) -> Option<(u64, u64)> {
     let core = version.trim().trim_start_matches('v');
     let core = core.split(['-', '+']).next()?;
@@ -61,5 +76,22 @@ mod tests {
         assert_eq!(skew("0.6.1", "0.6.invalid"), None);
         assert_eq!(skew("0.6.1", "0.6.0.1"), None);
         assert_eq!(skew("0.6.1", "0.+6.0"), None);
+    }
+
+    #[test]
+    fn an_older_applier_blocks_host_plans_and_the_same_minor_does_not() {
+        assert!(applier_blocks_host_plans("0.8.0", "0.8.0").is_none());
+        assert!(applier_blocks_host_plans("0.8.1", "0.8.0").is_none());
+        assert!(applier_blocks_host_plans("0.8.0", "0.9.0").is_none());
+        let behind = applier_blocks_host_plans("0.8.0", "0.7.0-rc.1").unwrap();
+        assert!(
+            behind.contains("0.7.0-rc.1") && behind.contains("0.8.0") && behind.contains("behind"),
+            "{behind}"
+        );
+        let unknown = applier_blocks_host_plans("0.8.0", "dev").unwrap();
+        assert!(
+            unknown.contains("dev") && unknown.contains("0.8.0"),
+            "{unknown}"
+        );
     }
 }

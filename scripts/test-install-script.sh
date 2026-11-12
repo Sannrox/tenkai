@@ -8,7 +8,8 @@
 #
 # The self-test covers each role, the baked and --version paths, a checksum
 # mismatch and a missing SHA256SUMS entry (nothing installed, existing files
-# kept), a refused self-upgrade home, and --with-host-applier refused for a
+# kept), a refused self-upgrade home, --role host-applier leaving that home
+# alone (and refusing --prefix), and --with-host-applier refused for a
 # non-root user or a non-Linux system. The container run installs on
 # Ubuntu 22.04, Debian 12, RHEL 8 and 9 compatible images, also with
 # --with-host-applier as root (owners, modes, files), runs every installed
@@ -168,8 +169,11 @@ self_test() {
   local home="${tmp}/home-layout"
   mkdir -p "${home}/versions/abc"
   ln -s versions/abc "${home}/current"
+  printf '{}\n' >"${home}/upgrade.json"
   expect_refused "self-upgrade home" "$script" --base-url "$base" --prefix "$home" --role server
   expect_refused "self-upgrade home" "$script" --base-url "$base" --prefix "${home}/current" --role server
+  expect_refused "do not pass --prefix" "$script" --base-url "$base" --prefix "$home" --role host-applier
+  expect_files "$home" current upgrade.json versions
   expect_files "${home}/versions/abc"
   mkdir -p "${tmp}/linked"
   ln -s "${home}/current/tenkai-server" "${tmp}/linked/tenkai-server"
@@ -189,6 +193,10 @@ self_test() {
   if [[ "$(id -u)" != 0 || "$(uname -s)" != Linux ]]; then
     expect_refused "$applier_refusal" "$script" --base-url "file://${tmp}/missing" --prefix "${tmp}/applier" --with-host-applier
     [[ ! -e "${tmp}/applier" ]] || fail "a refused applier install created its prefix"
+    # --role host-applier never inspects a self-upgrade home; without root it
+    # stops on the applier's root check, not the self-upgrade refusal.
+    expect_refused "$applier_refusal" "$script" --base-url "$base" --role host-applier
+    expect_files "$home" current upgrade.json versions
   fi
 
   printf 'install script self-test passed\n'
@@ -256,7 +264,28 @@ container_test() {
         exit 1
       fi
       grep -Fq "/usr/local/libexec/tenkai is a symbolic link" /tmp/err
-      echo "host applier ok"'
+      echo "host applier ok"
+      rm /usr/local/libexec/tenkai
+      mv /usr/local/libexec/tenkai.real /usr/local/libexec/tenkai
+      # A self-upgrade home is refused for --role server, and left alone by
+      # --role host-applier, which re-installs the applier by rename.
+      mkdir -p /opt/tenkai/versions/abc
+      ln -s versions/abc /opt/tenkai/current
+      printf "{}\n" >/opt/tenkai/upgrade.json
+      if sh "${release}/install.sh" --base-url file:///release --role server --with-host-applier --prefix /opt/tenkai 2>/tmp/err; then
+        echo "server install into a self-upgrade home was not refused" >&2
+        exit 1
+      fi
+      grep -Fq "self-upgrade home" /tmp/err
+      test -L /opt/tenkai/current
+      test -f /opt/tenkai/upgrade.json
+      sh "${release}/install.sh" --base-url file:///release --role host-applier
+      test -L /opt/tenkai/current
+      test -f /opt/tenkai/upgrade.json
+      test ! -e /opt/tenkai/tenkaictl
+      applier=/usr/local/libexec/tenkai/tenkai-host-applier
+      test "$(stat -c "%u:%g %a" "$applier")" = "0:0 755"
+      echo "host-applier role ok"'
   done
 
   printf '== alpine:3 (musl, refused)\n'

@@ -504,6 +504,11 @@ async fn bind_host_steps(
                 records.insert(crate::host_records::HostRecords::of(ctx, executors, env).await?)
             }
         };
+        // Local records run on this process's applier. Reported records are
+        // a runtime's; that host admits when it applies.
+        if matches!(records, crate::host_records::HostRecords::Local(_)) {
+            executors.admit_host_plans()?;
+        }
         let record = records.applied_state(env, &step.product)?;
         match step.host {
             // An applied release's outstanding health step, at the record's

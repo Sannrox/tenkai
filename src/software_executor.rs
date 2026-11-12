@@ -931,6 +931,9 @@ impl SoftwareExecutors {
     }
 
     /// The host executor, or an error naming what is missing.
+    ///
+    /// Access for fencing, records, and recovery. New host plans and steps
+    /// use [`Self::admit_host_plans`].
     pub fn host(&self) -> Result<&Arc<crate::host_executor::HostExecutor>> {
         self.host.as_ref().map_err(|reason| {
             anyhow::anyhow!(
@@ -939,10 +942,25 @@ impl SoftwareExecutors {
         })
     }
 
+    /// Fail closed unless this process may plan or start a host step.
+    pub fn admit_host_plans(&self) -> Result<()> {
+        self.host()?;
+        if let Some(applier) = crate::host_executor::installed_applier_version() {
+            let applier = applier?;
+            if let Some(block) = crate::version_skew::applier_blocks_host_plans(
+                crate::version_skew::SERVER_VERSION,
+                &applier,
+            ) {
+                bail!("{block}");
+            }
+        }
+        Ok(())
+    }
+
     /// Fail closed unless a release that declares `declared` can run here.
     pub fn require_available(&self, declared: Option<SoftwareExecutorKind>) -> Result<()> {
         if declared == Some(SoftwareExecutorKind::Host) {
-            return self.host().map(|_| ());
+            return self.admit_host_plans();
         }
         self.resolve(declared).map(|_| ())
     }
