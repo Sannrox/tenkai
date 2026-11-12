@@ -249,6 +249,26 @@ pub(crate) fn status_result(env: &str, rows: usize) -> CommandResultV1 {
         .counts(None, Some(rows))
 }
 
+/// One `status` line per failing or warning health check (#1057).
+pub(crate) fn health_check_lines(checks: &[tenkai::instance_health::HealthCheck]) -> Vec<String> {
+    checks
+        .iter()
+        .filter(|check| check.state >= tenkai::instance_health::HealthCheckState::Warning)
+        .map(|check| {
+            if check.message.is_empty() {
+                format!("  health {}: {}", check.name, check.state.as_str())
+            } else {
+                format!(
+                    "  health {}: {}: {}",
+                    check.name,
+                    check.state.as_str(),
+                    check.message
+                )
+            }
+        })
+        .collect()
+}
+
 /// The status line of a workload certificate near expiry (ADR 0046 §3),
 /// naming its expiry and why renewal has not cleared it.
 pub(crate) fn certificate_line(

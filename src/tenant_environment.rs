@@ -818,6 +818,7 @@ mod tests {
                     dependency_hold: None,
                     spec_drift: None,
                     certificate: None,
+                    health_checks: Vec::new(),
                 }])
             })
         }

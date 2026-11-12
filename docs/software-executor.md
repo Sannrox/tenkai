@@ -217,7 +217,12 @@ after apply.
 Reconcile may emit a Restart plan when Helm/Kubernetes observe is `Absent` or
 `Mismatched`, recorded apply health is `unhealthy`, or environment overlays
 changed since the last apply. `tenkaictl plan` does not execute `deploy.health`,
-but it does emit Restart when Tenkai-owned overlays are stale. Executors that
+but it does emit Restart when Tenkai-owned overlays are stale.
+After apply, an environment runtime that names `instance_health`
+re-runs the locally verified `deploy.health` of the placed release on
+its work poll and reports the result; `status` overlays a stale report
+as `unknown`
+([instance health](runtime-protocol-v1.md#instance-health)). Executors that
 implement `render_target_changes` also record a desired-versus-live diff on
 each step; `tenkaictl plan` prints it, the plan digest covers it, and apply
 refuses the step as stale if the live object moved.

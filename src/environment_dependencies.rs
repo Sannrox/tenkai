@@ -858,6 +858,7 @@ mod tests {
             delivery_hold: None,
             spec_drift: None,
             certificate: None,
+            health_checks: Vec::new(),
             dependency_hold: Some(StatusDependencyHold {
                 release_id: "tenkai:release:app@2.0.0".into(),
                 contracts: vec![UnmetContract {

@@ -4067,6 +4067,34 @@
       ],
       "type": "object"
     },
+    "HealthCheck": {
+      "description": "One named check inside a probe's structured stdout.",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/HealthCheckState"
+        }
+      },
+      "required": [
+        "name",
+        "state"
+      ],
+      "type": "object"
+    },
+    "HealthCheckState": {
+      "enum": [
+        "healthy",
+        "repairing",
+        "warning",
+        "failing"
+      ],
+      "type": "string"
+    },
     "HoldAuditEvent": {
       "description": "One immutable set, clear, or retry transition.",
       "properties": {
@@ -6870,6 +6898,13 @@
             "string",
             "null"
           ]
+        },
+        "health_checks": {
+          "description": "Failing and warning checks from the latest health observation (#1057).\nEmpty when none were reported or the observation is stale.",
+          "items": {
+            "$ref": "#/$defs/HealthCheck"
+          },
+          "type": "array"
         },
         "instance": {
           "default": "",

@@ -933,6 +933,13 @@ impl BuiltinConfig {
             &manifest.artifacts,
             &release.entries,
         )?;
+        self.persist_verified_manifest(
+            environment,
+            expected.product,
+            expected.release_digest,
+            expected.artifact_digest,
+            &release.manifest,
+        )?;
         request.workdir = workdir;
         request.cluster_config_path = self.cluster_config.clone();
         request.secret_dir_path = self.secret_dir.clone();
@@ -1295,9 +1302,7 @@ impl BuiltinConfig {
     ) -> Result<PathBuf> {
         crate::ontology::validate_identifier("environment", environment)?;
         crate::ontology::validate_identifier("product", product)?;
-        if artifact_digest.is_empty()
-            || !artifact_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
+        if !is_hex_digest(artifact_digest) {
             bail!("the plan step's artifact digest is not a hex digest");
         }
         let product_dir = self.work_root.join(environment).join(product);
@@ -1333,6 +1338,105 @@ impl BuiltinConfig {
         }
         Ok(destination)
     }
+
+    fn verified_manifest_path(
+        &self,
+        environment: &str,
+        product: &str,
+        release_digest: &str,
+    ) -> PathBuf {
+        self.work_root
+            .join(environment)
+            .join(product)
+            .join(format!("{release_digest}.manifest"))
+    }
+
+    fn persist_verified_manifest(
+        &self,
+        environment: &str,
+        product: &str,
+        release_digest: &str,
+        artifact_digest: &str,
+        raw: &str,
+    ) -> Result<()> {
+        crate::atomic_state::write_file(
+            &self.verified_manifest_path(environment, product, release_digest),
+            raw.as_bytes(),
+            Some(0o600),
+        )?;
+        crate::atomic_state::write_file(
+            &self.verified_artifact_digest_path(environment, product, release_digest),
+            artifact_digest.as_bytes(),
+            Some(0o600),
+        )
+    }
+
+    fn verified_artifact_digest_path(
+        &self,
+        environment: &str,
+        product: &str,
+        release_digest: &str,
+    ) -> PathBuf {
+        self.work_root
+            .join(environment)
+            .join(product)
+            .join(format!("{release_digest}.artifact"))
+    }
+
+    /// `deploy.health` and the placed workdir of a release this runtime already
+    /// verified. Missing when this host never placed that digest.
+    pub(crate) fn local_health_probe(
+        &self,
+        environment: &str,
+        product: &str,
+        artifact_digest: &str,
+        release_digest: &str,
+    ) -> Option<(String, PathBuf)> {
+        crate::ontology::validate_identifier("environment", environment).ok()?;
+        crate::ontology::validate_identifier("product", product).ok()?;
+        if !is_hex_digest(artifact_digest) || !is_hex_digest(release_digest) {
+            return None;
+        }
+        let workdir = self
+            .work_root
+            .join(environment)
+            .join(product)
+            .join(artifact_digest);
+        if !workdir.is_dir() {
+            return None;
+        }
+        let raw = std::fs::read_to_string(self.verified_manifest_path(
+            environment,
+            product,
+            release_digest,
+        ))
+        .ok()?;
+        if crate::manifest::digest(&raw) != release_digest {
+            return None;
+        }
+        let placed = std::fs::read_to_string(self.verified_artifact_digest_path(
+            environment,
+            product,
+            release_digest,
+        ))
+        .ok()?;
+        if placed != artifact_digest {
+            return None;
+        }
+        let manifest = crate::manifest::parse_raw(&raw).ok()?;
+        if manifest.deploy.executor == Some(crate::software_executor::SoftwareExecutorKind::Host) {
+            return None;
+        }
+        let command = manifest
+            .deploy
+            .health
+            .filter(|command| !command.is_empty())?;
+        Some((command, workdir))
+    }
+}
+
+fn is_hex_digest(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Write `entries` under `root`. Every path must be relative, without `..`,
@@ -2140,6 +2244,69 @@ mod tests {
             )
             .unwrap();
         assert_eq!(again.request.workdir, workdir);
+        assert_eq!(
+            std::fs::read_to_string(
+                case.config
+                    .work_root
+                    .join(ENVIRONMENT)
+                    .join("api")
+                    .join(format!("{}.artifact", case.step.release_digest))
+            )
+            .unwrap(),
+            case.step.artifact_digest
+        );
+    }
+
+    #[test]
+    fn local_health_probe_ignores_untrusted_duty_paths() {
+        let case = case("health = \"true\"\n");
+        case.config
+            .verify(
+                case.release.clone(),
+                ENVIRONMENT,
+                &Expected::target(&case.step),
+            )
+            .unwrap();
+        let (command, workdir) = case
+            .config
+            .local_health_probe(
+                ENVIRONMENT,
+                "api",
+                &case.step.artifact_digest,
+                &case.step.release_digest,
+            )
+            .unwrap();
+        assert_eq!(command, "true");
+        assert_eq!(
+            workdir,
+            case.config
+                .work_root
+                .join(ENVIRONMENT)
+                .join("api")
+                .join(&case.step.artifact_digest)
+        );
+        assert!(
+            case.config
+                .local_health_probe(
+                    ENVIRONMENT,
+                    "../escape",
+                    &case.step.artifact_digest,
+                    &case.step.release_digest,
+                )
+                .is_none()
+        );
+        assert!(
+            case.config
+                .local_health_probe(ENVIRONMENT, "api", "../escape", &case.step.release_digest,)
+                .is_none()
+        );
+        let mut wrong = case.step.release_digest.clone();
+        wrong.replace_range(..2, "ff");
+        assert!(
+            case.config
+                .local_health_probe(ENVIRONMENT, "api", &case.step.artifact_digest, &wrong)
+                .is_none()
+        );
     }
 
     #[test]

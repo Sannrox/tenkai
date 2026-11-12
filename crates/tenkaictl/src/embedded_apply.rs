@@ -157,6 +157,9 @@ pub(crate) async fn run(
                 if let Some(drift) = &r.spec_drift {
                     crate::output::print_spec_drift(drift);
                 }
+                for line in crate::output::health_check_lines(&r.health_checks) {
+                    println!("{line}");
+                }
                 if let Some(line) = r
                     .certificate
                     .as_ref()
