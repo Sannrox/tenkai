@@ -41,7 +41,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/tenkai-install-test.$$.XXXXXX")"
+# Strip a trailing slash so the path matches what install.sh resolves with pwd.
+tmp_root="${TMPDIR:-/tmp}"
+tmp="$(mktemp -d "${tmp_root%/}/tenkai-install-test.$$.XXXXXX")"
 trap "rm -rf $(printf '%q' "$tmp")" EXIT
 
 # Run install.sh under sh; print its output; return its status.
