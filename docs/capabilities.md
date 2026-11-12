@@ -80,7 +80,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | AuthStack management HTTP + federation accept path | [Auth context](auth-request-context.md), [federated identity](federated-identity.md); #68, #71 |
 | JWT EdDSA enterprise assertion verifier (static keys) | [Auth context](auth-request-context.md#reference-jwt-assertion-verifier-110); #110 |
 | Tenant-isolation harness + in-memory tenant store | [Tenant isolation](tenant-isolation-conformance.md); #37, #69, #70 |
-| Tenant isolation on all HTTP management surfaces | [Tenant isolation HTTP exposure](tenant-isolation-conformance.md#http-exposure-vs-registry-112); #112 |
+| Tenant isolation on all HTTP management surfaces | [Tenant-mode HTTP routes](tenant-isolation-conformance.md#tenant-mode-http-routes); #112 |
 | Hub PostgreSQL / spoke-embedded SQLite, one operational port | [Operational storage](operational-storage.md); [ADR 0010](decisions/0010-supported-operating-profiles.md); [ADR 0029](decisions/0029-hub-spoke-operational-store.md); #373 |
 | Optional Postgres multi-tenant hub store (feature `postgres`) | [Postgres tenant store](postgres-tenant-store.md); #111 |
 | tenkai-server tenant mode → Postgres hub store | [Postgres server wiring](postgres-tenant-store.md#tenkai-server-wiring-127); #127 |

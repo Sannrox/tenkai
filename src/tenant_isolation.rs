@@ -46,9 +46,10 @@ pub enum TenantVisibleSurface {
 
 /// A public operation that can reveal tenant-scoped identifiers or values.
 ///
-/// Every tenant-visible RPC must appear in [`tenant_visible_rpcs`] and register
-/// conformance coverage through [`conformance_case_matrix`]. CI fails when a
-/// registered RPC lacks a required isolation case.
+/// Every tenant-visible RPC must appear in [`tenant_visible_rpcs`]. The
+/// `tenkai-http` tenant route guard fails when a published route serves tenant
+/// mode without a registration here, and when a registered `/v1/` route is no
+/// longer published.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TenantVisibleRpc {
     pub id: &'static str,
@@ -56,56 +57,8 @@ pub struct TenantVisibleRpc {
     pub surface: TenantVisibleSurface,
 }
 
-/// Isolation cases every tenant-visible RPC must cover.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IsolationCase {
-    ValidContext,
-    MissingContext,
-    MismatchedTenant,
-    ForgedContext,
-    ExpiredContext,
-    WrongAudience,
-    SuspendedTenant,
-    RevokedCredential,
-    CrossTenantIdentifier,
-    ListLeakage,
-    CountLeakage,
-    StatusLeakage,
-    EventLeakage,
-    MetricLabelLeakage,
-    CacheLeakage,
-    AuditLeakage,
-    AgentCrossEnvironment,
-    AgentCrossTenant,
-}
-
-/// Required cases for every registered tenant-visible RPC.
-pub fn required_isolation_cases() -> &'static [IsolationCase] {
-    &[
-        IsolationCase::ValidContext,
-        IsolationCase::MissingContext,
-        IsolationCase::MismatchedTenant,
-        IsolationCase::ForgedContext,
-        IsolationCase::ExpiredContext,
-        IsolationCase::WrongAudience,
-        IsolationCase::SuspendedTenant,
-        IsolationCase::RevokedCredential,
-        IsolationCase::CrossTenantIdentifier,
-        IsolationCase::ListLeakage,
-        IsolationCase::CountLeakage,
-        IsolationCase::StatusLeakage,
-        IsolationCase::EventLeakage,
-        IsolationCase::MetricLabelLeakage,
-        IsolationCase::CacheLeakage,
-        IsolationCase::AuditLeakage,
-        IsolationCase::AgentCrossEnvironment,
-        IsolationCase::AgentCrossTenant,
-    ]
-}
-
-/// Isolation matrix for tenant-visible operations: live HTTP routes plus
-/// harness and in-process enterprise catalog/plan surfaces.
+/// Tenant-visible operations: live HTTP routes (`METHOD /v1/...` templates)
+/// plus harness and in-process enterprise catalog/plan surfaces.
 pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
     &[
         TenantVisibleRpc {
@@ -219,6 +172,41 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Environment,
         },
         TenantVisibleRpc {
+            id: "environment.retire",
+            path_template: "POST /v1/environments/{environment}/retire",
+            surface: TenantVisibleSurface::Environment,
+        },
+        TenantVisibleRpc {
+            id: "environment.delivery_hold",
+            path_template: "GET /v1/environments/{environment}/hold",
+            surface: TenantVisibleSurface::Environment,
+        },
+        TenantVisibleRpc {
+            id: "catalog.list_releases",
+            path_template: "GET /v1/releases",
+            surface: TenantVisibleSurface::Catalog,
+        },
+        TenantVisibleRpc {
+            id: "catalog.list_channels",
+            path_template: "GET /v1/channels",
+            surface: TenantVisibleSurface::Catalog,
+        },
+        TenantVisibleRpc {
+            id: "catalog.advisory_feed",
+            path_template: "GET /v1/advisory-feed",
+            surface: TenantVisibleSurface::Catalog,
+        },
+        TenantVisibleRpc {
+            id: "catalog.product_criticality",
+            path_template: "GET /v1/products/{product}/criticality",
+            surface: TenantVisibleSurface::Catalog,
+        },
+        TenantVisibleRpc {
+            id: "catalog.channel_hold",
+            path_template: "GET /v1/products/{product}/channels/{channel}/hold",
+            surface: TenantVisibleSurface::Catalog,
+        },
+        TenantVisibleRpc {
             id: "plan.list",
             path_template: "LIST plans",
             surface: TenantVisibleSurface::Plan,
@@ -269,92 +257,6 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Aggregate,
         },
     ]
-}
-
-/// Tenant-visible RPCs that are **live on management HTTP** today and must be
-/// enforced in `crates/tenkai-http` under tenant mode.
-///
-/// All other entries in [`tenant_visible_rpcs`] remain harness or in-process
-/// enterprise surfaces; they are not advertised as public HTTP unless listed
-/// here.
-pub fn http_exposed_tenant_rpc_ids() -> &'static [&'static str] {
-    &[
-        "management.reconcile",
-        "management.fleet_status",
-        "management.package_migration_preview",
-        "management.package_migration_apply",
-        "management.package_migration_status",
-        "management.package_migration_list",
-        "management.package_migration_resume",
-        "management.package_migration_rollback",
-        "development.fixture_import",
-        "development.fixture_reset",
-        "runtime.work",
-        "runtime.complete",
-        "runtime.heartbeat",
-        "runtime.inventory",
-        "environment.list",
-        "environment.get",
-        "environment.status",
-        "environment.dependencies",
-        "environment.history",
-        "environment.runtime",
-        "event.list",
-    ]
-}
-
-/// True when the RPC id is a live HTTP management/runtime route.
-pub fn is_http_exposed_tenant_rpc(rpc_id: &str) -> bool {
-    http_exposed_tenant_rpc_ids().contains(&rpc_id)
-}
-
-/// Declares which isolation cases the harness exercises for each registered RPC.
-///
-/// When adding a tenant-visible RPC, append it to [`tenant_visible_rpcs`] and
-/// list its covered cases here. [`assert_conformance_coverage`] fails CI if a
-/// required case is missing.
-pub fn conformance_case_matrix() -> BTreeMap<&'static str, BTreeSet<IsolationCase>> {
-    let all: BTreeSet<IsolationCase> = required_isolation_cases().iter().copied().collect();
-    tenant_visible_rpcs()
-        .iter()
-        .map(|rpc| (rpc.id, all.clone()))
-        .collect()
-}
-
-/// Fail when a registered RPC lacks a required isolation case.
-pub fn assert_conformance_coverage() -> Result<(), CoverageError> {
-    let matrix = conformance_case_matrix();
-    let required: BTreeSet<_> = required_isolation_cases().iter().copied().collect();
-    let mut missing = BTreeMap::new();
-    for rpc in tenant_visible_rpcs() {
-        let covered = matrix.get(rpc.id).cloned().unwrap_or_default();
-        let gap: BTreeSet<_> = required.difference(&covered).copied().collect();
-        if !gap.is_empty() {
-            missing.insert(rpc.id.to_string(), gap);
-        }
-    }
-    for rpc_id in matrix.keys() {
-        if !tenant_visible_rpcs().iter().any(|rpc| rpc.id == *rpc_id) {
-            return Err(CoverageError::UnregisteredRpc {
-                rpc_id: (*rpc_id).into(),
-            });
-        }
-    }
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(CoverageError::MissingCases { missing })
-    }
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum CoverageError {
-    #[error("tenant-visible RPC `{rpc_id}` is listed in the case matrix but not registered")]
-    UnregisteredRpc { rpc_id: String },
-    #[error("tenant-visible RPCs are missing required isolation cases: {missing:?}")]
-    MissingCases {
-        missing: BTreeMap<String, BTreeSet<IsolationCase>>,
-    },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -1113,9 +1015,6 @@ impl TenantIsolationHarness {
 
     /// Run the full isolation matrix against the reference surface.
     pub fn run_conformance(&self) -> Result<(), IsolationError> {
-        assert_conformance_coverage()
-            .map_err(|error| IsolationError::Contract(error.to_string()))?;
-
         let a = &self.fixture.tenant_a;
         let b = &self.fixture.tenant_b;
         let ctx_a = self
@@ -1325,14 +1224,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_requires_isolation_cases_for_every_rpc() {
-        assert_conformance_coverage().unwrap();
-        assert!(!tenant_visible_rpcs().is_empty());
-        assert_eq!(conformance_case_matrix().len(), tenant_visible_rpcs().len());
-    }
-
-    #[test]
-    fn runtime_inventory_is_registered_and_http_exposed() {
+    fn runtime_inventory_is_registered() {
         let rpc = tenant_visible_rpcs()
             .iter()
             .find(|rpc| rpc.id == "runtime.inventory")
@@ -1342,11 +1234,10 @@ mod tests {
             "POST /v1/runtime/environments/{environment}/inventory"
         );
         assert_eq!(rpc.surface, TenantVisibleSurface::RuntimeAgent);
-        assert!(http_exposed_tenant_rpc_ids().contains(&"runtime.inventory"));
     }
 
     #[test]
-    fn environment_runtime_is_registered_and_http_exposed() {
+    fn environment_runtime_is_registered() {
         let rpc = tenant_visible_rpcs()
             .iter()
             .find(|rpc| rpc.id == "environment.runtime")
@@ -1356,11 +1247,10 @@ mod tests {
             "GET /v1/environments/{environment}/runtime"
         );
         assert_eq!(rpc.surface, TenantVisibleSurface::Environment);
-        assert!(http_exposed_tenant_rpc_ids().contains(&"environment.runtime"));
     }
 
     #[test]
-    fn environment_dependencies_is_registered_and_http_exposed() {
+    fn environment_dependencies_is_registered() {
         let rpc = tenant_visible_rpcs()
             .iter()
             .find(|rpc| rpc.id == "environment.dependencies")
@@ -1370,11 +1260,10 @@ mod tests {
             "GET /v1/environments/{environment}/dependencies"
         );
         assert_eq!(rpc.surface, TenantVisibleSurface::Environment);
-        assert!(http_exposed_tenant_rpc_ids().contains(&"environment.dependencies"));
     }
 
     #[test]
-    fn environment_history_is_registered_and_http_exposed() {
+    fn environment_history_is_registered() {
         let rpc = tenant_visible_rpcs()
             .iter()
             .find(|rpc| rpc.id == "environment.history")
@@ -1384,7 +1273,6 @@ mod tests {
             "GET /v1/environments/{environment}/history"
         );
         assert_eq!(rpc.surface, TenantVisibleSurface::Environment);
-        assert!(http_exposed_tenant_rpc_ids().contains(&"environment.history"));
     }
 
     #[test]

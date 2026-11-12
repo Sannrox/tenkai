@@ -27,6 +27,7 @@ mod runtime_unknown_fields;
 mod software_compatibility;
 mod support;
 mod tenant;
+mod tenant_routes;
 mod trust;
 
 pub(super) use std::collections::HashMap;
