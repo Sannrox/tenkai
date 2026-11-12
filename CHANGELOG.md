@@ -6,6 +6,26 @@ pull request body, which becomes the squash commit; at release,
 
 ## [Unreleased]
 
+## v0.8.1 (2026-11-12)
+
+Gate flags: none
+
+Patch on 0.8.0 for `kubernetes-inprocess`: failed-apply cleanup and product
+removal no longer delete objects the release does not own, including
+PersistentVolumeClaims, and `PodDisruptionBudget` (`policy/v1`) is a supported
+kind. Both fixes are backports from `main`.
+
+### Fixed
+- fix(executor): delete only owned objects in in-process Kubernetes cleanup and removal (#1199, backport #1211 of #1206)
+- fix(executor): apply PodDisruptionBudget in-process and refuse unsupported kinds before mutating (#1200, backport #1214 of #1208)
+
+### Upgrade
+- Install 0.8.1 hosts from the GitHub Release after verifying `SHA256SUMS` and the attestation, or with `install.sh`. No store schema change and no migration. `tenkaictl --version` reports `tenkaictl 0.8.1`.
+- Failed-apply cleanup (#1199): it deletes only objects the failed attempt created, which apply marks with the `tenkai.created-by-attempt` annotation. Objects carried over from the previous release or adopted by name stay for the restore. Cleanup never deletes a `PersistentVolumeClaim` or a `Namespace`, so a failed first install leaves its new claims behind, and the next install adopts them. Objects applied by 0.8.0 carry no mark, so a failed retry under 0.8.1 keeps them too.
+- Removal (#1199): it deletes only objects whose `tenkai.instance` label (or `tenkai.product`, on objects applied before that label existed) names the instance being removed. Objects a successor took over by name stay. An object named in the release's manifests that has no Tenkai labels stays, and the removal fails naming it. Delete or label it by hand once nothing uses it, then let the next approved plan retry the removal.
+- Supported kinds (#1200): `PodDisruptionBudget` (`policy/v1`) applies with server-side apply and is removed with the product. Apply now checks every object's kind and apiVersion before it applies the first one, and an unsupported object fails the step naming the manifest file and the object, with nothing applied. On this line the check runs at apply, not at plan time; plan-time refusal exists only on `main`.
+- Rollback to 0.8.0: the previous binary plus the existing store. 0.8.0 ignores the `tenkai.created-by-attempt` annotation, refuses `PodDisruptionBudget` again, and deletes objects by kind and name again during failed-apply cleanup and removal.
+
 ## v0.8.0 (2026-11-11)
 
 Gate flags: breaking, migration
