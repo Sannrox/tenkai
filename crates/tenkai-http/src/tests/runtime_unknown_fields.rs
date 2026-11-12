@@ -36,6 +36,10 @@ async fn runtime_http_bodies_reject_unknown_fields() {
         "source": "runtime-probe",
         "extension": true
     });
+    let health = serde_json::json!({
+        "observations": [],
+        "extension": true
+    });
     let nested_receipt = serde_json::json!({
         "plan_id": "plan-1",
         "generation": 1,
@@ -54,6 +58,7 @@ async fn runtime_http_bodies_reject_unknown_fields() {
         ("complete", nested_receipt),
         ("heartbeat", heartbeat),
         ("inventory", inventory),
+        ("health", health),
     ] {
         let status = post_runtime(app.clone(), route, body).await;
         assert_eq!(

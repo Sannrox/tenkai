@@ -1562,6 +1562,10 @@ pub struct StatusRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub certificate: Option<crate::certificate_reports::CertificateStatus>,
+    /// Failing and warning checks from the latest health observation (#1057).
+    /// Empty when none were reported or the observation is stale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub health_checks: Vec<crate::instance_health::HealthCheck>,
 }
 
 /// Unmet contract named by a dependency hold.
@@ -2000,7 +2004,10 @@ pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
 async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<StatusRow>> {
     let subscriptions = list_subscriptions(ctx, env_obj).await?;
     let certificates = crate::certificate_reports::reported(ctx, &env_obj.name).await?;
-    let now_secs = crate::now_millis() / 1000;
+    let observations = crate::instance_health::reported(ctx, &env_obj.name).await?;
+    let now_ms = crate::now_millis();
+    let now_secs = now_ms / 1000;
+    let max_age_ms = crate::instance_health::max_age_ms(env_obj);
     let mut rows = Vec::new();
     for sub in subscriptions {
         let product = sub.product;
@@ -2047,16 +2054,37 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
         });
         let dependency_hold =
             dependency_hold(&env_obj.properties, &instance).map(|hold| hold.to_status_view());
+        let apply_health = env_obj
+            .properties
+            .get(&format!("deployment_health.{instance}"))
+            .cloned();
+        let deployed_digest = match env_obj
+            .properties
+            .get(&format!("deployed_release.{applied_key}"))
+        {
+            Some(id) => ctx
+                .get(id)
+                .await?
+                .and_then(|release| release.properties.get("artifact_digest").cloned()),
+            None => None,
+        };
+        let (health, health_checks) = crate::instance_health::overlay(
+            apply_health,
+            observations.get(&applied_key),
+            deployed_digest.as_deref(),
+            now_ms,
+            max_age_ms,
+        );
+        let certificate = certificates
+            .get(&applied_key)
+            .map(|report| report.status(now_secs));
         rows.push(StatusRow {
             instance: instance.clone(),
             deployed: env_obj
                 .properties
                 .get(&format!("deployed.{instance}"))
                 .cloned(),
-            health: env_obj
-                .properties
-                .get(&format!("deployment_health.{instance}"))
-                .cloned(),
+            health,
             error: if held
                 && env_obj
                     .properties
@@ -2085,9 +2113,8 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             delivery_hold,
             dependency_hold,
             spec_drift: spec_drift_from_object(env_obj, &applied_key),
-            certificate: certificates
-                .get(&applied_key)
-                .map(|report| report.status(now_secs)),
+            certificate,
+            health_checks,
         });
     }
     rows.sort_by(|a, b| {
@@ -4187,6 +4214,7 @@ mod tests {
             delivery_hold: None,
             spec_drift: None,
             certificate: None,
+            health_checks: Vec::new(),
             dependency_hold: Some(StatusDependencyHold {
                 release_id: "tenkai:release:app@1.0.0".into(),
                 contracts: vec![UnmetContract {

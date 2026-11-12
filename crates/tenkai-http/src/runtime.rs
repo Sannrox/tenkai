@@ -29,7 +29,7 @@ pub(super) async fn runtime_work(
         Ok(work) => (
             [(
                 tenkai::runtime_delivery::SERVER_CAPABILITIES_HEADER,
-                tenkai::runtime_delivery::CERTIFICATE_OBSERVATIONS_CAPABILITY,
+                tenkai::runtime_delivery::SERVER_RUNTIME_CAPABILITIES,
             )],
             Json(work),
         )
@@ -260,6 +260,29 @@ pub(super) async fn runtime_certificates(
     }
 }
 
+/// The instance health a runtime reports (#1057).
+pub(super) async fn runtime_health(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
+    Json(report): Json<tenkai::runtime_delivery::RuntimeHealthReport>,
+) -> Response {
+    match state
+        .runtime_delivery
+        .report_health(
+            bearer(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
+            &environment,
+            &report,
+        )
+        .await
+    {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => runtime_delivery_error(error),
+    }
+}
+
 /// The calling instance, the agent's version when sent (#673), and the
 /// connection's verified client certificate (#674).
 fn runtime_caller<'a>(
@@ -288,6 +311,10 @@ fn runtime_caller<'a>(
         issuer_removal: names_capability(
             headers,
             tenkai::runtime_delivery::ISSUER_REMOVAL_CAPABILITY,
+        ),
+        instance_health: names_capability(
+            headers,
+            tenkai::runtime_delivery::INSTANCE_HEALTH_CAPABILITY,
         ),
     }
 }

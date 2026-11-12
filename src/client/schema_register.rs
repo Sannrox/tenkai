@@ -13,8 +13,8 @@ use crate::ontology::{
     KIND_CHANNEL_PROMOTION_DECISION, KIND_CHANNEL_PROMOTION_POLICY,
     KIND_CHANNEL_PROMOTION_POLICY_POINTER, KIND_CHANNEL_PROMOTION_SOAK, KIND_CONNECTIVITY_UPGRADE,
     KIND_DEPLOYMENT, KIND_ENVIRONMENT, KIND_ENVIRONMENT_EXECUTION, KIND_HEALTH_GATE_EVIDENCE,
-    KIND_HOST_RECORD, KIND_INSTANCE, KIND_MAINTENANCE_CONFIG, KIND_PACKAGE_MIGRATION,
-    KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN, KIND_PLAN_APPROVAL_ENVELOPE,
+    KIND_HOST_RECORD, KIND_INSTANCE, KIND_INSTANCE_HEALTH, KIND_MAINTENANCE_CONFIG,
+    KIND_PACKAGE_MIGRATION, KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN, KIND_PLAN_APPROVAL_ENVELOPE,
     KIND_PLAN_APPROVAL_VERIFICATION, KIND_PRODUCT, KIND_PRODUCT_MAINTENANCE_CONFIG,
     KIND_PROMOTION_AUDIT, KIND_PROMOTION_LOCK, KIND_RELEASE, KIND_RELEASE_RECALL,
     KIND_RELEASE_RECALL_RANGE, KIND_RELEASE_VERIFICATION, KIND_RUNTIME_ENROLLMENT, KIND_WAVE,
@@ -671,6 +671,28 @@ pub fn known_object_types() -> Vec<ObjectType> {
                     "Detached tenkai.plan-approval.v1 envelope",
                 ),
                 prop("collected_at", true, "Collection time in Unix milliseconds"),
+            ],
+        ),
+        object_type(
+            KIND_INSTANCE_HEALTH,
+            "An immutable instance health observation an environment runtime made",
+            vec![
+                prop(
+                    "environment",
+                    true,
+                    "Environment the observation belongs to",
+                ),
+                prop("instance", true, "Instance the observation belongs to"),
+                prop(
+                    "report",
+                    true,
+                    "Reported tenkai.instance-health.v1 observation (JSON)",
+                ),
+                prop(
+                    "observed_at_ms",
+                    true,
+                    "When the runtime observed this state, Unix milliseconds",
+                ),
             ],
         ),
         object_type(

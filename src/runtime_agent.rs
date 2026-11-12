@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use reqwest::StatusCode;
+use tokio::io::AsyncReadExt as _;
 use tokio::process::Command;
 
 use crate::inventory::{self, RUNTIME_INVENTORY_SOURCE};
@@ -322,6 +323,11 @@ pub struct RuntimeClient {
     /// The last pull's server admits the take-up fields of a certificate
     /// report; an older one refuses them, so they are left out.
     server_observations: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The last pull's server admits instance health observations (#1057).
+    server_instance_health: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Next idle health duty to try, so a slow early instance cannot starve
+    /// later ones across polls.
+    health_duty_cursor: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// The host preflight config whose checks runner attestation carries.
     preflight: Option<PathBuf>,
     /// Local approval policy and trust roots, installed on this host
@@ -376,6 +382,8 @@ impl RuntimeClient {
             renewal_pass_at: Default::default(),
             certificates_reported: Default::default(),
             server_observations: Default::default(),
+            server_instance_health: Default::default(),
+            health_duty_cursor: Default::default(),
             preflight: None,
             local_policy: None,
         })
@@ -597,7 +605,11 @@ impl RuntimeClient {
             }
         }
         let approvals = work.approvals;
+        let duties = work.health_observations;
         let (Some(plan), Some(claim)) = (work.plan, work.claim) else {
+            if let Err(error) = self.observe_instance_health(&duties).await {
+                eprintln!("instance health observation failed (retrying): {error:#}");
+            }
             return Ok(false);
         };
         if let Some(completion_json) = claim.completion_json {
@@ -965,35 +977,37 @@ impl RuntimeClient {
             .bearer_auth(&self.token)
             .header("x-tenkai-runtime-instance", &self.instance_id)
             .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"));
-        // A server that predates the header ignores it and offers no issuer
-        // work; one that knows it offers issuer work only with it.
+        // A server that predates the header ignores it and offers no
+        // optional work; one that knows a name offers that work only with it.
+        let mut capabilities = vec![crate::runtime_delivery::INSTANCE_HEALTH_CAPABILITY];
         if self.workload_identity() {
-            request = request.header(
-                "x-tenkai-runtime-capabilities",
-                format!(
-                    "{},{},{},{},{}",
-                    crate::runtime_delivery::WORKLOAD_IDENTITY_CAPABILITY,
-                    crate::runtime_delivery::PEER_GRANTS_CAPABILITY,
-                    crate::runtime_delivery::ISSUER_ROTATION_CAPABILITY,
-                    crate::runtime_delivery::ISSUER_TAKE_UP_CAPABILITY,
-                    crate::runtime_delivery::ISSUER_REMOVAL_CAPABILITY
-                ),
-            );
+            capabilities.extend([
+                crate::runtime_delivery::WORKLOAD_IDENTITY_CAPABILITY,
+                crate::runtime_delivery::PEER_GRANTS_CAPABILITY,
+                crate::runtime_delivery::ISSUER_ROTATION_CAPABILITY,
+                crate::runtime_delivery::ISSUER_TAKE_UP_CAPABILITY,
+                crate::runtime_delivery::ISSUER_REMOVAL_CAPABILITY,
+            ]);
         }
+        request = request.header("x-tenkai-runtime-capabilities", capabilities.join(","));
         let response = request.send().await?;
         // What the server admits is read on every pull, so a server rolled
         // back to an older version is followed within one poll.
-        let observations = response
+        let names = response
             .headers()
             .get(crate::runtime_delivery::SERVER_CAPABILITIES_HEADER)
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|names| {
-                names.split(',').any(|name| {
-                    name.trim() == crate::runtime_delivery::CERTIFICATE_OBSERVATIONS_CAPABILITY
-                })
-            });
-        self.server_observations
-            .store(observations, std::sync::atomic::Ordering::SeqCst);
+            .unwrap_or_default();
+        let names_capability =
+            |capability: &str| names.split(',').any(|name| name.trim() == capability);
+        self.server_observations.store(
+            names_capability(crate::runtime_delivery::CERTIFICATE_OBSERVATIONS_CAPABILITY),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        self.server_instance_health.store(
+            names_capability(crate::runtime_delivery::INSTANCE_HEALTH_CAPABILITY),
+            std::sync::atomic::Ordering::SeqCst,
+        );
         decode_response(response, "pulling runtime work").await
     }
 
@@ -1112,6 +1126,201 @@ impl RuntimeClient {
         Ok(())
     }
 
+    /// Re-run each idle duty's `deploy.health` and POST the observations.
+    /// Never fails the poll: a probe or report that could not run is logged
+    /// and retried next poll.
+    async fn observe_instance_health(
+        &self,
+        duties: &[crate::runtime_delivery::HealthObservationDuty],
+    ) -> Result<()> {
+        if duties.is_empty()
+            || !self
+                .server_instance_health
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+        let deadline = tokio::time::Instant::now() + HEALTH_PROBE_TIMEOUT;
+        let start = self
+            .health_duty_cursor
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut visited = 0;
+        for offset in 0..duties.len() {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining < Duration::from_millis(50) {
+                break;
+            }
+            visited += 1;
+            let duty = &duties[(start + offset) % duties.len()];
+            let Some((command, workdir)) = self.local_health_probe(duty) else {
+                continue;
+            };
+            let (exit_ok, stdout) = probe_health(
+                &command,
+                &workdir,
+                &self.environment,
+                &duty.product,
+                &duty.instance,
+                remaining,
+            )
+            .await;
+            let observation = crate::instance_health::from_probe(
+                &self.environment,
+                &duty.instance,
+                &duty.artifact_digest,
+                crate::now_millis(),
+                exit_ok,
+                &stdout,
+            );
+            if let Err(error) = self.report_health(vec![observation]).await {
+                eprintln!(
+                    "reporting instance health of {} failed (retrying): {error:#}",
+                    duty.instance
+                );
+            }
+        }
+        if visited > 0 {
+            self.health_duty_cursor
+                .fetch_add(visited, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    fn local_health_probe(
+        &self,
+        duty: &crate::runtime_delivery::HealthObservationDuty,
+    ) -> Option<(String, PathBuf)> {
+        match &self.executor {
+            StepExecutor::Builtin(config) => config.local_health_probe(
+                &self.environment,
+                &duty.product,
+                &duty.artifact_digest,
+                &duty.release_digest,
+            ),
+            StepExecutor::Program(_) => None,
+        }
+    }
+
+    async fn report_health(
+        &self,
+        observations: Vec<crate::instance_health::HealthObservation>,
+    ) -> Result<()> {
+        if observations.is_empty() {
+            return Ok(());
+        }
+        for batch in observations.chunks(crate::instance_health::MAX_REPORTS) {
+            let report = crate::runtime_delivery::RuntimeHealthReport {
+                observations: batch.to_vec(),
+            };
+            let response = self
+                .client()?
+                .post(format!(
+                    "{}/v1/runtime/environments/{}/health",
+                    self.base_url, self.environment
+                ))
+                .bearer_auth(&self.token)
+                .header("x-tenkai-runtime-instance", &self.instance_id)
+                .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
+                .json(&report)
+                .send()
+                .await?;
+            if matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ) {
+                eprintln!(
+                    "the server does not accept instance health observations; continuing with apply-time health"
+                );
+                return Ok(());
+            }
+            let _: crate::runtime_delivery::RuntimeHealthResponse =
+                decode_response(response, "reporting instance health").await?;
+        }
+        Ok(())
+    }
+}
+
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run `command` with `/bin/sh -c` from the verified workdir, cap stdout
+/// while reading (later bytes discarded), and treat a timeout or spawn
+/// failure as a failed probe. Overflow of the cap is a truncated warning,
+/// not a failed exit.
+async fn probe_health(
+    command: &str,
+    workdir: &Path,
+    environment: &str,
+    product: &str,
+    instance: &str,
+    timeout: Duration,
+) -> (bool, Vec<u8>) {
+    if !workdir.is_dir() {
+        return (false, Vec::new());
+    }
+    let mut child = Command::new(crate::fenced_mutation::DEPLOY_SHELL);
+    child
+        .arg("-c")
+        .arg(command)
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .current_dir(workdir)
+        .env_clear();
+    for (key, value) in
+        crate::fenced_mutation::deploy_child_environment(environment, product, instance, None)
+    {
+        child.env(key, value);
+    }
+    child.as_std_mut().process_group(0);
+    let mut spawned = match child.spawn() {
+        Ok(spawned) => spawned,
+        Err(_) => return (false, Vec::new()),
+    };
+    let process_group = spawned.id().map(|id| -(id as i32));
+    let Some(mut stdout) = spawned.stdout.take() else {
+        return (false, Vec::new());
+    };
+    let cap = crate::instance_health::MAX_STDOUT_BYTES.saturating_add(1);
+    let collect = async {
+        let mut buf = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            match stdout.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if buf.len() < cap {
+                        let take = n.min(cap.saturating_sub(buf.len()));
+                        buf.extend_from_slice(&chunk[..take]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        buf
+    };
+    match tokio::time::timeout(timeout, async {
+        let buf = collect.await;
+        match spawned.wait().await {
+            Ok(status) => (status.success(), buf),
+            Err(_) => (false, buf),
+        }
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            if let Some(process_group) = process_group {
+                unsafe {
+                    libc::kill(process_group, libc::SIGKILL);
+                }
+            }
+            (false, Vec::new())
+        }
+    }
+}
+
+impl RuntimeClient {
     /// Whether this runtime runs identity issuer steps (ADR 0046 §2): only
     /// the built-in executor with a sealing key opens the issuer key.
     fn workload_identity(&self) -> bool {
@@ -2024,5 +2233,125 @@ mod tests {
         assert_eq!(sent.len(), 2, "the new shape is sent at once: {sent:?}");
         assert_eq!(fields(&sent[0]), [false; 3]);
         assert_eq!(fields(&sent[1]), [true; 3]);
+    }
+
+    #[tokio::test]
+    async fn idle_work_posts_a_failed_health_probe() {
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let digest = "ab".repeat(32);
+        let manifest = "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\nhealth = \"false\"\n";
+        let release_digest = crate::manifest::digest(manifest);
+        let app = {
+            let bodies = bodies.clone();
+            let digest = digest.clone();
+            let release_digest = release_digest.clone();
+            axum::Router::new()
+                .route(
+                    "/v1/runtime/environments/prod/work",
+                    axum::routing::get(move || {
+                        let digest = digest.clone();
+                        let release_digest = release_digest.clone();
+                        async move {
+                            let mut response = axum::response::IntoResponse::into_response(
+                                axum::Json(serde_json::json!({
+                                    "environment": "prod",
+                                    "plan": null,
+                                    "claim": null,
+                                    "health_observations": [{
+                                        "instance": "api",
+                                        "product": "api",
+                                        "artifact_digest": digest,
+                                        "release_digest": release_digest
+                                    }]
+                                })),
+                            );
+                            response.headers_mut().insert(
+                                crate::runtime_delivery::SERVER_CAPABILITIES_HEADER,
+                                axum::http::HeaderValue::from_static(
+                                    crate::runtime_delivery::SERVER_RUNTIME_CAPABILITIES,
+                                ),
+                            );
+                            response
+                        }
+                    }),
+                )
+                .route(
+                    "/v1/runtime/environments/prod/health",
+                    axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                        let bodies = bodies.clone();
+                        async move {
+                            bodies.lock().unwrap().push(body);
+                            axum::Json(serde_json::json!({ "stored": ["api"] }))
+                        }
+                    }),
+                )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-health-probe-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let work_root = root.join("work");
+        let placed = work_root.join("prod").join("api").join(&digest);
+        std::fs::create_dir_all(&placed).unwrap();
+        std::fs::write(
+            work_root
+                .join("prod")
+                .join("api")
+                .join(format!("{release_digest}.manifest")),
+            manifest,
+        )
+        .unwrap();
+        std::fs::write(
+            work_root
+                .join("prod")
+                .join("api")
+                .join(format!("{release_digest}.artifact")),
+            &digest,
+        )
+        .unwrap();
+        let client = RuntimeClient::new_with_options(
+            format!("http://{address}"),
+            "prod",
+            "tkc_bearer",
+            StepExecutor::Builtin(std::sync::Arc::new(crate::runtime_builtin::BuiltinConfig {
+                executors: crate::software_executor::SoftwareExecutors::default(),
+                release_roots: crate::release_signing::TrustRoots {
+                    version: crate::release_signing::TRUST_ROOT_VERSION,
+                    signers: Vec::new(),
+                },
+                cluster_config: None,
+                secret_dir: None,
+                sealing_dir: None,
+                work_root,
+            })),
+            false,
+        )
+        .unwrap();
+        assert!(!client.run_once().await.unwrap());
+        let sent = bodies.lock().unwrap();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        let observation = &sent[0]["observations"][0];
+        assert_eq!(observation["instance"], "api");
+        assert_eq!(observation["state"], "failing");
+        assert_eq!(observation["environment"], "prod");
+    }
+
+    #[tokio::test]
+    async fn health_probe_caps_stdout_while_reading() {
+        let (ok, stdout) = probe_health(
+            "head -c 1048576 /dev/zero",
+            &std::env::temp_dir(),
+            "prod",
+            "api",
+            "api",
+            HEALTH_PROBE_TIMEOUT,
+        )
+        .await;
+        assert!(ok);
+        assert_eq!(stdout.len(), crate::instance_health::MAX_STDOUT_BYTES + 1);
     }
 }

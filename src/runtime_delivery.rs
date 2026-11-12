@@ -795,6 +795,11 @@ pub struct RuntimeWork {
     /// that names `issuer_take_up`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issuer_proofs: Vec<crate::identity_issuer::IssuerProof>,
+    /// Instances whose `deploy.health` this idle runtime should re-run
+    /// (#1057). Omitted when empty, and only filled for a runtime that
+    /// names `instance_health`, so an older one keeps decoding idle work.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub health_observations: Vec<HealthObservationDuty>,
 }
 
 fn idle_work(environment: &str) -> RuntimeWork {
@@ -805,7 +810,64 @@ fn idle_work(environment: &str) -> RuntimeWork {
         approvals: Vec::new(),
         issuer_candidate: None,
         issuer_proofs: Vec::new(),
+        health_observations: Vec::new(),
     }
+}
+
+async fn health_duties_from_env(
+    ctx: &mut Ctx,
+    environment: &str,
+) -> anyhow::Result<Vec<HealthObservationDuty>> {
+    let env_obj = crate::environment::environment(ctx, environment).await?;
+    let mut duties = Vec::new();
+    for (key, release_id) in &env_obj.properties {
+        let Some(instance) = key.strip_prefix("deployed_release.") else {
+            continue;
+        };
+        let Some(object) = ctx.get(release_id).await? else {
+            continue;
+        };
+        let Some(raw) = object.properties.get("manifest") else {
+            continue;
+        };
+        let Ok(manifest) = crate::manifest::parse_raw(raw) else {
+            continue;
+        };
+        if manifest.deploy.executor == Some(crate::software_executor::SoftwareExecutorKind::Host) {
+            continue;
+        }
+        if manifest
+            .deploy
+            .health
+            .as_ref()
+            .is_none_or(|command| command.is_empty())
+        {
+            continue;
+        }
+        let Some(product) = object
+            .properties
+            .get("product")
+            .filter(|product| !product.is_empty())
+            .cloned()
+        else {
+            continue;
+        };
+        let Some(artifact_digest) = object
+            .properties
+            .get("artifact_digest")
+            .filter(|digest| !digest.is_empty())
+            .cloned()
+        else {
+            continue;
+        };
+        duties.push(HealthObservationDuty {
+            instance: instance.to_owned(),
+            product,
+            artifact_digest,
+            release_digest: crate::manifest::digest(raw),
+        });
+    }
+    Ok(duties)
 }
 
 async fn delivered_work(
@@ -839,6 +901,7 @@ async fn delivered_work(
         approvals,
         issuer_candidate: None,
         issuer_proofs: Vec::new(),
+        health_observations: Vec::new(),
     })
 }
 
@@ -1008,6 +1071,32 @@ pub struct RuntimeCertificatesResponse {
     pub stored: Vec<String>,
 }
 
+/// One instance whose idle runtime should re-run `deploy.health` (#1057).
+///
+/// The command is not on the wire: the agent reads it from the locally
+/// verified copy of `product` identified by `release_digest`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthObservationDuty {
+    pub instance: String,
+    pub product: String,
+    pub artifact_digest: String,
+    pub release_digest: String,
+}
+
+/// The health observations a runtime reports for its environment (#1057).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeHealthReport {
+    pub observations: Vec<crate::instance_health::HealthObservation>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RuntimeHealthResponse {
+    /// Instances whose observation was newer than the stored one.
+    pub stored: Vec<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeDeliveryError {
     #[error("missing bearer token")]
@@ -1071,6 +1160,9 @@ pub struct RuntimeCaller<'a> {
     /// steps and the remove plan's proof (ADR 0046 §7), which an older
     /// runtime refuses to decode.
     pub issuer_removal: bool,
+    /// The agent named the `instance_health` capability: it re-runs
+    /// `deploy.health` on idle work and POSTs observations (#1057).
+    pub instance_health: bool,
 }
 
 /// The capability a runtime names to be offered identity issuer work.
@@ -1089,6 +1181,12 @@ pub const SERVER_CAPABILITIES_HEADER: &str = "x-tenkai-server-capabilities";
 /// The server admits certificate reports with `trust`, `restart_pending`
 /// and `observed_at` (ADR 0046 §7).
 pub const CERTIFICATE_OBSERVATIONS_CAPABILITY: &str = "certificate_observations";
+/// The capability a runtime names to be offered health-observation duties
+/// and to POST `/health` (#1057).
+pub const INSTANCE_HEALTH_CAPABILITY: &str = "instance_health";
+/// What this server admits on runtime work, comma-separated so an agent
+/// keeps to the shape an older server decodes.
+pub const SERVER_RUNTIME_CAPABILITIES: &str = "certificate_observations,instance_health";
 
 impl<'a> From<Option<&'a str>> for RuntimeCaller<'a> {
     fn from(instance: Option<&'a str>) -> Self {
@@ -1221,6 +1319,9 @@ impl RuntimeDeliveryOperations {
         if caller.issuer_take_up {
             work.issuer_proofs = self.issuer_proofs(environment, caller.issuer_removal).await;
         }
+        if caller.instance_health && work.plan.is_none() {
+            work.health_observations = self.health_observation_duties(environment).await;
+        }
         Ok(work)
     }
 
@@ -1295,6 +1396,22 @@ impl RuntimeDeliveryOperations {
         Ok(crate::identity_issuer::wanted_generation(&env_obj)
             .map_err(unavailable)?
             .map(|generation| crate::identity_issuer::CandidateRequest { generation }))
+    }
+
+    /// Idle work for a runtime that names `instance_health`: each deployed
+    /// instance that still declares `deploy.health`. Optional: a miss
+    /// retries on the next poll, and apply-time health stands until then.
+    async fn health_observation_duties(&self, environment: &str) -> Vec<HealthObservationDuty> {
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Vec::new();
+        };
+        match health_duties_from_env(&mut ctx, environment).await {
+            Ok(duties) => duties,
+            Err(error) => {
+                eprintln!("reading instance health duties of {environment} failed: {error:#}");
+                Vec::new()
+            }
+        }
     }
 
     /// Store a runtime's identity issuer candidate (ADR 0046 §2). The first
@@ -1466,6 +1583,7 @@ impl RuntimeDeliveryOperations {
                     approvals: Vec::new(),
                     issuer_candidate: None,
                     issuer_proofs: Vec::new(),
+                    health_observations: Vec::new(),
                 }),
                 _ => Err(RuntimeDeliveryError::Unavailable(refusal.to_string())),
             };
@@ -2001,6 +2119,29 @@ impl RuntimeDeliveryOperations {
             .await
             .map_err(|error| RuntimeDeliveryError::InvalidRequest(format!("{error:#}")))?;
         Ok(RuntimeCertificatesResponse { stored })
+    }
+
+    /// Admit the instance health observations a runtime reports (#1057).
+    /// Newest `observed_at_ms` of an instance wins.
+    pub async fn report_health(
+        &self,
+        token: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
+        environment: &str,
+        report: &RuntimeHealthReport,
+    ) -> Result<RuntimeHealthResponse, RuntimeDeliveryError> {
+        let caller = caller.into();
+        let identity = self.admit_work(token, &caller, environment).await?;
+        self.note_activity(&identity, environment, caller.version, Activity::Inventory);
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "environment state unavailable".into(),
+            ));
+        };
+        let stored = crate::instance_health::admit(&mut ctx, environment, &report.observations)
+            .await
+            .map_err(|error| RuntimeDeliveryError::InvalidRequest(format!("{error:#}")))?;
+        Ok(RuntimeHealthResponse { stored })
     }
 
     pub async fn report_inventory(
@@ -3388,6 +3529,105 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn idle_health_duties_follow_deploy_health_and_newest_observation_wins() {
+        let (operations, port) = operations();
+        let mut ctx = port.ctx.clone().unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "prod", "runtime")
+            .await
+            .unwrap();
+        let manifest = r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+health = "curl -f http://127.0.0.1:9/health"
+"#;
+        let release_id = crate::ontology::release_id("api", "1.0.0");
+        let now = crate::now_millis();
+        ctx.put(crate::pb::sekai::Object {
+            id: release_id.clone(),
+            kind: crate::ontology::KIND_RELEASE.into(),
+            name: "api@1.0.0".into(),
+            namespace: crate::ontology::NS.into(),
+            external_id: String::new(),
+            properties: std::collections::HashMap::from([
+                ("product".into(), "api".into()),
+                ("version".into(), "1.0.0".into()),
+                ("artifact_digest".into(), "ab".repeat(32)),
+                ("manifest".into(), manifest.into()),
+            ]),
+            created: now,
+            updated: now,
+        })
+        .await
+        .unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "prod")
+            .await
+            .unwrap();
+        env.properties
+            .insert("deployed_release.api".into(), release_id);
+        env.updated = now;
+        ctx.put(env).await.unwrap();
+
+        let duties = health_duties_from_env(&mut ctx, "prod").await.unwrap();
+        assert_eq!(duties.len(), 1);
+        assert_eq!(duties[0].instance, "api");
+        assert_eq!(duties[0].product, "api");
+        assert_eq!(duties[0].artifact_digest, "ab".repeat(32));
+        assert_eq!(duties[0].release_digest, crate::manifest::digest(manifest));
+
+        let capable = RuntimeCaller {
+            instance: Some("instance-a"),
+            instance_health: true,
+            ..RuntimeCaller::default()
+        };
+        let older = operations
+            .claim_work(Some("runtime-secret"), Some("instance-a"), "prod")
+            .await
+            .unwrap();
+        assert!(older.health_observations.is_empty());
+
+        let failing =
+            crate::instance_health::from_probe("prod", "api", &"ab".repeat(32), 20, false, b"");
+        let stored = operations
+            .report_health(
+                Some("runtime-secret"),
+                capable,
+                "prod",
+                &RuntimeHealthReport {
+                    observations: vec![failing],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(stored.stored, ["api"]);
+        assert_eq!(
+            crate::instance_health::reported(&mut ctx, "prod")
+                .await
+                .unwrap()["api"]
+                .state,
+            crate::instance_health::HealthCheckState::Failing
+        );
+        let healthy =
+            crate::instance_health::from_probe("prod", "api", &"ab".repeat(32), 10, true, b"");
+        let ignored = operations
+            .report_health(
+                Some("runtime-secret"),
+                capable,
+                "prod",
+                &RuntimeHealthReport {
+                    observations: vec![healthy],
+                },
+            )
+            .await
+            .unwrap();
+        assert!(ignored.stored.is_empty());
+    }
+
     /// Certificate identity (#674): enrollment with a CSR issues a runner
     /// certificate; it admits its runner only in its environment and only
     /// until the credential is revoked; one from another CA claims nothing;
@@ -3449,6 +3689,7 @@ mod tests {
                 issuer_rotation: false,
                 issuer_take_up: false,
                 issuer_removal: false,
+                instance_health: false,
             };
             operations.admit(None, &caller, environment)
         };
@@ -3499,6 +3740,7 @@ mod tests {
                         issuer_rotation: false,
                         issuer_take_up: false,
                         issuer_removal: false,
+                        instance_health: false,
                     },
                     "prod",
                     &request,
@@ -3682,6 +3924,7 @@ mod tests {
                             issuer_rotation: false,
                             issuer_take_up: false,
                             issuer_removal: false,
+                            instance_health: false,
                         },
                         "prod",
                         &request,
@@ -3769,6 +4012,7 @@ mod tests {
                         issuer_rotation: false,
                         issuer_take_up: false,
                         issuer_removal: false,
+                        instance_health: false,
                     },
                     "prod",
                     RuntimeInventoryReport {
@@ -4741,6 +4985,7 @@ mod tests {
                     issuer_rotation: false,
                     issuer_take_up: false,
                     issuer_removal: false,
+                    instance_health: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -4859,6 +5104,7 @@ mod tests {
                     issuer_rotation: false,
                     issuer_take_up: false,
                     issuer_removal: false,
+                    instance_health: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -4898,6 +5144,7 @@ mod tests {
                     issuer_rotation: false,
                     issuer_take_up: false,
                     issuer_removal: false,
+                    instance_health: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
