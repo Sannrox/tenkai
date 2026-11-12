@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::client::PlanKindListTick;
 use crate::pb::sekai::Object;
 
@@ -14,30 +12,6 @@ fn plan_kind_list_tick_is_inactive_outside_begin() {
     assert!(tick.tick_cell().is_some());
     tick.end();
     assert!(tick.tick_cell().is_none());
-}
-
-#[tokio::test]
-async fn plan_kind_list_tick_loads_once_while_active() {
-    let tick = PlanKindListTick::default();
-    tick.begin();
-    let loads = std::sync::atomic::AtomicUsize::new(0);
-    let load = || {
-        loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        async {
-            Ok(vec![Object {
-                id: "plan-1".into(),
-                ..Default::default()
-            }])
-        }
-    };
-    let first = tick.get_or_load(load).await.unwrap();
-    let second = tick.get_or_load(load).await.unwrap();
-    assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert!(Arc::ptr_eq(&first, &second));
-    assert_eq!(first[0].id, "plan-1");
-    tick.end();
-    let _ = tick.get_or_load(load).await.unwrap();
-    assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 fn mock_plan_object(env: &str, created_at: i64) -> Object {

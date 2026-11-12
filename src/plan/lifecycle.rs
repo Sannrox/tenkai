@@ -406,25 +406,6 @@ pub(crate) async fn load_oldest_for_environment(
     Ok(plans.pop())
 }
 
-#[cfg(test)]
-pub(super) async fn executable_for_environment(
-    ctx: &mut Ctx,
-    environment: &str,
-    statuses: &[PlanState],
-) -> Result<Vec<Plan>> {
-    require_environment_indexes_match_payloads(ctx, environment).await?;
-    load_for_environment(
-        ctx,
-        environment,
-        Some(statuses),
-        false,
-        None,
-        None,
-        Some(true),
-    )
-    .await
-}
-
 pub(super) async fn executable_batch_for_environment(
     ctx: &mut Ctx,
     environment: &str,

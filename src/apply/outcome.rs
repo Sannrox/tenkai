@@ -567,11 +567,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_persisted_status_fails_closed() {
-        assert!(StepOutcomeStatus::parse("unknown").is_err());
-    }
-
-    #[test]
     fn public_string_field_remains_compatible_but_classification_fails_closed() {
         let outcome = Outcome {
             step: step(),

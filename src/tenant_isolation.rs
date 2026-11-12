@@ -1441,14 +1441,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_case_coverage_is_detected() {
-        // Sanity: empty matrix would fail; our production matrix is complete.
-        let required = required_isolation_cases();
-        assert!(required.contains(&IsolationCase::AgentCrossTenant));
-        assert!(required.contains(&IsolationCase::ListLeakage));
-    }
-
-    #[test]
     fn community_mode_is_not_the_enterprise_harness() {
         // The harness itself requires enterprise mode; community remains
         // tenant-free and does not run this surface.

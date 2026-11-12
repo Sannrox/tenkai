@@ -1,8 +1,6 @@
 //! Isolated-process check that `install()` registers Helm, kubectl, and Docker.
 
-use tenkai::software_executor::{
-    SoftwareExecutors, request_from_parts, selected_software_executor,
-};
+use tenkai::software_executor::{SoftwareExecutors, request_from_parts};
 
 #[test]
 fn install_selects_helm_kubernetes_and_docker_adapters() {
@@ -26,11 +24,13 @@ fn install_selects_helm_kubernetes_and_docker_adapters() {
         }
         let request =
             request_from_parts("api", "1.0.0", "prod", &workdir, "tenkai:release:api@1.0.0");
-        let executor = selected_software_executor()
-            .unwrap_or_else(|| panic!("{value} adapter missing after tenkai_executor::install()"));
-        let err = executor.apply(&request).unwrap_err().to_string();
         let resolved = SoftwareExecutors::try_from_process()
             .unwrap_or_else(|error| panic!("{value} process default refused: {error:#}"));
+        let executor = resolved
+            .resolve(None)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{value} adapter missing after tenkai_executor::install()"));
+        let err = executor.apply(&request).unwrap_err().to_string();
         let kind = if value == "k8s" { "kubernetes" } else { value };
         let expected = format!("software_executor:{kind}");
         assert_eq!(

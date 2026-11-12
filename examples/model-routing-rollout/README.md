@@ -32,8 +32,8 @@ Tenkai plan steps — no second control plane and no merged product kind.
 | routing upgrade before model install | Traffic to a missing/unhealthy model |
 | model downgrade before routing switch | Live routes still target the retiring model |
 
-Source: `plan::validate_model_routing_rollout_order` /
-`model_routing_rollout_rank` in `src/plan.rs`.
+Source: `validate_model_routing_rollout_order` /
+`model_routing_rollout_rank` in `src/plan/convergence.rs`.
 
 ## Fixtures
 

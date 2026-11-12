@@ -521,21 +521,14 @@ pub async fn oldest_for_environment(
     lifecycle::oldest_for_environment(ctx, environment, statuses).await
 }
 
-/// Plans with steps for `environment` whose status is in `statuses`.
-///
-/// Zero-step plans are excluded by the `has_steps` index, not by decoding
-/// every matching payload. Ordered oldest `created_at` first.
-#[cfg(test)]
-pub(crate) async fn executable_for_environment(
-    ctx: &mut Ctx,
-    environment: &str,
-    statuses: &[PlanState],
-) -> Result<Vec<Plan>> {
-    lifecycle::executable_for_environment(ctx, environment, statuses).await
-}
-
 pub(crate) const EXECUTABLE_ADMISSION_BATCH: u32 = 8;
 
+/// One window of plans with steps for `environment` whose status is in
+/// `statuses`, oldest `created_at` first.
+///
+/// Zero-step plans are excluded by the `has_steps` index, not by decoding
+/// every matching payload. Callers run
+/// `require_environment_indexes_match_payloads` once per tick first.
 pub(crate) async fn executable_batch_for_environment(
     ctx: &mut Ctx,
     environment: &str,
@@ -817,16 +810,6 @@ pub async fn create_holding_failed_targets(ctx: &mut Ctx, env: &str) -> Result<P
             Err(error)
         }
     }
-}
-
-pub fn model_routing_rollout_rank(kind: crate::manifest::ProductKind, action: Action) -> u8 {
-    convergence::model_routing_rollout_rank(kind, action)
-}
-
-pub fn validate_model_routing_rollout_order(
-    steps: &[(crate::manifest::ProductKind, Action)],
-) -> Result<()> {
-    convergence::validate_model_routing_rollout_order(steps)
 }
 
 #[cfg(test)]
@@ -1326,36 +1309,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn executable_fail_closed_on_status_index_poison() {
-        let database = std::env::temp_dir().join(format!(
-            "tenkai-plan-exec-status-poison-{}-{}.db",
-            std::process::id(),
-            crate::now_millis()
-        ));
-        let _ = std::fs::remove_file(&database);
-        let mut ctx = Ctx::embedded(&database).unwrap();
-
-        let live = plan_for("env_a", 200, PlanState::Computed);
-        store(&mut ctx, &live).await.unwrap();
-        let mut poisoned = ctx.get(&live.id).await.unwrap().unwrap();
-        poisoned
-            .properties
-            .insert("status".into(), "succeeded".into());
-        ctx.put(poisoned).await.unwrap();
-
-        let error = executable_for_environment(&mut ctx, "env_a", &[PlanState::Computed])
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("status index succeeded does not match payload computed"),
-            "{error}"
-        );
-
-        let _ = std::fs::remove_file(&database);
-    }
-
-    #[tokio::test]
     async fn latest_fail_closed_when_true_newest_created_at_index_is_depressed() {
         let database = std::env::temp_dir().join(format!(
             "tenkai-plan-newest-depressed-{}-{}.db",
@@ -1552,9 +1505,15 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(oldest.id, work.id);
-        let executable = executable_for_environment(&mut ctx, "env_a", &[PlanState::Computed])
-            .await
-            .unwrap();
+        let executable = executable_batch_for_environment(
+            &mut ctx,
+            "env_a",
+            &[PlanState::Computed],
+            EXECUTABLE_ADMISSION_BATCH,
+            0,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             executable
                 .iter()

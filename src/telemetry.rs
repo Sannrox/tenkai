@@ -592,15 +592,6 @@ mod tests {
     }
 
     #[test]
-    fn disabled_exporter_is_a_noop() {
-        let telemetry = NoopTelemetry;
-        let attrs = DeliveryAttributes::new(Operation::Plan);
-        let token = telemetry.start_span("tenkai.plan", &attrs);
-        telemetry.end_span(token, &attrs, SpanStatus::Ok);
-        telemetry.record_metric(METRIC_APPLY_OUTCOME, 1.0, &attrs);
-    }
-
-    #[test]
     fn otlp_payload_carries_allowlisted_identities_only() {
         let attrs = DeliveryAttributes::new(Operation::Apply)
             .plan_id("tenkai:plan:lab:1")

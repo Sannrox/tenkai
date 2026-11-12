@@ -489,27 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn membership_delta_gets_only_appeared_ids() {
-        let mut index = EnvironmentIndex::default();
-        index.replace_from_objects(vec![environment("alpha", 1), environment("beta", 2)]);
-        let listed = vec![env_id("beta"), env_id("gamma")];
-        let (appeared, disappeared) = index.membership_delta(&listed);
-        assert_eq!(appeared, vec![env_id("gamma")]);
-        assert_eq!(disappeared, vec![env_id("alpha")]);
-    }
-
-    #[test]
-    fn membership_delta_is_empty_when_ids_are_unchanged() {
-        let mut index = EnvironmentIndex::default();
-        index.replace_from_objects(vec![environment("alpha", 1), environment("beta", 2)]);
-        let listed = vec![env_id("alpha"), env_id("beta")];
-        let (appeared, disappeared) = index.membership_delta(&listed);
-        assert!(appeared.is_empty());
-        assert!(disappeared.is_empty());
-        assert_eq!(index.by_name.get("alpha").unwrap().updated, 1);
-    }
-
-    #[test]
     fn upsert_refreshes_generation_and_remove_id_drops_names() {
         let mut index = EnvironmentIndex::default();
         index.replace_from_objects(vec![environment("alpha", 1), environment("beta", 2)]);

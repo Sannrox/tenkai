@@ -55,7 +55,8 @@ mod tests {
 
     #[test]
     fn current_or_newer_skips_migrate() {
-        assert!(tenant_schema_is_current(Some(1), 1));
+        let stamp = i32::try_from(TENANT_SCHEMA_VERSION).unwrap();
+        assert!(tenant_schema_is_current(Some(stamp), TENANT_SCHEMA_VERSION));
         assert!(tenant_schema_is_current(Some(2), 1));
         assert!(!tenant_schema_is_current(Some(0), 1));
         assert!(!tenant_schema_is_current(None, 1));
