@@ -55,6 +55,9 @@
 //! - `apply::start_admission` hides evaluation-evidence validation, maintenance
 //!   authorization and timing races, emergency-override recording, and durable
 //!   blocked/running Plan transitions behind one private start interface.
+//! - [`upgrade_pace`] spreads upgrades to a newly promoted channel head over a
+//!   duration, from durable state any replica can recompute, and records early
+//!   admission as an audited exemption.
 //! - [`health_gate`] evaluates post-apply Prometheus-compatible SLO queries
 //!   after activation succeeds and before recording Succeeded, persists release
 //!   evidence, and either halts or restores a previously signed pin without
@@ -309,6 +312,7 @@ mod terminal_outcome;
 pub mod topology;
 pub mod topology_drill;
 pub mod trust_posture;
+pub mod upgrade_pace;
 pub mod version_skew;
 pub mod wave;
 pub mod worker_pool;

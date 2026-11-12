@@ -118,6 +118,8 @@ pub enum ManagementLifecycleOperation {
     ChannelHold,
     ChannelRelease,
     ChannelRemove,
+    ChannelConfigure,
+    ChannelAdmit,
     Register,
     Configure,
     Cancel,
@@ -146,6 +148,8 @@ impl ManagementLifecycleOperation {
             Self::ChannelHold => "channel_hold",
             Self::ChannelRelease => "channel_release",
             Self::ChannelRemove => "channel_remove",
+            Self::ChannelConfigure => "channel_configure",
+            Self::ChannelAdmit => "channel_admit",
             Self::Register => "register",
             Self::Configure => "configure",
             Self::Cancel => "cancel",
@@ -163,6 +167,8 @@ impl ManagementLifecycleOperation {
                 | Self::ChannelHold
                 | Self::ChannelRelease
                 | Self::ChannelRemove
+                | Self::ChannelConfigure
+                | Self::ChannelAdmit
                 | Self::Register
         )
     }
@@ -246,6 +252,8 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "channel_hold" => Ok(ManagementLifecycleOperation::ChannelHold),
         "channel_release" => Ok(ManagementLifecycleOperation::ChannelRelease),
         "channel_remove" => Ok(ManagementLifecycleOperation::ChannelRemove),
+        "channel_configure" => Ok(ManagementLifecycleOperation::ChannelConfigure),
+        "channel_admit" => Ok(ManagementLifecycleOperation::ChannelAdmit),
         "register" => Ok(ManagementLifecycleOperation::Register),
         "configure" => Ok(ManagementLifecycleOperation::Configure),
         "cancel" => Ok(ManagementLifecycleOperation::Cancel),
@@ -742,6 +750,27 @@ pub struct ChannelRemoveRequest {
     pub operation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_head: Option<String>,
+}
+
+/// Body of `POST /v1/products/{product}/channels/{channel}/pace`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelConfigureRequest {
+    pub version: u32,
+    pub operation: String,
+    /// Duration (`30`, `250ms`, `2m`, `3h`) or `off`. A bare number is seconds.
+    pub upgrade_pace: String,
+}
+
+/// Body of `POST /v1/products/{product}/channels/{channel}/admit`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelAdmitRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub instance: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1409,6 +1438,58 @@ pub fn admit_channel_remove(
     require_route_operation(
         admitted.operation,
         ManagementLifecycleOperation::ChannelRemove,
+    )?;
+    Ok(admitted)
+}
+
+pub fn admit_channel_configure(
+    request: &ChannelConfigureRequest,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    crate::upgrade_pace::parse_pace(&request.upgrade_pace)?;
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: None,
+            expected_generation: None,
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(
+        admitted.operation,
+        ManagementLifecycleOperation::ChannelConfigure,
+    )?;
+    Ok(admitted)
+}
+
+pub fn admit_channel_admit(
+    request: &ChannelAdmitRequest,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    crate::ontology::validate_identifier("environment", &request.environment)?;
+    crate::ontology::validate_instance_name(&request.instance)
+        .or_else(|_| crate::ontology::validate_identifier("instance", &request.instance))?;
+    anyhow::ensure!(
+        !request.reason.trim().is_empty(),
+        "upgrade-pace admit reason must not be empty"
+    );
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: None,
+            expected_generation: None,
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(
+        admitted.operation,
+        ManagementLifecycleOperation::ChannelAdmit,
     )?;
     Ok(admitted)
 }
@@ -2200,6 +2281,38 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(scoped.contains("cannot call catalog-wide"), "{scoped}");
+
+        let pace = ChannelConfigureRequest {
+            version: 1,
+            operation: "channel_configure".into(),
+            upgrade_pace: "3h".into(),
+        };
+        admit_channel_configure(&pace, PrincipalKind::Management, None).unwrap();
+        let runtime = admit_channel_configure(&pace, PrincipalKind::Runtime, None)
+            .unwrap_err()
+            .to_string();
+        assert!(runtime.contains("runtime credentials"), "{runtime}");
+        let scoped = admit_channel_configure(&pace, PrincipalKind::Management, Some("stage"))
+            .unwrap_err()
+            .to_string();
+        assert!(scoped.contains("cannot call catalog-wide"), "{scoped}");
+
+        let admit = ChannelAdmitRequest {
+            version: 1,
+            operation: "channel_admit".into(),
+            environment: "stage".into(),
+            instance: "api".into(),
+            reason: "canary host".into(),
+        };
+        admit_channel_admit(&admit, PrincipalKind::Management, None).unwrap();
+        let empty = ChannelAdmitRequest {
+            reason: String::new(),
+            ..admit.clone()
+        };
+        let err = admit_channel_admit(&empty, PrincipalKind::Management, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reason"), "{err}");
     }
 
     #[test]

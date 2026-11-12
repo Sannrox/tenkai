@@ -585,6 +585,26 @@ history. Promote, subscribe, and deploy do not touch a hold. Remote
 `tenkaictl --target remote` uses the same HTTP routes; environment set,
 clear, and failed-target retry require `--generation`.
 
+### Channel upgrade pace
+
+A channel may spread upgrades to a newly promoted release over a duration.
+Only upgrades wait. Rollbacks, recall removals, installs, removals, restarts,
+and config changes start as soon as their other gates allow. Counted time is
+time inside both the environment and product maintenance windows; closed
+windows do not consume the pace. Any replica recomputes the same admission
+from durable state.
+
+```bash
+tenkaictl channel configure hello-local stable --upgrade-pace 3h
+tenkaictl channel configure hello-local stable --upgrade-pace off
+tenkaictl channel admit hello-local stable stage api --reason "canary host"
+```
+
+Enabling or disabling takes effect at once. Changing the duration applies to
+the next promotion. An instance waiting on the pace reports it from
+`tenkaictl explain`; `channel admit` records the reason and lets that
+instance start before its slot. A bare number is seconds.
+
 A failed target stays held until an explicit retry. Remote and embedded
 operators plan that retry with `tenkaictl env retry <env> <product> --reason …`.
 

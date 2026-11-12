@@ -62,6 +62,8 @@ pub(crate) struct ExplainStoreFacts {
     pub unhealthy_restart: bool,
     /// Channel exists but has no promoted current_release.
     pub empty_channel: bool,
+    /// Upgrade waiting on the channel's upgrade pace.
+    pub upgrade_pace: Option<crate::upgrade_pace::PaceHold>,
 }
 
 /// List every check that currently blocks `instance` in `environment`.
@@ -214,6 +216,30 @@ pub(crate) fn from_inspect(
         facts.product_maintenance.as_ref(),
     ) {
         blockers.push(blocker);
+    }
+
+    let desired = facts
+        .desired_version
+        .as_deref()
+        .unwrap_or(row.head.as_str());
+    if let Some(hold) = &facts.upgrade_pace
+        && let Some(deployed) = row.deployed.as_deref()
+        && deployed != desired
+        && desired == row.head
+        && crate::plan::classify_change(deployed, desired) == crate::plan::Action::Upgrade
+    {
+        let until = crate::upgrade_pace::format_eligible_at(hold.eligible_at_ms);
+        blockers.push(InstanceExplainBlocker {
+            check: "upgrade_pace".into(),
+            evidence: format!(
+                "channel {}/{} admits {} of {} upgrades; this instance is eligible at {until}",
+                hold.product, hold.channel, hold.admitted, hold.subscribed
+            ),
+            unblock: format!(
+                "wait until {until} or tenkaictl channel admit {} {} {environment} {instance} --reason …",
+                hold.product, hold.channel
+            ),
+        });
     }
 
     if facts.empty_channel {
@@ -478,6 +504,19 @@ async fn load_store_facts(
         }
         _ => None,
     };
+    let upgrade_pace = if empty_channel {
+        None
+    } else {
+        crate::upgrade_pace::evaluate_instance(
+            ctx,
+            &row.product,
+            &row.channel,
+            &inspect.name,
+            instance,
+            crate::now_millis(),
+        )
+        .await?
+    };
     Ok(ExplainStoreFacts {
         recalled_release,
         superseded_plan,
@@ -487,6 +526,7 @@ async fn load_store_facts(
         unknown_deployment,
         unhealthy_restart,
         empty_channel,
+        upgrade_pace,
     })
 }
 
@@ -727,6 +767,102 @@ mod tests {
             after_plan.as_ref().map(|plan| plan.id.as_str())
         );
         assert_eq!(before_lease, after_lease);
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn paced_upgrade_is_a_named_blocker() {
+        let (database, mut ctx, root) = seeded("pace").await;
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.insert("deployed.api".into(), "1.0.0".into());
+        env.properties.insert(
+            "deployed_release.api".into(),
+            crate::ontology::release_id("api", "1.0.0"),
+        );
+        ctx.put(env).await.unwrap();
+        std::fs::write(
+            root.join("tenkai.toml"),
+            "[product]\nname = \"api\"\nversion = \"1.1.0\"\n\n[deploy]\ninstall = \"true\"\n",
+        )
+        .unwrap();
+        crate::catalog::publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        crate::upgrade_pace::configure(&mut ctx, "api", "stable", Some(10_800_000))
+            .await
+            .unwrap();
+        let actor = crate::auth_context::test_management_context("explain-pace");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.1.0", "stable")
+            .await
+            .unwrap();
+        let report = explain_instance(&mut ctx, "local", "api").await.unwrap();
+        let blocker = report
+            .blockers
+            .iter()
+            .find(|blocker| blocker.check == "upgrade_pace")
+            .expect("pace blocker");
+        assert!(blocker.evidence.contains("api/stable"), "{blocker:?}");
+        assert!(blocker.unblock.contains("channel admit"), "{blocker:?}");
+        assert!(report.next_change.is_none(), "{report:?}");
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn paced_downgrade_is_not_a_named_blocker() {
+        let (database, mut ctx, root) = seeded("pace-down").await;
+        std::fs::write(
+            root.join("tenkai.toml"),
+            "[product]\nname = \"api\"\nversion = \"1.1.0\"\n\n[deploy]\ninstall = \"true\"\n",
+        )
+        .unwrap();
+        crate::catalog::publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("explain-pace-down");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.1.0", "stable")
+            .await
+            .unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.insert("deployed.api".into(), "1.1.0".into());
+        env.properties.insert(
+            "deployed_release.api".into(),
+            crate::ontology::release_id("api", "1.1.0"),
+        );
+        ctx.put(env).await.unwrap();
+        crate::upgrade_pace::configure(&mut ctx, "api", "stable", Some(10_800_000))
+            .await
+            .unwrap();
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        let report = explain_instance(&mut ctx, "local", "api").await.unwrap();
+        assert!(
+            report
+                .blockers
+                .iter()
+                .all(|blocker| blocker.check != "upgrade_pace"),
+            "{report:?}"
+        );
         let _ = std::fs::remove_file(&database);
         let _ = std::fs::remove_dir_all(&root);
     }

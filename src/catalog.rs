@@ -812,21 +812,33 @@ pub(crate) async fn pin_isolated_channel(
         ))
         .await?;
     }
+    let existing_channel = ctx.get(&cid).await?;
+    let previous_head = existing_channel
+        .as_ref()
+        .and_then(|channel| channel.properties.get("current_release"))
+        .cloned()
+        .unwrap_or_default();
+    let head_moved = previous_head != rid;
     let mut channel_properties = HashMap::from([
         ("product".into(), product.into()),
         ("channel".into(), channel.into()),
         ("current_version".into(), version.into()),
         ("current_release".into(), rid.clone()),
     ]);
-    if let Some(existing) = ctx.get(&cid).await?
-        && let Some(overlay) = existing
+    if let Some(existing) = existing_channel.as_ref() {
+        if let Some(overlay) = existing
             .properties
             .get(crate::health_gate::CHANNEL_HEALTH_GATES_PROPERTY)
-    {
-        channel_properties.insert(
-            crate::health_gate::CHANNEL_HEALTH_GATES_PROPERTY.into(),
-            overlay.clone(),
-        );
+        {
+            channel_properties.insert(
+                crate::health_gate::CHANNEL_HEALTH_GATES_PROPERTY.into(),
+                overlay.clone(),
+            );
+        }
+        crate::upgrade_pace::copy_channel_properties(&mut channel_properties, existing);
+    }
+    if head_moved {
+        crate::upgrade_pace::snapshot_on_head_move(&mut channel_properties, crate::now_millis());
     }
     ctx.link(&cid, &rid, REL_PROMOTES).await?;
     ctx.put(object(
@@ -1062,6 +1074,13 @@ async fn promote_inner(
                     );
                 }
             }
+            let existing_channel = ctx.get(&cid).await?;
+            let previous_head = existing_channel
+                .as_ref()
+                .and_then(|channel| channel.properties.get("current_release"))
+                .cloned()
+                .unwrap_or_default();
+            let head_moved = previous_head != promoted_release;
             let mut channel_properties = HashMap::from([
                 ("product".into(), promotion_name.clone()),
                 ("channel".into(), promotion_channel.clone()),
@@ -1070,14 +1089,22 @@ async fn promote_inner(
                 ("promoted_by".into(), promoted_by.clone()),
                 ("promoted_by_kind".into(), promoted_by_kind.clone()),
             ]);
-            if let Some(existing) = ctx.get(&cid).await?
-                && let Some(overlay) = existing
+            if let Some(existing) = existing_channel.as_ref() {
+                if let Some(overlay) = existing
                     .properties
                     .get(crate::health_gate::CHANNEL_HEALTH_GATES_PROPERTY)
-            {
-                channel_properties.insert(
-                    crate::health_gate::CHANNEL_HEALTH_GATES_PROPERTY.into(),
-                    overlay.clone(),
+                {
+                    channel_properties.insert(
+                        crate::health_gate::CHANNEL_HEALTH_GATES_PROPERTY.into(),
+                        overlay.clone(),
+                    );
+                }
+                crate::upgrade_pace::copy_channel_properties(&mut channel_properties, existing);
+            }
+            if head_moved {
+                crate::upgrade_pace::snapshot_on_head_move(
+                    &mut channel_properties,
+                    crate::now_millis(),
                 );
             }
             let channel_head = object(

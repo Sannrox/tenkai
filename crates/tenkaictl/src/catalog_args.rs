@@ -118,6 +118,23 @@ pub(crate) enum ChannelCommand {
         #[arg(long, conflicts_with = "pause")]
         resume: bool,
     },
+    /// Spread upgrades to a newly promoted release over a duration.
+    Configure {
+        product: String,
+        channel: String,
+        /// Duration (`30`, `250ms`, `2m`, `3h`) or `off`. A bare number is seconds.
+        #[arg(long = "upgrade-pace")]
+        upgrade_pace: String,
+    },
+    /// Admit one instance onto the current head before its paced slot.
+    Admit {
+        product: String,
+        channel: String,
+        environment: String,
+        instance: String,
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -233,6 +250,65 @@ mod tests {
         assert!(!recall_on_failing);
         assert!(!pause);
         assert!(!resume);
+    }
+
+    #[test]
+    fn parses_channel_upgrade_pace_and_admit() {
+        let configure = Cli::try_parse_from([
+            "tenkaictl",
+            "channel",
+            "configure",
+            "api",
+            "stable",
+            "--upgrade-pace",
+            "3h",
+        ])
+        .unwrap();
+        let Command::Channel {
+            command:
+                ChannelCommand::Configure {
+                    product,
+                    channel,
+                    upgrade_pace,
+                },
+        } = configure.command
+        else {
+            panic!("expected channel configure");
+        };
+        assert_eq!(product, "api");
+        assert_eq!(channel, "stable");
+        assert_eq!(upgrade_pace, "3h");
+
+        let admit = Cli::try_parse_from([
+            "tenkaictl",
+            "channel",
+            "admit",
+            "api",
+            "stable",
+            "stage",
+            "api",
+            "--reason",
+            "canary host",
+        ])
+        .unwrap();
+        let Command::Channel {
+            command:
+                ChannelCommand::Admit {
+                    product,
+                    channel,
+                    environment,
+                    instance,
+                    reason,
+                },
+        } = admit.command
+        else {
+            panic!("expected channel admit");
+        };
+        assert_eq!(product, "api");
+        assert_eq!(channel, "stable");
+        assert_eq!(environment, "stage");
+        assert_eq!(instance, "api");
+        assert_eq!(reason, "canary host");
     }
 
     #[test]

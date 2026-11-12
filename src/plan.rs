@@ -16,8 +16,8 @@ mod lifecycle;
 mod release_selection;
 
 pub(crate) use convergence::{
-    current_peers, readable_manifest, require_host_product, require_removable, split_release_id,
-    step_identity, stored_release_executor, stored_release_manifest,
+    classify_change, current_peers, readable_manifest, require_host_product, require_removable,
+    split_release_id, step_identity, stored_release_executor, stored_release_manifest,
 };
 
 pub(crate) use release_selection::resolve_subscription_selection;

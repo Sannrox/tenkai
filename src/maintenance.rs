@@ -847,6 +847,125 @@ async fn update_claimed(
     Ok(message)
 }
 
+/// Counted milliseconds in `[from_ms, to_ms)` when any window is open.
+/// Empty windows are unrestricted. Invalid window definitions fail closed.
+/// DST-ambiguous or missing starts are not open and do not fail the caller.
+pub fn elapsed_open_ms(windows: &[Window], from_ms: i64, to_ms: i64) -> Result<i64> {
+    if to_ms <= from_ms {
+        return Ok(0);
+    }
+    if windows.is_empty() {
+        return Ok(to_ms.saturating_sub(from_ms));
+    }
+    Ok(merged_open_intervals(windows, from_ms, to_ms)?
+        .into_iter()
+        .map(|(start, end)| end.saturating_sub(start))
+        .fold(0_i64, i64::saturating_add))
+}
+
+/// Counted milliseconds when both window sets are open. An empty set is unrestricted.
+pub fn elapsed_open_intersect_ms(
+    left: &[Window],
+    right: &[Window],
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<i64> {
+    if left.is_empty() {
+        return elapsed_open_ms(right, from_ms, to_ms);
+    }
+    if right.is_empty() {
+        return elapsed_open_ms(left, from_ms, to_ms);
+    }
+    let a = merged_open_intervals(left, from_ms, to_ms)?;
+    let b = merged_open_intervals(right, from_ms, to_ms)?;
+    Ok(intersect_elapsed(&a, &b))
+}
+
+fn merged_open_intervals(windows: &[Window], from_ms: i64, to_ms: i64) -> Result<Vec<(i64, i64)>> {
+    for window in windows {
+        window.validate()?;
+    }
+    let from = DateTime::from_timestamp_millis(from_ms)
+        .context("start time is outside the supported maintenance-window range")?;
+    let to = DateTime::from_timestamp_millis(to_ms)
+        .context("end time is outside the supported maintenance-window range")?;
+    let mut raw = Vec::new();
+    for window in windows {
+        let tz = window.timezone.parse::<Tz>().with_context(|| {
+            format!(
+                "maintenance window {} has an invalid timezone",
+                window.identity
+            )
+        })?;
+        let start_date = from
+            .with_timezone(&tz)
+            .date_naive()
+            .checked_sub_signed(Duration::days(8))
+            .context("maintenance window date overflows supported time range")?;
+        let end_date = to
+            .with_timezone(&tz)
+            .date_naive()
+            .checked_add_signed(Duration::days(8))
+            .context("maintenance window date overflows supported time range")?;
+        let mut date = start_date;
+        while date <= end_date {
+            match occurrence(window, date) {
+                Ok(Occurrence::Valid { start, end }) => {
+                    let start_ms = start.timestamp_millis().max(from_ms);
+                    let end_ms = end.timestamp_millis().min(to_ms);
+                    if end_ms > start_ms {
+                        raw.push((start_ms, end_ms));
+                    }
+                }
+                Ok(Occurrence::Invalid { .. }) => {
+                    // Missing or DST-ambiguous starts are not open. Counting
+                    // them as closed keeps a historical gap from blocking
+                    // plan computation for every action in the environment.
+                }
+                Ok(Occurrence::Absent) => {}
+                Err(detail) => bail!("{detail}"),
+            }
+            date = date
+                .checked_add_signed(Duration::days(1))
+                .context("maintenance window date overflows supported time range")?;
+        }
+    }
+    raw.sort_unstable();
+    Ok(merge_intervals(raw))
+}
+
+fn merge_intervals(raw: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+    let mut merged = Vec::new();
+    for (start, end) in raw {
+        match merged.last_mut() {
+            Some((_, last_end)) if start <= *last_end => {
+                *last_end = (*last_end).max(end);
+            }
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+fn intersect_elapsed(left: &[(i64, i64)], right: &[(i64, i64)]) -> i64 {
+    let mut total = 0_i64;
+    let mut i = 0;
+    let mut j = 0;
+    while i < left.len() && j < right.len() {
+        let start = left[i].0.max(right[j].0);
+        let end = left[i].1.min(right[j].1);
+        if end > start {
+            total = total.saturating_add(end - start);
+        }
+        if left[i].1 < right[j].1 {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    total
+}
+
 pub fn weekday_values(value: &str) -> Result<Vec<u32>> {
     let aliases = HashMap::from([
         ("mon", 1),
@@ -1165,6 +1284,31 @@ mod tests {
         assert!(Window::new("bad", "Mars/Olympus", vec![1], "09:00", 60).is_err());
         assert!(Window::new("bad", "UTC", vec![1, 1], "09:00", 60).is_err());
         assert!(weekday_values("mon,funday").is_err());
+    }
+
+    #[test]
+    fn elapsed_open_counts_only_open_windows() {
+        let from = at("2026-01-05T00:00:00Z").timestamp_millis(); // Monday
+        let to = at("2026-01-05T03:00:00Z").timestamp_millis();
+        assert_eq!(elapsed_open_ms(&[], from, to).unwrap(), 3 * 60 * 60 * 1000);
+        let weekday = [Window::new("night", "UTC", vec![1], "01:00", 60).unwrap()];
+        assert_eq!(elapsed_open_ms(&weekday, from, to).unwrap(), 60 * 60 * 1000);
+        let closed = [Window::new("later", "UTC", vec![2], "01:00", 60).unwrap()];
+        assert_eq!(elapsed_open_ms(&closed, from, to).unwrap(), 0);
+        let product = [Window::new("overlap", "UTC", vec![1], "01:30", 60).unwrap()];
+        assert_eq!(
+            elapsed_open_intersect_ms(&weekday, &product, from, to).unwrap(),
+            30 * 60 * 1000
+        );
+    }
+
+    #[test]
+    fn elapsed_open_skips_dst_gap_instead_of_failing() {
+        // 2026-03-29 is the Europe/Berlin spring-forward Sunday; 02:30 does not exist.
+        let windows = [Window::new("gap", "Europe/Berlin", vec![7], "02:30", 60).unwrap()];
+        let from = at("2026-03-28T00:00:00Z").timestamp_millis();
+        let to = at("2026-03-30T00:00:00Z").timestamp_millis();
+        assert_eq!(elapsed_open_ms(&windows, from, to).unwrap(), 0);
     }
 
     #[test]

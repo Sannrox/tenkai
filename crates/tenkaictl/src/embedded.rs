@@ -171,6 +171,50 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
             );
             Ok(())
         }
+        Command::Channel {
+            command:
+                crate::catalog_args::ChannelCommand::Configure {
+                    product,
+                    channel,
+                    upgrade_pace,
+                },
+        } => {
+            let _actor = crate::authorization::embedded_management_actor()?;
+            let pace = tenkai::upgrade_pace::parse_pace(&upgrade_pace)?;
+            tenkai::upgrade_pace::configure(&mut ctx, &product, &channel, pace).await?;
+            match pace {
+                Some(ms) => println!("upgrade pace {ms}ms for {product}/{channel}"),
+                None => println!("upgrade pace off for {product}/{channel}"),
+            }
+            Ok(())
+        }
+        Command::Channel {
+            command:
+                crate::catalog_args::ChannelCommand::Admit {
+                    product,
+                    channel,
+                    environment,
+                    instance,
+                    reason,
+                },
+        } => {
+            let actor = crate::authorization::embedded_management_actor()?;
+            let event = tenkai::upgrade_pace::admit_early(
+                &mut ctx,
+                &product,
+                &channel,
+                &environment,
+                &instance,
+                &reason,
+                &actor.audit_principal(),
+            )
+            .await?;
+            println!(
+                "admitted {environment}/{instance} onto {product}/{channel} by {}: {}",
+                event.actor, event.reason
+            );
+            Ok(())
+        }
         Command::Fleet { command } => {
             crate::embedded_fleet::run(&mut ctx, command, &database, output).await
         }

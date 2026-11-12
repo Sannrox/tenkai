@@ -264,6 +264,36 @@ pub(crate) async fn run(
         Command::Channel {
             command: crate::catalog_args::ChannelCommand::Policy { .. },
         } => anyhow::bail!("channel policy is available only with --target embedded"),
+        Command::Channel {
+            command:
+                crate::catalog_args::ChannelCommand::Configure {
+                    product,
+                    channel,
+                    upgrade_pace,
+                },
+        } => {
+            let result = client
+                .configure_channel_pace(&product, &channel, &upgrade_pace)
+                .await?;
+            println!("{}", result.message);
+            Ok(())
+        }
+        Command::Channel {
+            command:
+                crate::catalog_args::ChannelCommand::Admit {
+                    product,
+                    channel,
+                    environment,
+                    instance,
+                    reason,
+                },
+        } => {
+            let result = client
+                .admit_channel_instance(&product, &channel, &environment, &instance, &reason)
+                .await?;
+            println!("{}", result.message);
+            Ok(())
+        }
         Command::Env {
             command:
                 EnvCommand::Add {

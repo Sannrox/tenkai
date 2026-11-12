@@ -40,6 +40,10 @@ pub const KIND_CHANNEL_PROMOTION_POLICY: &str = "tenkai.channel_promotion_policy
 pub const KIND_CHANNEL_PROMOTION_POLICY_POINTER: &str = "tenkai.channel_promotion_policy_pointer";
 pub const KIND_CHANNEL_PROMOTION_SOAK: &str = "tenkai.channel_promotion_soak";
 pub const KIND_CHANNEL_PROMOTION_DECISION: &str = "tenkai.channel_promotion_decision";
+/// One early upgrade-pace admission for a subscribed instance on a channel head.
+pub const KIND_UPGRADE_PACE_ADMIT: &str = "tenkai.upgrade_pace_admit";
+/// Immutable set event for an upgrade-pace early admission.
+pub const KIND_UPGRADE_PACE_ADMIT_AUDIT: &str = "tenkai.upgrade_pace_admit_audit";
 pub const KIND_RUNTIME_ENROLLMENT: &str = "tenkai.runtime_enrollment";
 pub const KIND_WAVE: &str = "tenkai.wave";
 pub const KIND_CONNECTIVITY_UPGRADE: &str = "tenkai.connectivity_upgrade";
@@ -114,6 +118,17 @@ pub fn release_recall_range_id(product: &str, from: &str) -> String {
 }
 pub fn channel_id(product: &str, channel: &str) -> String {
     format!("tenkai:channel:{product}/{channel}")
+}
+
+/// Early admission of one instance onto a paced channel head.
+pub fn upgrade_pace_admit_id(
+    product: &str,
+    channel: &str,
+    environment: &str,
+    instance: &str,
+    release: &str,
+) -> String {
+    format!("tenkai:upgrade_pace_admit:{product}/{channel}:{environment}:{instance}:{release}")
 }
 /// Property a headless channel object carries with the typed revision its
 /// removed head reached (#1174). Stores restart the revision above it, so a

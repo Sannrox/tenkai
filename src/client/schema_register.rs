@@ -17,8 +17,9 @@ use crate::ontology::{
     KIND_PACKAGE_MIGRATION, KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN, KIND_PLAN_APPROVAL_ENVELOPE,
     KIND_PLAN_APPROVAL_VERIFICATION, KIND_PRODUCT, KIND_PRODUCT_MAINTENANCE_CONFIG,
     KIND_PROMOTION_AUDIT, KIND_PROMOTION_LOCK, KIND_RELEASE, KIND_RELEASE_RECALL,
-    KIND_RELEASE_RECALL_RANGE, KIND_RELEASE_VERIFICATION, KIND_RUNTIME_ENROLLMENT, KIND_WAVE,
-    KIND_WORKLOAD_CERTIFICATE, REL_SUBSCRIBES,
+    KIND_RELEASE_RECALL_RANGE, KIND_RELEASE_VERIFICATION, KIND_RUNTIME_ENROLLMENT,
+    KIND_UPGRADE_PACE_ADMIT, KIND_UPGRADE_PACE_ADMIT_AUDIT, KIND_WAVE, KIND_WORKLOAD_CERTIFICATE,
+    REL_SUBSCRIBES,
 };
 use crate::pb::graph_action::{ActionOp, ActionParamDef, ActionTypeDef};
 use crate::pb::sekai::{ObjectType, PropertyDef};
@@ -565,6 +566,21 @@ pub fn known_object_types() -> Vec<ObjectType> {
                     false,
                     "principal or channel_promotion_policy; unknown values fail closed",
                 ),
+                prop(
+                    "upgrade_pace_ms",
+                    false,
+                    "Configured duration over which upgrades to a new head spread",
+                ),
+                prop(
+                    "upgrade_pace_applied_ms",
+                    false,
+                    "Duration frozen for the current head at promotion",
+                ),
+                prop(
+                    "promoted_at",
+                    false,
+                    "Unix-ms stamp when the current head was set",
+                ),
             ],
         ),
         object_type(
@@ -1015,6 +1031,35 @@ pub fn known_object_types() -> Vec<ObjectType> {
                     false,
                     "true after the channel head moved; false means crash-before-promote may retry",
                 ),
+            ],
+        ),
+        object_type(
+            KIND_UPGRADE_PACE_ADMIT,
+            "Early admission of one instance onto a paced channel head",
+            vec![
+                prop("product", true, "Product the channel belongs to"),
+                prop("channel", true, "Channel whose head is paced"),
+                prop("environment", true, "Environment of the admitted instance"),
+                prop("instance", true, "Admitted instance name"),
+                prop("release", true, "Channel head the admission applies to"),
+                prop("reason", true, "Why the instance was admitted early"),
+                prop("actor", true, "Principal that admitted the instance"),
+                prop("at", true, "Unix-ms timestamp of the admission"),
+            ],
+        ),
+        object_type(
+            KIND_UPGRADE_PACE_ADMIT_AUDIT,
+            "Immutable set event for an upgrade-pace early admission",
+            vec![
+                prop("product", true, "Product the channel belongs to"),
+                prop("channel", true, "Channel whose head is paced"),
+                prop("environment", true, "Environment of the admitted instance"),
+                prop("instance", true, "Admitted instance name"),
+                prop("release", true, "Channel head the admission applies to"),
+                prop("action", true, "set"),
+                prop("reason", true, "Why the instance was admitted early"),
+                prop("actor", true, "Principal that admitted the instance"),
+                prop("at", true, "Unix-ms timestamp of the admission"),
             ],
         ),
         object_type(
