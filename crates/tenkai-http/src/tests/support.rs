@@ -172,6 +172,7 @@ impl ReconcilePort for FixedReconciler {
                 environments_behind: 0,
                 environments_unhealthy: 0,
                 environments_empty: 1,
+                promotion_policies: Vec::new(),
             })
         })
     }

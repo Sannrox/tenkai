@@ -56,6 +56,9 @@ pub struct FleetStatusReport {
     pub environments_behind: usize,
     pub environments_unhealthy: usize,
     pub environments_empty: usize,
+    /// Active channel promotion policies and soak state (#899).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub promotion_policies: Vec<crate::channel_promotion::ChannelPromotionPolicyStatus>,
 }
 
 /// Build a fleet report from inspect reports (used by tests and filtered hosts).
@@ -420,6 +423,7 @@ fn aggregate_fleet_report(environments: Vec<FleetEnvironmentRow>) -> FleetStatus
         environments_behind,
         environments_unhealthy,
         environments_empty,
+        promotion_policies: Vec::new(),
     }
 }
 

@@ -228,6 +228,40 @@ pub(crate) async fn fenced_put(
     Ok(object)
 }
 
+/// Write every object only while the promotion lock is held, in one store
+/// transaction. Used so a channel head and its decision commit cannot split.
+pub(crate) async fn fenced_put_objects(
+    ctx: &mut Ctx,
+    locks: &[PromotionLock],
+    objects: Vec<Object>,
+) -> Result<()> {
+    if objects.is_empty() {
+        return Ok(());
+    }
+    if objects.len() == 1 {
+        fenced_put(ctx, locks, objects.into_iter().next().expect("len 1")).await?;
+        return Ok(());
+    }
+    let Some((guard, others)) = locks.split_first() else {
+        for object in objects {
+            ctx.put(object).await?;
+        }
+        return Ok(());
+    };
+    for lock in others {
+        confirm_promotion_lock(ctx, lock).await?;
+    }
+    ctx.guarded_update_objects_with_provider_events(
+        &objects,
+        PROMOTION_LEASE_NAMESPACE,
+        &guard.key,
+        &guard.fencing_token,
+        &[],
+        &[],
+    )
+    .await
+}
+
 /// Create `object` only while every lock in `locks` is held. `None` when
 /// an object with that id already exists.
 pub(crate) async fn fenced_create(
@@ -847,7 +881,7 @@ pub(super) async fn policies_for_release(
     Ok(policies)
 }
 
-async fn maybe_active_policy(
+pub(crate) async fn maybe_active_policy(
     ctx: &mut Ctx,
     product: &str,
     version: &str,

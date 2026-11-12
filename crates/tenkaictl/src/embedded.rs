@@ -112,6 +112,63 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
             }
             Ok(())
         }
+        Command::Channel {
+            command:
+                crate::catalog_args::ChannelCommand::Policy {
+                    product,
+                    channel,
+                    source,
+                    soak,
+                    require_canary,
+                    require_health_slo,
+                    require_evaluation,
+                    pause,
+                    resume,
+                },
+        } => {
+            let actor = crate::authorization::embedded_management_actor()?;
+            if pause || resume {
+                let active = tenkai::channel_promotion::set_paused(
+                    &mut ctx, &actor, &product, &channel, pause,
+                )
+                .await?;
+                println!(
+                    "channel promotion policy {} {} for {product}/{channel}",
+                    active.id(),
+                    if active.paused { "paused" } else { "resumed" }
+                );
+                return Ok(());
+            }
+            let source = source.ok_or_else(|| {
+                anyhow::anyhow!("channel policy requires --from <source-channel>")
+            })?;
+            let soak =
+                soak.ok_or_else(|| anyhow::anyhow!("channel policy requires --soak <duration>"))?;
+            let active = tenkai::channel_promotion::configure(
+                &mut ctx,
+                &actor,
+                tenkai::channel_promotion::ChannelPromotionPolicy {
+                    product: product.clone(),
+                    target_channel: channel.clone(),
+                    source_channel: source,
+                    soak_duration_ms: tenkai::channel_promotion::parse_soak(&soak)?,
+                    stale_after_ms: 0,
+                    evidence: tenkai::channel_promotion::ChannelPromotionEvidence {
+                        canary: require_canary,
+                        health_slo: require_health_slo,
+                        evaluation: require_evaluation,
+                        ..Default::default()
+                    },
+                },
+            )
+            .await?;
+            println!(
+                "channel promotion policy {} active for {product}/{channel} soak {}ms",
+                active.id(),
+                active.policy.soak_duration_ms
+            );
+            Ok(())
+        }
         Command::Fleet { command } => {
             crate::embedded_fleet::run(&mut ctx, command, &database, output).await
         }

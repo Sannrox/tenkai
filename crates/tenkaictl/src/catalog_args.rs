@@ -76,6 +76,32 @@ pub(crate) enum ChannelCommand {
         #[arg(long)]
         expected_head: Option<String>,
     },
+    /// Declare, pause, or resume automatic promotion into this channel.
+    Policy {
+        product: String,
+        channel: String,
+        /// Source channel whose head is promoted.
+        #[arg(long = "from")]
+        source: Option<String>,
+        /// Minimum soak (`30`, `250ms`, `2m`, `24h`). A bare number is seconds.
+        #[arg(long)]
+        soak: Option<String>,
+        /// Require a passing canary cohort for the target channel.
+        #[arg(long)]
+        require_canary: bool,
+        /// Require passing health/SLO gate evidence.
+        #[arg(long)]
+        require_health_slo: bool,
+        /// Require published evaluation evidence.
+        #[arg(long)]
+        require_evaluation: bool,
+        /// Pause the policy without deleting soak state.
+        #[arg(long, conflicts_with = "resume")]
+        pause: bool,
+        /// Resume a paused policy.
+        #[arg(long, conflicts_with = "pause")]
+        resume: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -146,6 +172,49 @@ mod tests {
         assert_eq!(channel, "stable");
         assert_eq!(cohort, ["canary-a", "canary-b"]);
         assert!(reactivate);
+    }
+
+    #[test]
+    fn parses_channel_promotion_policy() {
+        let cli = Cli::try_parse_from([
+            "tenkaictl",
+            "channel",
+            "policy",
+            "api",
+            "stable",
+            "--from",
+            "candidate",
+            "--soak",
+            "24h",
+            "--require-canary",
+        ])
+        .unwrap();
+        let Command::Channel {
+            command:
+                ChannelCommand::Policy {
+                    product,
+                    channel,
+                    source,
+                    soak,
+                    require_canary,
+                    require_health_slo,
+                    require_evaluation,
+                    pause,
+                    resume,
+                },
+        } = cli.command
+        else {
+            panic!("expected channel policy command");
+        };
+        assert_eq!(product, "api");
+        assert_eq!(channel, "stable");
+        assert_eq!(source.as_deref(), Some("candidate"));
+        assert_eq!(soak.as_deref(), Some("24h"));
+        assert!(require_canary);
+        assert!(!require_health_slo);
+        assert!(!require_evaluation);
+        assert!(!pause);
+        assert!(!resume);
     }
 
     #[test]

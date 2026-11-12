@@ -59,3 +59,31 @@ A train is immutable: admitting the same profile again is a no-op, and a
 different profile under an admitted name is refused. Promoting a stable train
 is a no-op. Admitting and promoting need the management credential, like
 `promote`, and run with `--target embedded`.
+
+## Automatic channel promotion
+
+Declare a policy so the reconciler promotes a source channel head onto a
+target after soak and evidence hold. The promotion is the same guarded
+write as `tenkaictl promote`; the record names the policy id and version as
+the actor.
+
+```sh
+tenkaictl channel policy api stable --from candidate --soak 24h --require-canary
+tenkaictl channel policy api stable --pause
+tenkaictl channel policy api stable --resume
+```
+
+`--soak` is milliseconds with `ms`/`s`/`m`/`h`, or seconds when bare.
+`--require-canary`, `--require-health-slo`, and `--require-evaluation` opt
+into those evidence kinds. Instance health is always required: an instance
+with no health evidence waits, and `fleet status` names it. The policy
+never promotes on elapsed time alone. Time with every replica healthy, and
+time with any replica failing, are shares of the soak; a failing instance
+resets the clock. Soak resets appear as `promotion_soak_reset` in the
+change-event stream.
+
+Gate flags on a train still refuse automatic promotion; `--approve-gates`
+stays a human action. Pause is durable and does not delete soak state.
+`channel policy` runs with `--target embedded`. A replica that does not
+advertise `channel_promotion_policy` does not evaluate policies; stored
+policies stay inert.

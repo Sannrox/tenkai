@@ -197,6 +197,12 @@ pub(super) async fn run(request: TickRequest<'_>) -> Result<TickReport> {
 }
 
 async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport> {
+    let mut promotion = ctx.clone();
+    crate::channel_promotion::reconcile_tick(
+        &mut promotion,
+        request.config.channel_promotion_policies,
+    )
+    .await?;
     let mut listing = ctx.clone();
     let names = load_environment_names(
         &mut listing,

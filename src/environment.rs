@@ -2257,7 +2257,9 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             identity_issuer_waiting: Vec::new(),
         });
     }
-    Ok(fleet_status_from_inspects(reports))
+    let mut report = fleet_status_from_inspects(reports);
+    report.promotion_policies = crate::channel_promotion::status_snapshot(ctx).await?;
+    Ok(report)
 }
 
 /// Inspect one environment's subscriptions, lease/fence, and latest plan.

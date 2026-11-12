@@ -261,6 +261,9 @@ pub(crate) async fn run(
             println!("{}", result.message);
             Ok(())
         }
+        Command::Channel {
+            command: crate::catalog_args::ChannelCommand::Policy { .. },
+        } => anyhow::bail!("channel policy is available only with --target embedded"),
         Command::Env {
             command:
                 EnvCommand::Add {
