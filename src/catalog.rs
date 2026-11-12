@@ -836,6 +836,7 @@ pub(crate) async fn pin_isolated_channel(
             );
         }
         crate::upgrade_pace::copy_channel_properties(&mut channel_properties, existing);
+        crate::exposure::copy_channel_grace(&mut channel_properties, existing);
     }
     if head_moved {
         crate::upgrade_pace::snapshot_on_head_move(&mut channel_properties, crate::now_millis());
@@ -1100,6 +1101,7 @@ async fn promote_inner(
                     );
                 }
                 crate::upgrade_pace::copy_channel_properties(&mut channel_properties, existing);
+                crate::exposure::copy_channel_grace(&mut channel_properties, existing);
             }
             if head_moved {
                 crate::upgrade_pace::snapshot_on_head_move(

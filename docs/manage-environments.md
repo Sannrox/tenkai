@@ -608,6 +608,14 @@ instance start before its slot. A bare number is seconds.
 A failed target stays held until an explicit retry. Remote and embedded
 operators plan that retry with `tenkaictl env retry <env> <product> --reason …`.
 
+### Advisory waivers and grace
+
+A waiver covers one advisory at `release`, `component`, `product`, or
+`global` scope until a required expiry. The narrowest match wins. Grace
+(`exposure.grace_ms` on the environment, else the subscribed channel) admits
+during the window counted from first-seen; it does not auto-recall. See
+[advisory feed](offline-bundles.md#advisory-feed).
+
 ### Channel removal
 
 Removing a channel's head stops that channel delivering the product, without

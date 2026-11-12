@@ -127,6 +127,37 @@ age; `fleet watch` exits non-zero when age exceeds
 severity or above without an operator command; signed notices and
 fix-forward waves still use [`remediate propose`](recall-notices.md).
 
+An operator may waive one advisory at a named scope (`release`, `component`,
+`product`, or `global`) with a category (`false_positive`, `mitigated`, or
+`upstream_dependency`), a reason, and a required expiry. The narrowest
+matching waiver wins: a release waiver covers only that release; an expired
+narrowest match refuses even when a broader unexpired waiver exists. Missing
+or expired waivers refuse as they did before. Create and remove require
+Management; each transition appends an immutable audit event.
+
+```bash
+tenkaictl exposure waive --advisory TENKAI-2026-1 --scope release \
+  --release tenkai:release:hello-local@1.2.0 --category false_positive \
+  --reason "scanner noise" --expires 7d
+tenkaictl exposure unwaive --advisory TENKAI-2026-1 --scope release \
+  --release tenkai:release:hello-local@1.2.0 --reason "fixed"
+```
+
+Grace is an environment or channel property `exposure.grace_ms`. It reports
+and admits during the window; it does not refuse plans or trigger auto-recall.
+Counted time starts at the durable first-seen stamp written when the finding
+was stored. Missing first-seen is not grace. Environment grace, when set,
+wins over the subscribed channel.
+
+```bash
+tenkaictl exposure grace --env stage --grace 24h
+tenkaictl exposure grace --product hello-local --channel stable --grace 24h
+tenkaictl exposure grace --env stage --grace off
+```
+
+Remote environment grace requires `--generation`. Inspect shows an active
+waiver on each matching finding.
+
 A signed `tenkai.derived-criticality.v2` travels as `criticality/derived.json`,
 byte for byte as the producer signed it ([wire format](manage-environments.md#derived-criticality-wire-format)).
 Bind, first install, and reinstall verify it against

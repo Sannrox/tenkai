@@ -120,6 +120,10 @@ pub enum ManagementLifecycleOperation {
     ChannelRemove,
     ChannelConfigure,
     ChannelAdmit,
+    WaiverSet,
+    WaiverClear,
+    ExposureGrace,
+    ChannelExposureGrace,
     Register,
     Configure,
     Cancel,
@@ -150,6 +154,10 @@ impl ManagementLifecycleOperation {
             Self::ChannelRemove => "channel_remove",
             Self::ChannelConfigure => "channel_configure",
             Self::ChannelAdmit => "channel_admit",
+            Self::WaiverSet => "waiver_set",
+            Self::WaiverClear => "waiver_clear",
+            Self::ExposureGrace => "exposure_grace",
+            Self::ChannelExposureGrace => "channel_exposure_grace",
             Self::Register => "register",
             Self::Configure => "configure",
             Self::Cancel => "cancel",
@@ -169,6 +177,9 @@ impl ManagementLifecycleOperation {
                 | Self::ChannelRemove
                 | Self::ChannelConfigure
                 | Self::ChannelAdmit
+                | Self::WaiverSet
+                | Self::WaiverClear
+                | Self::ChannelExposureGrace
                 | Self::Register
         )
     }
@@ -197,6 +208,7 @@ impl ManagementLifecycleOperation {
                 | Self::Retry
                 | Self::Configure
                 | Self::Cancel
+                | Self::ExposureGrace
         )
     }
 }
@@ -254,6 +266,10 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "channel_remove" => Ok(ManagementLifecycleOperation::ChannelRemove),
         "channel_configure" => Ok(ManagementLifecycleOperation::ChannelConfigure),
         "channel_admit" => Ok(ManagementLifecycleOperation::ChannelAdmit),
+        "waiver_set" => Ok(ManagementLifecycleOperation::WaiverSet),
+        "waiver_clear" => Ok(ManagementLifecycleOperation::WaiverClear),
+        "exposure_grace" => Ok(ManagementLifecycleOperation::ExposureGrace),
+        "channel_exposure_grace" => Ok(ManagementLifecycleOperation::ChannelExposureGrace),
         "register" => Ok(ManagementLifecycleOperation::Register),
         "configure" => Ok(ManagementLifecycleOperation::Configure),
         "cancel" => Ok(ManagementLifecycleOperation::Cancel),
@@ -771,6 +787,65 @@ pub struct ChannelAdmitRequest {
     pub environment: String,
     pub instance: String,
     pub reason: String,
+}
+
+/// Body of `POST /v1/exposures/waivers`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExposureWaiverRequest {
+    pub version: u32,
+    pub operation: String,
+    pub advisory_id: String,
+    pub scope: String,
+    pub category: String,
+    pub reason: String,
+    /// RFC3339 timestamp or duration (`7d`, `24h`). A bare number is seconds.
+    pub expires: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+}
+
+/// Body of `POST /v1/exposures/waivers/clear`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExposureWaiverClearRequest {
+    pub version: u32,
+    pub operation: String,
+    pub advisory_id: String,
+    pub scope: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+}
+
+/// Body of `POST /v1/environments/{environment}/exposure-grace`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExposureGraceRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    /// Duration (`30`, `250ms`, `2m`, `24h`) or `off`. A bare number is seconds.
+    pub grace: String,
+}
+
+/// Body of `POST /v1/products/{product}/channels/{channel}/exposure-grace`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelExposureGraceRequest {
+    pub version: u32,
+    pub operation: String,
+    /// Duration (`30`, `250ms`, `2m`, `24h`) or `off`. A bare number is seconds.
+    pub grace: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1490,6 +1565,109 @@ pub fn admit_channel_admit(
     require_route_operation(
         admitted.operation,
         ManagementLifecycleOperation::ChannelAdmit,
+    )?;
+    Ok(admitted)
+}
+
+pub fn admit_exposure_waiver(
+    request: &ExposureWaiverRequest,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    crate::exposure::WaiverScopeKind::parse(&request.scope)?;
+    crate::exposure::WaiverCategory::parse(&request.category)?;
+    crate::exposure::parse_expiry(&request.expires, crate::now_millis())?;
+    anyhow::ensure!(
+        !request.advisory_id.trim().is_empty(),
+        "waiver advisory id is required"
+    );
+    anyhow::ensure!(
+        !request.reason.trim().is_empty(),
+        "waiver reason must not be empty"
+    );
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: None,
+            expected_generation: None,
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(admitted.operation, ManagementLifecycleOperation::WaiverSet)?;
+    Ok(admitted)
+}
+
+pub fn admit_exposure_waiver_clear(
+    request: &ExposureWaiverClearRequest,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    crate::exposure::WaiverScopeKind::parse(&request.scope)?;
+    anyhow::ensure!(
+        !request.advisory_id.trim().is_empty(),
+        "waiver advisory id is required"
+    );
+    anyhow::ensure!(
+        !request.reason.trim().is_empty(),
+        "waiver reason must not be empty"
+    );
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: None,
+            expected_generation: None,
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(
+        admitted.operation,
+        ManagementLifecycleOperation::WaiverClear,
+    )?;
+    Ok(admitted)
+}
+
+pub fn admit_exposure_grace(
+    request: &ExposureGraceRequest,
+    path_environment: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    crate::exposure::parse_grace(&request.grace)?;
+    require_path_environment("exposure_grace", &request.environment, path_environment)?;
+    admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        ManagementLifecycleOperation::ExposureGrace,
+        kind,
+        granted_environment,
+    )
+}
+
+pub fn admit_channel_exposure_grace(
+    request: &ChannelExposureGraceRequest,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    crate::exposure::parse_grace(&request.grace)?;
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: None,
+            expected_generation: None,
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(
+        admitted.operation,
+        ManagementLifecycleOperation::ChannelExposureGrace,
     )?;
     Ok(admitted)
 }
@@ -2313,6 +2491,71 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("reason"), "{err}");
+
+        let waiver = ExposureWaiverRequest {
+            version: 1,
+            operation: "waiver_set".into(),
+            advisory_id: "TENKAI-2026-1".into(),
+            scope: "release".into(),
+            category: "false_positive".into(),
+            reason: "scanner noise".into(),
+            expires: "7d".into(),
+            release_id: Some("tenkai:release:api@1.0.0".into()),
+            product: None,
+            component: None,
+        };
+        admit_exposure_waiver(&waiver, PrincipalKind::Management, None).unwrap();
+        let runtime = admit_exposure_waiver(&waiver, PrincipalKind::Runtime, None)
+            .unwrap_err()
+            .to_string();
+        assert!(runtime.contains("runtime credentials"), "{runtime}");
+        let scoped = admit_exposure_waiver(&waiver, PrincipalKind::Management, Some("stage"))
+            .unwrap_err()
+            .to_string();
+        assert!(scoped.contains("cannot call catalog-wide"), "{scoped}");
+
+        let clear = ExposureWaiverClearRequest {
+            version: 1,
+            operation: "waiver_clear".into(),
+            advisory_id: "TENKAI-2026-1".into(),
+            scope: "release".into(),
+            reason: "fixed".into(),
+            release_id: Some("tenkai:release:api@1.0.0".into()),
+            product: None,
+            component: None,
+        };
+        admit_exposure_waiver_clear(&clear, PrincipalKind::Management, None).unwrap();
+
+        let env_grace = ExposureGraceRequest {
+            version: 1,
+            operation: "exposure_grace".into(),
+            environment: "stage".into(),
+            expected_generation: 0,
+            grace: "24h".into(),
+        };
+        admit_exposure_grace(
+            &env_grace,
+            "stage",
+            PrincipalKind::Management,
+            Some("stage"),
+        )
+        .unwrap();
+        let runtime = admit_exposure_grace(&env_grace, "stage", PrincipalKind::Runtime, None)
+            .unwrap_err()
+            .to_string();
+        assert!(runtime.contains("runtime credentials"), "{runtime}");
+
+        let channel_grace = ChannelExposureGraceRequest {
+            version: 1,
+            operation: "channel_exposure_grace".into(),
+            grace: "off".into(),
+        };
+        admit_channel_exposure_grace(&channel_grace, PrincipalKind::Management, None).unwrap();
+        let scoped =
+            admit_channel_exposure_grace(&channel_grace, PrincipalKind::Management, Some("stage"))
+                .unwrap_err()
+                .to_string();
+        assert!(scoped.contains("cannot call catalog-wide"), "{scoped}");
     }
 
     #[test]

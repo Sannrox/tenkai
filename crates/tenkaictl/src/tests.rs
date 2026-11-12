@@ -827,6 +827,66 @@ fn parses_exposure_import_inspect_and_query() {
             }
         } if component == "openssl" && range == ">=1.0.0"
     ));
+    let waive = Cli::try_parse_from([
+        "tenkaictl",
+        "exposure",
+        "waive",
+        "--advisory",
+        "TENKAI-2026-1",
+        "--scope",
+        "release",
+        "--category",
+        "false_positive",
+        "--reason",
+        "scanner noise",
+        "--expires",
+        "7d",
+        "--release",
+        "tenkai:release:api@1.0.0",
+    ])
+    .unwrap();
+    assert!(matches!(
+        waive.command,
+        Command::Exposure {
+            command: crate::args::ExposureCommand::Waive {
+                ref advisory,
+                ref scope,
+                ref category,
+                ref reason,
+                ref expires,
+                ref release,
+                ..
+            }
+        } if advisory == "TENKAI-2026-1"
+            && scope == "release"
+            && category == "false_positive"
+            && reason == "scanner noise"
+            && expires == "7d"
+            && release.as_deref() == Some("tenkai:release:api@1.0.0")
+    ));
+    let grace = Cli::try_parse_from([
+        "tenkaictl",
+        "exposure",
+        "grace",
+        "--env",
+        "stage",
+        "--grace",
+        "24h",
+        "--generation",
+        "3",
+    ])
+    .unwrap();
+    assert!(matches!(
+        grace.command,
+        Command::Exposure {
+            command: crate::args::ExposureCommand::Grace {
+                ref grace,
+                ref env,
+                generation: Some(3),
+                ..
+            }
+        } if grace == "24h" && env.as_deref() == Some("stage")
+    ));
 }
 
 #[test]

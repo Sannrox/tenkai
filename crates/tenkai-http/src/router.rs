@@ -32,16 +32,18 @@ use super::inspect::{
 };
 use super::lifecycle::{
     admit_channel_instance, apply_plan, approve_plan, cancel_apply, cancel_environment_freeze,
-    channel_hold, clear_environment_failure_threshold, clear_product_criticality,
-    close_recall_range, configure_channel_pace, environment_hold, import_derived_criticality,
-    install_model_evaluation_trust, plan_environment, plan_identity_issuer,
-    prepare_identity_issuer, promote_release, publish_release, recall_release,
-    record_model_evaluation_evidence, record_recall_range, record_software_compatibility_evidence,
-    release_channel_hold, release_environment_hold, remove_channel_head, retire_environment,
-    retry_failed_target, rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment,
-    schedule_environment_freeze, set_channel_hold, set_environment_failure_threshold,
-    set_environment_hold, set_product_criticality, software_compatibility_report,
-    subscribe_environment, unsubscribe_environment,
+    channel_hold, clear_environment_failure_threshold, clear_exposure_waiver,
+    clear_product_criticality, close_recall_range, configure_channel_exposure_grace,
+    configure_channel_pace, configure_environment_exposure_grace, environment_hold,
+    import_derived_criticality, install_model_evaluation_trust, plan_environment,
+    plan_identity_issuer, prepare_identity_issuer, promote_release, publish_release,
+    recall_release, record_model_evaluation_evidence, record_recall_range,
+    record_software_compatibility_evidence, release_channel_hold, release_environment_hold,
+    remove_channel_head, retire_environment, retry_failed_target, rewrap_identity_issuer,
+    rewrap_sealed_secrets, rollback_environment, schedule_environment_freeze, set_channel_hold,
+    set_environment_failure_threshold, set_environment_hold, set_exposure_waiver,
+    set_product_criticality, software_compatibility_report, subscribe_environment,
+    unsubscribe_environment,
 };
 use super::package_migration::{
     apply_package_migration, package_migration_status, preview_package_migration,
@@ -210,6 +212,8 @@ pub fn router(
                 )),
         )
         .route("/v1/exposures", get(query_exposures))
+        .route("/v1/exposures/waivers", post(set_exposure_waiver))
+        .route("/v1/exposures/waivers/clear", post(clear_exposure_waiver))
         .route("/v1/advisory-feed", get(inspect_advisory_feed))
         .route("/v1/criticality/derived", post(import_derived_criticality))
         .route("/v1/channels", get(list_channels))
@@ -393,6 +397,10 @@ pub fn router(
             post(retry_failed_target),
         )
         .route(
+            "/v1/environments/{environment}/exposure-grace",
+            post(configure_environment_exposure_grace),
+        )
+        .route(
             "/v1/products/{product}/channels/{channel}/hold",
             get(channel_hold).post(set_channel_hold),
         )
@@ -411,6 +419,10 @@ pub fn router(
         .route(
             "/v1/products/{product}/channels/{channel}/admit",
             post(admit_channel_instance),
+        )
+        .route(
+            "/v1/products/{product}/channels/{channel}/exposure-grace",
+            post(configure_channel_exposure_grace),
         )
         .route(
             "/v1/runtime/environments/{environment}/work",

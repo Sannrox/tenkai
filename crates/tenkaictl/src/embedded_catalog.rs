@@ -166,6 +166,92 @@ pub(crate) async fn run(
                 .await?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
+            ExposureCommand::Waive {
+                advisory,
+                scope,
+                category,
+                reason,
+                expires,
+                release,
+                product,
+                component,
+            } => {
+                let actor = embedded_management_actor()?;
+                let now_ms = tenkai::now_millis();
+                let waiver = tenkai::exposure::ExposureWaiver {
+                    advisory_id: advisory,
+                    scope: tenkai::exposure::WaiverScopeKind::parse(&scope)?,
+                    release_id: release,
+                    product,
+                    component,
+                    category: tenkai::exposure::WaiverCategory::parse(&category)?,
+                    reason,
+                    actor: actor.audit_principal(),
+                    expires_at: tenkai::exposure::parse_expiry(&expires, now_ms)?,
+                };
+                tenkai::exposure::set_waiver(ctx, waiver, now_ms).await?;
+                println!("waived advisory until {expires}");
+            }
+            ExposureCommand::Unwaive {
+                advisory,
+                scope,
+                reason,
+                release,
+                product,
+                component,
+            } => {
+                let actor = embedded_management_actor()?;
+                tenkai::exposure::clear_waiver(
+                    ctx,
+                    tenkai::exposure::ExposureWaiver {
+                        advisory_id: advisory.clone(),
+                        scope: tenkai::exposure::WaiverScopeKind::parse(&scope)?,
+                        release_id: release,
+                        product,
+                        component,
+                        category: tenkai::exposure::WaiverCategory::FalsePositive,
+                        reason,
+                        actor: actor.audit_principal(),
+                        expires_at: tenkai::now_millis().saturating_add(1),
+                    },
+                    tenkai::now_millis(),
+                )
+                .await?;
+                println!("cleared {scope} waiver for {advisory}");
+            }
+            ExposureCommand::Grace {
+                grace,
+                env,
+                generation: _,
+                product,
+                channel,
+            } => {
+                let _actor = embedded_management_actor()?;
+                let grace_ms = tenkai::exposure::parse_grace(&grace)?;
+                match (env, product, channel) {
+                    (Some(env), None, None) => {
+                        tenkai::exposure::configure_environment_grace(ctx, &env, grace_ms, |_| {
+                            Ok(())
+                        })
+                        .await?;
+                        match grace_ms {
+                            Some(ms) => println!("exposure grace {ms}ms for {env}"),
+                            None => println!("exposure grace off for {env}"),
+                        }
+                    }
+                    (None, Some(product), Some(channel)) => {
+                        tenkai::exposure::configure_channel_grace(
+                            ctx, &product, &channel, grace_ms,
+                        )
+                        .await?;
+                        match grace_ms {
+                            Some(ms) => println!("exposure grace {ms}ms for {product}/{channel}"),
+                            None => println!("exposure grace off for {product}/{channel}"),
+                        }
+                    }
+                    _ => bail!("exposure grace requires --env or --product and --channel"),
+                }
+            }
         },
         Command::Criticality { command } => match command {
             crate::args::DerivedCriticalityCommand::Import {

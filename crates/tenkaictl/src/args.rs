@@ -691,6 +691,59 @@ pub(crate) enum ExposureCommand {
         #[arg(long)]
         min_criticality: Option<String>,
     },
+    /// Waive an advisory finding at a named scope until expiry.
+    Waive {
+        #[arg(long)]
+        advisory: String,
+        /// `release`, `component`, `product`, or `global`.
+        #[arg(long)]
+        scope: String,
+        /// `false_positive`, `mitigated`, or `upstream_dependency`.
+        #[arg(long)]
+        category: String,
+        #[arg(long)]
+        reason: String,
+        /// RFC3339 timestamp or duration (`7d`, `24h`). A bare number is seconds.
+        #[arg(long)]
+        expires: String,
+        #[arg(long)]
+        release: Option<String>,
+        #[arg(long)]
+        product: Option<String>,
+        #[arg(long)]
+        component: Option<String>,
+    },
+    /// Remove an advisory waiver. Missing is success.
+    Unwaive {
+        #[arg(long)]
+        advisory: String,
+        /// `release`, `component`, `product`, or `global`.
+        #[arg(long)]
+        scope: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        release: Option<String>,
+        #[arg(long)]
+        product: Option<String>,
+        #[arg(long)]
+        component: Option<String>,
+    },
+    /// Set or clear the exposure grace window on an environment or channel.
+    Grace {
+        /// Duration (`30`, `250ms`, `2m`, `24h`) or `off`. A bare number is seconds.
+        #[arg(long)]
+        grace: String,
+        #[arg(long, conflicts_with_all = ["product", "channel"])]
+        env: Option<String>,
+        /// Current fencing generation; required with `--target remote` for `--env`.
+        #[arg(long)]
+        generation: Option<u64>,
+        #[arg(long, requires = "channel")]
+        product: Option<String>,
+        #[arg(long, requires = "product")]
+        channel: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
