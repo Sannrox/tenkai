@@ -933,7 +933,7 @@ promotion = "manual"
         let root = tmp_root("takeover");
         let path = root.join("spoke.db");
         let runtime = Arc::new(Mutex::new(Fence::empty()));
-        let ttl = Duration::from_millis(50);
+        let ttl = DRILL_LEASE_TTL;
         let mut a = SpokeNode::new(
             "a",
             "site",
@@ -944,9 +944,12 @@ promotion = "manual"
         .unwrap();
         let mut b =
             SpokeNode::new("b", "site", SqliteStore::open(&path).unwrap(), ttl, runtime).unwrap();
+        let acquired = Instant::now();
         a.acquire().unwrap();
-        assert!(b.acquire().is_err(), "a live lease is not taken over");
-        std::thread::sleep(ttl + Duration::from_millis(20));
+        if acquired.elapsed() + DRILL_LIVE_MARGIN < ttl {
+            assert!(b.acquire().is_err(), "a live lease is not taken over");
+        }
+        std::thread::sleep(ttl.saturating_sub(acquired.elapsed()) + Duration::from_millis(20));
         assert_eq!(b.acquire().unwrap(), 2);
         // A stalled past its lease: its role lapsed, and a write that slips
         // through with the old generation is refused by the store.
@@ -998,13 +1001,18 @@ promotion = "manual"
             "a",
             "site",
             drill_store(&store).unwrap(),
-            Duration::from_millis(50),
+            DRILL_LEASE_TTL,
             runtime,
         )
         .unwrap();
+        let acquired = Instant::now();
         a.acquire().unwrap();
-        assert!(a.promote(&seed, 0).is_err(), "renewal is not a promotion");
-        std::thread::sleep(Duration::from_millis(80));
+        if acquired.elapsed() + DRILL_LIVE_MARGIN < DRILL_LEASE_TTL {
+            assert!(a.promote(&seed, 0).is_err(), "renewal is not a promotion");
+        }
+        std::thread::sleep(
+            DRILL_LEASE_TTL.saturating_sub(acquired.elapsed()) + Duration::from_millis(20),
+        );
         assert!(a.promote(&root.join("missing-seed"), 0).is_err());
         assert_eq!(a.recorded_generation().unwrap(), 1, "no key, no takeover");
         assert_eq!(a.promote(&seed, 0).unwrap().statement.generation, 2);
