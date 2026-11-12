@@ -316,6 +316,15 @@ pub(crate) async fn run(
             }
             Ok(())
         }
+        Command::Explain { env, instance } => {
+            let report = client.explain_instance(&env, &instance).await?;
+            if output == OutputFormat::JsonV1 {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                return Ok(());
+            }
+            crate::output::print_explain(&report);
+            Ok(())
+        }
         Command::Status { env } => {
             let env = crate::client_config::require_env(env)?;
             let rows = client.environment_status(&env).await?;

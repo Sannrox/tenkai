@@ -30,6 +30,7 @@ use tenkai::environment_dependencies::EnvironmentDependencies;
 use tenkai::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryResult};
 use tenkai::fleet::FleetStatusReport;
 use tenkai::host_identity::AuthSession;
+use tenkai::instance_explain::InstanceExplainReport;
 use tenkai::management_lifecycle::{
     ApplyRequest, ApproveRequest, ChannelHoldRequest, ChannelRemoveRequest,
     DeliveryFailureThresholdRequest, DeliveryFreezeRequest, DeliveryHoldRequest,
@@ -342,6 +343,13 @@ pub fn http_contract() -> Value {
             auth: Auth::Read,
             request: None,
             response: schema::<Vec<StatusRow>>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/environments/{environment}/instances/{instance}/explain",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<InstanceExplainReport>(&mut g),
         },
         Route {
             method: "GET",

@@ -332,6 +332,8 @@ pub(crate) enum Command {
         #[arg(long, env = "TENKAI_ENVIRONMENT")]
         env: Option<String>,
     },
+    /// List the checks that currently block the next change for one instance.
+    Explain { env: String, instance: String },
     /// Inspect the embedded control-plane state without distributed diagnostics.
     Inspect,
     /// Export a bounded, read-only recovery diagnostic (no authority).

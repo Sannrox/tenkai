@@ -368,6 +368,18 @@ fn status_without_target_or_env_stays_unspecified() {
 }
 
 #[test]
+fn parses_explain_env_and_instance() {
+    let cli = Cli::try_parse_from(["tenkaictl", "explain", "prod", "api"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Explain {
+            ref env,
+            ref instance,
+        } if env == "prod" && instance == "api"
+    ));
+}
+
+#[test]
 fn parses_secret_trust_and_recipients() {
     let trust = Cli::try_parse_from([
         "tenkaictl",

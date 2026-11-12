@@ -116,6 +116,18 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn explain_instance(
+        &self,
+        environment: &str,
+        instance: &str,
+    ) -> anyhow::Result<tenkai::instance_explain::InstanceExplainReport> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/environments/{environment}/instances/{instance}/explain"),
+        )
+        .await
+    }
+
     pub async fn environment_dependencies(
         &self,
         environment: &str,

@@ -18,6 +18,7 @@ pub enum CommandName {
     Plan,
     Apply,
     Status,
+    Explain,
     InspectEnvironment,
     HistoryEnvironment,
     Rollback,

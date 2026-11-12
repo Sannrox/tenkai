@@ -203,6 +203,23 @@ pub(super) async fn environment_status(
     )
 }
 
+pub(super) async fn instance_explain(
+    State(state): State<Arc<AppState>>,
+    Path((environment, instance)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .explain_instance(&credential, &environment, &instance)
+            .await,
+    )
+}
+
 pub(super) async fn environment_dependencies(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,

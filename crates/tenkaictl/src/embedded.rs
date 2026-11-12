@@ -184,6 +184,7 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
         command @ (Command::Plan { .. }
         | Command::Apply { .. }
         | Command::Status { .. }
+        | Command::Explain { .. }
         | Command::Recovery { .. }
         | Command::Inspect
         | Command::Backup { .. }) => {

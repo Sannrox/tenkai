@@ -27,6 +27,7 @@ use crate::deployment_history::{DeploymentHistoryPage, DeploymentHistoryQuery};
 use crate::environment_dependencies::EnvironmentDependencies;
 use crate::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryResult};
 use crate::host_identity::AuthSession;
+use crate::instance_explain::InstanceExplainReport;
 use crate::management_lifecycle::{
     self, ApplyRequest, ApproveRequest, ChannelHoldRequest, ChannelRemoveRequest,
     DeliveryFailureThresholdRequest, DeliveryFreezeRequest, DeliveryHoldRequest,
@@ -1066,6 +1067,27 @@ impl ManagementOperations {
         }
         self.reconciler
             .environment_status(environment.to_string())
+            .await
+            .map_err(map_environment_error)
+    }
+
+    pub async fn explain_instance(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        instance: &str,
+    ) -> Result<InstanceExplainReport, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        if self.tenant_mode {
+            return self
+                .tenant_operations()?
+                .explain(&context, environment, instance)
+                .await
+                .map_err(map_tenant_error);
+        }
+        self.reconciler
+            .explain_instance(environment.to_string(), instance.to_string())
             .await
             .map_err(map_environment_error)
     }
@@ -3436,7 +3458,7 @@ fn map_history_error(error: anyhow::Error) -> ManagementError {
 
 fn map_environment_error(error: anyhow::Error) -> ManagementError {
     let message = format!("{error:#}");
-    if message.contains("not registered") {
+    if message.contains("not registered") || message.contains("has no instance") {
         ManagementError::NotFound(message)
     } else if message.contains("apply in progress")
         || message.contains("active delivery work")

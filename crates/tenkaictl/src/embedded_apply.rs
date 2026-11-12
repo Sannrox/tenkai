@@ -102,6 +102,20 @@ pub(crate) async fn run(
             )
             .await?;
         }
+        Command::Explain { env, instance } => {
+            let report = tenkai::instance_explain::explain_instance_for_policy(
+                ctx,
+                &env,
+                &instance,
+                tenkai::approval_policy::ExecutionPolicy::from_host_env(),
+            )
+            .await?;
+            if output == OutputFormat::JsonV1 {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                crate::output::print_explain(&report);
+            }
+        }
         Command::Status { env } => {
             let env = crate::client_config::require_env(env)?;
             let rows = plan::status(ctx, &env).await?;
