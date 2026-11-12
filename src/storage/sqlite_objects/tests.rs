@@ -73,6 +73,60 @@ fn delete_if_property_keeps_the_object_when_the_value_moved() {
 }
 
 #[test]
+fn put_keeping_property_copies_the_stored_value() {
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-1061-keep-prop-{}-{}.db",
+        std::process::id(),
+        crate::now_millis()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let store = SqliteStore::open(&path).unwrap();
+    let mut object = Object {
+        id: "tenkai:delivery_hold:environment:lab".into(),
+        kind: "tenkai.delivery_hold".into(),
+        name: "environment:lab".into(),
+        properties: HashMap::from([
+            ("actor".into(), "alice".into()),
+            ("reason".into(), "stop".into()),
+            ("cancel_generation".into(), "7".into()),
+        ]),
+        ..Object::default()
+    };
+    store.create(object.clone()).unwrap();
+    object.properties.remove("cancel_generation");
+    object
+        .properties
+        .insert("reason".into(), "maintenance".into());
+    object.properties.insert("actor".into(), "bob".into());
+    let stored = store
+        .put_keeping_property(object, "cancel_generation")
+        .unwrap();
+    assert_eq!(
+        stored
+            .properties
+            .get("cancel_generation")
+            .map(String::as_str),
+        Some("7")
+    );
+    let reread = store
+        .get("tenkai:delivery_hold:environment:lab")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reread
+            .properties
+            .get("cancel_generation")
+            .map(String::as_str),
+        Some("7")
+    );
+    assert_eq!(
+        reread.properties.get("reason").map(String::as_str),
+        Some("maintenance")
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn catalog_history_older_than_retention_is_pruned() {
     let path = std::env::temp_dir().join(format!(
         "tenkai-874-prune-{}-{}.db",

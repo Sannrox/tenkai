@@ -17,6 +17,7 @@ pub enum CommandName {
     Promote,
     Plan,
     Apply,
+    ApplyCancel,
     Status,
     Explain,
     InspectEnvironment,

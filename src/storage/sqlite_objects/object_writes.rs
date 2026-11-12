@@ -59,6 +59,11 @@ impl SqliteStore {
         self.delete_object_if_property(id, key, value)
     }
 
+    /// Write `object`, copying `key` from the stored row when it is already set.
+    pub fn put_keeping_property(&self, object: Object, key: &str) -> AnyResult<Object> {
+        self.put_object_keeping_property(object, key)
+    }
+
     pub fn create_object(&self, object: Object) -> Result<Object> {
         let mut connection = self.connection()?;
         let tx = connection
@@ -120,6 +125,38 @@ impl SqliteStore {
         delete_object_rows(&tx, id)?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Upsert `object` while copying `key` from the stored row in the same
+    /// immediate transaction, so a concurrent writer cannot drop that property.
+    pub fn put_object_keeping_property(&self, mut object: Object, key: &str) -> AnyResult<Object> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT value FROM catalog_object_properties WHERE object_id=?1 AND key=?2",
+                rusqlite::params![&object.id, key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(value) = current.filter(|value| !value.is_empty()) {
+            object.properties.insert(key.to_string(), value);
+        }
+        let previous = decode_optional(
+            tx.query_row(
+                "SELECT payload FROM catalog_objects WHERE id=?1",
+                [&object.id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?,
+            "object",
+        )?;
+        upsert_object_in(&tx, &object, &self.principal).map_err(anyhow::Error::from)?;
+        if let Some(previous) = previous {
+            record_changes(&tx, &previous, &object, &self.principal)?;
+        }
+        tx.commit()?;
+        Ok(object)
     }
 }
 

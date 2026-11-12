@@ -93,6 +93,21 @@ impl Ctx {
         self.backend.object_lifecycle().delete(id).await
     }
 
+    /// Write `object`, copying `key` from the stored row when it is already set.
+    ///
+    /// Embedded SQLite reads and upserts in one immediate transaction.
+    pub(crate) async fn put_keeping_property(
+        &mut self,
+        object: Object,
+        key: &str,
+    ) -> Result<Object> {
+        let Some(store) = self.embedded_arc() else {
+            anyhow::bail!("put_keeping_property requires the embedded store");
+        };
+        let key = key.to_string();
+        super::block_embedded(store, move |store| store.put_keeping_property(object, &key)).await
+    }
+
     /// Delete `id` only while property `key` still equals `value`.
     ///
     /// Embedded SQLite checks and deletes in one immediate transaction.

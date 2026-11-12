@@ -20,6 +20,8 @@ pub(crate) async fn run(
             allow_recalled_recovery,
             recovery_reason,
             generation: _,
+            no_hold,
+            reason: hold_skip_reason,
         } => {
             let env = crate::client_config::require_env(env)?;
             if output == OutputFormat::JsonV1 {
@@ -49,6 +51,17 @@ pub(crate) async fn run(
                 println!("rolling back in {env}:");
                 print_steps(&stored.steps);
             }
+            if no_hold && !bypass.allow_unapproved_development {
+                bail!(
+                    "--no-hold applies only when rollback executes now; pass --allow-unapproved-development or clear the hold after apply"
+                );
+            }
+            let had_hold = tenkai::delivery_hold::get(
+                ctx,
+                &tenkai::delivery_hold::HoldScope::environment(&env),
+            )
+            .await?
+            .is_some();
             if bypass.allow_unapproved_development {
                 run_plan(
                     ctx,
@@ -77,6 +90,17 @@ pub(crate) async fn run(
                     },
                 )
                 .await?;
+                if no_hold && !had_hold {
+                    let _ = hold_skip_reason;
+                    let actor = crate::authorization::embedded_management_actor()?;
+                    tenkai::delivery_hold::clear_if_reason(
+                        ctx,
+                        &tenkai::delivery_hold::HoldScope::environment(&env),
+                        actor.principal_id(),
+                        tenkai::apply::ROLLBACK_HOLD_REASON,
+                    )
+                    .await?;
+                }
             } else if output == OutputFormat::JsonV1 {
                 let mut result = CommandResultV1::failed(
                     CommandName::Rollback,

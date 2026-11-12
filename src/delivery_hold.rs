@@ -274,9 +274,212 @@ pub async fn set(
         actor: actor.into(),
         held_at: crate::now_millis(),
     };
-    ctx.put(hold_object(scope, &hold)).await?;
+    // Keep a live apply-cancel marker. `set` pauses new work; it must not
+    // resume remaining steps of an apply that already recorded cancel.
+    ctx.put_keeping_property(hold_object(scope, &hold, None), "cancel_generation")
+        .await?;
     append_audit(ctx, scope, "set", &hold).await?;
     Ok(hold)
+}
+
+/// Set an environment hold only while `fencing_token` still owns the apply lease.
+///
+/// Existing holds are left unchanged. A lost fence is a no-op.
+pub(crate) async fn set_if_absent_fenced(
+    ctx: &mut Ctx,
+    environment: &str,
+    reason: &str,
+    actor: &str,
+    generation: u64,
+    fencing_token: &str,
+) -> Result<Option<DeliveryHold>> {
+    require_embedded(ctx)?;
+    let reason = reason.trim();
+    anyhow::ensure!(!reason.is_empty(), "delivery hold reason must not be empty");
+    anyhow::ensure!(
+        reason.len() <= 1024,
+        "delivery hold reason exceeds 1024 bytes"
+    );
+    let actor = validate_actor(actor)?;
+    anyhow::ensure!(
+        actor != AUTOMATIC_HOLD_ACTOR,
+        "delivery hold actor {AUTOMATIC_HOLD_ACTOR} is reserved for failure-threshold holds"
+    );
+    let scope = HoldScope::environment(environment);
+    scope.require_exists(ctx).await?;
+    if get(ctx, &scope).await?.is_some() {
+        return Ok(None);
+    }
+    if apply_fence_lost(ctx, environment, generation, fencing_token).await? {
+        return Ok(None);
+    }
+    let hold = DeliveryHold {
+        reason: reason.into(),
+        actor: actor.into(),
+        held_at: crate::now_millis(),
+    };
+    match ctx
+        .guarded_create(
+            hold_object(&scope, &hold, None),
+            crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+            environment,
+            fencing_token,
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(error) if is_already_exists(&error) => return get(ctx, &scope).await,
+        Err(_) if apply_fence_lost(ctx, environment, generation, fencing_token).await? => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    }
+    append_audit(ctx, &scope, "set", &hold).await?;
+    Ok(Some(hold))
+}
+
+/// Pause new execution and ask the apply of `generation` to skip later steps.
+///
+/// The hold write is fenced by the live apply lease: a takeover or expiry
+/// makes this a no-op, and a newer `cancel_generation` is never overwritten.
+pub async fn set_cancel(
+    ctx: &mut Ctx,
+    scope: &HoldScope,
+    reason: &str,
+    actor: &str,
+    generation: u64,
+    fencing_token: &str,
+) -> Result<Option<DeliveryHold>> {
+    require_embedded(ctx)?;
+    let reason = reason.trim();
+    anyhow::ensure!(!reason.is_empty(), "delivery hold reason must not be empty");
+    anyhow::ensure!(
+        reason.len() <= 1024,
+        "delivery hold reason exceeds 1024 bytes"
+    );
+    let actor = validate_actor(actor)?;
+    anyhow::ensure!(
+        actor != AUTOMATIC_HOLD_ACTOR,
+        "delivery hold actor {AUTOMATIC_HOLD_ACTOR} is reserved for failure-threshold holds"
+    );
+    scope.require_exists(ctx).await?;
+    let HoldScope::Environment(environment) = scope else {
+        bail!("apply cancel is environment-scoped");
+    };
+    if apply_fence_lost(ctx, environment, generation, fencing_token).await? {
+        return Ok(None);
+    }
+    if let Some(existing) = cancel_generation(ctx, environment).await? {
+        if existing > generation {
+            return Ok(None);
+        }
+        if existing == generation {
+            return get(ctx, scope).await;
+        }
+    }
+    let hold = DeliveryHold {
+        reason: reason.into(),
+        actor: actor.into(),
+        held_at: crate::now_millis(),
+    };
+    let object = hold_object(scope, &hold, Some(generation));
+    let namespace = crate::apply::ENVIRONMENT_LEASE_NAMESPACE;
+    if get(ctx, scope).await?.is_some() {
+        match ctx
+            .guarded_update(object, namespace, environment, fencing_token)
+            .await
+        {
+            Ok(_) => {}
+            Err(_) if apply_fence_lost(ctx, environment, generation, fencing_token).await? => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        match ctx
+            .guarded_create(object, namespace, environment, fencing_token)
+            .await
+        {
+            Ok(_) => {}
+            Err(error) if is_already_exists(&error) => {
+                if let Some(existing) = cancel_generation(ctx, environment).await? {
+                    if existing > generation {
+                        return Ok(None);
+                    }
+                    if existing == generation {
+                        return get(ctx, scope).await;
+                    }
+                }
+                match ctx
+                    .guarded_update(
+                        hold_object(scope, &hold, Some(generation)),
+                        namespace,
+                        environment,
+                        fencing_token,
+                    )
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(_)
+                        if apply_fence_lost(ctx, environment, generation, fencing_token)
+                            .await? =>
+                    {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(_) if apply_fence_lost(ctx, environment, generation, fencing_token).await? => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    append_audit(ctx, scope, "set", &hold).await?;
+    Ok(Some(hold))
+}
+
+fn is_already_exists(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::storage::StoreError>()
+            .is_some_and(crate::storage::StoreError::is_already_exists)
+    })
+}
+
+async fn apply_fence_lost(
+    ctx: &mut Ctx,
+    environment: &str,
+    generation: u64,
+    fencing_token: &str,
+) -> Result<bool> {
+    let Some(lease) = ctx
+        .get_lease(crate::apply::ENVIRONMENT_LEASE_NAMESPACE, environment)
+        .await?
+    else {
+        return Ok(true);
+    };
+    Ok(lease.status != "active"
+        || lease.generation != generation
+        || lease.fencing_token != fencing_token
+        || lease.expires_at_ms <= crate::now_millis())
+}
+
+/// Apply-lease generation recorded on the environment hold, if any.
+pub(crate) async fn cancel_generation(ctx: &mut Ctx, environment: &str) -> Result<Option<u64>> {
+    let Some(object) = ctx
+        .get(&HoldScope::environment(environment).hold_id())
+        .await?
+    else {
+        return Ok(None);
+    };
+    if object.kind != HOLD_KIND {
+        bail!("object {} is {}, not {HOLD_KIND}", object.id, object.kind);
+    }
+    match object.properties.get("cancel_generation") {
+        Some(value) if !value.is_empty() => Ok(Some(value.parse()?)),
+        _ => Ok(None),
+    }
 }
 
 /// Remove the hold so the next tick may execute; returns the hold that was cleared.
@@ -300,6 +503,47 @@ pub async fn clear(ctx: &mut Ctx, scope: &HoldScope, actor: &str) -> Result<Deli
     )
     .await?;
     Ok(cleared)
+}
+
+/// Clear the hold only while its reason is still `reason`.
+///
+/// The property check and delete share one store transaction so a concurrent
+/// set or cancel cannot be removed by this call. A replacement that still
+/// has this reason is another hold of the same kind (rollback `--no-hold`
+/// skips the post-rollback pause; cancel's default reason is not `rollback`).
+pub async fn clear_if_reason(
+    ctx: &mut Ctx,
+    scope: &HoldScope,
+    actor: &str,
+    reason: &str,
+) -> Result<Option<DeliveryHold>> {
+    require_embedded(ctx)?;
+    let actor = validate_actor(actor)?;
+    scope.require_exists(ctx).await?;
+    let Some(cleared) = get(ctx, scope).await? else {
+        return Ok(None);
+    };
+    if cleared.reason != reason {
+        return Ok(None);
+    }
+    if !ctx
+        .delete_if_property(&scope.hold_id(), "reason", reason)
+        .await?
+    {
+        return Ok(None);
+    }
+    append_audit(
+        ctx,
+        scope,
+        "clear",
+        &DeliveryHold {
+            reason: cleared.reason.clone(),
+            actor: actor.into(),
+            held_at: crate::now_millis(),
+        },
+    )
+    .await?;
+    Ok(Some(cleared))
 }
 
 /// The active hold for `scope`, if any.
@@ -733,7 +977,7 @@ async fn try_set_automatic_hold(
         actor: AUTOMATIC_HOLD_ACTOR.into(),
         held_at: crate::now_millis(),
     };
-    match ctx.create_once(hold_object(scope, &hold)).await {
+    match ctx.create_once(hold_object(scope, &hold, None)).await {
         Ok(_) => append_audit(ctx, scope, "set", &hold).await,
         Err(status) if crate::client::is_unique_conflict(&status) => Ok(()),
         Err(status) => Err(status.into()),
@@ -855,19 +1099,23 @@ fn required<'a>(object: &'a Object, key: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow::anyhow!("{} has no {key}", object.id))
 }
 
-fn hold_object(scope: &HoldScope, hold: &DeliveryHold) -> Object {
+fn hold_object(scope: &HoldScope, hold: &DeliveryHold, cancel_generation: Option<u64>) -> Object {
+    let mut properties = HashMap::from([
+        ("scope".into(), scope.key()),
+        ("reason".into(), hold.reason.clone()),
+        ("actor".into(), hold.actor.clone()),
+        ("held_at".into(), hold.held_at.to_string()),
+    ]);
+    if let Some(generation) = cancel_generation {
+        properties.insert("cancel_generation".into(), generation.to_string());
+    }
     Object {
         id: scope.hold_id(),
         kind: HOLD_KIND.into(),
         name: scope.key(),
         namespace: NS.into(),
         external_id: String::new(),
-        properties: HashMap::from([
-            ("scope".into(), scope.key()),
-            ("reason".into(), hold.reason.clone()),
-            ("actor".into(), hold.actor.clone()),
-            ("held_at".into(), hold.held_at.to_string()),
-        ]),
+        properties,
         created: hold.held_at,
         updated: hold.held_at,
     }
@@ -924,6 +1172,89 @@ mod tests {
         let mut ctx = Ctx::embedded(&database).unwrap();
         crate::ontology::register(&mut ctx).await.unwrap();
         (database, ctx)
+    }
+
+    #[tokio::test]
+    async fn set_keeps_a_live_cancel_generation() {
+        let (database, mut ctx) = temp_ctx("preserve-cancel").await;
+        crate::environment::env_add(&mut ctx, "lab", "Lab")
+            .await
+            .unwrap();
+        let lease = crate::apply::claim_environment(&mut ctx, "lab", "plan-1")
+            .await
+            .unwrap();
+        let scope = HoldScope::environment("lab");
+        set_cancel(
+            &mut ctx,
+            &scope,
+            "stop",
+            "alice",
+            lease.generation,
+            &lease.fencing_token,
+        )
+        .await
+        .unwrap();
+        set(&mut ctx, &scope, "maintenance", "bob").await.unwrap();
+        assert_eq!(
+            cancel_generation(&mut ctx, "lab").await.unwrap(),
+            Some(lease.generation)
+        );
+        crate::apply::release_environment(&mut ctx, &lease)
+            .await
+            .unwrap();
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn clear_if_reason_leaves_a_replaced_hold() {
+        let (database, mut ctx) = temp_ctx("clear-if-reason").await;
+        crate::environment::env_add(&mut ctx, "lab", "Lab")
+            .await
+            .unwrap();
+        let scope = HoldScope::environment("lab");
+        set(&mut ctx, &scope, "rollback", "alice").await.unwrap();
+        set(&mut ctx, &scope, "maintenance", "bob").await.unwrap();
+        assert!(
+            clear_if_reason(&mut ctx, &scope, "alice", "rollback")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let kept = get(&mut ctx, &scope).await.unwrap().unwrap();
+        assert_eq!(kept.reason, "maintenance");
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn set_cancel_without_the_live_fence_is_a_noop() {
+        let (database, mut ctx) = temp_ctx("cancel-fence").await;
+        crate::environment::env_add(&mut ctx, "lab", "Lab")
+            .await
+            .unwrap();
+        let lease = crate::apply::claim_environment(&mut ctx, "lab", "plan-1")
+            .await
+            .unwrap();
+        let wrote = set_cancel(
+            &mut ctx,
+            &HoldScope::environment("lab"),
+            "stop",
+            "alice",
+            lease.generation,
+            "not-the-token",
+        )
+        .await
+        .unwrap();
+        assert!(wrote.is_none());
+        assert!(
+            get(&mut ctx, &HoldScope::environment("lab"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        crate::apply::release_environment(&mut ctx, &lease)
+            .await
+            .unwrap();
+        let _ = std::fs::remove_file(&database);
     }
 
     #[tokio::test]

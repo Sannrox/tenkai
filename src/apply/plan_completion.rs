@@ -28,6 +28,30 @@ impl ExecutionCompletion {
         Ok(self.terminal_state != PlanState::Succeeded)
     }
 
+    pub(super) fn all_succeeded(&self) -> bool {
+        self.terminal_state == PlanState::Succeeded
+            && self.outcomes.iter().all(|outcome| {
+                outcome
+                    .classified_status()
+                    .is_ok_and(StepOutcomeStatus::is_success)
+            })
+    }
+
+    /// Record remaining steps as skipped after a matching apply cancel.
+    pub(super) fn skip_remaining(
+        &mut self,
+        steps: impl IntoIterator<Item = Step>,
+        skip_detail: &str,
+        plan_detail: &str,
+    ) {
+        for step in steps {
+            self.outcomes
+                .push(Outcome::new(step, StepOutcomeStatus::Failed, skip_detail));
+        }
+        self.terminal_state = PlanState::Failed;
+        self.detail = plan_detail.into();
+    }
+
     /// Persist the terminal state and return the collected Step outcomes.
     pub(super) async fn finish(
         self,

@@ -113,6 +113,10 @@ pub(crate) fn command_name(command: &Command, target: Target) -> Option<CommandN
         Command::Publish { .. } => CommandName::Publish,
         Command::Promote { .. } => CommandName::Promote,
         Command::Plan { .. } => CommandName::Plan,
+        Command::Apply {
+            command: Some(crate::args::ApplyCommand::Cancel { .. }),
+            ..
+        } => CommandName::ApplyCancel,
         Command::Apply { .. } => CommandName::Apply,
         Command::Status { .. } => CommandName::Status,
         Command::Explain { .. } => CommandName::Explain,
@@ -151,6 +155,7 @@ fn is_mutation(command: CommandName) -> bool {
             | CommandName::Promote
             | CommandName::Plan
             | CommandName::Apply
+            | CommandName::ApplyCancel
             | CommandName::Rollback
             | CommandName::Restart
             | CommandName::Recall
@@ -645,6 +650,7 @@ mod tests {
             (CommandName::Promote, "channel"),
             (CommandName::Plan, "plan"),
             (CommandName::Apply, "plan"),
+            (CommandName::ApplyCancel, "environment"),
             (CommandName::Status, "environment"),
             (CommandName::InspectEnvironment, "environment"),
             (CommandName::HistoryEnvironment, "environment"),

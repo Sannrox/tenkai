@@ -388,6 +388,25 @@ async fn complete_under_optional_lease(
             )
             .await?;
         }
+        if completion.succeeded
+            && !stored.steps.is_empty()
+            && stored
+                .steps
+                .iter()
+                .all(|step| step.action == crate::plan::Action::Rollback)
+            && let Some(lease) = ctx
+                .get_lease(crate::apply::ENVIRONMENT_LEASE_NAMESPACE, environment)
+                .await?
+        {
+            crate::apply::hold_after_rollback(
+                ctx,
+                environment,
+                "apply",
+                lease.generation,
+                &lease.fencing_token,
+            )
+            .await?;
+        }
         return Ok(());
     }
     crate::delivery_manifest::admit_runtime_completion(ctx, environment, completion).await

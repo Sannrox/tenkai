@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 
 use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
 
-use crate::args::{Command, OutputFormat};
+use crate::args::{ApplyCommand, Command, OutputFormat};
 use crate::authorization::{load_remote_migration_authorization, reject_remote_migration_bypass};
 use crate::migrate_args::MigrateCommand;
 use crate::output::{print_machine_result, reported_machine_failure, with_remote_resources};
@@ -16,6 +16,42 @@ pub(crate) async fn run(
     let machine = output == OutputFormat::JsonV1;
     match command {
         Command::Apply {
+            command:
+                Some(ApplyCommand::Cancel {
+                    env,
+                    reason,
+                    generation,
+                    no_hold,
+                }),
+            ..
+        } => {
+            if no_hold {
+                bail!("cancel always holds the environment; `--no-hold` is refused");
+            }
+            let generation = generation
+                .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;
+            let result = client
+                .cancel_apply(&env, generation, reason)
+                .await
+                .map_err(|error| {
+                    with_remote_resources(
+                        error,
+                        output,
+                        CommandName::ApplyCancel,
+                        &[("environment", &env)],
+                    )
+                })?;
+            if machine {
+                return print_machine_result(
+                    &CommandResultV1::succeeded(CommandName::ApplyCancel)
+                        .resource("environment", env),
+                );
+            }
+            println!("{}", result.message);
+            Ok(())
+        }
+        Command::Apply {
+            command: None,
             plan_id,
             approval,
             skip_gates,
@@ -27,6 +63,7 @@ pub(crate) async fn run(
                     "the local-development apply bypass is available only with --target embedded"
                 );
             }
+            let plan_id = plan_id.ok_or_else(|| anyhow::anyhow!("apply requires a plan id"))?;
             let generation = generation
                 .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;
             let approval_path = approval
@@ -81,8 +118,15 @@ pub(crate) async fn run(
             allow_recalled_recovery,
             recovery_reason,
             generation,
+            no_hold,
+            reason: _,
         } => {
             let env = crate::client_config::require_env(env)?;
+            if no_hold {
+                bail!(
+                    "--no-hold applies only when rollback executes now; remote rollback only plans, so clear the hold after apply"
+                );
+            }
             if bypass.allow_unapproved_development || bypass.development_reason.is_some() {
                 bail!(
                     "the local-development rollback bypass is available only with --target embedded"

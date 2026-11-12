@@ -600,6 +600,28 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn cancel_apply(
+        &self,
+        environment: &str,
+        expected_generation: u64,
+        reason: Option<String>,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/apply/cancel"),
+            Some(&tenkai::management_lifecycle::DeliveryHoldRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Cancel
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                reason,
+            }),
+        )
+        .await
+    }
+
     pub async fn rollback_environment(
         &self,
         environment: &str,
