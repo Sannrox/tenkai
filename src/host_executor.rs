@@ -38,6 +38,45 @@ const MAX_RECORD_BYTES: u64 = 1024 * 1024;
 /// `PATH` `systemctl` is looked up in; the server's own environment, which
 /// holds its credentials, never reaches it.
 const SYSTEMCTL_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
+/// Where `install.sh --role host-applier` puts the binary. The unit's
+/// ExecStart names this path.
+pub const APPLIER_BIN: &str = "/usr/local/libexec/tenkai/tenkai-host-applier";
+
+/// Version printed by `path --version`, for example `0.8.0`.
+pub fn read_applier_version(path: &Path) -> Result<String> {
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("running {} --version", path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "{} --version exited {}",
+            path.display(),
+            output.status.code().unwrap_or(1)
+        );
+    }
+    let text = String::from_utf8(output.stdout)
+        .with_context(|| format!("reading {} --version", path.display()))?;
+    let version = text
+        .trim()
+        .strip_prefix("tenkai-host-applier ")
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+        .with_context(|| {
+            format!(
+                "{} --version did not print 'tenkai-host-applier <version>'",
+                path.display()
+            )
+        })?;
+    Ok(version.to_string())
+}
+
+/// The installed applier's version, or `None` when the binary is not there.
+pub fn installed_applier_version() -> Option<Result<String>> {
+    Path::new(APPLIER_BIN)
+        .is_file()
+        .then(|| read_applier_version(Path::new(APPLIER_BIN)))
+}
 
 /// A boxed future that borrows its receiver.
 pub type UnitFuture<'a, T = ()> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;

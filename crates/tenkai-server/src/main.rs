@@ -27,8 +27,9 @@ use tenkai::providers::{
 use tenkai::reconciler::{Config as ReconcilerConfig, Reconciler};
 use tenkai::runtime_capabilities::{
     RuntimeRequirements, community_auth_capabilities, community_sqlite_profile,
-    enterprise_auth_capabilities, host_executor_capabilities, shell_executor_capabilities,
-    software_executor_default_capabilities, validate_runtime_capabilities,
+    enterprise_auth_capabilities, host_applier_capabilities, host_executor_capabilities,
+    shell_executor_capabilities, software_executor_default_capabilities,
+    validate_runtime_capabilities,
 };
 use tenkai::storage::{OperationalStore, SqliteStore};
 use tenkai::tenant_store::TenantOperationalStore;
@@ -930,7 +931,27 @@ async fn main() -> Result<()> {
     let host_executor = tenkai::host_executor::HostExecutor::from_env()
         .and_then(|host| host.map(|host| host.check_ready()).transpose());
     match host_executor {
-        Ok(Some(())) => capabilities.components.push(host_executor_capabilities()),
+        Ok(Some(())) => {
+            capabilities.components.push(host_executor_capabilities());
+            if let Some(version) = tenkai::host_executor::installed_applier_version() {
+                match version {
+                    Ok(version) => {
+                        capabilities
+                            .components
+                            .push(host_applier_capabilities(&version));
+                        if let Some(block) = tenkai::version_skew::applier_blocks_host_plans(
+                            tenkai::version_skew::SERVER_VERSION,
+                            &version,
+                        ) {
+                            eprintln!("tenkai-server warning: {block}");
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("tenkai-server warning: host applier version unread: {error:#}");
+                    }
+                }
+            }
+        }
         Ok(None) => {}
         Err(error) => eprintln!("tenkai-server warning: host executor unavailable: {error:#}"),
     }

@@ -206,11 +206,19 @@ applier refuses configuration or trust it reads from anything else.
 
 On `linux-x86_64`, the [install script](release-binaries.md#install-with-one-command)
 does steps 1 and 5 from a GitHub Release, every file checked against its
-`SHA256SUMS` first:
+`SHA256SUMS` first. A first install:
 
 ```bash
 curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh \
   | sudo sh -s -- --role server --with-host-applier
+```
+
+A server already in a [self-upgrade home](release-binaries.md#upgrade-a-server-host)
+upgrades the applier after the server switch, without touching that home:
+
+```bash
+curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh \
+  | sudo sh -s -- --role host-applier
 ```
 
 It installs the binary at `/usr/local/libexec/tenkai/tenkai-host-applier`

@@ -157,9 +157,9 @@ impl ProvidedCapabilities {
             self.components
                 .iter()
                 .filter(|component| {
-                    component
-                        .component_id
-                        .starts_with(SOFTWARE_EXECUTOR_DEFAULT_PREFIX)
+                    let id = component.component_id.as_str();
+                    id.starts_with(SOFTWARE_EXECUTOR_DEFAULT_PREFIX)
+                        || id.starts_with(HOST_APPLIER_PREFIX)
                 })
                 .map(|component| component.component_id.clone()),
         );
@@ -290,10 +290,18 @@ pub fn shell_executor_capabilities() -> ComponentCapabilities {
 
 /// Prefix of the `/readyz` token for the process software-executor default.
 pub const SOFTWARE_EXECUTOR_DEFAULT_PREFIX: &str = "software_executor:";
+/// Prefix of the `/readyz` token for the installed host applier's version.
+pub const HOST_APPLIER_PREFIX: &str = "host_applier:";
 
 /// Process default advertised on `/readyz`, for example `software_executor:shell`.
 pub fn software_executor_default_capabilities(kind: &str) -> ComponentCapabilities {
     ComponentCapabilities::new(format!("{SOFTWARE_EXECUTOR_DEFAULT_PREFIX}{kind}"), [])
+}
+
+/// `/readyz` token for the installed applier binary, for example
+/// `host_applier:0.8.0`.
+pub fn host_applier_capabilities(version: &str) -> ComponentCapabilities {
+    ComponentCapabilities::new(format!("{HOST_APPLIER_PREFIX}{version}"), [])
 }
 
 /// The host executor: its spool directory is usable and `systemctl` is
@@ -546,6 +554,19 @@ mod tests {
             provided
                 .diagnostic_names()
                 .contains(&"software_executor:kubernetes-inprocess".to_string())
+        );
+    }
+
+    #[test]
+    fn diagnostics_include_the_installed_host_applier_version() {
+        let mut provided = community_sqlite_profile(community_auth_capabilities());
+        provided
+            .components
+            .push(host_applier_capabilities("0.7.0-rc.1"));
+        assert!(
+            provided
+                .diagnostic_names()
+                .contains(&"host_applier:0.7.0-rc.1".to_string())
         );
     }
 

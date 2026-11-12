@@ -324,6 +324,30 @@ fn readiness_needs_a_private_spool_directory() {
     assert!(missing.check_ready().is_err());
 }
 
+#[test]
+fn read_applier_version_takes_the_version_after_the_binary_name() {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-host-applier-version-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("tenkai-host-applier");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\nprintf 'tenkai-host-applier 0.7.0-rc.1\\n'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let version = read_applier_version(&path).unwrap();
+    assert_eq!(version, "0.7.0-rc.1");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Sealed values are spooled only to memory-backed storage, owner-only, and
 /// cleanup under the fence removes only a stopped instance of its own
 /// environment.

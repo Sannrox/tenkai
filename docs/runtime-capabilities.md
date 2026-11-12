@@ -71,6 +71,7 @@ capabilities:
   - channel_promotion_policy:v1             # reconciler evaluates soak-and-evidence policies
   - shell_executor:v1                       # tenkai-server, when the guard resolves
   - host_executor:v1                        # tenkai-server, when TENKAI_HOST_SPOOL_DIR is usable
+  - host_applier:X.Y.Z                      # installed tenkai-host-applier --version, when that binary is present
   - software_executor:shell                 # process default; kubernetes-inprocess, helm, …
 ```
 
@@ -85,6 +86,12 @@ user does not own, others can write, or that is missing, or a host without
 `systemctl`, logs `tenkai-server warning: host executor unavailable` and
 omits `host_executor`; see
 [run host releases](run-tenkai-server.md#run-host-releases).
+When `/usr/local/libexec/tenkai/tenkai-host-applier` is present, `/readyz`
+also lists `host_applier:<version>` from startup. An applier on an older
+minor than the server is logged and refuses new host plans; fencing still
+uses `host_executor`. Upgrade it with `install.sh --role host-applier` and
+restart the server so `/readyz` lists the new version
+([upgrade a server host](release-binaries.md#upgrade-a-server-host)).
 
 They do **not** advertise tenant isolation, shared replica state, high
 availability, or enterprise authentication. Community operation is

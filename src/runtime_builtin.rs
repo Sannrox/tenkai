@@ -1266,7 +1266,7 @@ impl BuiltinConfig {
             });
         }
         match kind {
-            Some(SoftwareExecutorKind::Host) => self.executors.host().map(|_| ()).context(
+            Some(SoftwareExecutorKind::Host) => self.executors.admit_host_plans().context(
                 "this runtime runs host releases only with a host applier (TENKAI_HOST_SPOOL_DIR)",
             ),
             Some(

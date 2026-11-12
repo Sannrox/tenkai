@@ -10,6 +10,8 @@
 # tenkaictl self-upgrade home is refused: self-upgrade owns those hosts.
 # --with-host-applier also installs the root side of privileged host
 # releases at fixed root-owned paths, and starts nothing.
+# --role host-applier installs only those applier files and never writes
+# --prefix, so a self-upgrade home is left alone.
 set -eu
 
 # Written by scripts/package-release-binaries.sh install-script when the
@@ -38,14 +40,18 @@ Install Tenkai hosts from a GitHub Release, verified against its SHA256SUMS.
   curl -fsSL https://github.com/${REPO}/releases/download/vX.Y.Z/install.sh | sh -s -- --role server
 
 Options:
-  --role cli|server|runtime  cli: tenkaictl (default)
+  --role cli|server|runtime|host-applier
+                             cli: tenkaictl (default)
                              server: tenkaictl, tenkai-server, tenkai-executor-guard
                              runtime: tenkai-runtime, tenkai-runtime-guard
+                             host-applier: only the privileged host release
+                             applier (linux-x86_64, as root); never writes
+                             --prefix or client.toml
   --with-host-applier        also install the privileged host release applier
                              (linux-x86_64, as root): ${APPLIER_DIR}/tenkai-host-applier,
                              ${UNIT_DIR}/tenkai-host-apply@.service and
                              ${RULES_DIR}/50-tenkai-host-apply.rules.
-                             Starts nothing.
+                             Starts nothing. Implied by --role host-applier.
   --version X.Y.Z            release to install (default: ${RELEASE_VERSION:-none, required})
   --prefix DIR               install directory (default: /usr/local/bin as
                              root, ~/.local/bin otherwise)
@@ -63,7 +69,9 @@ EOF
 role=cli
 version="$RELEASE_VERSION"
 prefix=""
+prefix_set=false
 sysconfdir=/etc
+sysconfdir_set=false
 base_url="https://github.com/${REPO}/releases/download"
 with_applier=false
 while [ $# -gt 0 ]; do
@@ -73,8 +81,14 @@ while [ $# -gt 0 ]; do
       case "$1" in
         --role) role="$2" ;;
         --version) version="$2" ;;
-        --prefix) prefix="$2" ;;
-        --sysconfdir) sysconfdir="$2" ;;
+        --prefix)
+          prefix="$2"
+          prefix_set=true
+          ;;
+        --sysconfdir)
+          sysconfdir="$2"
+          sysconfdir_set=true
+          ;;
         --base-url) base_url="$2" ;;
       esac
       shift 2
@@ -93,8 +107,16 @@ case "$role" in
   # The guard is installed first, so a server never starts without it.
   server) binaries="tenkai-executor-guard tenkai-server tenkaictl" ;;
   runtime) binaries="tenkai-runtime-guard tenkai-runtime" ;;
-  *) die "unknown role ${role}; use cli, server or runtime" ;;
+  host-applier)
+    binaries=""
+    with_applier=true
+    ;;
+  *) die "unknown role ${role}; use cli, server, runtime or host-applier" ;;
 esac
+if [ "$role" = host-applier ]; then
+  $prefix_set && die "--role host-applier installs at fixed paths; do not pass --prefix"
+  $sysconfdir_set && die "--role host-applier installs at fixed paths; do not pass --sysconfdir"
+fi
 
 [ -n "$version" ] || die "no release version; pass --version X.Y.Z"
 version="${version#v}"
@@ -183,35 +205,37 @@ if $with_applier; then
   done
 fi
 
-if [ -z "$prefix" ]; then
-  if [ "$(id -u)" = 0 ]; then
-    prefix=/usr/local/bin
-  else
-    [ -n "${HOME:-}" ] || die "HOME is unset; pass --prefix"
-    prefix="${HOME}/.local/bin"
+if [ -n "$binaries" ]; then
+  if [ -z "$prefix" ]; then
+    if [ "$(id -u)" = 0 ]; then
+      prefix=/usr/local/bin
+    else
+      [ -n "${HOME:-}" ] || die "HOME is unset; pass --prefix"
+      prefix="${HOME}/.local/bin"
+    fi
   fi
-fi
 
-# A self-upgrade home (versions/, current -> versions/<digest>, upgrade.json)
-# and links into one are owned by tenkaictl self-upgrade, whose store check,
-# backup and rollback a plain replace would skip.
-is_home() {
-  [ -e "$1/upgrade.json" ] || { [ -d "$1/versions" ] && [ -L "$1/current" ]; }
-}
-for dir in "$prefix" "$prefix/.." "$prefix/../.."; do
-  if [ -d "$dir" ] && is_home "$dir"; then
-    die "${prefix} is in a tenkaictl self-upgrade home; upgrade it with tenkaictl self-upgrade (docs/release-binaries.md#upgrade-a-server-host)"
-  fi
-done
-for binary in $binaries; do
-  if [ -L "${prefix}/${binary}" ]; then
-    die "${prefix}/${binary} is a symbolic link (to $(readlink "${prefix}/${binary}")); upgrade the host it points to with tenkaictl self-upgrade, or remove the link"
-  fi
-  # mv would move the host into a directory and report success.
-  if [ -e "${prefix}/${binary}" ] && [ ! -f "${prefix}/${binary}" ]; then
-    die "${prefix}/${binary} exists and is not a regular file; refusing to install"
-  fi
-done
+  # A self-upgrade home (versions/, current -> versions/<digest>, upgrade.json)
+  # and links into one are owned by tenkaictl self-upgrade, whose store check,
+  # backup and rollback a plain replace would skip.
+  is_home() {
+    [ -e "$1/upgrade.json" ] || { [ -d "$1/versions" ] && [ -L "$1/current" ]; }
+  }
+  for dir in "$prefix" "$prefix/.." "$prefix/../.."; do
+    if [ -d "$dir" ] && is_home "$dir"; then
+      die "${prefix} is in a tenkaictl self-upgrade home; upgrade it with tenkaictl self-upgrade (docs/release-binaries.md#upgrade-a-server-host)"
+    fi
+  done
+  for binary in $binaries; do
+    if [ -L "${prefix}/${binary}" ]; then
+      die "${prefix}/${binary} is a symbolic link (to $(readlink "${prefix}/${binary}")); upgrade the host it points to with tenkaictl self-upgrade, or remove the link"
+    fi
+    # mv would move the host into a directory and report success.
+    if [ -e "${prefix}/${binary}" ] && [ ! -f "${prefix}/${binary}" ]; then
+      die "${prefix}/${binary} exists and is not a regular file; refusing to install"
+    fi
+  done
+fi
 
 if command -v curl >/dev/null 2>&1; then
   fetch() { curl -fsSL --proto-redir =https -o "$2" "$1"; }
@@ -238,14 +262,18 @@ fetch_verified() {
   [ "$actual" = "$expected" ] || die "checksum mismatch for $2: expected ${expected}, got ${actual}; refusing to install"
 }
 
-mkdir -p "$prefix" 2>/dev/null || die "cannot create ${prefix}; run as root or pass --prefix"
-# Staged inside the prefix, so the final rename stays on one file system.
-stage="$(mktemp -d "${prefix}/.tenkai-install.XXXXXX" 2>/dev/null)" \
-  || die "cannot write to ${prefix}; run as root or pass --prefix"
+stage=""
 applier_stage=""
 pending=""
-trap 'rm -rf "$stage" $applier_stage $pending' EXIT
+trap 'rm -rf ${stage:+"$stage"} ${applier_stage:+"$applier_stage"} ${pending:+"$pending"}' EXIT
 trap 'exit 1' HUP INT TERM
+
+if [ -n "$binaries" ]; then
+  mkdir -p "$prefix" 2>/dev/null || die "cannot create ${prefix}; run as root or pass --prefix"
+  # Staged inside the prefix, so the final rename stays on one file system.
+  stage="$(mktemp -d "${prefix}/.tenkai-install.XXXXXX" 2>/dev/null)" \
+    || die "cannot write to ${prefix}; run as root or pass --prefix"
+fi
 
 # The applier's files are staged and checked in a root-only directory, apart
 # from a prefix another user may control.
@@ -259,13 +287,19 @@ if $with_applier; then
 fi
 
 url="${base_url%/}/${tag}"
-say "Installing Tenkai ${tag} (${role}, ${platform}) into ${prefix}"
+if [ -n "$binaries" ]; then
+  say "Installing Tenkai ${tag} (${role}, ${platform}) into ${prefix}"
+else
+  say "Installing Tenkai ${tag} host applier (${platform})"
+fi
 
 # Verify every file before installing any of them.
-fetch "${url}/SHA256SUMS" "${stage}/SHA256SUMS" || die "cannot download ${url}/SHA256SUMS"
-for binary in $binaries; do
-  fetch_verified "$stage" "${binary}-${platform}"
-done
+if [ -n "$binaries" ]; then
+  fetch "${url}/SHA256SUMS" "${stage}/SHA256SUMS" || die "cannot download ${url}/SHA256SUMS"
+  for binary in $binaries; do
+    fetch_verified "$stage" "${binary}-${platform}"
+  done
+fi
 if $with_applier; then
   fetch "${url}/SHA256SUMS" "${applier_stage}/SHA256SUMS" || die "cannot download ${url}/SHA256SUMS"
   for asset in "tenkai-host-applier-${platform}" tenkai-host-apply.service tenkai-host-apply.rules; do
