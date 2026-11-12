@@ -28,6 +28,11 @@ use tenkai::software_executor::{
 };
 
 pub const FIELD_MANAGER: &str = "tenkai";
+
+/// Annotation an apply attempt sets only on objects it creates. An apply that
+/// finds the object already there omits it, so server-side apply drops it, and
+/// failed-apply cleanup can tell what the failed attempt created (#1199).
+const CREATED_BY_ATTEMPT: &str = "tenkai.created-by-attempt";
 /// First readiness poll after apply. Keeps post-ready wait under 250 ms.
 const DEFAULT_HEALTH_POLL: Duration = Duration::from_millis(100);
 /// Backoff cap so a long rollout cannot reintroduce a 1 s post-ready stall.
@@ -91,7 +96,9 @@ pub trait ClusterApplyApi: Send + Sync {
         name: &str,
         kind: &str,
     ) -> Result<Option<WorkloadObservation>>;
-    /// Live object JSON for spec-drift comparison (#1028). Default is none.
+    /// Live object JSON for spec-drift comparison (#1028) and for the
+    /// ownership read before failed-apply cleanup and removal. Default is
+    /// none, so an adapter without it removes nothing.
     fn observe_object(
         &self,
         cluster_config: &Path,
@@ -774,6 +781,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
                 serde_json::from_str(&json).context("parsing dependency ConfigMap")?;
             stamp_ownership(&mut object, request);
             stop_if_lease_lost(stop, request, &[], &[])?;
+            self.mark_if_new(cluster_config, request, &mut object)?;
             let _ = self.api.apply_server_side(
                 cluster_config,
                 &request.environment,
@@ -785,6 +793,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         for mut object in objects {
             stop_if_lease_lost(stop, request, &[], &[])?;
             stamp_ownership(&mut object, request);
+            self.mark_if_new(cluster_config, request, &mut object)?;
             let observed = self.api.apply_server_side(
                 cluster_config,
                 &request.environment,
@@ -798,6 +807,58 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         self.wait_for_health(request, cluster_config, &observations, stop)?;
         times.health_ms = health.elapsed().as_millis() as u64;
         Ok((observations, times))
+    }
+
+    /// Mark `object` as created by this attempt when it does not exist yet.
+    /// The read and the apply are not atomic; the environment apply lease
+    /// keeps other Tenkai applies out of the namespace in between.
+    fn mark_if_new(
+        &self,
+        cluster_config: &Path,
+        request: &SoftwareApplyRequest,
+        object: &mut Value,
+    ) -> Result<()> {
+        if request.apply_attempt.is_empty() {
+            return Ok(());
+        }
+        let (kind, name) = object_identity(object)?;
+        if self
+            .api
+            .observe_object(cluster_config, &request.environment, &name, &kind)?
+            .is_none()
+            && let Some(metadata) = object.get_mut("metadata").and_then(Value::as_object_mut)
+        {
+            let annotations = metadata
+                .entry("annotations")
+                .or_insert_with(|| Value::Object(Map::new()));
+            if annotations.is_null() {
+                *annotations = Value::Object(Map::new());
+            }
+            if let Some(annotations) = annotations.as_object_mut() {
+                annotations.insert(
+                    CREATED_BY_ATTEMPT.into(),
+                    Value::String(request.apply_attempt.clone()),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Kind and name of every object the release applies, in removal order:
+    /// manifest files last to first, then the dependency ConfigMap.
+    fn removal_order(request: &SoftwareApplyRequest) -> Result<Vec<(String, String)>> {
+        let manifests = kubernetes_manifests_dir(&request.workdir)?;
+        let mut objects = Vec::new();
+        for path in list_manifest_files(&manifests)?.iter().rev() {
+            for object in parse_manifest_objects(path, request.instance_name())? {
+                objects.push(object_identity(&object)?);
+            }
+        }
+        objects.push((
+            "ConfigMap".into(),
+            tenkai::dependency_document::configmap_name(request.instance_name()),
+        ));
+        Ok(objects)
     }
 
     /// Apply one generation and return wall time per phase. `apply` drops the times.
@@ -991,6 +1052,10 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
         self.remove_until_stopped(request, &NOT_STOPPED)
     }
 
+    /// Deletes only objects whose Tenkai labels name this instance. An object
+    /// another instance now owns, such as one a successor took over by name,
+    /// stays. An object without Tenkai labels stays too, and the removal fails
+    /// naming it, because nothing proves it belongs to this release (#1199).
     fn remove_until_stopped(
         &self,
         request: &SoftwareApplyRequest,
@@ -998,25 +1063,71 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
     ) -> Result<()> {
         validate_request(request)?;
         let cluster_config = Self::require_cluster_config(request)?;
-        let manifests = kubernetes_manifests_dir(&request.workdir)?;
-        let files = list_manifest_files(&manifests)?;
-        for path in files.iter().rev() {
-            for object in parse_manifest_objects(path, request.instance_name())? {
-                if stop.load(Ordering::SeqCst) {
-                    anyhow::bail!(
-                        "removal of {} stopped: the apply lease was lost",
-                        request.instance_name()
-                    );
+        let mut unproven = Vec::new();
+        for (kind, name) in Self::removal_order(request)? {
+            if stop.load(Ordering::SeqCst) {
+                anyhow::bail!(
+                    "removal of {} stopped: the apply lease was lost",
+                    request.instance_name()
+                );
+            }
+            let Some(live) =
+                self.api
+                    .observe_object(cluster_config, &request.environment, &name, &kind)?
+            else {
+                continue;
+            };
+            match ownership(&live, request) {
+                Ownership::Instance => {
+                    self.api
+                        .remove(cluster_config, &request.environment, &name, &kind)?
                 }
-                let (kind, name) = object_identity(&object)?;
+                Ownership::Other => {}
+                Ownership::Unlabeled => unproven.push(format!("{kind}/{name}")),
+            }
+        }
+        if !unproven.is_empty() {
+            bail!(
+                "removal of {} kept {}: no Tenkai ownership label proves this instance owns them; delete them by hand once nothing uses them",
+                request.instance_name(),
+                unproven.join(", ")
+            );
+        }
+        Ok(())
+    }
+
+    /// Deletes only what the failed attempt created: objects that carry its
+    /// creation mark and this instance's labels. Objects that were there
+    /// before, carried over from the previous release or adopted by name, stay
+    /// for the restore to re-apply. A PersistentVolumeClaim always stays,
+    /// because deleting it can delete its volume, and so does a Namespace,
+    /// whose deletion would take its claims with it (#1199).
+    fn cleanup_failed_apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        validate_request(request)?;
+        let cluster_config = Self::require_cluster_config(request)?;
+        if request.apply_attempt.is_empty() {
+            return Ok(());
+        }
+        for (kind, name) in Self::removal_order(request)? {
+            if matches!(kind.as_str(), "PersistentVolumeClaim" | "Namespace") {
+                continue;
+            }
+            let Some(live) =
+                self.api
+                    .observe_object(cluster_config, &request.environment, &name, &kind)?
+            else {
+                continue;
+            };
+            let created = live
+                .pointer("/metadata/annotations")
+                .and_then(|annotations| annotations.get(CREATED_BY_ATTEMPT))
+                .and_then(Value::as_str)
+                == Some(request.apply_attempt.as_str());
+            if created && ownership(&live, request) == Ownership::Instance {
                 self.api
                     .remove(cluster_config, &request.environment, &name, &kind)?;
             }
         }
-        let name = tenkai::dependency_document::configmap_name(request.instance_name());
-        let _ = self
-            .api
-            .remove(cluster_config, &request.environment, &name, "ConfigMap");
         Ok(())
     }
 
@@ -1204,6 +1315,31 @@ fn stamp_ownership(object: &mut Value, request: &SoftwareApplyRequest) {
         "tenkai.release-id".into(),
         Value::String(k8s_label_value(&request.release_id)),
     );
+}
+
+/// Who a live object belongs to, read from the labels [`stamp_ownership`] sets.
+#[derive(Debug, PartialEq, Eq)]
+enum Ownership {
+    Instance,
+    Other,
+    Unlabeled,
+}
+
+fn ownership(live: &Value, request: &SoftwareApplyRequest) -> Ownership {
+    let labels = live.pointer("/metadata/labels");
+    // Before `tenkai.instance` existed, `tenkai.product` named the instance.
+    let owner = labels
+        .and_then(|labels| {
+            labels
+                .get("tenkai.instance")
+                .or_else(|| labels.get("tenkai.product"))
+        })
+        .and_then(Value::as_str);
+    match owner {
+        None => Ownership::Unlabeled,
+        Some(owner) if owner == k8s_label_value(request.instance_name()) => Ownership::Instance,
+        Some(_) => Ownership::Other,
+    }
 }
 
 fn is_workload(kind: &str) -> bool {
@@ -2463,6 +2599,111 @@ mod tests {
                 .is_none()
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A release of `product` whose manifests hold `objects` as (kind, name).
+    fn release(
+        product: &str,
+        version: &str,
+        attempt: &str,
+        objects: &[(&str, &str)],
+    ) -> SoftwareApplyRequest {
+        let root = unique_root(&format!("{product}-{version}"));
+        let manifests = root.join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        let yaml = objects
+            .iter()
+            .map(|(kind, name)| {
+                let api_version = builtin_api_version(kind).unwrap();
+                format!("apiVersion: {api_version}\nkind: {kind}\nmetadata:\n  name: {name}\n")
+            })
+            .collect::<Vec<_>>()
+            .join("---\n");
+        std::fs::write(manifests.join("all.yaml"), yaml).unwrap();
+        let kubeconfig = root.join("kubeconfig");
+        std::fs::write(&kubeconfig, "apiVersion: v1\nkind: Config\nclusters: []\n").unwrap();
+        SoftwareApplyRequest {
+            product: product.into(),
+            release_id: format!("tenkai:release:{product}@{version}"),
+            apply_attempt: attempt.into(),
+            ..request(&root, &kubeconfig, version)
+        }
+    }
+
+    fn present(api: &MemoryClusterApi, kind: &str, name: &str) -> bool {
+        api.object("lab", kind, name).is_some()
+    }
+
+    #[test]
+    fn failed_upgrade_cleanup_deletes_only_what_the_attempt_created() {
+        let api = MemoryClusterApi::new();
+        let executor = InProcessKubernetesExecutor::new(&api);
+        let v1 = release(
+            "p",
+            "1",
+            "lease-1",
+            &[("PersistentVolumeClaim", "db"), ("Deployment", "db")],
+        );
+        executor.apply(&v1).unwrap();
+        let v2 = release(
+            "p",
+            "2",
+            "lease-2",
+            &[
+                ("PersistentVolumeClaim", "db"),
+                ("Deployment", "db"),
+                ("PersistentVolumeClaim", "cache"),
+                ("Service", "metrics"),
+            ],
+        );
+        executor.apply(&v2).unwrap();
+
+        executor.cleanup_failed_apply(&v2).unwrap();
+
+        assert!(present(&api, "PersistentVolumeClaim", "db"));
+        assert!(present(&api, "Deployment", "db"));
+        assert!(present(&api, "PersistentVolumeClaim", "cache"));
+        assert!(!present(&api, "Service", "metrics"));
+        let _ = std::fs::remove_dir_all(&v1.workdir);
+        let _ = std::fs::remove_dir_all(&v2.workdir);
+    }
+
+    #[test]
+    fn removal_keeps_objects_a_successor_owns_and_names_unlabeled_ones() {
+        let api = MemoryClusterApi::new();
+        let executor = InProcessKubernetesExecutor::new(&api);
+        let a = release(
+            "a",
+            "1",
+            "lease-1",
+            &[
+                ("PersistentVolumeClaim", "db"),
+                ("Deployment", "db"),
+                ("Service", "a-web"),
+                ("ConfigMap", "settings"),
+            ],
+        );
+        executor.apply(&a).unwrap();
+        let b = release(
+            "b",
+            "1",
+            "lease-2",
+            &[("PersistentVolumeClaim", "db"), ("Deployment", "db")],
+        );
+        executor.apply(&b).unwrap();
+        api.mutate_object("lab", "ConfigMap", "settings", |object| {
+            object["metadata"].as_object_mut().unwrap().remove("labels");
+        });
+
+        let error = executor.remove(&a).unwrap_err().to_string();
+
+        assert!(error.contains("kept ConfigMap/settings"), "{error}");
+        assert!(present(&api, "ConfigMap", "settings"));
+        assert!(present(&api, "PersistentVolumeClaim", "db"));
+        assert!(present(&api, "Deployment", "db"));
+        assert!(!present(&api, "Service", "a-web"));
+        let _ = std::fs::remove_dir_all(&a.workdir);
+        let _ = std::fs::remove_dir_all(&b.workdir);
     }
 
     #[test]

@@ -243,6 +243,17 @@ Rules beyond the native workdir contract:
   retries with its backoff until the file exists, for example once a host
   release has installed the cluster
   ([ADR 0041](decisions/0041-per-release-executor-and-privileged-host-releases.md)).
+- Removal deletes only objects whose `tenkai.instance` label (or, on objects
+  applied before that label existed, `tenkai.product`) names the instance
+  being removed. An object another instance owns, for example one a successor
+  took over by name, stays. An object without Tenkai labels stays and fails
+  the removal naming it, so an operator decides.
+- Failed-apply cleanup deletes only objects the failed attempt created; apply
+  marks them with the `tenkai.created-by-attempt` annotation. Objects that
+  existed before, carried over from the previous release or adopted by name,
+  stay for the restore. Failed-apply cleanup never deletes a
+  `PersistentVolumeClaim`, nor a `Namespace`, whose deletion would take its
+  claims with it.
 - Health comes from Deployment / StatefulSet / DaemonSet rollout status. A
   bounded wait refuses to complete when observed state disagrees with the
   applied revision.
