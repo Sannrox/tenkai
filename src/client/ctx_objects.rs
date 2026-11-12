@@ -93,6 +93,27 @@ impl Ctx {
         self.backend.object_lifecycle().delete(id).await
     }
 
+    /// Delete `id` only while property `key` still equals `value`.
+    ///
+    /// Embedded SQLite checks and deletes in one immediate transaction.
+    pub(crate) async fn delete_if_property(
+        &mut self,
+        id: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<bool> {
+        let Some(store) = self.embedded_arc() else {
+            anyhow::bail!("delete_if_property requires the embedded store");
+        };
+        let id = id.to_string();
+        let key = key.to_string();
+        let value = value.to_string();
+        super::block_embedded(store, move |store| {
+            store.delete_if_property(&id, &key, &value)
+        })
+        .await
+    }
+
     /// Create the object, or update it if the id already exists.
     pub async fn put(&mut self, object: Object) -> Result<Object> {
         self.backend.object_lifecycle().put(object).await

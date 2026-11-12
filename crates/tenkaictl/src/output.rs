@@ -17,6 +17,12 @@ pub(crate) fn print_hold_view(view: &tenkai::delivery_hold::DeliveryHoldView) {
         ),
         None => println!("no delivery hold"),
     }
+    if let Some(threshold) = &view.threshold {
+        println!(
+            "threshold: more than {} failed targets in {}ms",
+            threshold.count, threshold.window_ms
+        );
+    }
     print_delivery_freezes(None, &view.freezes);
     for event in &view.audit {
         println!(

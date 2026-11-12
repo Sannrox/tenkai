@@ -8,6 +8,11 @@
 //! A dated change freeze is a separate catalog object per environment name.
 //! It starts and ends by the clock; no write happens at either instant.
 //! Schedule and cancel append the same set/clear audit events as a hold.
+//!
+//! A failure threshold is one catalog object per environment. When more than
+//! N `failed_target.*` rows fall inside the window, the reconciler sets the
+//! environment hold with actor [`AUTOMATIC_HOLD_ACTOR`]. It never replaces or
+//! clears an operator hold.
 
 use std::collections::HashMap;
 
@@ -20,6 +25,9 @@ use crate::pb::sekai::Object;
 pub const HOLD_KIND: &str = "tenkai.delivery_hold";
 pub const HOLD_AUDIT_KIND: &str = "tenkai.delivery_hold_audit";
 pub const FREEZE_KIND: &str = "tenkai.delivery_freeze";
+pub const THRESHOLD_KIND: &str = "tenkai.delivery_failure_threshold";
+/// Actor stored on an automatic environment hold set by a failure threshold.
+pub const AUTOMATIC_HOLD_ACTOR: &str = "automatic";
 
 /// What a hold pauses: one environment, or every environment subscribed to a channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +119,23 @@ pub struct DeliveryHoldView {
     /// on channel hold views.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub freezes: Vec<DeliveryFreeze>,
+    /// Declared failure threshold. Omitted when unset, including on channel
+    /// hold views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub threshold: Option<FailureThreshold>,
+}
+
+/// Declared count and window that can set an automatic environment hold.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct FailureThreshold {
+    pub environment: String,
+    pub count: u32,
+    pub window_ms: i64,
+    pub actor: String,
+    pub set_at: i64,
 }
 
 /// A named environment freeze with a start and an end, evaluated by the clock.
@@ -170,14 +195,18 @@ impl DeliveryPause {
 
 /// Active hold and history for `scope`.
 pub async fn view(ctx: &mut Ctx, scope: &HoldScope) -> Result<DeliveryHoldView> {
-    let freezes = match scope {
-        HoldScope::Environment(env) => visible_freezes(ctx, env, crate::now_millis()).await?,
-        HoldScope::Channel { .. } => Vec::new(),
+    let (freezes, threshold) = match scope {
+        HoldScope::Environment(env) => (
+            visible_freezes(ctx, env, crate::now_millis()).await?,
+            get_failure_threshold(ctx, env).await?,
+        ),
+        HoldScope::Channel { .. } => (Vec::new(), None),
     };
     Ok(DeliveryHoldView {
         hold: get(ctx, scope).await?,
         audit: audit(ctx, scope).await?,
         freezes,
+        threshold,
     })
 }
 
@@ -235,6 +264,10 @@ pub async fn set(
         "delivery hold reason exceeds 1024 bytes"
     );
     let actor = validate_actor(actor)?;
+    anyhow::ensure!(
+        actor != AUTOMATIC_HOLD_ACTOR,
+        "delivery hold actor {AUTOMATIC_HOLD_ACTOR} is reserved for failure-threshold holds"
+    );
     scope.require_exists(ctx).await?;
     let hold = DeliveryHold {
         reason: reason.into(),
@@ -545,6 +578,238 @@ fn freeze_object(freeze: &DeliveryFreeze) -> Object {
         created: freeze.scheduled_at,
         updated: freeze.scheduled_at,
     }
+}
+
+/// Parse `--window`: integer milliseconds, or a count with `ms`, `s`, `m`, or `h`.
+pub fn parse_failure_window(value: &str) -> Result<i64> {
+    let value = value.trim();
+    anyhow::ensure!(!value.is_empty(), "--window must not be empty");
+    let (digits, multiplier) = if let Some(digits) = value.strip_suffix("ms") {
+        (digits, 1_i64)
+    } else if let Some(digits) = value.strip_suffix('s') {
+        (digits, 1_000)
+    } else if let Some(digits) = value.strip_suffix('m') {
+        (digits, 60_000)
+    } else if let Some(digits) = value.strip_suffix('h') {
+        (digits, 3_600_000)
+    } else {
+        (value, 1)
+    };
+    let amount: i64 = digits
+        .trim()
+        .parse()
+        .with_context(|| format!("--window {value:?} is not a duration"))?;
+    anyhow::ensure!(amount > 0, "--window must be greater than zero");
+    amount
+        .checked_mul(multiplier)
+        .filter(|ms| *ms > 0)
+        .ok_or_else(|| anyhow::anyhow!("--window {value:?} overflows milliseconds"))
+}
+
+fn threshold_id(environment: &str) -> String {
+    format!("tenkai:delivery_failure_threshold:environment:{environment}")
+}
+
+/// Record the failure threshold for `environment`. Unset means the feature is off.
+pub async fn set_failure_threshold(
+    ctx: &mut Ctx,
+    environment: &str,
+    count: u32,
+    window_ms: i64,
+    actor: &str,
+) -> Result<FailureThreshold> {
+    require_embedded(ctx)?;
+    anyhow::ensure!(count >= 1, "--count must be at least 1");
+    anyhow::ensure!(window_ms > 0, "--window must be greater than zero");
+    let actor = validate_actor(actor)?;
+    validate_identifier("environment", environment)?;
+    crate::environment::environment(ctx, environment).await?;
+    let threshold = FailureThreshold {
+        environment: environment.into(),
+        count,
+        window_ms,
+        actor: actor.into(),
+        set_at: crate::now_millis(),
+    };
+    ctx.put(threshold_object(&threshold)).await?;
+    Ok(threshold)
+}
+
+/// Remove the failure threshold. An active hold is unchanged.
+pub async fn clear_failure_threshold(
+    ctx: &mut Ctx,
+    environment: &str,
+    actor: &str,
+) -> Result<FailureThreshold> {
+    require_embedded(ctx)?;
+    let _actor = validate_actor(actor)?;
+    validate_identifier("environment", environment)?;
+    crate::environment::environment(ctx, environment).await?;
+    let Some(cleared) = get_failure_threshold(ctx, environment).await? else {
+        bail!("environment {environment} has no failure threshold");
+    };
+    ctx.delete(&threshold_id(environment)).await?;
+    Ok(cleared)
+}
+
+/// Declared threshold for `environment`, if any.
+pub async fn get_failure_threshold(
+    ctx: &mut Ctx,
+    environment: &str,
+) -> Result<Option<FailureThreshold>> {
+    let Some(object) = ctx.get(&threshold_id(environment)).await? else {
+        return Ok(None);
+    };
+    if object.kind != THRESHOLD_KIND {
+        bail!(
+            "object {} is {}, not {THRESHOLD_KIND}",
+            object.id,
+            object.kind
+        );
+    }
+    Ok(Some(FailureThreshold {
+        environment: required(&object, "environment")?.into(),
+        count: required(&object, "count")?.parse()?,
+        window_ms: required(&object, "window_ms")?.parse()?,
+        actor: required(&object, "actor")?.into(),
+        set_at: required(&object, "set_at")?.parse()?,
+    }))
+}
+
+fn threshold_object(threshold: &FailureThreshold) -> Object {
+    Object {
+        id: threshold_id(&threshold.environment),
+        kind: THRESHOLD_KIND.into(),
+        name: threshold.environment.clone(),
+        namespace: NS.into(),
+        external_id: String::new(),
+        properties: HashMap::from([
+            ("environment".into(), threshold.environment.clone()),
+            ("count".into(), threshold.count.to_string()),
+            ("window_ms".into(), threshold.window_ms.to_string()),
+            ("actor".into(), threshold.actor.clone()),
+            ("set_at".into(), threshold.set_at.to_string()),
+        ]),
+        created: threshold.set_at,
+        updated: threshold.set_at,
+    }
+}
+
+/// Set or lift the automatic environment hold from the declared threshold.
+///
+/// An operator hold is never replaced or cleared. `create_once` refuses to
+/// overwrite a hold that already exists; lift deletes only while actor is
+/// still `automatic`, in one store transaction.
+pub async fn evaluate_failure_threshold(
+    ctx: &mut Ctx,
+    environment: &str,
+    now_ms: i64,
+) -> Result<()> {
+    let Some(threshold) = get_failure_threshold(ctx, environment).await? else {
+        return Ok(());
+    };
+    let env = crate::environment::environment(ctx, environment).await?;
+    let failures = in_window_failed_targets(&env.properties, now_ms, threshold.window_ms);
+    let scope = HoldScope::environment(environment);
+    if failures.len() > threshold.count as usize {
+        try_set_automatic_hold(ctx, &scope, &failures).await
+    } else {
+        try_clear_automatic_hold(ctx, &scope).await
+    }
+}
+
+async fn try_set_automatic_hold(
+    ctx: &mut Ctx,
+    scope: &HoldScope,
+    failures: &[(String, String)],
+) -> Result<()> {
+    require_embedded(ctx)?;
+    if get(ctx, scope).await?.is_some() {
+        return Ok(());
+    }
+    let reason = automatic_hold_reason(failures);
+    let hold = DeliveryHold {
+        reason,
+        actor: AUTOMATIC_HOLD_ACTOR.into(),
+        held_at: crate::now_millis(),
+    };
+    match ctx.create_once(hold_object(scope, &hold)).await {
+        Ok(_) => append_audit(ctx, scope, "set", &hold).await,
+        Err(status) if crate::client::is_unique_conflict(&status) => Ok(()),
+        Err(status) => Err(status.into()),
+    }
+}
+
+async fn try_clear_automatic_hold(ctx: &mut Ctx, scope: &HoldScope) -> Result<()> {
+    require_embedded(ctx)?;
+    let Some(existing) = get(ctx, scope).await? else {
+        return Ok(());
+    };
+    if existing.actor != AUTOMATIC_HOLD_ACTOR {
+        return Ok(());
+    }
+    let deleted = ctx
+        .delete_if_property(&scope.hold_id(), "actor", AUTOMATIC_HOLD_ACTOR)
+        .await?;
+    if !deleted {
+        return Ok(());
+    }
+    append_audit(
+        ctx,
+        scope,
+        "clear",
+        &DeliveryHold {
+            reason: existing.reason,
+            actor: AUTOMATIC_HOLD_ACTOR.into(),
+            held_at: crate::now_millis(),
+        },
+    )
+    .await
+}
+
+fn in_window_failed_targets(
+    properties: &HashMap<String, String>,
+    now_ms: i64,
+    window_ms: i64,
+) -> Vec<(String, String)> {
+    let mut failures = Vec::new();
+    for (key, release) in properties {
+        let Some(instance) = key.strip_prefix("failed_target.") else {
+            continue;
+        };
+        if instance.is_empty() {
+            continue;
+        }
+        let Some(at) = properties
+            .get(&format!("failed_target_at.{instance}"))
+            .and_then(|value| value.parse::<i64>().ok())
+        else {
+            continue;
+        };
+        if at > now_ms || now_ms.saturating_sub(at) > window_ms {
+            continue;
+        }
+        let cause = properties
+            .get(&format!("failed_target_error.{instance}"))
+            .and_then(|value| value.split_once('\n').map(|(_, detail)| detail))
+            .filter(|detail| !detail.is_empty())
+            .unwrap_or(release.as_str());
+        failures.push((instance.to_string(), cause.to_string()));
+    }
+    failures.sort_by(|left, right| left.0.cmp(&right.0));
+    failures
+}
+
+fn automatic_hold_reason(failures: &[(String, String)]) -> String {
+    let mut reason = format!("automatic: {} failed target(s)", failures.len());
+    for (instance, cause) in failures {
+        let next = format!("; {instance} ({cause})");
+        if reason.len() + next.len() > 1024 {
+            break;
+        }
+        reason.push_str(&next);
+    }
+    reason
 }
 
 /// Set and clear events for `scope`, oldest first.
@@ -991,5 +1256,150 @@ mod tests {
         assert!(parse_freeze_instant("--from", "not-a-time").is_err());
         let ms = parse_freeze_instant("--until", "2026-11-28T00:00:00Z").unwrap();
         assert_eq!(format_freeze_instant(ms), "2026-11-28T00:00:00Z");
+    }
+
+    async fn mark_failed(ctx: &mut Ctx, env: &str, instance: &str, at: i64, cause: &str) {
+        let mut object = crate::environment::environment(ctx, env).await.unwrap();
+        let release = format!("tenkai:release:{instance}@1.0.0");
+        object
+            .properties
+            .insert(format!("failed_target.{instance}"), release.clone());
+        object
+            .properties
+            .insert(format!("failed_target_at.{instance}"), at.to_string());
+        object.properties.insert(
+            format!("failed_target_error.{instance}"),
+            format!("{release}\n{cause}"),
+        );
+        ctx.put(object).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn crossing_threshold_sets_one_automatic_hold() {
+        let (database, mut ctx) = temp_ctx("threshold-set").await;
+        crate::environment::env_add(&mut ctx, "lab", "Lab")
+            .await
+            .unwrap();
+        set_failure_threshold(&mut ctx, "lab", 1, 60_000, "alice")
+            .await
+            .unwrap();
+        let now = 100_000;
+        mark_failed(&mut ctx, "lab", "api", now - 1_000, "probe failed").await;
+        mark_failed(&mut ctx, "lab", "web", now - 2_000, "crash").await;
+        evaluate_failure_threshold(&mut ctx, "lab", now)
+            .await
+            .unwrap();
+        evaluate_failure_threshold(&mut ctx, "lab", now)
+            .await
+            .unwrap();
+        let scope = HoldScope::environment("lab");
+        let hold = get(&mut ctx, &scope).await.unwrap().unwrap();
+        assert_eq!(hold.actor, AUTOMATIC_HOLD_ACTOR);
+        assert!(hold.reason.contains("api"), "{}", hold.reason);
+        assert!(hold.reason.contains("web"), "{}", hold.reason);
+        let history = audit(&mut ctx, &scope).await.unwrap();
+        assert_eq!(history.len(), 1, "{history:?}");
+        assert_eq!(history[0].action, "set");
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn dropping_count_clears_automatic_hold_and_leaves_operator_hold() {
+        let (database, mut ctx) = temp_ctx("threshold-lift").await;
+        crate::environment::env_add(&mut ctx, "lab", "Lab")
+            .await
+            .unwrap();
+        set_failure_threshold(&mut ctx, "lab", 1, 60_000, "alice")
+            .await
+            .unwrap();
+        let now = 100_000;
+        mark_failed(&mut ctx, "lab", "api", now - 1_000, "probe failed").await;
+        mark_failed(&mut ctx, "lab", "web", now - 2_000, "crash").await;
+        evaluate_failure_threshold(&mut ctx, "lab", now)
+            .await
+            .unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "lab")
+            .await
+            .unwrap();
+        env.properties.remove("failed_target.web");
+        env.properties.remove("failed_target_at.web");
+        env.properties.remove("failed_target_error.web");
+        ctx.put(env).await.unwrap();
+        evaluate_failure_threshold(&mut ctx, "lab", now)
+            .await
+            .unwrap();
+        let scope = HoldScope::environment("lab");
+        assert_eq!(get(&mut ctx, &scope).await.unwrap(), None);
+
+        set(&mut ctx, &scope, "operator", "bob").await.unwrap();
+        mark_failed(&mut ctx, "lab", "web", now - 2_000, "crash").await;
+        evaluate_failure_threshold(&mut ctx, "lab", now)
+            .await
+            .unwrap();
+        let hold = get(&mut ctx, &scope).await.unwrap().unwrap();
+        assert_eq!(hold.actor, "bob");
+        assert_eq!(hold.reason, "operator");
+        env = crate::environment::environment(&mut ctx, "lab")
+            .await
+            .unwrap();
+        env.properties.remove("failed_target.web");
+        env.properties.remove("failed_target_at.web");
+        ctx.put(env).await.unwrap();
+        evaluate_failure_threshold(&mut ctx, "lab", now)
+            .await
+            .unwrap();
+        let hold = get(&mut ctx, &scope).await.unwrap().unwrap();
+        assert_eq!(hold.actor, "bob");
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn no_threshold_never_sets_an_environment_hold() {
+        let (database, mut ctx) = temp_ctx("threshold-off").await;
+        crate::environment::env_add(&mut ctx, "lab", "Lab")
+            .await
+            .unwrap();
+        let now = 100_000;
+        mark_failed(&mut ctx, "lab", "api", now, "probe failed").await;
+        mark_failed(&mut ctx, "lab", "web", now, "crash").await;
+        evaluate_failure_threshold(&mut ctx, "lab", now)
+            .await
+            .unwrap();
+        assert_eq!(
+            get(&mut ctx, &HoldScope::environment("lab")).await.unwrap(),
+            None
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[test]
+    fn failure_window_parses_units() {
+        assert_eq!(parse_failure_window("15m").unwrap(), 15 * 60_000);
+        assert_eq!(parse_failure_window("2h").unwrap(), 2 * 3_600_000);
+        assert_eq!(parse_failure_window("1500").unwrap(), 1500);
+        assert!(parse_failure_window("0").is_err());
+        assert!(parse_failure_window("nope").is_err());
+    }
+
+    #[tokio::test]
+    async fn operator_set_refuses_the_automatic_actor() {
+        let (database, mut ctx) = temp_ctx("threshold-actor").await;
+        crate::environment::env_add(&mut ctx, "lab", "Lab")
+            .await
+            .unwrap();
+        let error = set(
+            &mut ctx,
+            &HoldScope::environment("lab"),
+            "pause",
+            AUTOMATIC_HOLD_ACTOR,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("reserved for failure-threshold holds"),
+            "{error}"
+        );
+        let _ = std::fs::remove_file(&database);
     }
 }

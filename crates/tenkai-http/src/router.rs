@@ -31,14 +31,15 @@ use super::inspect::{
     plan_approvals, query_exposures, ready, reconcile, take_backup,
 };
 use super::lifecycle::{
-    apply_plan, approve_plan, cancel_environment_freeze, channel_hold, clear_product_criticality,
-    close_recall_range, environment_hold, import_derived_criticality,
-    install_model_evaluation_trust, plan_environment, plan_identity_issuer,
-    prepare_identity_issuer, promote_release, publish_release, recall_release,
-    record_model_evaluation_evidence, record_recall_range, record_software_compatibility_evidence,
-    release_channel_hold, release_environment_hold, remove_channel_head, retire_environment,
-    retry_failed_target, rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment,
-    schedule_environment_freeze, set_channel_hold, set_environment_hold, set_product_criticality,
+    apply_plan, approve_plan, cancel_environment_freeze, channel_hold,
+    clear_environment_failure_threshold, clear_product_criticality, close_recall_range,
+    environment_hold, import_derived_criticality, install_model_evaluation_trust, plan_environment,
+    plan_identity_issuer, prepare_identity_issuer, promote_release, publish_release,
+    recall_release, record_model_evaluation_evidence, record_recall_range,
+    record_software_compatibility_evidence, release_channel_hold, release_environment_hold,
+    remove_channel_head, retire_environment, retry_failed_target, rewrap_identity_issuer,
+    rewrap_sealed_secrets, rollback_environment, schedule_environment_freeze, set_channel_hold,
+    set_environment_failure_threshold, set_environment_hold, set_product_criticality,
     software_compatibility_report, subscribe_environment, unsubscribe_environment,
 };
 use super::package_migration::{
@@ -369,6 +370,14 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/hold/cancel",
             post(cancel_environment_freeze),
+        )
+        .route(
+            "/v1/environments/{environment}/hold/threshold",
+            post(set_environment_failure_threshold),
+        )
+        .route(
+            "/v1/environments/{environment}/hold/threshold/clear",
+            post(clear_environment_failure_threshold),
         )
         .route(
             "/v1/environments/{environment}/failed-targets/{product}/retry",

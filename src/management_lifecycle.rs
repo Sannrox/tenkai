@@ -112,6 +112,8 @@ pub enum ManagementLifecycleOperation {
     Release,
     HoldSchedule,
     HoldCancel,
+    HoldThreshold,
+    HoldThresholdClear,
     Retry,
     ChannelHold,
     ChannelRelease,
@@ -137,6 +139,8 @@ impl ManagementLifecycleOperation {
             Self::Release => "release",
             Self::HoldSchedule => "hold_schedule",
             Self::HoldCancel => "hold_cancel",
+            Self::HoldThreshold => "hold_threshold",
+            Self::HoldThresholdClear => "hold_threshold_clear",
             Self::Retry => "retry",
             Self::ChannelHold => "channel_hold",
             Self::ChannelRelease => "channel_release",
@@ -180,6 +184,8 @@ impl ManagementLifecycleOperation {
                 | Self::Release
                 | Self::HoldSchedule
                 | Self::HoldCancel
+                | Self::HoldThreshold
+                | Self::HoldThresholdClear
                 | Self::Retry
                 | Self::Configure
         )
@@ -231,6 +237,8 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "release" => Ok(ManagementLifecycleOperation::Release),
         "hold_schedule" => Ok(ManagementLifecycleOperation::HoldSchedule),
         "hold_cancel" => Ok(ManagementLifecycleOperation::HoldCancel),
+        "hold_threshold" => Ok(ManagementLifecycleOperation::HoldThreshold),
+        "hold_threshold_clear" => Ok(ManagementLifecycleOperation::HoldThresholdClear),
         "retry" => Ok(ManagementLifecycleOperation::Retry),
         "channel_hold" => Ok(ManagementLifecycleOperation::ChannelHold),
         "channel_release" => Ok(ManagementLifecycleOperation::ChannelRelease),
@@ -694,6 +702,21 @@ pub struct DeliveryFreezeRequest {
     pub until: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Body of `POST /v1/environments/{environment}/hold/threshold` and
+/// `POST /v1/environments/{environment}/hold/threshold/clear`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryFailureThresholdRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1265,6 +1288,41 @@ pub fn admit_delivery_freeze(
                 expected.as_str()
             );
         }
+    }
+    admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        expected,
+        kind,
+        granted_environment,
+    )
+}
+
+pub fn admit_delivery_failure_threshold(
+    request: &DeliveryFailureThresholdRequest,
+    path_environment: &str,
+    expected: ManagementLifecycleOperation,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_path_environment(expected.as_str(), &request.environment, path_environment)?;
+    if expected == ManagementLifecycleOperation::HoldThreshold {
+        let count = request
+            .count
+            .ok_or_else(|| anyhow::anyhow!("--count is required"))?;
+        anyhow::ensure!(count >= 1, "--count must be at least 1");
+        let window = request
+            .window
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--window is required"))?;
+        crate::delivery_hold::parse_failure_window(window)?;
+    } else if request.count.is_some() || request.window.is_some() {
+        bail!(
+            "management operation {} forbids count and window",
+            expected.as_str()
+        );
     }
     admit_environment_operation(
         request.version,

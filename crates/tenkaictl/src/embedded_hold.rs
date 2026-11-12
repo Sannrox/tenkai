@@ -71,6 +71,33 @@ pub(crate) async fn run(ctx: &mut client::Ctx, scope: HoldScope, action: HoldAct
                 freeze.name, freeze.reason
             );
         }
+        HoldAction::Threshold { count, window } => {
+            let HoldScope::Environment(env) = &scope else {
+                bail!("failure thresholds are per environment");
+            };
+            let actor = embedded_management_actor()?;
+            let window_ms = delivery_hold::parse_failure_window(&window)?;
+            let threshold = delivery_hold::set_failure_threshold(
+                ctx,
+                env,
+                count,
+                window_ms,
+                actor.principal_id(),
+            )
+            .await?;
+            println!(
+                "threshold on {env}: more than {} failed targets in {}ms",
+                threshold.count, threshold.window_ms
+            );
+        }
+        HoldAction::ThresholdClear => {
+            let HoldScope::Environment(env) = &scope else {
+                bail!("failure thresholds are per environment");
+            };
+            let actor = embedded_management_actor()?;
+            delivery_hold::clear_failure_threshold(ctx, env, actor.principal_id()).await?;
+            println!("cleared failure threshold on {env}");
+        }
     }
     Ok(())
 }

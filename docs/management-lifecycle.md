@@ -117,6 +117,8 @@ schedule, cancel, and failed-target retry are additive `tenkai.http.v1`
 routes that reuse this envelope's version, actor audit, and environment
 fencing generation. `hold_schedule` and `hold_cancel` record dated
 environment freezes; a server from before them answers `404`.
+`hold_threshold` and `hold_threshold_clear` record the failed-target
+count and window; a server from before them answers `404`.
 Channel removal is an additive route too; a server from before it answers
 `404`, so a client never mistakes an older server for a removal.
 Product recall-range record and close are additive routes; a server from

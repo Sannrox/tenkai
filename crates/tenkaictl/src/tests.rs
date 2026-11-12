@@ -314,6 +314,34 @@ fn parses_environment_freeze_schedule() {
 }
 
 #[test]
+fn parses_environment_failure_threshold() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "hold",
+        "prod",
+        "threshold",
+        "--count",
+        "2",
+        "--window",
+        "15m",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Env {
+            command: EnvCommand::Hold {
+                action: crate::env_args::HoldAction::Threshold {
+                    count: 2,
+                    ref window,
+                },
+                ..
+            }
+        } if window == "15m"
+    ));
+}
+
+#[test]
 fn parses_emergency_override_reason() {
     let cli = Cli::try_parse_from([
         "tenkaictl",

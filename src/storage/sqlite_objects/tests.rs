@@ -28,6 +28,51 @@ fn create_once_conflict_is_store_already_exists() {
 }
 
 #[test]
+fn delete_if_property_keeps_the_object_when_the_value_moved() {
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-1059-delete-if-{}-{}.db",
+        std::process::id(),
+        crate::now_millis()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let store = SqliteStore::open(&path).unwrap();
+    let object = Object {
+        id: "tenkai:delivery_hold:environment:lab".into(),
+        kind: "tenkai.delivery_hold".into(),
+        name: "environment:lab".into(),
+        properties: HashMap::from([
+            ("actor".into(), "automatic".into()),
+            ("reason".into(), "too many failed targets".into()),
+        ]),
+        ..Object::default()
+    };
+    store.create(object.clone()).unwrap();
+    assert!(
+        store
+            .delete_if_property(&object.id, "actor", "automatic")
+            .unwrap()
+    );
+    store
+        .create({
+            let mut operator = object.clone();
+            operator.properties.insert("actor".into(), "bob".into());
+            operator
+        })
+        .unwrap();
+    assert!(
+        !store
+            .delete_if_property(&object.id, "actor", "automatic")
+            .unwrap()
+    );
+    let kept = store.get(&object.id).unwrap().unwrap();
+    assert_eq!(
+        kept.properties.get("actor").map(String::as_str),
+        Some("bob")
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn catalog_history_older_than_retention_is_pruned() {
     let path = std::env::temp_dir().join(format!(
         "tenkai-874-prune-{}-{}.db",
