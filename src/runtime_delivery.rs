@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::client::Ctx;
 use crate::environment_dependencies::EnvironmentDependencies;
+use crate::instance_explain::InstanceExplainReport;
 use crate::plan::PlanState;
 use crate::plan::{
     EnvironmentInspectReport, EnvironmentListEntry, FleetStatusReport, Plan, StatusRow,
@@ -32,6 +33,8 @@ pub type InspectEnvFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<EnvironmentInspectReport>> + Send + 'a>>;
 pub type StatusEnvFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<Vec<StatusRow>>> + Send + 'a>>;
+pub type ExplainEnvFuture<'a> =
+    Pin<Box<dyn Future<Output = anyhow::Result<InstanceExplainReport>> + Send + 'a>>;
 pub type DependenciesEnvFuture<'a> =
     Pin<Box<dyn Future<Output = anyhow::Result<EnvironmentDependencies>> + Send + 'a>>;
 pub type FleetStatusFuture<'a> =
@@ -96,6 +99,10 @@ pub trait ReconcilePort: Send + Sync {
         })
     }
     fn environment_status(&self, environment: String) -> StatusEnvFuture<'_>;
+    fn explain_instance(&self, environment: String, instance: String) -> ExplainEnvFuture<'_> {
+        let _ = (environment, instance);
+        Box::pin(async { anyhow::bail!("instance explain is not supported by this host") })
+    }
     fn environment_dependencies(&self, environment: String) -> DependenciesEnvFuture<'_> {
         Box::pin(async move { Ok(EnvironmentDependencies::empty(environment)) })
     }
@@ -185,6 +192,19 @@ impl ReconcilePort for Reconciler {
         Box::pin(async move {
             let mut ctx = self.ctx_clone();
             crate::plan::status(&mut ctx, &environment).await
+        })
+    }
+
+    fn explain_instance(&self, environment: String, instance: String) -> ExplainEnvFuture<'_> {
+        Box::pin(async move {
+            let mut ctx = self.ctx_clone();
+            crate::instance_explain::explain_instance_for_policy(
+                &mut ctx,
+                &environment,
+                &instance,
+                self.execution_policy(),
+            )
+            .await
         })
     }
 

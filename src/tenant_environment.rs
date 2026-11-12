@@ -12,6 +12,7 @@ use std::sync::Arc;
 use crate::auth_context::AuthenticatedRequestContext;
 use crate::deployment_history::DeploymentHistoryPage;
 use crate::environment_dependencies::EnvironmentDependencies;
+use crate::instance_explain::InstanceExplainReport;
 use crate::plan::{EnvironmentInspectReport, EnvironmentListEntry, FleetStatusReport, StatusRow};
 use crate::reconciler::TickReport;
 use crate::tenant_isolation::IsolationError;
@@ -165,6 +166,26 @@ impl TenantEnvironmentOperations {
             return Ok(projection.status_rows());
         }
         Ok(Vec::new())
+    }
+
+    pub async fn explain(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &str,
+        instance: &str,
+    ) -> Result<InstanceExplainReport, TenantEnvironmentError> {
+        let fixture = self.visible_fixture(context, environment).await?;
+        let Some(projection) = fixture else {
+            return Err(TenantEnvironmentError::NotFound);
+        };
+        crate::instance_explain::from_inspect(
+            environment,
+            instance,
+            &projection.inspect_report(),
+            &projection.status_rows(),
+            crate::instance_explain::ExplainStoreFacts::default(),
+        )
+        .map_err(|_| TenantEnvironmentError::NotFound)
     }
 
     pub async fn dependencies(

@@ -115,6 +115,7 @@ pub(crate) fn command_name(command: &Command, target: Target) -> Option<CommandN
         Command::Plan { .. } => CommandName::Plan,
         Command::Apply { .. } => CommandName::Apply,
         Command::Status { .. } => CommandName::Status,
+        Command::Explain { .. } => CommandName::Explain,
         Command::Env {
             command: EnvCommand::Inspect { .. },
         } => CommandName::InspectEnvironment,
@@ -247,6 +248,51 @@ pub(crate) fn list_environments_result(count: usize) -> CommandResultV1 {
 pub(crate) fn fleet_status_result(report: &plan::FleetStatusReport) -> CommandResultV1 {
     CommandResultV1::succeeded(CommandName::FleetStatus)
         .counts(None, Some(report.environment_count))
+}
+
+pub(crate) fn print_explain(report: &tenkai::instance_explain::InstanceExplainReport) {
+    if report.blockers.is_empty() {
+        match report.next_change.as_ref() {
+            Some(next) if next.action == "current" => {
+                println!(
+                    "{}/{} is current at {}",
+                    report.environment, report.instance, next.head
+                );
+            }
+            Some(next) if next.action == "install" => {
+                println!(
+                    "{}/{} next change: install {}",
+                    report.environment, report.instance, next.head
+                );
+            }
+            Some(next) if next.action == "upgrade" => {
+                let deployed = next.deployed.as_deref().unwrap_or("-");
+                println!(
+                    "{}/{} next change: upgrade {deployed} -> {}",
+                    report.environment, report.instance, next.head
+                );
+            }
+            Some(next) if next.action == "restart" => {
+                println!(
+                    "{}/{} next change: restart {}",
+                    report.environment, report.instance, next.head
+                );
+            }
+            Some(next) => {
+                println!(
+                    "{}/{} next change: {}",
+                    report.environment, report.instance, next.action
+                );
+            }
+            None => println!("{}/{} has no blockers", report.environment, report.instance),
+        }
+        return;
+    }
+    println!("{}/{} blocked:", report.environment, report.instance);
+    for blocker in &report.blockers {
+        println!("  {:<18} {}", blocker.check, blocker.evidence);
+        println!("  {:<18} unblock: {}", "", blocker.unblock);
+    }
 }
 
 pub(crate) fn status_result(env: &str, rows: usize) -> CommandResultV1 {

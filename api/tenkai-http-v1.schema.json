@@ -4391,6 +4391,74 @@
       ],
       "type": "object"
     },
+    "InstanceExplainBlocker": {
+      "description": "Why one check currently blocks the next change.",
+      "properties": {
+        "check": {
+          "description": "Stable check name in admission order.",
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "unblock": {
+          "description": "Operator action that lifts this check.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "check",
+        "evidence",
+        "unblock"
+      ],
+      "type": "object"
+    },
+    "InstanceExplainReport": {
+      "description": "Read-only explain view for one instance.",
+      "properties": {
+        "blockers": {
+          "items": {
+            "$ref": "#/$defs/InstanceExplainBlocker"
+          },
+          "type": "array"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "next_change": {
+          "$ref": "#/$defs/InstanceNextChange"
+        }
+      },
+      "required": [
+        "environment",
+        "instance",
+        "blockers"
+      ],
+      "type": "object"
+    },
+    "InstanceNextChange": {
+      "description": "What the next change would be if nothing blocked it.",
+      "properties": {
+        "action": {
+          "description": "`install`, `upgrade`, `restart`, or `current`.",
+          "type": "string"
+        },
+        "deployed": {
+          "type": "string"
+        },
+        "head": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "head"
+      ],
+      "type": "object"
+    },
     "IssuerStatus": {
       "description": "The issuer state of an environment for inspection. A view: clients\nignore fields they do not know (#1172).",
       "properties": {
@@ -7863,6 +7931,15 @@
           "$ref": "#/$defs/StatusRow"
         },
         "type": "array"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}/instances/{instance}/explain",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/InstanceExplainReport"
       }
     },
     {
