@@ -243,6 +243,15 @@ async fn tenkai_upgrades_rolls_back_and_reverts_its_runtime_agent() {
         rollback.status_detail
     );
     assert_eq!(current(&home), installed);
+    // Successful rollback holds the environment so the next poll does not
+    // reissue the channel head. Clear it before the next change.
+    tenkai::delivery_hold::clear(
+        &mut ctx,
+        &tenkai::delivery_hold::HoldScope::environment("prod"),
+        actor.principal_id(),
+    )
+    .await
+    .unwrap();
 
     // A version that cannot run: the supervisor's hook reverts it, the
     // previous version reports the failure, and it is not tried again.
