@@ -19,6 +19,19 @@ pub(crate) fn print_steps(steps: &[plan::Step]) {
             from,
             s.to
         );
+        for change in &s.target_changes {
+            if change.fields.is_empty() {
+                continue;
+            }
+            for field in &change.fields {
+                let from = field.from.as_deref().unwrap_or("-");
+                let to = field.to.as_deref().unwrap_or("-");
+                println!(
+                    "    {} {} {}: {} -> {}",
+                    change.kind, change.name, field.field, from, to
+                );
+            }
+        }
     }
 }
 

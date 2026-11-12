@@ -346,6 +346,7 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
             issuer: None,
             identity: None,
             restore_identity: None,
+            target_changes: Vec::new(),
         }],
         state: PlanState::Computed,
         gates_skipped: None,

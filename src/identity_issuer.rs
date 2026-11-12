@@ -854,6 +854,7 @@ fn issuer_step(
         }),
         identity: None,
         restore_identity: None,
+        target_changes: Vec::new(),
     }
 }
 

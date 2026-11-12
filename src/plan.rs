@@ -43,7 +43,7 @@ pub use crate::environment::{
 pub(crate) use crate::environment::{
     inspect_environment_for_policy, update_runtime_deployments_object,
 };
-pub use crate::spec_drift::{SpecDriftObject, SpecDriftView};
+pub use crate::spec_drift::{SpecDriftObject, SpecDriftView, TargetChange, TargetFieldChange};
 
 pub use crate::deploy_webhook::{
     clear_environment_webhooks, list_environment_webhooks, set_environment_webhook,
@@ -148,6 +148,12 @@ pub struct Step {
     /// with its own approved grant, never the target's. Omitted when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore_identity: Option<crate::workload_identity::IdentityGrant>,
+    /// Desired-versus-live target changes at plan time (#1077). Empty and
+    /// omitted so plan digests of steps without it stay unchanged. A binary
+    /// that predates the field drops it, computes a different digest, and
+    /// fails approval closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_changes: Vec<crate::spec_drift::TargetChange>,
 }
 
 /// The issuer key an identity issuer step activates or re-wraps.
@@ -871,6 +877,7 @@ mod tests {
                 issuer: None,
                 identity: None,
                 restore_identity: None,
+                target_changes: Vec::new(),
             }],
             state: PlanState::Computed,
             gates_skipped: None,
