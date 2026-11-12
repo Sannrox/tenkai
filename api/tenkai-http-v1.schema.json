@@ -3822,6 +3822,13 @@
         "name": {
           "type": "string"
         },
+        "open_exposures": {
+          "description": "Open (release, advisory) matches on this environment (#900).",
+          "items": {
+            "$ref": "#/$defs/OpenEnvironmentExposure"
+          },
+          "type": "array"
+        },
         "posture": {
           "description": "Aggregate posture: `empty` | `unhealthy` | `behind` | `current`.",
           "type": "string"
@@ -4938,6 +4945,40 @@
       "required": [
         "value",
         "capabilities"
+      ],
+      "type": "object"
+    },
+    "OpenEnvironmentExposure": {
+      "description": "One open deployed exposure, with age, on a fleet row (#900).",
+      "properties": {
+        "advisory_id": {
+          "type": "string"
+        },
+        "age_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "first_seen_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "overdue": {
+          "description": "True when `age_ms` exceeds `exposure.max_age_ms.<severity>` on the environment.",
+          "type": "boolean"
+        },
+        "release": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "release",
+        "advisory_id",
+        "severity",
+        "first_seen_at",
+        "age_ms"
       ],
       "type": "object"
     },

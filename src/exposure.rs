@@ -8,7 +8,7 @@
 //! revocations, verifies the envelope, then matches locally. Query and advisory
 //! matching read only catalog and environment state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
@@ -43,6 +43,24 @@ pub const LAST_BUNDLE_IMPORT_AT_PROPERTY: &str = "last_bundle_import_at";
 pub const MAX_FEED_AGE_PROPERTY: &str = "exposure.max_feed_age_ms";
 /// Environment property: block plans at this severity or above.
 pub const BLOCK_SEVERITY_PROPERTY: &str = "exposure.block_severity";
+/// Environment property: stamp catalog recall at this severity or above (#900).
+pub const AUTO_RECALL_SEVERITY_PROPERTY: &str = "exposure.auto_recall_severity";
+/// Environment property prefix: max open-exposure age per severity (`high`, …).
+pub const MAX_EXPOSURE_AGE_PROPERTY_PREFIX: &str = "exposure.max_age_ms.";
+/// Stored (release, advisory) pair with a first-seen time (#900).
+pub const KIND_DEPLOYED_EXPOSURE: &str = "tenkai.deployed_exposure";
+/// One feed generation's re-assessment completion marker (#900).
+pub const KIND_EXPOSURE_ASSESSMENT: &str = "tenkai.exposure_assessment";
+
+mod deployed;
+
+#[cfg(test)]
+use deployed::reassess_loaded;
+use deployed::{
+    ASSESSMENT_LEASE_KEY, ASSESSMENT_LEASE_NAMESPACE, begin_assessment_write, end_assessment_write,
+    reassess_under_lease,
+};
+pub use deployed::{DeployedExposure, open_environment_exposures, reassess_deployed};
 
 const FEED_ID: &str = "tenkai:advisory-feed";
 const ALIAS_LEASE_NAMESPACE: &str = "tenkai/advisory-feed";
@@ -420,9 +438,13 @@ pub fn parse_advisory_feed(bytes: &[u8]) -> Result<AdvisoryFeed> {
     if feed.schema != ADVISORY_FEED_SCHEMA {
         bail!("advisory feed schema is not {ADVISORY_FEED_SCHEMA}");
     }
+    let mut ids = HashSet::new();
     for advisory in &feed.advisories {
         if advisory.id.trim().is_empty() || advisory.component.trim().is_empty() {
             bail!("advisory id and component are required");
+        }
+        if !ids.insert(advisory.id.as_str()) {
+            bail!("advisory feed has duplicate id {}", advisory.id);
         }
         semver::VersionReq::parse(&advisory.range)
             .with_context(|| format!("advisory {} has an invalid range", advisory.id))?;
@@ -445,31 +467,79 @@ pub async fn import_advisory_feed(
     let feed = parse_advisory_feed(&serde_json::to_vec(&feed)?)?;
     let now = crate::now_millis();
     let id = feed_object_id(feed.generated_at);
-    match ctx
-        .create_once(advisory_feed_object(id.clone(), &feed, imported_at, now)?)
-        .await
-    {
-        Ok(_) => {}
-        Err(crate::client::ClientError::UniqueConflict) => {
-            let existing = ctx
-                .get(&id)
-                .await?
-                .context("advisory feed generation conflicted but is missing")?;
-            let document = existing
-                .properties
-                .get("document")
-                .context("advisory feed is missing its document")?;
-            let stored = parse_advisory_feed(document.as_bytes())?;
-            if stored != feed {
-                bail!(
-                    "advisory feed generation {} already exists with different content",
-                    feed.generated_at
-                );
-            }
-        }
-        Err(error) => return Err(error.into()),
+    // Assessment generation is generated_at so it shares order with preferred
+    // feed selection. imported_at is only for inspect age.
+    let generation = feed.generated_at;
+    let token = begin_assessment_write(ctx).await?;
+    let result =
+        admit_feed_under_lease(ctx, &feed, &id, imported_at, now, generation, &token).await;
+    let released = end_assessment_write(ctx, &token).await;
+    match (result, released) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(release)) => Err(error.context(release)),
     }
-    publish_legacy_feed_alias(ctx).await
+}
+
+async fn admit_feed_under_lease(
+    ctx: &mut Ctx,
+    feed: &AdvisoryFeed,
+    id: &str,
+    imported_at: i64,
+    now: i64,
+    generation: i64,
+    fencing_token: &str,
+) -> Result<()> {
+    let proposed = advisory_feed_object(id.to_string(), feed, imported_at, now)?;
+    match ctx.get(id).await? {
+        Some(existing) => ensure_same_feed_document(&existing, feed)?,
+        None => match ctx
+            .guarded_create(
+                proposed,
+                ASSESSMENT_LEASE_NAMESPACE,
+                ASSESSMENT_LEASE_KEY,
+                fencing_token,
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                let existing = ctx.get(id).await?.ok_or(error)?;
+                ensure_same_feed_document(&existing, feed)?;
+            }
+        },
+    }
+    publish_legacy_feed_alias(ctx).await?;
+    // Keep superseded generations stored. Assessment follows the preferred
+    // feed identity, not the importer's generated_at-or-imported_at clock.
+    if !admitted_feed_is_preferred(ctx, feed).await? {
+        return Ok(());
+    }
+    reassess_under_lease(ctx, feed, generation, fencing_token).await?;
+    Ok(())
+}
+
+fn ensure_same_feed_document(existing: &Object, feed: &AdvisoryFeed) -> Result<()> {
+    let document = existing
+        .properties
+        .get("document")
+        .context("advisory feed is missing its document")?;
+    let stored = parse_advisory_feed(document.as_bytes())?;
+    if stored != *feed {
+        bail!(
+            "advisory feed generation {} already exists with different content",
+            feed.generated_at
+        );
+    }
+    Ok(())
+}
+
+async fn admitted_feed_is_preferred(ctx: &mut Ctx, feed: &AdvisoryFeed) -> Result<bool> {
+    match load_advisory_feed(ctx).await? {
+        Some((preferred, _)) => Ok(preferred.generated_at == feed.generated_at),
+        None => Ok(true),
+    }
 }
 
 /// Apply bundled revocations, then verify. Same order as bind and first-install.
@@ -851,7 +921,7 @@ fn parse_purl(purl: &str) -> Option<(String, String)> {
     Some((name.into(), version.into()))
 }
 
-fn stored_inventory(release: &Object) -> Result<Option<ComponentInventory>> {
+pub(super) fn stored_inventory(release: &Object) -> Result<Option<ComponentInventory>> {
     let Some(document) = release.properties.get(INVENTORY_DOCUMENT_PROPERTY) else {
         return Ok(None);
     };
@@ -901,7 +971,7 @@ fn environment_freshness(environment: &Object) -> Freshness {
     }
 }
 
-fn version_in_range(version: &str, range: &str) -> Result<bool> {
+pub(super) fn version_in_range(version: &str, range: &str) -> Result<bool> {
     let req = semver::VersionReq::parse(range)
         .with_context(|| format!("invalid version range {range:?}"))?;
     match semver::Version::parse(version) {
@@ -1053,7 +1123,7 @@ async fn alias_matches(ctx: &mut Ctx, feed: &AdvisoryFeed) -> Result<bool> {
     }
 }
 
-async fn load_advisory_feed(ctx: &mut Ctx) -> Result<Option<(AdvisoryFeed, i64)>> {
+pub(super) async fn load_advisory_feed(ctx: &mut Ctx) -> Result<Option<(AdvisoryFeed, i64)>> {
     if let Some(feed) = preferred_generation_feed(ctx).await? {
         return Ok(Some(feed));
     }
@@ -1238,6 +1308,33 @@ document = "sbom.json"
             .unwrap_err()
             .to_string();
         assert!(err.contains("advisory feed schema"), "{err}");
+        let duplicate = parse_advisory_feed(
+            serde_json::json!({
+                "schema": ADVISORY_FEED_SCHEMA,
+                "generated_at": 1,
+                "advisories": [
+                    {
+                        "id": "TENKAI-2026-1",
+                        "component": "openssl",
+                        "range": ">=1.0.0",
+                        "severity": "high",
+                        "issued_at": 1
+                    },
+                    {
+                        "id": "TENKAI-2026-1",
+                        "component": "openssl",
+                        "range": ">=1.0.0",
+                        "severity": "low",
+                        "issued_at": 1
+                    }
+                ]
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(duplicate.contains("duplicate id"), "{duplicate}");
     }
 
     #[test]
@@ -2014,6 +2111,647 @@ document = "sbom.json"
         ctx.release_lease(ALIAS_LEASE_NAMESPACE, ALIAS_LEASE_KEY, &lease.fencing_token)
             .await
             .unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    async fn stamp_deployed(ctx: &mut Ctx, env: &str, version: &str) {
+        let mut object = crate::environment::environment(ctx, env).await.unwrap();
+        object
+            .properties
+            .insert("deployed.api".into(), version.into());
+        object
+            .properties
+            .insert("deployed_release.api".into(), release_id("api", version));
+        ctx.put(object).await.unwrap();
+    }
+
+    async fn unstamp_deployed(ctx: &mut Ctx, env: &str) {
+        let mut object = crate::environment::environment(ctx, env).await.unwrap();
+        object.properties.remove("deployed.api");
+        object.properties.remove("deployed_release.api");
+        ctx.put(object).await.unwrap();
+    }
+
+    async fn stored_exposure(ctx: &mut Ctx) -> crate::pb::sekai::Object {
+        ctx.list_kind(KIND_DEPLOYED_EXPOSURE)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|object| object.kind == KIND_DEPLOYED_EXPOSURE)
+            .expect("exposure record")
+    }
+
+    #[tokio::test]
+    async fn newer_feed_records_subscribed_or_running_match_once() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-reassess-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 2_000), 2)
+            .await
+            .unwrap();
+        assert!(reassess_deployed(&mut ctx).await.unwrap().is_empty());
+
+        let actor = crate::auth_context::test_management_context("exposure-reassess");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        crate::environment::env_add(&mut ctx, "spoke", "spoke")
+            .await
+            .unwrap();
+        stamp_deployed(&mut ctx, "hub", "1.0.0").await;
+        crate::environment::subscribe(&mut ctx, "spoke", "api", "stable")
+            .await
+            .unwrap();
+
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 2_000), 3)
+            .await
+            .unwrap();
+        let first = reassess_deployed(&mut ctx).await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].advisory_id, "TENKAI-2026-1");
+        assert_eq!(first[0].release, "api@1.0.0");
+        assert!(first[0].first_seen_at > 0);
+        assert!(first[0].closed_at.is_none());
+        let first_seen = first[0].first_seen_at;
+
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 2_000), 4)
+            .await
+            .unwrap();
+        let again = reassess_deployed(&mut ctx).await.unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].first_seen_at, first_seen);
+        let stored = ctx
+            .list_kind(KIND_DEPLOYED_EXPOSURE)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|object| object.kind == KIND_DEPLOYED_EXPOSURE)
+            .count();
+        assert_eq!(stored, 1);
+
+        let by_env = open_environment_exposures(&mut ctx).await.unwrap();
+        assert_eq!(by_env.get("hub").map(Vec::len), Some(1));
+        assert_eq!(by_env.get("spoke").map(Vec::len), Some(1));
+        assert!(
+            !crate::catalog::release_is_recalled(&mut ctx, &release_id("api", "1.0.0"))
+                .await
+                .unwrap()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn older_or_tampered_feed_leaves_deployed_exposures_unchanged() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-older-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        stamp_deployed(&mut ctx, "hub", "1.0.0").await;
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 2_000), 2)
+            .await
+            .unwrap();
+        let first = reassess_deployed(&mut ctx).await.unwrap();
+        assert_eq!(first.len(), 1);
+        let first_seen = first[0].first_seen_at;
+
+        import_advisory_feed(&mut ctx, feed_document(Vec::new(), 1_500), 3)
+            .await
+            .unwrap();
+        let after_older = reassess_deployed(&mut ctx).await.unwrap();
+        assert_eq!(after_older.len(), 1);
+        assert_eq!(after_older[0].first_seen_at, first_seen);
+        assert!(after_older[0].closed_at.is_none());
+
+        import_advisory_feed(&mut ctx, feed_document(Vec::new(), 0), 1_700_000_000_000)
+            .await
+            .unwrap();
+        let after_zero = reassess_deployed(&mut ctx).await.unwrap();
+        assert_eq!(after_zero.len(), 1);
+        assert_eq!(after_zero[0].first_seen_at, first_seen);
+        assert!(after_zero[0].closed_at.is_none());
+
+        let conflict = import_advisory_feed(
+            &mut ctx,
+            feed_document(
+                vec![Advisory {
+                    id: "TENKAI-2026-2".into(),
+                    component: "openssl".into(),
+                    range: ">=1.0.0".into(),
+                    severity: Severity::Low,
+                    issued_at: 1,
+                }],
+                2_000,
+            ),
+            4,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(conflict.contains("different content"), "{conflict}");
+        let after_tamper = reassess_deployed(&mut ctx).await.unwrap();
+        assert_eq!(after_tamper.len(), 1);
+        assert_eq!(after_tamper[0].advisory_id, "TENKAI-2026-1");
+        assert_eq!(after_tamper[0].first_seen_at, first_seen);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn zero_generated_feed_does_not_poison_later_positive_generation() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-zero-gen-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        stamp_deployed(&mut ctx, "hub", "1.0.0").await;
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 0), 5_000)
+            .await
+            .unwrap();
+        let first = reassess_deployed(&mut ctx).await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            stored_exposure(&mut ctx)
+                .await
+                .properties
+                .get("last_seen_generation")
+                .map(String::as_str),
+            Some("0")
+        );
+
+        import_advisory_feed(&mut ctx, feed_document(Vec::new(), 4_000), 5_001)
+            .await
+            .unwrap();
+        assert!(reassess_deployed(&mut ctx).await.unwrap().is_empty());
+        let stored = stored_exposure(&mut ctx).await;
+        assert!(
+            stored
+                .properties
+                .get("closed_at")
+                .is_some_and(|value| !value.is_empty())
+        );
+        assert_eq!(
+            stored
+                .properties
+                .get("last_seen_generation")
+                .map(String::as_str),
+            Some("4000")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn withdrawn_advisory_closes_exposure() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-withdrawn-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        stamp_deployed(&mut ctx, "hub", "1.0.0").await;
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 2_000), 2)
+            .await
+            .unwrap();
+        let first_seen = reassess_deployed(&mut ctx).await.unwrap()[0].first_seen_at;
+
+        import_advisory_feed(&mut ctx, feed_document(Vec::new(), 3_000), 3)
+            .await
+            .unwrap();
+        assert!(reassess_deployed(&mut ctx).await.unwrap().is_empty());
+        let stored = ctx
+            .list_kind(KIND_DEPLOYED_EXPOSURE)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|object| object.kind == KIND_DEPLOYED_EXPOSURE)
+            .expect("closed record kept");
+        assert_eq!(
+            stored.properties.get("first_seen_at").cloned(),
+            Some(first_seen.to_string())
+        );
+        assert!(
+            stored
+                .properties
+                .get("closed_at")
+                .is_some_and(|value| !value.is_empty())
+        );
+        assert_eq!(
+            stored
+                .properties
+                .get("last_seen_generation")
+                .map(String::as_str),
+            Some("3000")
+        );
+
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 4_000), 4)
+            .await
+            .unwrap();
+        let reopened = reassess_deployed(&mut ctx).await.unwrap();
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened[0].first_seen_at, first_seen);
+        assert!(reopened[0].closed_at.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn bundle_import_reassesses_an_air_gapped_spoke() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-spoke-reassess-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "spoke", "isolated spoke")
+            .await
+            .unwrap();
+        stamp_deployed(&mut ctx, "spoke", "1.0.0").await;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
+        let verified = signed_feed_bundle(&key, &feed_document(vec![matched_advisory()], 2_000));
+        import_from_verified_bundle(&mut ctx, &verified, "spoke")
+            .await
+            .unwrap();
+        let open = reassess_deployed(&mut ctx).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].advisory_id, "TENKAI-2026-1");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn fleet_status_reports_open_exposure_age_and_overdue() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-fleet-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        stamp_deployed(&mut ctx, "hub", "1.0.0").await;
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 2_000), 2)
+            .await
+            .unwrap();
+        let records = ctx.list_kind(KIND_DEPLOYED_EXPOSURE).await.unwrap();
+        let mut record = records
+            .into_iter()
+            .find(|object| object.kind == KIND_DEPLOYED_EXPOSURE)
+            .expect("exposure record");
+        record.properties.insert("first_seen_at".into(), "1".into());
+        ctx.put(record).await.unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "hub")
+            .await
+            .unwrap();
+        env.properties.insert(
+            format!("{MAX_EXPOSURE_AGE_PROPERTY_PREFIX}high"),
+            "1".into(),
+        );
+        ctx.put(env).await.unwrap();
+        let report = crate::environment::fleet_status(&mut ctx).await.unwrap();
+        let row = report
+            .environments
+            .iter()
+            .find(|row| row.name == "hub")
+            .expect("hub row");
+        assert_eq!(row.open_exposures.len(), 1);
+        assert_eq!(row.open_exposures[0].advisory_id, "TENKAI-2026-1");
+        assert!(row.open_exposures[0].age_ms > 0);
+        assert!(row.open_exposures[0].overdue);
+        assert_eq!(crate::fleet::overdue_exposures(&report).len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn auto_recall_is_opt_in_per_environment() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-auto-recall-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        stamp_deployed(&mut ctx, "hub", "1.0.0").await;
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 2_000), 2)
+            .await
+            .unwrap();
+        let rid = release_id("api", "1.0.0");
+        assert!(
+            !crate::catalog::release_is_recalled(&mut ctx, &rid)
+                .await
+                .unwrap()
+        );
+
+        let mut env = crate::environment::environment(&mut ctx, "hub")
+            .await
+            .unwrap();
+        env.properties
+            .insert(AUTO_RECALL_SEVERITY_PROPERTY.into(), "high".into());
+        ctx.put(env).await.unwrap();
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 3_000), 3)
+            .await
+            .unwrap();
+        assert!(
+            crate::catalog::release_is_recalled(&mut ctx, &rid)
+                .await
+                .unwrap()
+        );
+        let recorded = reassess_deployed(&mut ctx).await.unwrap();
+        assert!(recorded[0].auto_recalled_at.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn named_instance_subscription_is_in_exposure_scope() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-named-instance-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        let actor = crate::auth_context::test_management_context("exposure-named");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::environment::env_add(&mut ctx, "spoke", "spoke")
+            .await
+            .unwrap();
+        crate::environment::subscribe_instance(&mut ctx, "spoke", "api", "stable", Some("api-a"))
+            .await
+            .unwrap();
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 2_000), 2)
+            .await
+            .unwrap();
+        let open = reassess_deployed(&mut ctx).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].release, "api@1.0.0");
+        let by_env = open_environment_exposures(&mut ctx).await.unwrap();
+        assert_eq!(by_env.get("spoke").map(Vec::len), Some(1));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn revised_advisory_closes_in_scope_unmatched_pair() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-revised-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        stamp_deployed(&mut ctx, "hub", "1.0.0").await;
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 2_000), 2)
+            .await
+            .unwrap();
+        assert_eq!(reassess_deployed(&mut ctx).await.unwrap().len(), 1);
+
+        let mut revised = matched_advisory();
+        revised.range = ">=9.0.0".into();
+        import_advisory_feed(&mut ctx, feed_document(vec![revised], 3_000), 3)
+            .await
+            .unwrap();
+        assert!(reassess_deployed(&mut ctx).await.unwrap().is_empty());
+        let stored = stored_exposure(&mut ctx).await;
+        assert!(
+            stored
+                .properties
+                .get("closed_at")
+                .is_some_and(|value| !value.is_empty())
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn revised_advisory_preserves_out_of_scope_pair() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-out-of-scope-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        stamp_deployed(&mut ctx, "hub", "1.0.0").await;
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 2_000), 2)
+            .await
+            .unwrap();
+        unstamp_deployed(&mut ctx, "hub").await;
+
+        let mut revised = matched_advisory();
+        revised.range = ">=9.0.0".into();
+        import_advisory_feed(&mut ctx, feed_document(vec![revised], 3_000), 3)
+            .await
+            .unwrap();
+        let open = reassess_deployed(&mut ctx).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert!(open[0].closed_at.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stale_assessment_does_not_overwrite_newer_generation() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-gen-fence-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        stamp_deployed(&mut ctx, "hub", "1.0.0").await;
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 2_000), 2)
+            .await
+            .unwrap();
+        let first_seen = reassess_deployed(&mut ctx).await.unwrap()[0].first_seen_at;
+        let mut record = stored_exposure(&mut ctx).await;
+        record
+            .properties
+            .insert("last_seen_generation".into(), "9000".into());
+        ctx.put(record).await.unwrap();
+
+        let mut lower = matched_advisory();
+        lower.severity = Severity::Low;
+        import_advisory_feed(&mut ctx, feed_document(vec![lower], 3_000), 3)
+            .await
+            .unwrap();
+        import_advisory_feed(&mut ctx, feed_document(Vec::new(), 3_500), 4)
+            .await
+            .unwrap();
+        let open = reassess_deployed(&mut ctx).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].first_seen_at, first_seen);
+        assert_eq!(open[0].severity, Severity::High);
+        let stored = stored_exposure(&mut ctx).await;
+        assert_eq!(
+            stored
+                .properties
+                .get("last_seen_generation")
+                .map(String::as_str),
+            Some("9000")
+        );
+        assert!(!stored.properties.contains_key("closed_at"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stale_assessment_aborts_when_preferred_generation_is_newer() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-stale-abort-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        stamp_deployed(&mut ctx, "hub", "1.0.0").await;
+        import_advisory_feed(&mut ctx, feed_document(vec![matched_advisory()], 2_000), 2)
+            .await
+            .unwrap();
+        let first_seen = reassess_deployed(&mut ctx).await.unwrap()[0].first_seen_at;
+        let newer = feed_document(vec![matched_advisory()], 4_000);
+        ctx.create_once(
+            advisory_feed_object(feed_object_id(4_000), &newer, 4, crate::now_millis()).unwrap(),
+        )
+        .await
+        .unwrap();
+        let error = reassess_loaded(&mut ctx, &feed_document(Vec::new(), 2_000), 2_000)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("stale"), "{error}");
+        let open = reassess_deployed(&mut ctx).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].first_seen_at, first_seen);
+        assert!(open[0].closed_at.is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 

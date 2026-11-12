@@ -402,6 +402,50 @@ pub fn known_object_types() -> Vec<ObjectType> {
             ],
         ),
         object_type(
+            crate::exposure::KIND_DEPLOYED_EXPOSURE,
+            "A (release, advisory) pair first seen on feed admission",
+            vec![
+                prop("release", true, "Product@version of the matched release"),
+                prop("release_id", true, "Catalog release id"),
+                prop("advisory_id", true, "Advisory id from the imported feed"),
+                prop("severity", true, "Advisory severity"),
+                prop("component", true, "Matched inventory component"),
+                prop(
+                    "component_version",
+                    true,
+                    "Matched inventory component version",
+                ),
+                prop(
+                    "first_seen_at",
+                    true,
+                    "Unix-ms when the pair was first recorded",
+                ),
+                prop(
+                    "last_seen_generation",
+                    true,
+                    "Feed generated_at that last matched this pair",
+                ),
+                prop(
+                    "closed_at",
+                    false,
+                    "Unix-ms when the pair no longer matches or the advisory was withdrawn",
+                ),
+                prop(
+                    "auto_recalled_at",
+                    false,
+                    "Unix-ms when opt-in auto-recall stamped the catalog",
+                ),
+            ],
+        ),
+        object_type(
+            crate::exposure::KIND_EXPOSURE_ASSESSMENT,
+            "Completion marker for one advisory-feed generation's deployed re-assessment",
+            vec![
+                prop("generated_at", true, "Feed generated_at that was assessed"),
+                prop("completed_at", true, "Unix-ms when the pass finished"),
+            ],
+        ),
+        object_type(
             crate::recall_notice::KIND_RECALL_NOTICE,
             "An imported signed recall notice",
             vec![

@@ -167,6 +167,7 @@ impl ReconcilePort for FixedReconciler {
                     latest_plan_state: None,
                     posture: "empty".into(),
                     criticality: None,
+                    open_exposures: Vec::new(),
                 }],
                 environment_count: 1,
                 environments_current: 0,

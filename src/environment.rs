@@ -2198,9 +2198,9 @@ pub async fn list_environments(ctx: &mut Ctx) -> Result<Vec<EnvironmentListEntry
 // Re-export the pure interface so existing `plan::Fleet*` call sites keep working.
 pub use crate::fleet::{
     FleetDriftSummary, FleetEnvironmentRow, FleetPostureSnapshot, FleetStatusReport,
-    compare_fleet_posture, fleet_posture_snapshot, fleet_status_from_inspects,
-    fleet_status_from_rows, is_hard_drift_posture, load_fleet_posture_baseline,
-    write_fleet_posture_baseline,
+    OpenEnvironmentExposure, compare_fleet_posture, fleet_posture_snapshot,
+    fleet_status_from_inspects, fleet_status_from_rows, is_hard_drift_posture,
+    load_fleet_posture_baseline, overdue_exposures, write_fleet_posture_baseline,
 };
 
 /// Summarize delivery posture for every registered environment.
@@ -2270,6 +2270,12 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
     }
     let mut report = fleet_status_from_inspects(reports);
     report.promotion_policies = crate::channel_promotion::status_snapshot(ctx).await?;
+    let open_exposures = crate::exposure::open_environment_exposures(ctx).await?;
+    for row in &mut report.environments {
+        if let Some(exposures) = open_exposures.get(&row.name) {
+            row.open_exposures = exposures.clone();
+        }
+    }
     Ok(report)
 }
 

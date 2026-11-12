@@ -113,6 +113,20 @@ to the bundle issued-at, then import time). An environment property
 verify. A bundle whose authenticated revocation list revokes its exporter
 is refused.
 
+Admitting a newer feed re-assesses every release the environment subscribes
+to (including named instances) or currently runs. Each new (release, advisory)
+pair is recorded once with its first-seen time; a replay or crash retry does
+not duplicate it. An older or tampered generation leaves those records
+unchanged. A withdrawn advisory closes the exposure. A revised advisory that
+no longer matches an in-scope release closes that pair; a pair whose release
+is no longer subscribed or running stays open until it is in scope again.
+`fleet status` and `fleet watch` report open exposures per environment with
+age; `fleet watch` exits non-zero when age exceeds
+`exposure.max_age_ms.<severity>`. Default is report only. Set
+`exposure.auto_recall_severity` to stamp catalog recall for matches at that
+severity or above without an operator command; signed notices and
+fix-forward waves still use [`remediate propose`](recall-notices.md).
+
 A signed `tenkai.derived-criticality.v2` travels as `criticality/derived.json`,
 byte for byte as the producer signed it ([wire format](manage-environments.md#derived-criticality-wire-format)).
 Bind, first install, and reinstall verify it against

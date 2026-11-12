@@ -1147,6 +1147,17 @@ pub(crate) async fn persist_recall_claim(
     actor: &AuthenticatedRequestContext,
     release_id: &str,
 ) -> Result<()> {
+    persist_recall_claim_with_fence(ctx, actor, release_id, None).await
+}
+
+/// Stamp a recall claim, optionally under an active write lease so a stale
+/// assessment cannot persist after another generation has taken over.
+pub(crate) async fn persist_recall_claim_with_fence(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    release_id: &str,
+    fence: Option<(&str, &str, &str)>,
+) -> Result<()> {
     actor
         .require_delivery_capability(DeliveryCapability::Management)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -1167,14 +1178,28 @@ pub(crate) async fn persist_recall_claim(
             ),
         ]),
     );
-    let claim = match ctx.create_once(proposed.clone()).await {
-        Ok(claim) => claim,
-        Err(status) if crate::client::is_unique_conflict(&status) => {
-            ctx.get(&claim_id).await?.ok_or_else(|| {
-                anyhow::anyhow!("release recall claim {claim_id} appeared then vanished")
-            })?
-        }
-        Err(status) => return Err(status.into()),
+    let claim = match ctx.get(&claim_id).await? {
+        Some(existing) => existing,
+        None => match fence {
+            None => match ctx.create_once(proposed.clone()).await {
+                Ok(claim) => claim,
+                Err(status) if crate::client::is_unique_conflict(&status) => {
+                    ctx.get(&claim_id).await?.ok_or_else(|| {
+                        anyhow::anyhow!("release recall claim {claim_id} appeared then vanished")
+                    })?
+                }
+                Err(status) => return Err(status.into()),
+            },
+            Some((namespace, key, token)) => {
+                match ctx
+                    .guarded_create(proposed.clone(), namespace, key, token)
+                    .await
+                {
+                    Ok(claim) => claim,
+                    Err(error) => ctx.get(&claim_id).await?.ok_or(error)?,
+                }
+            }
+        },
     };
     if claim.kind != KIND_RELEASE_RECALL
         || claim.properties.get("release_id").map(String::as_str) != Some(release_id)
@@ -1208,7 +1233,14 @@ pub(crate) async fn persist_recall_claim(
         .unwrap_or(recalled_by);
     release.properties.insert("recalled_at".into(), recalled_at);
     release.properties.insert("recalled_by".into(), recalled_by);
-    ctx.put(release).await?;
+    match fence {
+        None => {
+            ctx.put(release).await?;
+        }
+        Some((namespace, key, token)) => {
+            ctx.guarded_update(release, namespace, key, token).await?;
+        }
+    }
     Ok(())
 }
 
