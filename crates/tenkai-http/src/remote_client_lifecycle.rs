@@ -350,6 +350,59 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn schedule_environment_freeze(
+        &self,
+        environment: &str,
+        name: &str,
+        from: Option<&str>,
+        until: &str,
+        reason: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/hold/schedule"),
+            Some(&tenkai::management_lifecycle::DeliveryFreezeRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::HoldSchedule
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                name: name.to_string(),
+                from: from.map(str::to_string),
+                until: Some(until.to_string()),
+                reason: Some(reason.to_string()),
+            }),
+        )
+        .await
+    }
+
+    pub async fn cancel_environment_freeze(
+        &self,
+        environment: &str,
+        name: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/hold/cancel"),
+            Some(&tenkai::management_lifecycle::DeliveryFreezeRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::HoldCancel
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                name: name.to_string(),
+                from: None,
+                until: None,
+                reason: None,
+            }),
+        )
+        .await
+    }
+
     pub async fn retry_failed_target(
         &self,
         environment: &str,

@@ -23,19 +23,53 @@ pub(crate) async fn run(ctx: &mut client::Ctx, scope: HoldScope, action: HoldAct
             println!("cleared {label} hold: {}", cleared.reason);
         }
         HoldAction::Show => {
-            match delivery_hold::get(ctx, &scope).await? {
-                Some(hold) => println!(
-                    "held at {} by {}: {}",
-                    hold.held_at, hold.actor, hold.reason
-                ),
-                None => println!("no delivery hold"),
-            }
-            for event in delivery_hold::audit(ctx, &scope).await? {
-                println!(
-                    "{} {} by {}: {}",
-                    event.at, event.action, event.actor, event.reason
-                );
-            }
+            crate::output::print_hold_view(&delivery_hold::view(ctx, &scope).await?);
+        }
+        HoldAction::Schedule {
+            name,
+            from,
+            until,
+            reason,
+        } => {
+            let HoldScope::Environment(env) = &scope else {
+                bail!("change freezes are per environment");
+            };
+            let actor = embedded_management_actor()?;
+            let from_ms = match from.as_deref() {
+                Some(from) => delivery_hold::parse_freeze_instant("--from", from)?,
+                None => tenkai::now_millis(),
+            };
+            let until_ms = delivery_hold::parse_freeze_instant("--until", &until)?;
+            let freeze = delivery_hold::schedule_freeze(
+                ctx,
+                env,
+                &name,
+                from_ms,
+                until_ms,
+                &reason,
+                actor.principal_id(),
+            )
+            .await?;
+            println!(
+                "scheduled freeze {} on {env} from {} until {} by {}: {}",
+                freeze.name,
+                delivery_hold::format_freeze_instant(freeze.from_ms),
+                delivery_hold::format_freeze_instant(freeze.until_ms),
+                freeze.actor,
+                freeze.reason
+            );
+        }
+        HoldAction::Cancel { name } => {
+            let HoldScope::Environment(env) = &scope else {
+                bail!("change freezes are per environment");
+            };
+            let actor = embedded_management_actor()?;
+            let freeze =
+                delivery_hold::cancel_freeze(ctx, env, &name, actor.principal_id()).await?;
+            println!(
+                "cancelled freeze {} on {env}: {}",
+                freeze.name, freeze.reason
+            );
         }
     }
     Ok(())

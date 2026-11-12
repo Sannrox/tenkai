@@ -110,6 +110,8 @@ pub enum ManagementLifecycleOperation {
     Retire,
     Hold,
     Release,
+    HoldSchedule,
+    HoldCancel,
     Retry,
     ChannelHold,
     ChannelRelease,
@@ -133,6 +135,8 @@ impl ManagementLifecycleOperation {
             Self::Retire => "retire",
             Self::Hold => "hold",
             Self::Release => "release",
+            Self::HoldSchedule => "hold_schedule",
+            Self::HoldCancel => "hold_cancel",
             Self::Retry => "retry",
             Self::ChannelHold => "channel_hold",
             Self::ChannelRelease => "channel_release",
@@ -174,6 +178,8 @@ impl ManagementLifecycleOperation {
                 | Self::Rollback
                 | Self::Hold
                 | Self::Release
+                | Self::HoldSchedule
+                | Self::HoldCancel
                 | Self::Retry
                 | Self::Configure
         )
@@ -223,6 +229,8 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "retire" => Ok(ManagementLifecycleOperation::Retire),
         "hold" => Ok(ManagementLifecycleOperation::Hold),
         "release" => Ok(ManagementLifecycleOperation::Release),
+        "hold_schedule" => Ok(ManagementLifecycleOperation::HoldSchedule),
+        "hold_cancel" => Ok(ManagementLifecycleOperation::HoldCancel),
         "retry" => Ok(ManagementLifecycleOperation::Retry),
         "channel_hold" => Ok(ManagementLifecycleOperation::ChannelHold),
         "channel_release" => Ok(ManagementLifecycleOperation::ChannelRelease),
@@ -641,6 +649,24 @@ pub struct DeliveryHoldRequest {
     pub operation: String,
     pub environment: String,
     pub expected_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Body of `POST /v1/environments/{environment}/hold/schedule` and
+/// `POST /v1/environments/{environment}/hold/cancel`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryFreezeRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -1105,6 +1131,52 @@ pub fn admit_delivery_hold(
         .is_some_and(|reason| !reason.is_empty())
     {
         bail!("management operation {} forbids reason", expected.as_str());
+    }
+    admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        expected,
+        kind,
+        granted_environment,
+    )
+}
+
+pub fn admit_delivery_freeze(
+    request: &DeliveryFreezeRequest,
+    path_environment: &str,
+    expected: ManagementLifecycleOperation,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_path_environment(expected.as_str(), &request.environment, path_environment)?;
+    crate::ontology::validate_identifier("freeze", &request.name)?;
+    if expected == ManagementLifecycleOperation::HoldSchedule {
+        require_hold_reason(request.reason.as_deref())?;
+        let until = request
+            .until
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--until is required"))?;
+        let until_ms = crate::delivery_hold::parse_freeze_instant("--until", until)?;
+        if let Some(from) = request.from.as_deref() {
+            let from_ms = crate::delivery_hold::parse_freeze_instant("--from", from)?;
+            anyhow::ensure!(until_ms > from_ms, "--until must be after --from");
+        }
+    } else {
+        if request
+            .reason
+            .as_ref()
+            .is_some_and(|reason| !reason.is_empty())
+        {
+            bail!("management operation {} forbids reason", expected.as_str());
+        }
+        if request.from.is_some() || request.until.is_some() {
+            bail!(
+                "management operation {} forbids from and until",
+                expected.as_str()
+            );
+        }
     }
     admit_environment_operation(
         request.version,
@@ -1880,6 +1952,38 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("reason"), "{err}");
+
+        let freeze = DeliveryFreezeRequest {
+            version: 1,
+            operation: "hold_schedule".into(),
+            environment: "stage".into(),
+            expected_generation: 0,
+            name: "holiday".into(),
+            from: Some("2026-11-24T00:00:00Z".into()),
+            until: Some("2026-11-28T00:00:00Z".into()),
+            reason: Some("freeze".into()),
+        };
+        admit_delivery_freeze(
+            &freeze,
+            "stage",
+            ManagementLifecycleOperation::HoldSchedule,
+            PrincipalKind::Management,
+            Some("stage"),
+        )
+        .unwrap();
+        let mut inverted = freeze.clone();
+        inverted.from = Some("2026-11-28T00:00:00Z".into());
+        inverted.until = Some("2026-11-24T00:00:00Z".into());
+        let err = admit_delivery_freeze(
+            &inverted,
+            "stage",
+            ManagementLifecycleOperation::HoldSchedule,
+            PrincipalKind::Management,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--until must be after --from"), "{err}");
 
         let retry = RetryFailedTargetRequest {
             version: 1,

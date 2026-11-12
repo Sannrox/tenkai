@@ -29,9 +29,9 @@ use crate::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryRes
 use crate::host_identity::AuthSession;
 use crate::management_lifecycle::{
     self, ApplyRequest, ApproveRequest, ChannelHoldRequest, ChannelRemoveRequest,
-    DeliveryHoldRequest, ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest,
-    PromoteRequest, PublishRequest, RecallRequest, RetryFailedTargetRequest, RollbackRequest,
-    SubscribeRequest,
+    DeliveryFreezeRequest, DeliveryHoldRequest, ManagementLifecycleOperation,
+    ManagementLifecycleResult, PlanRequest, PromoteRequest, PublishRequest, RecallRequest,
+    RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
 };
 use crate::observed_runtime::EnvironmentRuntimeReport;
 use crate::package_migration::{
@@ -2129,6 +2129,127 @@ impl ManagementOperations {
         ))
     }
 
+    pub async fn schedule_environment_freeze(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: DeliveryFreezeRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        self.mutate_environment_freeze(
+            credential,
+            environment,
+            request,
+            ManagementLifecycleOperation::HoldSchedule,
+        )
+        .await
+    }
+
+    pub async fn cancel_environment_freeze(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: DeliveryFreezeRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        self.mutate_environment_freeze(
+            credential,
+            environment,
+            request,
+            ManagementLifecycleOperation::HoldCancel,
+        )
+        .await
+    }
+
+    async fn mutate_environment_freeze(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: DeliveryFreezeRequest,
+        operation: ManagementLifecycleOperation,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, &format!("delivery.hold.{}", operation.as_str()))?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_delivery_freeze(
+            &request,
+            environment,
+            operation,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(&context, environment, request.expected_generation)
+            .await?;
+        let actor = &context.audit_principal();
+        let verb = operation.as_str();
+        self.audit(actor, &format!("delivery.hold.{verb}.requested"))?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let freeze = match operation {
+            ManagementLifecycleOperation::HoldSchedule => {
+                let from_ms = match request.from.as_deref() {
+                    Some(from) => crate::delivery_hold::parse_freeze_instant("--from", from)
+                        .map_err(map_catalog_error)?,
+                    None => crate::now_millis(),
+                };
+                let until = request.until.as_deref().unwrap_or("");
+                let until_ms = crate::delivery_hold::parse_freeze_instant("--until", until)
+                    .map_err(map_catalog_error)?;
+                crate::delivery_hold::schedule_freeze(
+                    &mut ctx,
+                    environment,
+                    &request.name,
+                    from_ms,
+                    until_ms,
+                    request.reason.as_deref().unwrap_or(""),
+                    actor,
+                )
+                .await
+            }
+            ManagementLifecycleOperation::HoldCancel => {
+                crate::delivery_hold::cancel_freeze(&mut ctx, environment, &request.name, actor)
+                    .await
+            }
+            _ => {
+                return Err(ManagementError::Internal(
+                    "unsupported delivery freeze operation".into(),
+                ));
+            }
+        }
+        .map_err(map_catalog_error)?;
+        self.audit(actor, &format!("delivery.hold.{verb}.completed"))?;
+        self.record_change(
+            &context,
+            match operation {
+                ManagementLifecycleOperation::HoldSchedule => {
+                    crate::change_stream::ChangeEventKind::HoldSet
+                }
+                _ => crate::change_stream::ChangeEventKind::HoldReleased,
+            },
+            environment,
+            Some(environment),
+        )?;
+        let message = match operation {
+            ManagementLifecycleOperation::HoldSchedule => format!(
+                "scheduled freeze {} on {environment} from {} until {} by {}: {}",
+                freeze.name,
+                crate::delivery_hold::format_freeze_instant(freeze.from_ms),
+                crate::delivery_hold::format_freeze_instant(freeze.until_ms),
+                freeze.actor,
+                freeze.reason
+            ),
+            _ => format!(
+                "cancelled freeze {} on {environment}: {}",
+                freeze.name, freeze.reason
+            ),
+        };
+        Ok(ManagementLifecycleResult::new(
+            operation,
+            message,
+            Some(environment.to_string()),
+        ))
+    }
+
     pub async fn channel_hold(
         &self,
         credential: &CredentialMaterial,
@@ -3370,6 +3491,7 @@ mod tests {
                     retirement: None,
                     preview: None,
                     delivery_hold: None,
+                    delivery_freezes: Vec::new(),
                     criticality: None,
                     latest_failures: Vec::new(),
                     sealed_recovery_warning: None,

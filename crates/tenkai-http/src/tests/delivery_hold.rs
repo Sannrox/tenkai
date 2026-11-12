@@ -207,6 +207,44 @@ async fn remote_hold_set_release_retry_and_stale_generation() {
     assert_eq!(channel_view.hold.unwrap().reason, "pause stable");
     client.release_channel_hold("api", "stable").await.unwrap();
 
+    let until = "2099-01-02T00:00:00Z";
+    let scheduled = client
+        .schedule_environment_freeze(
+            "stage",
+            "holiday",
+            Some("2099-01-01T00:00:00Z"),
+            until,
+            "new year freeze",
+            current,
+        )
+        .await
+        .unwrap();
+    assert!(
+        scheduled.message.contains("holiday"),
+        "{}",
+        scheduled.message
+    );
+    let freeze_view = client.environment_hold("stage").await.unwrap();
+    assert_eq!(freeze_view.freezes.len(), 1);
+    assert_eq!(freeze_view.freezes[0].name, "holiday");
+    let cancelled = client
+        .cancel_environment_freeze("stage", "holiday", current)
+        .await
+        .unwrap();
+    assert!(
+        cancelled.message.contains("cancelled"),
+        "{}",
+        cancelled.message
+    );
+    assert!(
+        client
+            .environment_hold("stage")
+            .await
+            .unwrap()
+            .freezes
+            .is_empty()
+    );
+
     let missing = client
         .retry_failed_target("stage", "api", "retry after fix", current)
         .await

@@ -279,6 +279,41 @@ fn parses_spoke_standby_validate_promote_and_drill() {
 }
 
 #[test]
+fn parses_environment_freeze_schedule() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "hold",
+        "prod",
+        "schedule",
+        "black-friday",
+        "--from",
+        "2026-11-24T00:00:00Z",
+        "--until",
+        "2026-11-28T00:00:00Z",
+        "--reason",
+        "holiday freeze",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Env {
+            command: EnvCommand::Hold {
+                action: crate::env_args::HoldAction::Schedule {
+                    ref name,
+                    ref until,
+                    ref reason,
+                    ..
+                },
+                ..
+            }
+        } if name == "black-friday"
+            && until == "2026-11-28T00:00:00Z"
+            && reason == "holiday freeze"
+    ));
+}
+
+#[test]
 fn parses_emergency_override_reason() {
     let cli = Cli::try_parse_from([
         "tenkaictl",

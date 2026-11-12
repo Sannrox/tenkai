@@ -23,6 +23,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Health probes, auto-rollback, deliberate rollback | [Upgrade and rollback](upgrade-and-rollback.md) |
 | Same-version restart, recall roll-off, product windows | [ADR 0016](decisions/0016-same-version-remediation.md); `restart`, `release recall`, `product maintenance` |
 | Maintenance windows | [Manage environments](manage-environments.md#maintenance-windows); `product maintenance` |
+| Dated change freezes | [Manage environments](manage-environments.md#delivery-hold); `env hold schedule` / `cancel` |
 | Canary cohort promotion evidence | #7; `src/canary.rs` |
 | Evaluation gate evidence projection | [Evaluation gate evidence](evaluation-gate-evidence.md); [ADR 0013](decisions/0013-evaluation-gate-evidence-projection.md) |
 | Versioned two-way model-release evidence schema | [Model-release evidence](model-release-evidence.md); [ADR 0032](decisions/0032-model-release-evidence.md); #603 |

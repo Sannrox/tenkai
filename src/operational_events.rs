@@ -194,11 +194,17 @@ async fn hold_set_at(ctx: &mut crate::client::Ctx, scope: &str) -> Option<i64> {
         let (product, channel) = scope.strip_prefix("channel:")?.split_once('/')?;
         HoldScope::channel(product, channel)
     };
-    crate::delivery_hold::get(ctx, &scope)
+    if let Some(hold) = crate::delivery_hold::get(ctx, &scope).await.ok().flatten() {
+        return Some(hold.held_at);
+    }
+    let HoldScope::Environment(environment) = &scope else {
+        return None;
+    };
+    crate::delivery_hold::active_freeze(ctx, environment, crate::now_millis())
         .await
         .ok()
         .flatten()
-        .map(|hold| hold.held_at)
+        .map(|freeze| freeze.from_ms)
 }
 
 /// Announce every failed import in `staging` not yet announced, to its

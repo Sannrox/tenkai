@@ -31,14 +31,14 @@ use super::inspect::{
     plan_approvals, query_exposures, ready, reconcile, take_backup,
 };
 use super::lifecycle::{
-    apply_plan, approve_plan, channel_hold, clear_product_criticality, environment_hold,
-    import_derived_criticality, install_model_evaluation_trust, plan_environment,
+    apply_plan, approve_plan, cancel_environment_freeze, channel_hold, clear_product_criticality,
+    environment_hold, import_derived_criticality, install_model_evaluation_trust, plan_environment,
     plan_identity_issuer, prepare_identity_issuer, promote_release, publish_release,
     recall_release, record_model_evaluation_evidence, record_software_compatibility_evidence,
     release_channel_hold, release_environment_hold, remove_channel_head, retire_environment,
     retry_failed_target, rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment,
-    set_channel_hold, set_environment_hold, set_product_criticality, software_compatibility_report,
-    subscribe_environment, unsubscribe_environment,
+    schedule_environment_freeze, set_channel_hold, set_environment_hold, set_product_criticality,
+    software_compatibility_report, subscribe_environment, unsubscribe_environment,
 };
 use super::package_migration::{
     apply_package_migration, package_migration_status, preview_package_migration,
@@ -352,6 +352,14 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/hold/release",
             post(release_environment_hold),
+        )
+        .route(
+            "/v1/environments/{environment}/hold/schedule",
+            post(schedule_environment_freeze),
+        )
+        .route(
+            "/v1/environments/{environment}/hold/cancel",
+            post(cancel_environment_freeze),
         )
         .route(
             "/v1/environments/{environment}/failed-targets/{product}/retry",

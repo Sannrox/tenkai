@@ -329,6 +329,7 @@ pub(crate) async fn run(
                         hold.held_at, hold.actor, hold.reason
                     );
                 }
+                crate::output::print_delivery_freezes(Some(&env), &report.delivery_freezes);
                 if let Some(issuer) = report.identity_issuer {
                     println!(
                         "{}",

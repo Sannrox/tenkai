@@ -279,6 +279,19 @@ pub fn known_object_types() -> Vec<ObjectType> {
             ],
         ),
         object_type(
+            crate::delivery_hold::FREEZE_KIND,
+            "A named environment change freeze with a start and an end",
+            vec![
+                prop("environment", true, "Environment the freeze pauses"),
+                prop("name", true, "Operator-chosen freeze name"),
+                prop("from", true, "Unix-ms instant the freeze starts"),
+                prop("until", true, "Unix-ms instant the freeze ends"),
+                prop("reason", true, "Why delivery is paused"),
+                prop("actor", true, "Principal that scheduled the freeze"),
+                prop("scheduled_at", true, "Unix-ms timestamp when recorded"),
+            ],
+        ),
+        object_type(
             crate::release_train::TRAIN_KIND,
             "A signed family release train: component releases tested together",
             vec![
