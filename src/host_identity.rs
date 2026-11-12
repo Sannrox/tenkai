@@ -920,15 +920,14 @@ mod tests {
         assert_eq!(*lookup.0.lock().unwrap(), 2);
     }
 
+    /// Process-unique scratch directory with a short name, so `dir/tenkai.sock`
+    /// stays under the Unix socket path limit (104 bytes on macOS) even with a
+    /// per-user `TMPDIR`.
     fn unique_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "tenkai-host-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("th-{label}-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
     }

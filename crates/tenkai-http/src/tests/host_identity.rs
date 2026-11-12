@@ -258,15 +258,9 @@ async fn unix_listener_uses_kernel_peer_credentials() {
         // SAFETY: geteuid has no preconditions.
         unsafe { libc::geteuid() }
     };
-    let dir = std::env::temp_dir().join(format!(
-        "tenkai-host-sock-{}-{}-{}",
-        std::process::id(),
-        uid,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    // Short and process-unique: `dir/tenkai.sock` must stay under the Unix
+    // socket path limit (104 bytes on macOS) with a per-user `TMPDIR`.
+    let dir = std::env::temp_dir().join(format!("ths-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("tenkai.sock");
