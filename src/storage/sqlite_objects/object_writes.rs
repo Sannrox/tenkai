@@ -50,15 +50,36 @@ impl SqliteStore {
         self.delete_object(id)
     }
 
+    /// Delete `id` only when property `key` still equals `value`.
+    ///
+    /// The check and the row deletes share one immediate transaction so a
+    /// concurrent put cannot replace the object between the read and the
+    /// delete.
+    pub fn delete_if_property(&self, id: &str, key: &str, value: &str) -> AnyResult<bool> {
+        self.delete_object_if_property(id, key, value)
+    }
+
     pub fn create_object(&self, object: Object) -> Result<Object> {
-        if self
-            .get_object(&object.id)
-            .map_err(|error| StoreError::Database(error.to_string()))?
-            .is_some()
-        {
+        let mut connection = self.connection()?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_objects WHERE id=?1)
+                 OR EXISTS(SELECT 1 FROM plans WHERE id=?1)
+                 OR EXISTS(SELECT 1 FROM environments WHERE id=?1)
+                 OR EXISTS(SELECT 1 FROM releases WHERE id=?1)
+                 OR EXISTS(SELECT 1 FROM channels WHERE id=?1)",
+                [&object.id],
+                |row| row.get(0),
+            )
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        if exists {
             return Err(StoreError::already_exists("object", object.id));
         }
-        self.put_object(object.clone())
+        upsert_object_in(&tx, &object, &self.principal)?;
+        tx.commit()
             .map_err(|error| StoreError::Database(error.to_string()))?;
         Ok(object)
     }
@@ -78,23 +99,48 @@ impl SqliteStore {
     pub fn delete_object(&self, id: &str) -> AnyResult<()> {
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
-        tx.execute("DELETE FROM plans WHERE id=?1", [id])?;
-        tx.execute("DELETE FROM environments WHERE id=?1", [id])?;
-        tx.execute("DELETE FROM releases WHERE id=?1", [id])?;
-        tx.execute("DELETE FROM channels WHERE id=?1", [id])?;
-        tx.execute(
-            "DELETE FROM catalog_links WHERE from_id=?1 OR to_id=?1",
-            [id],
-        )?;
-        tx.execute(
-            "DELETE FROM catalog_object_properties WHERE object_id=?1",
-            [id],
-        )?;
-        tx.execute("DELETE FROM catalog_objects WHERE id=?1", [id])?;
+        delete_object_rows(&tx, id)?;
         tx.commit()?;
         Ok(())
     }
 
+    pub fn delete_object_if_property(&self, id: &str, key: &str, value: &str) -> AnyResult<bool> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT value FROM catalog_object_properties WHERE object_id=?1 AND key=?2",
+                rusqlite::params![id, key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current.as_deref() != Some(value) {
+            return Ok(false);
+        }
+        delete_object_rows(&tx, id)?;
+        tx.commit()?;
+        Ok(true)
+    }
+}
+
+fn delete_object_rows(tx: &rusqlite::Transaction<'_>, id: &str) -> AnyResult<()> {
+    tx.execute("DELETE FROM plans WHERE id=?1", [id])?;
+    tx.execute("DELETE FROM environments WHERE id=?1", [id])?;
+    tx.execute("DELETE FROM releases WHERE id=?1", [id])?;
+    tx.execute("DELETE FROM channels WHERE id=?1", [id])?;
+    tx.execute(
+        "DELETE FROM catalog_links WHERE from_id=?1 OR to_id=?1",
+        [id],
+    )?;
+    tx.execute(
+        "DELETE FROM catalog_object_properties WHERE object_id=?1",
+        [id],
+    )?;
+    tx.execute("DELETE FROM catalog_objects WHERE id=?1", [id])?;
+    Ok(())
+}
+
+impl SqliteStore {
     pub(super) fn put_objects_inner(
         &self,
         objects: &[Object],

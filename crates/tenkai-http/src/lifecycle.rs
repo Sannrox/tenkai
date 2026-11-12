@@ -562,6 +562,50 @@ pub(super) async fn cancel_environment_freeze(
     )
 }
 
+pub(super) async fn set_environment_failure_threshold(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .set_environment_failure_threshold(&credential, &environment, request)
+            .await,
+    )
+}
+
+pub(super) async fn clear_environment_failure_threshold(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .clear_environment_failure_threshold(&credential, &environment, request)
+            .await,
+    )
+}
+
 pub(super) async fn retry_failed_target(
     State(state): State<Arc<AppState>>,
     Path((environment, product)): Path<(String, String)>,

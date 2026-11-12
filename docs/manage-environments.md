@@ -529,6 +529,8 @@ tenkaictl env hold prod show
 tenkaictl env hold prod clear
 tenkaictl env hold prod schedule black-friday --from 2026-11-24T00:00:00Z --until 2026-11-28T00:00:00Z --reason "holiday freeze"
 tenkaictl env hold prod cancel black-friday
+tenkaictl env hold prod threshold --count 2 --window 15m
+tenkaictl env hold prod threshold-clear
 ```
 
 A dated freeze starts and ends by the clock. While it is active the
@@ -541,6 +543,15 @@ name the active freeze and when it ends, and list upcoming ones. `--from`
 defaults to now; `--until` is required and must be later. A plan blocked by
 a freeze names it. During a rolling deploy a freeze holds only once every
 server reads the freeze record.
+
+A failure threshold is opt-in. When more than `--count` held failed targets
+have `failed_target_at` inside `--window`, the reconciler sets the
+environment hold with actor `automatic` and a reason that names those
+instances. Crossing again does not write a second hold. The automatic hold
+lifts when the in-window count drops to the threshold or below. An operator
+hold is never replaced or cleared by the threshold. `--window` is
+milliseconds, or a count with `ms`, `s`, `m`, or `h`. Unset (or
+`threshold-clear`) leaves per-instance failed-target holds as they are.
 
 A channel hold blocks every environment subscribed to that channel:
 

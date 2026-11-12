@@ -255,7 +255,7 @@ pub(crate) enum DockerSecretsCommand {
 
 /// Set, clear, or show an environment or channel delivery hold. The actor is
 /// the authenticated management principal. Schedule and cancel are
-/// environment-only dated freezes.
+/// environment-only dated freezes. Threshold is environment-only.
 #[derive(Subcommand)]
 pub(crate) enum HoldAction {
     /// Pause new execution; in-flight applies finish.
@@ -265,7 +265,7 @@ pub(crate) enum HoldAction {
     },
     /// Resume execution on the next reconcile tick.
     Clear,
-    /// Show the active hold, freezes, and set/clear history.
+    /// Show the active hold, freezes, threshold, and set/clear history.
     Show,
     /// Record a dated freeze. `--from` defaults to now; `--until` is required.
     Schedule {
@@ -279,6 +279,15 @@ pub(crate) enum HoldAction {
     },
     /// Cancel a freeze. An operator hold is unchanged.
     Cancel { name: String },
+    /// Hold automatically when more than `--count` failed targets fall in `--window`.
+    Threshold {
+        #[arg(long)]
+        count: u32,
+        #[arg(long)]
+        window: String,
+    },
+    /// Remove the failure threshold. An active hold is unchanged.
+    ThresholdClear,
 }
 
 #[derive(Subcommand)]

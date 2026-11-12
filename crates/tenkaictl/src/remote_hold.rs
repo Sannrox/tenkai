@@ -50,6 +50,20 @@ pub(crate) async fn environment(
                 .await?;
             println!("{}", result.message);
         }
+        HoldAction::Threshold { count, window } => {
+            let generation = require_generation(generation)?;
+            let result = client
+                .set_environment_failure_threshold(env, count, &window, generation)
+                .await?;
+            println!("{}", result.message);
+        }
+        HoldAction::ThresholdClear => {
+            let generation = require_generation(generation)?;
+            let result = client
+                .clear_environment_failure_threshold(env, generation)
+                .await?;
+            println!("{}", result.message);
+        }
     }
     Ok(())
 }
@@ -72,8 +86,11 @@ pub(crate) async fn channel(
         HoldAction::Show => {
             crate::output::print_hold_view(&client.channel_hold(product, channel).await?);
         }
-        HoldAction::Schedule { .. } | HoldAction::Cancel { .. } => {
-            anyhow::bail!("change freezes are per environment");
+        HoldAction::Schedule { .. }
+        | HoldAction::Cancel { .. }
+        | HoldAction::Threshold { .. }
+        | HoldAction::ThresholdClear => {
+            anyhow::bail!("change freezes and failure thresholds are per environment");
         }
     }
     Ok(())

@@ -29,9 +29,9 @@ use crate::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryRes
 use crate::host_identity::AuthSession;
 use crate::management_lifecycle::{
     self, ApplyRequest, ApproveRequest, ChannelHoldRequest, ChannelRemoveRequest,
-    DeliveryFreezeRequest, DeliveryHoldRequest, ManagementLifecycleOperation,
-    ManagementLifecycleResult, PlanRequest, PromoteRequest, PublishRequest, RecallRequest,
-    RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
+    DeliveryFailureThresholdRequest, DeliveryFreezeRequest, DeliveryHoldRequest,
+    ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest, PromoteRequest,
+    PublishRequest, RecallRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
 };
 use crate::observed_runtime::EnvironmentRuntimeReport;
 use crate::package_migration::{
@@ -2322,6 +2322,102 @@ impl ManagementOperations {
                 freeze.name, freeze.reason
             ),
         };
+        Ok(ManagementLifecycleResult::new(
+            operation,
+            message,
+            Some(environment.to_string()),
+        ))
+    }
+
+    pub async fn set_environment_failure_threshold(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: DeliveryFailureThresholdRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        self.mutate_environment_failure_threshold(
+            credential,
+            environment,
+            request,
+            ManagementLifecycleOperation::HoldThreshold,
+        )
+        .await
+    }
+
+    pub async fn clear_environment_failure_threshold(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: DeliveryFailureThresholdRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        self.mutate_environment_failure_threshold(
+            credential,
+            environment,
+            request,
+            ManagementLifecycleOperation::HoldThresholdClear,
+        )
+        .await
+    }
+
+    async fn mutate_environment_failure_threshold(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: DeliveryFailureThresholdRequest,
+        operation: ManagementLifecycleOperation,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, &format!("delivery.hold.{}", operation.as_str()))?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_delivery_failure_threshold(
+            &request,
+            environment,
+            operation,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(&context, environment, request.expected_generation)
+            .await?;
+        let actor = &context.audit_principal();
+        let verb = operation.as_str();
+        self.audit(actor, &format!("delivery.hold.{verb}.requested"))?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let message = match operation {
+            ManagementLifecycleOperation::HoldThreshold => {
+                let count = request.count.unwrap_or(0);
+                let window = request.window.as_deref().unwrap_or("");
+                let window_ms = crate::delivery_hold::parse_failure_window(window)
+                    .map_err(map_catalog_error)?;
+                let threshold = crate::delivery_hold::set_failure_threshold(
+                    &mut ctx,
+                    environment,
+                    count,
+                    window_ms,
+                    actor,
+                )
+                .await
+                .map_err(map_catalog_error)?;
+                format!(
+                    "threshold on {environment}: more than {} failed targets in {}ms",
+                    threshold.count, threshold.window_ms
+                )
+            }
+            ManagementLifecycleOperation::HoldThresholdClear => {
+                crate::delivery_hold::clear_failure_threshold(&mut ctx, environment, actor)
+                    .await
+                    .map_err(map_catalog_error)?;
+                format!("cleared failure threshold on {environment}")
+            }
+            _ => {
+                return Err(ManagementError::Internal(
+                    "unsupported delivery failure threshold operation".into(),
+                ));
+            }
+        };
+        self.audit(actor, &format!("delivery.hold.{verb}.completed"))?;
         Ok(ManagementLifecycleResult::new(
             operation,
             message,

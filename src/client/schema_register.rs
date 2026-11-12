@@ -292,6 +292,21 @@ pub fn known_object_types() -> Vec<ObjectType> {
             ],
         ),
         object_type(
+            crate::delivery_hold::THRESHOLD_KIND,
+            "Declared failed-target count and window that can set an automatic environment hold",
+            vec![
+                prop("environment", true, "Environment the threshold watches"),
+                prop(
+                    "count",
+                    true,
+                    "Hold when more than this many failed targets fall in the window",
+                ),
+                prop("window_ms", true, "Look-back window in unix milliseconds"),
+                prop("actor", true, "Principal that declared the threshold"),
+                prop("set_at", true, "Unix-ms timestamp when recorded"),
+            ],
+        ),
+        object_type(
             crate::release_train::TRAIN_KIND,
             "A signed family release train: component releases tested together",
             vec![

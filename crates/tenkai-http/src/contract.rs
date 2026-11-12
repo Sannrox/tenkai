@@ -31,11 +31,11 @@ use tenkai::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryRe
 use tenkai::fleet::FleetStatusReport;
 use tenkai::host_identity::AuthSession;
 use tenkai::management_lifecycle::{
-    ApplyRequest, ApproveRequest, ChannelHoldRequest, ChannelRemoveRequest, DeliveryFreezeRequest,
-    DeliveryHoldRequest, ManagementLifecycleResult, PlanRequest, PromoteHttpRequest,
-    PublishRequest, RecallRangeCloseRequest, RecallRangeRequest, RecallRequest,
-    RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
-    UnsubscribeRequest,
+    ApplyRequest, ApproveRequest, ChannelHoldRequest, ChannelRemoveRequest,
+    DeliveryFailureThresholdRequest, DeliveryFreezeRequest, DeliveryHoldRequest,
+    ManagementLifecycleResult, PlanRequest, PromoteHttpRequest, PublishRequest,
+    RecallRangeCloseRequest, RecallRangeRequest, RecallRequest, RetireEnvironmentRequest,
+    RetryFailedTargetRequest, RollbackRequest, SubscribeRequest, UnsubscribeRequest,
 };
 use tenkai::observed_runtime::EnvironmentRuntimeReport;
 use tenkai::offline_import::{ImportJob, ImportJobList, ImportRequest, StagedBundle};
@@ -627,6 +627,20 @@ pub fn http_contract() -> Value {
             path: "/v1/environments/{environment}/hold/cancel",
             auth: Auth::Management,
             request: Some(schema::<DeliveryFreezeRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/environments/{environment}/hold/threshold",
+            auth: Auth::Management,
+            request: Some(schema::<DeliveryFailureThresholdRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/environments/{environment}/hold/threshold/clear",
+            auth: Auth::Management,
+            request: Some(schema::<DeliveryFailureThresholdRequest>(&mut g)),
             response: lifecycle.clone(),
         },
         Route {

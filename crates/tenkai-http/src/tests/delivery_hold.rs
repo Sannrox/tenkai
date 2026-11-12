@@ -236,6 +236,34 @@ async fn remote_hold_set_release_retry_and_stale_generation() {
         "{}",
         cancelled.message
     );
+
+    let threshold = client
+        .set_environment_failure_threshold("stage", 2, "15m", current)
+        .await
+        .unwrap();
+    assert!(
+        threshold.message.contains("more than 2"),
+        "{}",
+        threshold.message
+    );
+    let threshold_view = client.environment_hold("stage").await.unwrap();
+    assert_eq!(threshold_view.threshold.as_ref().unwrap().count, 2);
+    assert_eq!(
+        threshold_view.threshold.as_ref().unwrap().window_ms,
+        15 * 60_000
+    );
+    client
+        .clear_environment_failure_threshold("stage", current)
+        .await
+        .unwrap();
+    assert!(
+        client
+            .environment_hold("stage")
+            .await
+            .unwrap()
+            .threshold
+            .is_none()
+    );
     assert!(
         client
             .environment_hold("stage")

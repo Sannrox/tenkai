@@ -449,6 +449,58 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn set_environment_failure_threshold(
+        &self,
+        environment: &str,
+        count: u32,
+        window: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/hold/threshold"),
+            Some(
+                &tenkai::management_lifecycle::DeliveryFailureThresholdRequest {
+                    version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                    operation:
+                        tenkai::management_lifecycle::ManagementLifecycleOperation::HoldThreshold
+                            .as_str()
+                            .into(),
+                    environment: environment.to_string(),
+                    expected_generation,
+                    count: Some(count),
+                    window: Some(window.to_string()),
+                },
+            ),
+        )
+        .await
+    }
+
+    pub async fn clear_environment_failure_threshold(
+        &self,
+        environment: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/hold/threshold/clear"),
+            Some(
+                &tenkai::management_lifecycle::DeliveryFailureThresholdRequest {
+                    version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                    operation:
+                        tenkai::management_lifecycle::ManagementLifecycleOperation::HoldThresholdClear
+                            .as_str()
+                            .into(),
+                    environment: environment.to_string(),
+                    expected_generation,
+                    count: None,
+                    window: None,
+                },
+            ),
+        )
+        .await
+    }
+
     pub async fn retry_failed_target(
         &self,
         environment: &str,
