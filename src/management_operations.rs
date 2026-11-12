@@ -29,10 +29,11 @@ use crate::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryRes
 use crate::host_identity::AuthSession;
 use crate::instance_explain::InstanceExplainReport;
 use crate::management_lifecycle::{
-    self, ApplyRequest, ApproveRequest, ChannelHoldRequest, ChannelRemoveRequest,
-    DeliveryFailureThresholdRequest, DeliveryFreezeRequest, DeliveryHoldRequest,
-    ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest, PromoteRequest,
-    PublishRequest, RecallRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
+    self, ApplyRequest, ApproveRequest, ChannelAdmitRequest, ChannelConfigureRequest,
+    ChannelHoldRequest, ChannelRemoveRequest, DeliveryFailureThresholdRequest,
+    DeliveryFreezeRequest, DeliveryHoldRequest, ManagementLifecycleOperation,
+    ManagementLifecycleResult, PlanRequest, PromoteRequest, PublishRequest, RecallRequest,
+    RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
 };
 use crate::observed_runtime::EnvironmentRuntimeReport;
 use crate::package_migration::{
@@ -2550,6 +2551,92 @@ impl ManagementOperations {
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::ChannelRemove,
             message,
+            Some(resource),
+        ))
+    }
+
+    pub async fn configure_channel_pace(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+        request: ChannelConfigureRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.channel_configure")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        Self::require_channel_binding(&context, channel)?;
+        Self::require_product_grant(&context, product)?;
+        management_lifecycle::admit_channel_configure(
+            &request,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.channel_configure.requested")?;
+        let pace =
+            crate::upgrade_pace::parse_pace(&request.upgrade_pace).map_err(map_catalog_error)?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::upgrade_pace::configure(&mut ctx, product, channel, pace)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(actor, "catalog.channel_configure.completed")?;
+        let resource = format!("{product}/{channel}");
+        let message = match pace {
+            Some(ms) => format!("upgrade pace {ms}ms for {resource}"),
+            None => format!("upgrade pace off for {resource}"),
+        };
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::ChannelConfigure,
+            message,
+            Some(resource),
+        ))
+    }
+
+    pub async fn admit_channel_instance(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+        request: ChannelAdmitRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.channel_admit")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        Self::require_channel_binding(&context, channel)?;
+        Self::require_product_grant(&context, product)?;
+        management_lifecycle::admit_channel_admit(
+            &request,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = context.audit_principal();
+        self.audit(&actor, "catalog.channel_admit.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let event = crate::upgrade_pace::admit_early(
+            &mut ctx,
+            product,
+            channel,
+            &request.environment,
+            &request.instance,
+            &request.reason,
+            &actor,
+        )
+        .await
+        .map_err(map_catalog_error)?;
+        self.audit(&actor, "catalog.channel_admit.completed")?;
+        let resource = format!(
+            "{product}/{channel}:{}:{}",
+            request.environment, request.instance
+        );
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::ChannelAdmit,
+            format!(
+                "admitted {}/{} onto {product}/{channel} by {}: {}",
+                request.environment, request.instance, event.actor, event.reason
+            ),
             Some(resource),
         ))
     }

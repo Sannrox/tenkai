@@ -127,6 +127,7 @@ async fn execute_locked(
     let skip_gates = options.skip_gates;
     execution_admission::admit(ctx, &stored_plan).await?;
     crate::delivery_hold::require_not_held(ctx, &stored_plan).await?;
+    crate::upgrade_pace::require_for_plan(ctx, &stored_plan, crate::now_millis()).await?;
     let env = stored_plan.environment.clone();
     let steps = stored_plan.steps.clone();
     if let Some(outcomes) = start_admission::admit(

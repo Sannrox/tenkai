@@ -577,6 +577,51 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn configure_channel_pace(
+        &self,
+        product: &str,
+        channel: &str,
+        upgrade_pace: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/products/{product}/channels/{channel}/pace"),
+            Some(&tenkai::management_lifecycle::ChannelConfigureRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation:
+                    tenkai::management_lifecycle::ManagementLifecycleOperation::ChannelConfigure
+                        .as_str()
+                        .into(),
+                upgrade_pace: upgrade_pace.to_string(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn admit_channel_instance(
+        &self,
+        product: &str,
+        channel: &str,
+        environment: &str,
+        instance: &str,
+        reason: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/products/{product}/channels/{channel}/admit"),
+            Some(&tenkai::management_lifecycle::ChannelAdmitRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::ChannelAdmit
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                instance: instance.to_string(),
+                reason: reason.to_string(),
+            }),
+        )
+        .await
+    }
+
     /// Removes `product`'s head from `channel`; `expected_head`
     /// (`<product>@<version>`) refuses it when another release heads it.
     pub async fn remove_channel_head(

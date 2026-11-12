@@ -32,11 +32,12 @@ use tenkai::fleet::FleetStatusReport;
 use tenkai::host_identity::AuthSession;
 use tenkai::instance_explain::InstanceExplainReport;
 use tenkai::management_lifecycle::{
-    ApplyRequest, ApproveRequest, ChannelHoldRequest, ChannelRemoveRequest,
-    DeliveryFailureThresholdRequest, DeliveryFreezeRequest, DeliveryHoldRequest,
-    ManagementLifecycleResult, PlanRequest, PromoteHttpRequest, PublishRequest,
-    RecallRangeCloseRequest, RecallRangeRequest, RecallRequest, RetireEnvironmentRequest,
-    RetryFailedTargetRequest, RollbackRequest, SubscribeRequest, UnsubscribeRequest,
+    ApplyRequest, ApproveRequest, ChannelAdmitRequest, ChannelConfigureRequest, ChannelHoldRequest,
+    ChannelRemoveRequest, DeliveryFailureThresholdRequest, DeliveryFreezeRequest,
+    DeliveryHoldRequest, ManagementLifecycleResult, PlanRequest, PromoteHttpRequest,
+    PublishRequest, RecallRangeCloseRequest, RecallRangeRequest, RecallRequest,
+    RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
+    UnsubscribeRequest,
 };
 use tenkai::observed_runtime::EnvironmentRuntimeReport;
 use tenkai::offline_import::{ImportJob, ImportJobList, ImportRequest, StagedBundle};
@@ -749,6 +750,20 @@ pub fn http_contract() -> Value {
             path: "/v1/products/{product}/channels/{channel}/remove",
             auth: Auth::Publish,
             request: Some(schema::<ChannelRemoveRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/products/{product}/channels/{channel}/pace",
+            auth: Auth::Management,
+            request: Some(schema::<ChannelConfigureRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/products/{product}/channels/{channel}/admit",
+            auth: Auth::Management,
+            request: Some(schema::<ChannelAdmitRequest>(&mut g)),
             response: lifecycle.clone(),
         },
         Route {

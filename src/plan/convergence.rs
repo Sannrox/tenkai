@@ -46,7 +46,7 @@ fn refuse_second_one_instance(
     Ok(())
 }
 
-fn classify_change(current: &str, desired: &str) -> Action {
+pub(crate) fn classify_change(current: &str, desired: &str) -> Action {
     match (
         semver::Version::parse(current),
         semver::Version::parse(desired),
@@ -1233,6 +1233,31 @@ async fn compute_snapshot_with_policy(
                 || !matches!(entry.action, Action::Downgrade | Action::Rollback)
         });
     }
+    let mut pending = if crate::upgrade_pace::any_configured(ctx).await? {
+        let now_ms = crate::now_millis();
+        let mut paced = Vec::with_capacity(pending.len());
+        for entry in pending {
+            // Recall removals are Action::Remove and stay unpaced. An upgrade
+            // onto a replacement head still uses the channel pace.
+            if entry.action == Action::Upgrade
+                && crate::upgrade_pace::holds_upgrade(
+                    ctx,
+                    env,
+                    &entry.product,
+                    entry.instance_name(),
+                    now_ms,
+                )
+                .await?
+                .is_some()
+            {
+                continue;
+            }
+            paced.push(entry);
+        }
+        paced
+    } else {
+        pending
+    };
     let mut target_profiles = BTreeMap::new();
     for entry in &pending {
         if matches!(entry.action, Action::Remove) {

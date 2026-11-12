@@ -28,6 +28,7 @@ mod software_compatibility;
 mod support;
 mod tenant;
 mod trust;
+mod upgrade_pace;
 
 pub(super) use std::collections::HashMap;
 pub(super) use std::sync::Arc;

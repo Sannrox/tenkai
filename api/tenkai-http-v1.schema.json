@@ -579,6 +579,61 @@
       ],
       "type": "object"
     },
+    "ChannelAdmitRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/products/{product}/channels/{channel}/admit`.",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "instance",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ChannelConfigureRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/products/{product}/channels/{channel}/pace`.",
+      "properties": {
+        "operation": {
+          "type": "string"
+        },
+        "upgrade_pace": {
+          "description": "Duration (`30`, `250ms`, `2m`, `3h`) or `off`. A bare number is seconds.",
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "upgrade_pace"
+      ],
+      "type": "object"
+    },
     "ChannelHoldRequest": {
       "additionalProperties": false,
       "properties": {
@@ -8525,6 +8580,28 @@
       "path": "/v1/products/{product}/channels/{channel}/remove",
       "request": {
         "$ref": "#/$defs/ChannelRemoveRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/products/{product}/channels/{channel}/pace",
+      "request": {
+        "$ref": "#/$defs/ChannelConfigureRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/products/{product}/channels/{channel}/admit",
+      "request": {
+        "$ref": "#/$defs/ChannelAdmitRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"
