@@ -212,8 +212,16 @@ pub async fn admit_early(
         .filter(|value| !value.is_empty())
         .cloned()
         .with_context(|| format!("channel {product}/{channel} has no promoted release"))?;
-    let at = crate::now_millis();
     let id = upgrade_pace_admit_id(product, channel, environment, instance, &release);
+    if let Some(existing) = ctx.get(&id).await? {
+        return Ok(PaceAdmitAudit {
+            action: "set".into(),
+            reason: required(&existing, "reason")?.into(),
+            actor: required(&existing, "actor")?.into(),
+            at: required(&existing, "at")?.parse()?,
+        });
+    }
+    let at = crate::now_millis();
     let event = PaceAdmitAudit {
         action: "set".into(),
         reason: reason.to_string(),
@@ -230,33 +238,31 @@ pub async fn admit_early(
         &event,
     )
     .await?;
-    if ctx.get(&id).await?.is_none() {
-        match ctx
-            .create_once(Object {
-                id: id.clone(),
-                kind: KIND_UPGRADE_PACE_ADMIT.into(),
-                name: format!("{environment}/{instance}"),
-                namespace: NS.into(),
-                external_id: String::new(),
-                properties: HashMap::from([
-                    ("product".into(), product.into()),
-                    ("channel".into(), channel.into()),
-                    ("environment".into(), environment.into()),
-                    ("instance".into(), instance.into()),
-                    ("release".into(), release.clone()),
-                    ("reason".into(), event.reason.clone()),
-                    ("actor".into(), event.actor.clone()),
-                    ("at".into(), at.to_string()),
-                ]),
-                created: at,
-                updated: at,
-            })
-            .await
-        {
-            Ok(_) => {}
-            Err(status) if crate::client::is_unique_conflict(&status) => {}
-            Err(status) => return Err(status.into()),
-        }
+    match ctx
+        .create_once(Object {
+            id: id.clone(),
+            kind: KIND_UPGRADE_PACE_ADMIT.into(),
+            name: format!("{environment}/{instance}"),
+            namespace: NS.into(),
+            external_id: String::new(),
+            properties: HashMap::from([
+                ("product".into(), product.into()),
+                ("channel".into(), channel.into()),
+                ("environment".into(), environment.into()),
+                ("instance".into(), instance.into()),
+                ("release".into(), release.clone()),
+                ("reason".into(), event.reason.clone()),
+                ("actor".into(), event.actor.clone()),
+                ("at".into(), at.to_string()),
+            ]),
+            created: at,
+            updated: at,
+        })
+        .await
+    {
+        Ok(_) => {}
+        Err(status) if crate::client::is_unique_conflict(&status) => {}
+        Err(status) => return Err(status.into()),
     }
     Ok(event)
 }
@@ -311,12 +317,16 @@ pub async fn any_configured(ctx: &mut Ctx) -> Result<bool> {
     Ok(false)
 }
 
-/// Hold for an upgrade of `instance` in `environment`, if the pace applies.
+/// Hold for an upgrade of `instance` in `environment` onto `release_id`.
+///
+/// Only the subscribed channel's current head is paced. An upgrade onto
+/// another selected release is not delayed by this head's `promoted_at`.
 pub async fn holds_upgrade(
     ctx: &mut Ctx,
     environment: &str,
     product: &str,
     instance: &str,
+    release_id: &str,
     now_ms: i64,
 ) -> Result<Option<PaceHold>> {
     let env_obj = crate::environment::environment(ctx, environment).await?;
@@ -341,6 +351,13 @@ pub async fn holds_upgrade(
                 .map(|(_, name)| name.to_string())
         })
         .unwrap_or_default();
+    let Some(channel_obj) = ctx.get(&channel_id(product, &channel_name)).await? else {
+        return Ok(None);
+    };
+    match channel_obj.properties.get("current_release") {
+        Some(head) if head == release_id => {}
+        _ => return Ok(None),
+    }
     evaluate_instance(ctx, product, &channel_name, environment, instance, now_ms).await
 }
 
@@ -384,6 +401,7 @@ pub async fn require_for_plan(ctx: &mut Ctx, plan: &Plan, now_ms: i64) -> Result
             &plan.environment,
             &step.product,
             step.instance_name(),
+            &step.release_id,
             now_ms,
         )
         .await?
@@ -856,10 +874,22 @@ mod tests {
         }
     }
 
+    async fn current_head(ctx: &mut Ctx) -> String {
+        ctx.get(&channel_id("api", "stable"))
+            .await
+            .unwrap()
+            .unwrap()
+            .properties
+            .get("current_release")
+            .cloned()
+            .unwrap()
+    }
+
     async fn admitted_at(ctx: &mut Ctx, now: i64) -> Vec<String> {
+        let release = current_head(ctx).await;
         let mut names = Vec::new();
         for name in ["env-a", "env-b", "env-c", "env-d", "env-e", "env-f"] {
-            if holds_upgrade(ctx, name, "api", "api", now)
+            if holds_upgrade(ctx, name, "api", "api", &release, now)
                 .await
                 .unwrap()
                 .is_none()
@@ -931,8 +961,9 @@ mod tests {
             .unwrap();
         let promoted_at = 1_700_000_000_000;
         stamp_promoted_at(&mut ctx, promoted_at).await;
+        let head = current_head(&mut ctx).await;
         assert!(
-            holds_upgrade(&mut ctx, "env-f", "api", "api", promoted_at)
+            holds_upgrade(&mut ctx, "env-f", "api", "api", &head, promoted_at)
                 .await
                 .unwrap()
                 .is_some()
@@ -950,8 +981,21 @@ mod tests {
         .unwrap();
         assert_eq!(event.reason, "canary host");
         assert_eq!(event.actor, "alice");
+        let again = admit_early(
+            &mut ctx,
+            "api",
+            "stable",
+            "env-f",
+            "api",
+            "retry after lost response",
+            "bob",
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.reason, "canary host");
+        assert_eq!(again.actor, "alice");
         assert!(
-            holds_upgrade(&mut ctx, "env-f", "api", "api", promoted_at)
+            holds_upgrade(&mut ctx, "env-f", "api", "api", &head, promoted_at)
                 .await
                 .unwrap()
                 .is_none()
@@ -1005,15 +1049,16 @@ mod tests {
             .unwrap();
         let promoted_at = 1_700_000_000_000;
         stamp_promoted_at(&mut ctx, promoted_at).await;
+        let head = current_head(&mut ctx).await;
         assert!(
-            holds_upgrade(&mut ctx, "env-f", "api", "api", promoted_at)
+            holds_upgrade(&mut ctx, "env-f", "api", "api", &head, promoted_at)
                 .await
                 .unwrap()
                 .is_some()
         );
         configure(&mut ctx, "api", "stable", None).await.unwrap();
         assert!(
-            holds_upgrade(&mut ctx, "env-f", "api", "api", promoted_at)
+            holds_upgrade(&mut ctx, "env-f", "api", "api", &head, promoted_at)
                 .await
                 .unwrap()
                 .is_none()
@@ -1093,6 +1138,52 @@ mod tests {
             .unwrap();
         let still_three_hour = admitted_at(&mut ctx, first + 3_600_000).await;
         assert_eq!(still_three_hour, ["env-a", "env-b"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn upgrade_onto_another_release_is_not_paced() {
+        let (root, mut ctx, actor) = fixture("other-head").await;
+        publish(&mut ctx, &root, "1.0.0").await;
+        publish(&mut ctx, &root, "2.0.0").await;
+        publish(&mut ctx, &root, "3.0.0").await;
+        subscribe_fleet(&mut ctx, &actor).await;
+        configure(&mut ctx, "api", "stable", Some(10_800_000))
+            .await
+            .unwrap();
+        crate::catalog::promote(&mut ctx, &actor, "api@2.0.0", "stable")
+            .await
+            .unwrap();
+        let promoted_at = 1_700_000_000_000;
+        stamp_promoted_at(&mut ctx, promoted_at).await;
+        let head = current_head(&mut ctx).await;
+        assert_eq!(head, release_id("api", "2.0.0"));
+        assert!(
+            holds_upgrade(&mut ctx, "env-f", "api", "api", &head, promoted_at)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            holds_upgrade(
+                &mut ctx,
+                "env-f",
+                "api",
+                "api",
+                &release_id("api", "3.0.0"),
+                promoted_at
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        let mut other = action_plan("env-f", Action::Upgrade);
+        other.steps[0].from = Some("1.0.0".into());
+        other.steps[0].to = "3.0.0".into();
+        other.steps[0].release_id = release_id("api", "3.0.0");
+        require_for_plan(&mut ctx, &other, promoted_at)
+            .await
+            .unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 }

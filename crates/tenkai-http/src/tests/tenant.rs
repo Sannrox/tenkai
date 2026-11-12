@@ -228,6 +228,42 @@ async fn tenant_mode_management_apis_isolate_environments() {
     assert!(!history_body.contains("tenant-b"));
     assert!(!history_body.contains("env-b"));
 
+    let admit_cross = tenant_app
+        .clone()
+        .oneshot(
+            Request::post("/v1/products/api/channels/stable/admit")
+                .header(
+                    "x-tenkai-assertion",
+                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                )
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&tenkai::management_lifecycle::ChannelAdmitRequest {
+                        version: 1,
+                        operation: "channel_admit".into(),
+                        environment: "env-b".into(),
+                        instance: "api".into(),
+                        reason: "canary host".into(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(admit_cross.status(), StatusCode::NOT_FOUND);
+    let admit_body = String::from_utf8(
+        axum::body::to_bytes(admit_cross.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(admit_body.contains(NON_DISCLOSING_DENY));
+    assert!(!admit_body.contains("tenant-b"));
+    assert!(!admit_body.contains("env-b"));
+    assert!(!admit_body.contains("not subscribed"));
+
     let runtime_cross = tenant_app
         .clone()
         .oneshot(

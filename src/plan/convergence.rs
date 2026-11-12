@@ -1245,6 +1245,7 @@ async fn compute_snapshot_with_policy(
                     env,
                     &entry.product,
                     entry.instance_name(),
+                    &entry.release.release_id,
                     now_ms,
                 )
                 .await?

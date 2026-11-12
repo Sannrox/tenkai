@@ -225,6 +225,7 @@ pub(crate) fn from_inspect(
     if let Some(hold) = &facts.upgrade_pace
         && let Some(deployed) = row.deployed.as_deref()
         && deployed != desired
+        && desired == row.head
         && crate::plan::classify_change(deployed, desired) == crate::plan::Action::Upgrade
     {
         let until = crate::upgrade_pace::format_eligible_at(hold.eligible_at_ms);

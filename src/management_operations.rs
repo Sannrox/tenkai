@@ -2612,6 +2612,8 @@ impl ManagementOperations {
             self.granted_environment(credential, &context),
         )
         .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, &request.environment)
+            .await?;
         let actor = context.audit_principal();
         self.audit(&actor, "catalog.channel_admit.requested")?;
         let mut ctx = self.catalog_ctx(&context)?;
