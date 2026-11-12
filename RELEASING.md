@@ -48,7 +48,7 @@ vX.Y.Z
 
 A tag is never moved, deleted, or reused. The tagged commit must be on
 `main` or on the `release-*` branch that matches the tag's version
-(`v0.5.1` → `release-0.5`; after 1.0, `v1.2.3` → `release-1`). The
+(`v0.5.1` → `release-0.5`, `v1.2.3` → `release-1.2`). The
 workflow refuses any other commit. The release run still starts from
 main's workflow and verifier.
 
@@ -126,9 +126,9 @@ To trust a new tag signing key, add its public key to
 Use a line only when a consumer pins an older Tenkai tag and needs a fix
 without taking `main`. Do not create one in advance.
 
-Name it `release-<major>.<minor>` before 1.0 (`release-0.5`) and
-`release-<major>` after. Create it from the last tag of that line when the
-first fix needs it. The hyphen keeps it apart from `release/<version>`
+Name it `release-<major>.<minor>`, one per minor, before and after 1.0
+(`release-0.5`, `release-1.2`). Create it from the last tag of that line
+when the first fix needs it. The hyphen keeps it apart from `release/<version>`
 bump branches.
 
 Eligible changes are critical bug fixes (data loss, corruption, panic,

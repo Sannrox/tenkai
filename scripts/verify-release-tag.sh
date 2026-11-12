@@ -48,8 +48,8 @@ verify_release_tag() {
   printf 'Release tag %s resolves to triggering commit %s\n' "$tag" "$expected_commit"
 }
 
-# release-<major>.<minor> before 1.0, release-<major> after. Hyphen, not the
-# release/<version> bump branch.
+# release-<major>.<minor>, one line per minor, before and after 1.0. Hyphen,
+# not the release/<version> bump branch.
 maintenance_line() {
   local tag="$1" version major rest minor
   [[ "$tag" =~ $RELEASE_TAG_PATTERN ]] || fail "invalid release tag: ${tag}"
@@ -58,11 +58,7 @@ maintenance_line() {
   major="${version%%.*}"
   rest="${version#*.}"
   minor="${rest%%.*}"
-  if [[ "$major" == 0 ]]; then
-    printf 'release-%s.%s\n' "$major" "$minor"
-  else
-    printf 'release-%s\n' "$major"
-  fi
+  printf 'release-%s.%s\n' "$major" "$minor"
 }
 
 # origin/main wins when the commit is on it, so tags on main stay latest.
@@ -212,7 +208,7 @@ expect_line() {
 # reachable only from a non-matching release-* branch, or from any other
 # branch, must not release.
 ancestry_self_test() {
-  local tmp="$1" work a main_tip line_05 line_04 other line_1 accepted output
+  local tmp="$1" work a main_tip line_05 line_04 other line_12 accepted output
   work="${tmp}/ancestry"
   git init -q "$work"
   git -C "$work" config user.name "Release tag self-test"
@@ -243,22 +239,23 @@ ancestry_self_test() {
   git -C "$work" commit -qam other
   other="$(git -C "$work" rev-parse HEAD)"
 
-  git -C "$work" checkout -q -b release-1 "$a"
-  printf '1.x\n' >"${work}/source"
-  git -C "$work" commit -qam '1.x line'
-  line_1="$(git -C "$work" rev-parse HEAD)"
+  git -C "$work" checkout -q -b release-1.2 "$a"
+  printf '1.2\n' >"${work}/source"
+  git -C "$work" commit -qam '1.2 line'
+  line_12="$(git -C "$work" rev-parse HEAD)"
 
   git -C "$work" update-ref refs/remotes/origin/main "$main_tip"
   git -C "$work" update-ref refs/remotes/origin/release-0.5 "$line_05"
   git -C "$work" update-ref refs/remotes/origin/release-0.4 "$line_04"
   git -C "$work" update-ref refs/remotes/origin/other "$other"
-  git -C "$work" update-ref refs/remotes/origin/release-1 "$line_1"
+  git -C "$work" update-ref refs/remotes/origin/release-1.2 "$line_12"
 
   expect_line v0.5.1 release-0.5
   expect_line v0.5.1-rc.2 release-0.5
   expect_line v0.0.1 release-0.0
-  expect_line v1.2.3 release-1
-  expect_line v1.0.0-rc.1 release-1
+  expect_line v1.2.3 release-1.2
+  expect_line v1.0.0-rc.1 release-1.0
+  expect_line v1.3.0 release-1.3
   if output="$(bash "$SCRIPT_PATH" maintenance-line v1.2.3-beta.1 2>&1)"; then
     fail "maintenance-line accepted an invalid tag"
   fi
@@ -277,14 +274,15 @@ ancestry_self_test() {
   [[ "$accepted" == release-0.5 ]] || fail "matching 0.x line: expected release-0.5, got ${accepted}"
   accepted="$(cd "$work" && bash "$SCRIPT_PATH" require-ancestry v0.5.2-rc.1 "$line_05")"
   [[ "$accepted" == release-0.5 ]] || fail "matching 0.x rc: expected release-0.5, got ${accepted}"
-  accepted="$(cd "$work" && bash "$SCRIPT_PATH" require-ancestry v1.2.3 "$line_1")"
-  [[ "$accepted" == release-1 ]] || fail "matching 1.x line: expected release-1, got ${accepted}"
+  accepted="$(cd "$work" && bash "$SCRIPT_PATH" require-ancestry v1.2.3 "$line_12")"
+  [[ "$accepted" == release-1.2 ]] || fail "matching 1.2 line: expected release-1.2, got ${accepted}"
 
   (cd "$work" && expect_ancestry_failure "is not on main or release-0.5" v0.5.1 "$line_04")
-  (cd "$work" && expect_ancestry_failure "is not on main or release-0.5" v0.5.1 "$line_1")
-  (cd "$work" && expect_ancestry_failure "is not on main or release-1" v1.2.3 "$line_05")
+  (cd "$work" && expect_ancestry_failure "is not on main or release-0.5" v0.5.1 "$line_12")
+  (cd "$work" && expect_ancestry_failure "is not on main or release-1.2" v1.2.3 "$line_05")
   (cd "$work" && expect_ancestry_failure "is not on main or release-0.5" v0.5.1 "$other")
-  (cd "$work" && expect_ancestry_failure "is not on main or release-1" v1.2.3 "$other")
+  (cd "$work" && expect_ancestry_failure "is not on main or release-1.2" v1.2.3 "$other")
+  (cd "$work" && expect_ancestry_failure "is not on main or release-1.3" v1.3.1 "$line_12")
   (cd "$work" && expect_ancestry_failure "invalid release tag" v1.2.3-beta.1 "$main_tip")
 }
 
