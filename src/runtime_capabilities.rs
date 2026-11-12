@@ -36,6 +36,8 @@ pub enum CapabilityName {
     ShellExecutor,
     /// Host can spool host steps and start the root-side applier (ADR 0041).
     HostExecutor,
+    /// Host evaluates operator-declared channel promotion policies on reconcile.
+    ChannelPromotionPolicy,
 }
 
 impl CapabilityName {
@@ -48,6 +50,7 @@ impl CapabilityName {
             Self::OperationalStoreMigration => "operational_store_migration",
             Self::ShellExecutor => "shell_executor",
             Self::HostExecutor => "host_executor",
+            Self::ChannelPromotionPolicy => "channel_promotion_policy",
         }
     }
 }
@@ -305,9 +308,27 @@ pub fn host_executor_capabilities() -> ComponentCapabilities {
     )
 }
 
+/// Host evaluates channel promotion policies on each reconcile tick.
+pub fn channel_promotion_policy_capabilities() -> ComponentCapabilities {
+    ComponentCapabilities::new(
+        "channel_promotion_policy",
+        [Capability::named(
+            CapabilityName::ChannelPromotionPolicy,
+            RUNTIME_CAPABILITY_CONTRACT_VERSION,
+        )],
+    )
+}
+
 /// Assemble the community embedded SQLite profile used by default hosts.
 pub fn community_sqlite_profile(auth: ComponentCapabilities) -> ProvidedCapabilities {
-    ProvidedCapabilities::assemble("community-sqlite", [sqlite_store_capabilities(), auth])
+    ProvidedCapabilities::assemble(
+        "community-sqlite",
+        [
+            sqlite_store_capabilities(),
+            auth,
+            channel_promotion_policy_capabilities(),
+        ],
+    )
 }
 
 /// Validate required capabilities against what the composed runtime provides.
@@ -489,6 +510,7 @@ mod tests {
         assert!(!provided.supports(CapabilityName::HighAvailability));
         assert!(!provided.supports(CapabilityName::EnterpriseAuthentication));
         assert_eq!(provided.migration_level(), Some(SCHEMA_VERSION));
+        assert!(provided.supports(CapabilityName::ChannelPromotionPolicy));
         validate_runtime_capabilities(&provided, &RuntimeRequirements::community()).unwrap();
     }
 

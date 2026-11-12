@@ -554,6 +554,7 @@
         "release_promoted",
         "release_recalled",
         "channel_head_removed",
+        "promotion_soak_reset",
         "compatibility_result_recorded",
         "trust_threshold_crossed"
       ],
@@ -644,6 +645,54 @@
       },
       "required": [
         "items"
+      ],
+      "type": "object"
+    },
+    "ChannelPromotionPolicyStatus": {
+      "description": "Operator-visible soak row for `fleet status`.",
+      "properties": {
+        "instances_without_evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "policy_id": {
+          "type": "string"
+        },
+        "policy_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "product": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "source_channel": {
+          "type": "string"
+        },
+        "state": {
+          "description": "`waiting` | `soaking` | `ready` | `reset` | `refused` | `promoted`.",
+          "type": "string"
+        },
+        "target_channel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "product",
+        "target_channel",
+        "source_channel",
+        "policy_id",
+        "policy_version",
+        "paused",
+        "state"
       ],
       "type": "object"
     },
@@ -3749,6 +3798,13 @@
           "format": "uint",
           "minimum": 0,
           "type": "integer"
+        },
+        "promotion_policies": {
+          "description": "Active channel promotion policies and soak state (#899).",
+          "items": {
+            "$ref": "#/$defs/ChannelPromotionPolicyStatus"
+          },
+          "type": "array"
         },
         "server_version": {
           "default": "",

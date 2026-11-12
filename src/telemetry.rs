@@ -801,6 +801,7 @@ mod tests {
                     unapproved_development_reason: Some("otel reconcile drill".into()),
                     approval_directory: None,
                     approval_trust_roots: None,
+                    channel_promotion_policies: true,
                 },
             )
             .unwrap();

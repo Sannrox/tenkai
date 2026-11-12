@@ -25,6 +25,10 @@
 //!   admission, optional multi-host fencing, concurrency, join, diagnostics,
 //!   and an environment-name index so ticks do not `list_kind` the fleet when
 //!   membership is unchanged; environment_lifecycle remains the per-env worker.
+//! - [`channel_promotion`] owns versioned channel promotion policies the
+//!   reconciler evaluates: soak clocks, evidence, pause, and the policy actor
+//!   on the promotion record. It reuses `guarded_promotion` and the promotion
+//!   lock rather than a second writer.
 //! - `canary::promotion_lifecycle` hides Canary policy snapshots and
 //!   promotion-lock coordination. `canary::attempt_lifecycle` hides attempt
 //!   start and finalization ordering, durable outcome evidence, and crash
@@ -171,6 +175,7 @@ pub mod catalog;
 pub mod certificate_reports;
 pub mod change_set_pin;
 pub mod change_stream;
+pub mod channel_promotion;
 pub mod client;
 pub mod clock_guard;
 pub mod command_result;

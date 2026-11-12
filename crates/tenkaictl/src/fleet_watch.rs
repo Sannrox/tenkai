@@ -35,6 +35,16 @@ pub(crate) fn print_fleet_status(report: &plan::FleetStatusReport) {
             lease
         );
     }
+    if !report.promotion_policies.is_empty() {
+        println!("promotion policies:");
+        for policy in &report.promotion_policies {
+            let reason = policy.reason.as_deref().unwrap_or("-");
+            println!(
+                "  {}/{} <- {} {} {}",
+                policy.product, policy.target_channel, policy.source_channel, policy.state, reason
+            );
+        }
+    }
 }
 
 pub(crate) struct FleetWatchOptions {

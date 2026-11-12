@@ -26,6 +26,7 @@ pub enum ChangeEventKind {
     // A product's channel head was removed; the resource is
     // `<product>/<channel>`.
     ChannelHeadRemoved,
+    PromotionSoakReset,
     CompatibilityResultRecorded,
     // The host's worst certificate status turned `warning`, `critical` or
     // `expired`, or back to `ok` after one (#784); the resource is
@@ -55,6 +56,7 @@ impl ChangeEventKind {
         Self::ReleasePromoted,
         Self::ReleaseRecalled,
         Self::ChannelHeadRemoved,
+        Self::PromotionSoakReset,
         Self::CompatibilityResultRecorded,
         Self::TrustThresholdCrossed,
     ];
@@ -73,6 +75,7 @@ impl ChangeEventKind {
             Self::ReleasePromoted => "release_promoted",
             Self::ReleaseRecalled => "release_recalled",
             Self::ChannelHeadRemoved => "channel_head_removed",
+            Self::PromotionSoakReset => "promotion_soak_reset",
             Self::CompatibilityResultRecorded => "compatibility_result_recorded",
             Self::TrustThresholdCrossed => "trust_threshold_crossed",
         }
@@ -92,6 +95,7 @@ impl ChangeEventKind {
             "release_promoted" => Ok(Self::ReleasePromoted),
             "release_recalled" => Ok(Self::ReleaseRecalled),
             "channel_head_removed" => Ok(Self::ChannelHeadRemoved),
+            "promotion_soak_reset" => Ok(Self::PromotionSoakReset),
             "compatibility_result_recorded" => Ok(Self::CompatibilityResultRecorded),
             "trust_threshold_crossed" => Ok(Self::TrustThresholdCrossed),
             other => Err(ChangeStreamError::UnknownKind(other.into())),
@@ -199,7 +203,7 @@ mod tests {
         for kind in ChangeEventKind::ALL {
             assert_eq!(ChangeEventKind::parse(kind.as_str()).unwrap(), *kind);
         }
-        assert_eq!(ChangeEventKind::ALL.len(), 14);
+        assert_eq!(ChangeEventKind::ALL.len(), 15);
         assert!(ChangeEventKind::parse("webhook").is_err());
     }
 

@@ -31,6 +31,7 @@ runtime currently provides.
 | `operational_store_migration` | Supported operational schema / migration level |
 | `shell_executor` | Host resolved `tenkai-executor-guard` and can run shell-executor deploys |
 | `host_executor` | Host can spool host steps and start the root-side applier ([ADR 0041](decisions/0041-per-release-executor-and-privileged-host-releases.md)) |
+| `channel_promotion_policy` | Host evaluates operator-declared channel promotion policies on reconcile |
 
 Each capability is versioned. Migration also carries a numeric `level` (the
 store schema version).
@@ -67,6 +68,7 @@ Embedded SQLite and the default `tenkai-server` profile advertise:
 profile: community-sqlite
 capabilities:
   - operational_store_migration:v1:levelN   # N = SCHEMA_VERSION
+  - channel_promotion_policy:v1             # reconciler evaluates soak-and-evidence policies
   - shell_executor:v1                       # tenkai-server, when the guard resolves
   - host_executor:v1                        # tenkai-server, when TENKAI_HOST_SPOOL_DIR is usable
   - software_executor:shell                 # process default; kubernetes-inprocess, helm, …

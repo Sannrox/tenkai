@@ -1008,8 +1008,22 @@ async fn promote_inner(
     let promoted_release = rid.clone();
     let replaceable_heads = replaceable_heads.map(|heads| heads.to_vec());
     let hold_actor = actor.principal_id().to_string();
+    let promoted_by = hold_actor.clone();
+    let promoted_by_kind = crate::channel_promotion::actor_kind_for(actor).to_string();
+    let check_policy = actor.authenticator_id == crate::channel_promotion::POLICY_AUTHENTICATOR;
+    let policy_principal = hold_actor.clone();
     crate::canary::guarded_promotion(ctx, actor, &name, &version, &channel, &owner, move |ctx, lock| {
         Box::pin(async move {
+            if check_policy {
+                crate::channel_promotion::require_soak_still_ready(
+                    ctx,
+                    &promotion_name,
+                    &promotion_channel,
+                    &promoted_release,
+                    &policy_principal,
+                )
+                .await?;
+            }
             let Some(release) = ctx.get(&promoted_release).await? else {
                 anyhow::bail!("release {promotion_name}@{promotion_version} is not published");
             };
@@ -1043,6 +1057,8 @@ async fn promote_inner(
                 ("channel".into(), promotion_channel.clone()),
                 ("current_version".into(), promotion_version.clone()),
                 ("current_release".into(), promoted_release.clone()),
+                ("promoted_by".into(), promoted_by.clone()),
+                ("promoted_by_kind".into(), promoted_by_kind.clone()),
             ]);
             if let Some(existing) = ctx.get(&cid).await?
                 && let Some(overlay) = existing
@@ -1087,7 +1103,23 @@ async fn promote_inner(
                 }
             }
             ctx.link(&cid, &promoted_release, REL_PROMOTES).await?;
-            crate::canary::fenced_put(ctx, std::slice::from_ref(lock), channel_head).await?;
+            if check_policy {
+                let decision = crate::channel_promotion::committed_decision_object(
+                    ctx,
+                    &promotion_name,
+                    &promotion_channel,
+                    &promoted_release,
+                )
+                .await?;
+                crate::canary::fenced_put_objects(
+                    ctx,
+                    std::slice::from_ref(lock),
+                    vec![channel_head, decision],
+                )
+                .await?;
+            } else {
+                crate::canary::fenced_put(ctx, std::slice::from_ref(lock), channel_head).await?;
+            }
             Ok::<_, anyhow::Error>(format!(
                 "promoted {promotion_name}@{promotion_version} to channel {promotion_channel}"
             ))

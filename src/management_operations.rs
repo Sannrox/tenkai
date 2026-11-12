@@ -3392,6 +3392,7 @@ mod tests {
                     environments_behind: 0,
                     environments_unhealthy: 0,
                     environments_empty: 0,
+                    promotion_policies: Vec::new(),
                 })
             })
         }

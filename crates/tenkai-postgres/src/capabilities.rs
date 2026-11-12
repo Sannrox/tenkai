@@ -1,5 +1,6 @@
 use tenkai::runtime_capabilities::{
     Capability, CapabilityName, ComponentCapabilities, RUNTIME_CAPABILITY_CONTRACT_VERSION,
+    channel_promotion_policy_capabilities,
 };
 use tenkai::storage::SCHEMA_VERSION;
 
@@ -45,7 +46,11 @@ pub fn enterprise_postgres_hub_profile(
 ) -> tenkai::runtime_capabilities::ProvidedCapabilities {
     tenkai::runtime_capabilities::ProvidedCapabilities::assemble(
         "enterprise-experimental",
-        [tenant_postgres_store_capabilities(), auth],
+        [
+            tenant_postgres_store_capabilities(),
+            auth,
+            channel_promotion_policy_capabilities(),
+        ],
     )
 }
 

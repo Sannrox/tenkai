@@ -28,6 +28,9 @@ pub struct Config {
     pub unapproved_development_reason: Option<String>,
     pub approval_directory: Option<PathBuf>,
     pub approval_trust_roots: Option<PathBuf>,
+    /// Evaluate channel promotion policies each tick. Old replicas omit the
+    /// loop; new replicas default on.
+    pub channel_promotion_policies: bool,
 }
 
 impl Default for Config {
@@ -41,6 +44,7 @@ impl Default for Config {
             approval_directory: std::env::var_os("TENKAI_PLAN_APPROVAL_DIR").map(PathBuf::from),
             approval_trust_roots: std::env::var_os(crate::plan_approval::TRUST_ROOTS_ENV)
                 .map(PathBuf::from),
+            channel_promotion_policies: true,
         }
     }
 }
@@ -438,6 +442,7 @@ mod tests {
             unapproved_development_reason: Some("reconciler test".into()),
             approval_directory: None,
             approval_trust_roots: None,
+            channel_promotion_policies: true,
         }
     }
 
