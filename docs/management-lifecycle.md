@@ -110,9 +110,11 @@ changing failure semantics requires version `2` and an explicit migration
 window.
 
 Existing `/v1/reconcile`, `/v1/environments`, `/v1/fleet/status`, and
-`/v1/migrations/*` routes are unchanged. Delivery-hold set, release, and
-failed-target retry are additive `tenkai.http.v1` routes that reuse this
-envelope's version, actor audit, and environment fencing generation.
+`/v1/migrations/*` routes are unchanged. Delivery-hold set, release,
+schedule, cancel, and failed-target retry are additive `tenkai.http.v1`
+routes that reuse this envelope's version, actor audit, and environment
+fencing generation. `hold_schedule` and `hold_cancel` record dated
+environment freezes; a server from before them answers `404`.
 Channel removal is an additive route too; a server from before it answers
 `404`, so a client never mistakes an older server for a removal.
 `GET /v1/environments/{environment}/approval-policy` is an additive

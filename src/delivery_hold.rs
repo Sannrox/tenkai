@@ -4,10 +4,14 @@
 //! writes (promote, subscribe, deploy) never have to carry it forward. Every
 //! set and clear also appends an immutable audit event with reason, actor, and
 //! time; clearing deletes the hold but never its history.
+//!
+//! A dated change freeze is a separate catalog object per environment name.
+//! It starts and ends by the clock; no write happens at either instant.
+//! Schedule and cancel append the same set/clear audit events as a hold.
 
 use std::collections::HashMap;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 
 use crate::client::Ctx;
 use crate::ontology::{KIND_CHANNEL, NS, channel_id, validate_identifier};
@@ -15,6 +19,7 @@ use crate::pb::sekai::Object;
 
 pub const HOLD_KIND: &str = "tenkai.delivery_hold";
 pub const HOLD_AUDIT_KIND: &str = "tenkai.delivery_hold_audit";
+pub const FREEZE_KIND: &str = "tenkai.delivery_freeze";
 
 /// What a hold pauses: one environment, or every environment subscribed to a channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,14 +107,92 @@ pub struct DeliveryHoldView {
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub hold: Option<DeliveryHold>,
     pub audit: Vec<HoldAuditEvent>,
+    /// Active and upcoming environment freezes. Omitted when empty, including
+    /// on channel hold views.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub freezes: Vec<DeliveryFreeze>,
+}
+
+/// A named environment freeze with a start and an end, evaluated by the clock.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct DeliveryFreeze {
+    pub name: String,
+    pub environment: String,
+    pub from_ms: i64,
+    pub until_ms: i64,
+    pub reason: String,
+    pub actor: String,
+    pub scheduled_at: i64,
+}
+
+impl DeliveryFreeze {
+    pub fn active_at(&self, now_ms: i64) -> bool {
+        self.from_ms <= now_ms && now_ms < self.until_ms
+    }
+
+    pub fn upcoming_at(&self, now_ms: i64) -> bool {
+        self.from_ms > now_ms
+    }
+}
+
+/// Why a plan is paused: an operator hold, or a freeze that covers `now`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryPause {
+    Hold {
+        hold: DeliveryHold,
+        scope: HoldScope,
+    },
+    Freeze(DeliveryFreeze),
+}
+
+impl DeliveryPause {
+    pub fn reason(&self) -> String {
+        match self {
+            Self::Hold { hold, .. } => hold.reason.clone(),
+            Self::Freeze(freeze) => format!(
+                "freeze {} until {}: {}",
+                freeze.name,
+                format_freeze_instant(freeze.until_ms),
+                freeze.reason
+            ),
+        }
+    }
+
+    pub fn scope_key(&self) -> String {
+        match self {
+            Self::Hold { scope, .. } => scope.key(),
+            Self::Freeze(freeze) => HoldScope::environment(&freeze.environment).key(),
+        }
+    }
 }
 
 /// Active hold and history for `scope`.
 pub async fn view(ctx: &mut Ctx, scope: &HoldScope) -> Result<DeliveryHoldView> {
+    let freezes = match scope {
+        HoldScope::Environment(env) => visible_freezes(ctx, env, crate::now_millis()).await?,
+        HoldScope::Channel { .. } => Vec::new(),
+    };
     Ok(DeliveryHoldView {
         hold: get(ctx, scope).await?,
         audit: audit(ctx, scope).await?,
+        freezes,
     })
+}
+
+/// Parse an RFC 3339 freeze bound. The label names the flag in refusals.
+pub fn parse_freeze_instant(label: &str, value: &str) -> Result<i64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(value)
+        .with_context(|| format!("{label} {value:?} is not RFC 3339"))?;
+    Ok(parsed.timestamp_millis())
+}
+
+/// RFC 3339 UTC, or the raw millis when the instant is out of range.
+pub fn format_freeze_instant(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| ms.to_string())
 }
 
 /// Record a failed-target retry on the environment scope without changing the hold object.
@@ -206,7 +289,17 @@ pub async fn get(ctx: &mut Ctx, scope: &HoldScope) -> Result<Option<DeliveryHold
 pub async fn active_for_plan(
     ctx: &mut Ctx,
     plan: &crate::plan::Plan,
-) -> Result<Option<(DeliveryHold, HoldScope)>> {
+) -> Result<Option<DeliveryPause>> {
+    active_for_plan_at(ctx, plan, crate::now_millis()).await
+}
+
+/// Evaluate holds and freezes at `now_ms` so two replicas of the same instant
+/// agree without writing at start or end.
+pub async fn active_for_plan_at(
+    ctx: &mut Ctx,
+    plan: &crate::plan::Plan,
+    now_ms: i64,
+) -> Result<Option<DeliveryPause>> {
     if plan
         .steps
         .iter()
@@ -221,24 +314,237 @@ pub async fn active_for_plan(
     );
     for scope in scopes {
         if let Some(hold) = get(ctx, &scope).await? {
-            return Ok(Some((hold, scope)));
+            return Ok(Some(DeliveryPause::Hold { hold, scope }));
         }
+    }
+    if let Some(freeze) = active_freeze(ctx, &plan.environment, now_ms).await? {
+        return Ok(Some(DeliveryPause::Freeze(freeze)));
     }
     Ok(None)
 }
 
-/// Refuse to start `plan` while a hold pauses it.
+/// Refuse to start `plan` while a hold or freeze pauses it.
 pub async fn require_not_held(ctx: &mut Ctx, plan: &crate::plan::Plan) -> Result<()> {
-    if let Some((hold, scope)) = active_for_plan(ctx, plan).await? {
-        bail!(
+    require_not_held_at(ctx, plan, crate::now_millis()).await
+}
+
+pub async fn require_not_held_at(
+    ctx: &mut Ctx,
+    plan: &crate::plan::Plan,
+    now_ms: i64,
+) -> Result<()> {
+    match active_for_plan_at(ctx, plan, now_ms).await? {
+        Some(DeliveryPause::Hold { hold, scope }) => bail!(
             "plan {} is paused by delivery hold {} set by {}: {}; clear the hold to execute",
             plan.id,
             scope.key(),
             hold.actor,
             hold.reason
-        );
+        ),
+        Some(DeliveryPause::Freeze(freeze)) => bail!(
+            "plan {} is paused by freeze {} until {}: {}; cancel the freeze to execute",
+            plan.id,
+            freeze.name,
+            format_freeze_instant(freeze.until_ms),
+            freeze.reason
+        ),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// True when an operator hold or an active freeze pauses `environment`.
+pub async fn environment_delivery_held(
+    ctx: &mut Ctx,
+    environment: &str,
+    now_ms: i64,
+) -> Result<bool> {
+    if get(ctx, &HoldScope::environment(environment))
+        .await?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    Ok(active_freeze(ctx, environment, now_ms).await?.is_some())
+}
+
+/// Record a named freeze. `until_ms` must be after `from_ms`.
+pub async fn schedule_freeze(
+    ctx: &mut Ctx,
+    environment: &str,
+    name: &str,
+    from_ms: i64,
+    until_ms: i64,
+    reason: &str,
+    actor: &str,
+) -> Result<DeliveryFreeze> {
+    require_embedded(ctx)?;
+    let reason = reason.trim();
+    anyhow::ensure!(
+        !reason.is_empty(),
+        "delivery freeze reason must not be empty"
+    );
+    anyhow::ensure!(
+        reason.len() <= 1024,
+        "delivery freeze reason exceeds 1024 bytes"
+    );
+    let actor = validate_actor(actor)?;
+    validate_identifier("environment", environment)?;
+    validate_identifier("freeze", name)?;
+    crate::environment::environment(ctx, environment).await?;
+    anyhow::ensure!(until_ms > from_ms, "--until must be after --from");
+    let freeze = DeliveryFreeze {
+        name: name.into(),
+        environment: environment.into(),
+        from_ms,
+        until_ms,
+        reason: reason.into(),
+        actor: actor.into(),
+        scheduled_at: crate::now_millis(),
+    };
+    ctx.put(freeze_object(&freeze)).await?;
+    append_audit(
+        ctx,
+        &HoldScope::environment(environment),
+        "set",
+        &DeliveryHold {
+            reason: format!("{}: {}", freeze.name, freeze.reason),
+            actor: freeze.actor.clone(),
+            held_at: freeze.scheduled_at,
+        },
+    )
+    .await?;
+    Ok(freeze)
+}
+
+/// Remove a freeze. An operator hold on the same environment is unchanged.
+pub async fn cancel_freeze(
+    ctx: &mut Ctx,
+    environment: &str,
+    name: &str,
+    actor: &str,
+) -> Result<DeliveryFreeze> {
+    require_embedded(ctx)?;
+    let actor = validate_actor(actor)?;
+    validate_identifier("environment", environment)?;
+    validate_identifier("freeze", name)?;
+    crate::environment::environment(ctx, environment).await?;
+    let Some(cleared) = get_freeze(ctx, environment, name).await? else {
+        bail!("environment {environment} has no freeze {name}");
+    };
+    ctx.delete(&freeze_id(environment, name)).await?;
+    append_audit(
+        ctx,
+        &HoldScope::environment(environment),
+        "clear",
+        &DeliveryHold {
+            reason: format!("{}: {}", cleared.name, cleared.reason),
+            actor: actor.into(),
+            held_at: crate::now_millis(),
+        },
+    )
+    .await?;
+    Ok(cleared)
+}
+
+/// Active freeze covering `now_ms`, if any. Earliest `until`, then name.
+pub async fn active_freeze(
+    ctx: &mut Ctx,
+    environment: &str,
+    now_ms: i64,
+) -> Result<Option<DeliveryFreeze>> {
+    let mut active: Vec<DeliveryFreeze> = list_freezes(ctx, environment)
+        .await?
+        .into_iter()
+        .filter(|freeze| freeze.active_at(now_ms))
+        .collect();
+    active.sort_by(|left, right| {
+        left.until_ms
+            .cmp(&right.until_ms)
+            .then(left.name.cmp(&right.name))
+    });
+    Ok(active.into_iter().next())
+}
+
+/// Active and upcoming freezes for `environment`, soonest first.
+pub async fn visible_freezes(
+    ctx: &mut Ctx,
+    environment: &str,
+    now_ms: i64,
+) -> Result<Vec<DeliveryFreeze>> {
+    let mut freezes: Vec<DeliveryFreeze> = list_freezes(ctx, environment)
+        .await?
+        .into_iter()
+        .filter(|freeze| freeze.active_at(now_ms) || freeze.upcoming_at(now_ms))
+        .collect();
+    freezes.sort_by(|left, right| {
+        left.from_ms
+            .cmp(&right.from_ms)
+            .then(left.until_ms.cmp(&right.until_ms))
+            .then(left.name.cmp(&right.name))
+    });
+    Ok(freezes)
+}
+
+async fn list_freezes(ctx: &mut Ctx, environment: &str) -> Result<Vec<DeliveryFreeze>> {
+    let mut freezes = Vec::new();
+    for object in ctx.list_kind(FREEZE_KIND).await? {
+        if object.properties.get("environment") != Some(&environment.to_string()) {
+            continue;
+        }
+        freezes.push(freeze_from_object(&object)?);
+    }
+    Ok(freezes)
+}
+
+async fn get_freeze(
+    ctx: &mut Ctx,
+    environment: &str,
+    name: &str,
+) -> Result<Option<DeliveryFreeze>> {
+    let Some(object) = ctx.get(&freeze_id(environment, name)).await? else {
+        return Ok(None);
+    };
+    if object.kind != FREEZE_KIND {
+        bail!("object {} is {}, not {FREEZE_KIND}", object.id, object.kind);
+    }
+    Ok(Some(freeze_from_object(&object)?))
+}
+
+fn freeze_id(environment: &str, name: &str) -> String {
+    format!("tenkai:delivery_freeze:environment:{environment}:{name}")
+}
+
+fn freeze_from_object(object: &Object) -> Result<DeliveryFreeze> {
+    Ok(DeliveryFreeze {
+        name: required(object, "name")?.into(),
+        environment: required(object, "environment")?.into(),
+        from_ms: required(object, "from")?.parse()?,
+        until_ms: required(object, "until")?.parse()?,
+        reason: required(object, "reason")?.into(),
+        actor: required(object, "actor")?.into(),
+        scheduled_at: required(object, "scheduled_at")?.parse()?,
+    })
+}
+
+fn freeze_object(freeze: &DeliveryFreeze) -> Object {
+    Object {
+        id: freeze_id(&freeze.environment, &freeze.name),
+        kind: FREEZE_KIND.into(),
+        name: freeze.name.clone(),
+        namespace: NS.into(),
+        external_id: String::new(),
+        properties: HashMap::from([
+            ("environment".into(), freeze.environment.clone()),
+            ("name".into(), freeze.name.clone()),
+            ("from".into(), freeze.from_ms.to_string()),
+            ("until".into(), freeze.until_ms.to_string()),
+            ("reason".into(), freeze.reason.clone()),
+            ("actor".into(), freeze.actor.clone()),
+            ("scheduled_at".into(), freeze.scheduled_at.to_string()),
+        ]),
+        created: freeze.scheduled_at,
+        updated: freeze.scheduled_at,
+    }
 }
 
 /// Set and clear events for `scope`, oldest first.
@@ -544,5 +850,146 @@ mod tests {
         );
         let _ = std::fs::remove_file(&database);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn deploy_plan(env: &str) -> crate::plan::Plan {
+        crate::plan::Plan {
+            format_version: crate::plan::PLAN_FORMAT_VERSION,
+            id: "tenkai:plan:freeze-test".into(),
+            content_id: "c".into(),
+            environment: env.into(),
+            created_at: 1,
+            inputs: Vec::new(),
+            steps: vec![crate::plan::Step {
+                id: "s".into(),
+                order: 0,
+                product: "api".into(),
+                instance: String::new(),
+                action: crate::plan::Action::Upgrade,
+                from: None,
+                to: "1.0.0".into(),
+                release_id: "tenkai:release:api@1.0.0".into(),
+                release_digest: "sha256:x".into(),
+                artifact_digest: "sha256:y".into(),
+                workdir: "/".into(),
+                restore: None,
+                host: None,
+                sealed: Vec::new(),
+                rewrap: None,
+                issuer: None,
+                identity: None,
+                restore_identity: None,
+                target_changes: Vec::new(),
+            }],
+            state: crate::plan::PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+            credential_runway: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn freeze_refuses_inside_range_and_admits_outside() {
+        let (database, mut ctx) = temp_ctx("freeze-range").await;
+        crate::environment::env_add(&mut ctx, "lab", "Lab")
+            .await
+            .unwrap();
+        let from = 1_000;
+        let until = 2_000;
+        schedule_freeze(
+            &mut ctx,
+            "lab",
+            "black-friday",
+            from,
+            until,
+            "holiday",
+            "alice",
+        )
+        .await
+        .unwrap();
+        let plan = deploy_plan("lab");
+        assert!(
+            active_for_plan_at(&mut ctx, &plan, from)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            active_for_plan_at(&mut ctx, &plan, until - 1)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            active_for_plan_at(&mut ctx, &plan, from - 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            active_for_plan_at(&mut ctx, &plan, until)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let first = active_for_plan_at(&mut ctx, &plan, 1_500).await.unwrap();
+        let second = active_for_plan_at(&mut ctx, &plan, 1_500).await.unwrap();
+        assert_eq!(first, second);
+        let error = require_not_held_at(&mut ctx, &plan, 1_500)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("freeze black-friday"), "{error}");
+        assert!(error.contains("cancel the freeze"), "{error}");
+        let mut rollback = plan.clone();
+        rollback.steps[0].action = crate::plan::Action::Rollback;
+        require_not_held_at(&mut ctx, &rollback, 1_500)
+            .await
+            .unwrap();
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn freeze_and_hold_are_independent() {
+        let (database, mut ctx) = temp_ctx("freeze-hold").await;
+        crate::environment::env_add(&mut ctx, "lab", "Lab")
+            .await
+            .unwrap();
+        let scope = HoldScope::environment("lab");
+        set(&mut ctx, &scope, "operator", "alice").await.unwrap();
+        schedule_freeze(&mut ctx, "lab", "holiday", 1_000, 2_000, "freeze", "bob")
+            .await
+            .unwrap();
+        cancel_freeze(&mut ctx, "lab", "holiday", "carol")
+            .await
+            .unwrap();
+        assert!(get(&mut ctx, &scope).await.unwrap().is_some());
+        set(&mut ctx, &scope, "operator", "alice").await.unwrap();
+        schedule_freeze(&mut ctx, "lab", "holiday", 1_000, 2_000, "freeze", "bob")
+            .await
+            .unwrap();
+        clear(&mut ctx, &scope, "alice").await.unwrap();
+        assert!(
+            active_freeze(&mut ctx, "lab", 1_500)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let error = schedule_freeze(&mut ctx, "lab", "bad", 2_000, 2_000, "same", "alice")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--until must be after --from"), "{error}");
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[test]
+    fn freeze_instant_is_rfc3339() {
+        assert!(parse_freeze_instant("--from", "not-a-time").is_err());
+        let ms = parse_freeze_instant("--until", "2026-11-28T00:00:00Z").unwrap();
+        assert_eq!(format_freeze_instant(ms), "2026-11-28T00:00:00Z");
     }
 }

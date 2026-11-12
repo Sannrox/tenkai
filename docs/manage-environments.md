@@ -527,7 +527,20 @@ applies finish, and rollback-only plans are never held. `env inspect`,
 tenkaictl env hold prod set --reason "change freeze"
 tenkaictl env hold prod show
 tenkaictl env hold prod clear
+tenkaictl env hold prod schedule black-friday --from 2026-11-24T00:00:00Z --until 2026-11-28T00:00:00Z --reason "holiday freeze"
+tenkaictl env hold prod cancel black-friday
 ```
+
+A dated freeze starts and ends by the clock. While it is active the
+environment behaves as under a delivery hold: the reconciler plans and
+reports `held`, `apply` refuses, a pull-only runtime receives no work,
+in-flight applies finish, and rollback-only plans run. An emergency start
+does not pass a freeze. Several freezes may be scheduled; an operator hold
+and a freeze are independent. `env hold show`, `env inspect`, and `status`
+name the active freeze and when it ends, and list upcoming ones. `--from`
+defaults to now; `--until` is required and must be later. A plan blocked by
+a freeze names it. During a rolling deploy a freeze holds only once every
+server reads the freeze record.
 
 A channel hold blocks every environment subscribed to that channel:
 

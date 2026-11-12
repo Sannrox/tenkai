@@ -120,6 +120,10 @@ pub(crate) async fn run(
                     hold.held_at, hold.actor, hold.reason
                 );
             }
+            crate::output::print_delivery_freezes(
+                Some(&env),
+                &tenkai::delivery_hold::visible_freezes(ctx, &env, tenkai::now_millis()).await?,
+            );
             if rows.is_empty() {
                 println!("{env} has no channel subscriptions");
                 return Ok(());

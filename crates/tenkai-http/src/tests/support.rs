@@ -135,6 +135,7 @@ impl ReconcilePort for FixedReconciler {
                 retirement: None,
                 preview: None,
                 delivery_hold: None,
+                delivery_freezes: Vec::new(),
                 criticality: None,
                 latest_failures: Vec::new(),
                 sealed_recovery_warning: None,

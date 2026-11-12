@@ -474,6 +474,50 @@ pub(super) async fn release_environment_hold(
     )
 }
 
+pub(super) async fn schedule_environment_freeze(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .schedule_environment_freeze(&credential, &environment, request)
+            .await,
+    )
+}
+
+pub(super) async fn cancel_environment_freeze(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .cancel_environment_freeze(&credential, &environment, request)
+            .await,
+    )
+}
+
 pub(super) async fn retry_failed_target(
     State(state): State<Arc<AppState>>,
     Path((environment, product)): Path<(String, String)>,

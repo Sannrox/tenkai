@@ -1,5 +1,4 @@
 use anyhow::Result;
-use tenkai::delivery_hold::DeliveryHoldView;
 
 use crate::env_args::HoldAction;
 
@@ -23,7 +22,33 @@ pub(crate) async fn environment(
             println!("{}", result.message);
         }
         HoldAction::Show => {
-            print_view(&client.environment_hold(env).await?);
+            crate::output::print_hold_view(&client.environment_hold(env).await?);
+        }
+        HoldAction::Schedule {
+            name,
+            from,
+            until,
+            reason,
+        } => {
+            let generation = require_generation(generation)?;
+            let result = client
+                .schedule_environment_freeze(
+                    env,
+                    &name,
+                    from.as_deref(),
+                    &until,
+                    &reason,
+                    generation,
+                )
+                .await?;
+            println!("{}", result.message);
+        }
+        HoldAction::Cancel { name } => {
+            let generation = require_generation(generation)?;
+            let result = client
+                .cancel_environment_freeze(env, &name, generation)
+                .await?;
+            println!("{}", result.message);
         }
     }
     Ok(())
@@ -45,7 +70,10 @@ pub(crate) async fn channel(
             println!("{}", result.message);
         }
         HoldAction::Show => {
-            print_view(&client.channel_hold(product, channel).await?);
+            crate::output::print_hold_view(&client.channel_hold(product, channel).await?);
+        }
+        HoldAction::Schedule { .. } | HoldAction::Cancel { .. } => {
+            anyhow::bail!("change freezes are per environment");
         }
     }
     Ok(())
@@ -74,20 +102,4 @@ pub(crate) async fn retry(
 
 fn require_generation(generation: Option<u64>) -> Result<u64> {
     generation.ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))
-}
-
-fn print_view(view: &DeliveryHoldView) {
-    match &view.hold {
-        Some(hold) => println!(
-            "held at {} by {}: {}",
-            hold.held_at, hold.actor, hold.reason
-        ),
-        None => println!("no delivery hold"),
-    }
-    for event in &view.audit {
-        println!(
-            "{} {} by {}: {}",
-            event.at, event.action, event.actor, event.reason
-        );
-    }
 }

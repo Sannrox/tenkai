@@ -1723,6 +1723,9 @@ pub struct EnvironmentInspectReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub delivery_hold: Option<crate::delivery_hold::DeliveryHold>,
+    /// Active and upcoming dated change freezes. Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery_freezes: Vec<crate::delivery_hold::DeliveryFreeze>,
     /// Declared and derived criticality when either is set (#694).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
@@ -2169,6 +2172,11 @@ pub async fn list_environments(ctx: &mut Ctx) -> Result<Vec<EnvironmentListEntry
                 break;
             }
         }
+        if !delivery_held {
+            delivery_held =
+                crate::delivery_hold::environment_delivery_held(ctx, &name, crate::now_millis())
+                    .await?;
+        }
         entries.push(EnvironmentListEntry {
             name,
             id: env_obj.id,
@@ -2223,6 +2231,8 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             &crate::delivery_hold::HoldScope::environment(&env_obj.name),
         )
         .await?;
+        let delivery_freezes =
+            crate::delivery_hold::visible_freezes(ctx, &env_obj.name, crate::now_millis()).await?;
         let criticality = criticality_from_properties(&env_obj.properties, crate::now_millis());
         reports.push(EnvironmentInspectReport {
             name: env_obj.name,
@@ -2250,6 +2260,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             preview: None,
             retirement,
             delivery_hold,
+            delivery_freezes,
             criticality,
             latest_failures: Vec::new(),
             sealed_recovery_warning: None,
@@ -2313,6 +2324,8 @@ async fn inspect_environment_base(
         &crate::delivery_hold::HoldScope::environment(&env_obj.name),
     )
     .await?;
+    let delivery_freezes =
+        crate::delivery_hold::visible_freezes(ctx, &env_obj.name, crate::now_millis()).await?;
     let constraints = environment_constraints_from_object(&env_obj);
     let webhooks = crate::deploy_webhook::parse_endpoints(&env_obj)
         .with_context(|| format!("reading the webhooks of environment {env}"))?;
@@ -2365,6 +2378,7 @@ async fn inspect_environment_base(
         preview,
         retirement,
         delivery_hold,
+        delivery_freezes,
         criticality,
         latest_failures,
         sealed_recovery_warning,

@@ -102,11 +102,11 @@ async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<E
 async fn held(ctx: &mut Ctx, plan: &Plan) -> Result<Option<EnvironmentStatus>> {
     Ok(crate::delivery_hold::active_for_plan(ctx, plan)
         .await?
-        .map(|(hold, scope)| EnvironmentStatus::Held {
+        .map(|pause| EnvironmentStatus::Held {
             plan_id: plan.id.clone(),
             steps: plan.steps.len(),
-            reason: hold.reason,
-            scope: scope.key(),
+            reason: pause.reason(),
+            scope: pause.scope_key(),
         }))
 }
 

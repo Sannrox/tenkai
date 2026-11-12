@@ -9,6 +9,51 @@ use crate::catalog_args::{ApprovalCommand, ReleaseCommand};
 use crate::env_args::EnvCommand;
 use crate::fleet_args::FleetCommand;
 
+pub(crate) fn print_hold_view(view: &tenkai::delivery_hold::DeliveryHoldView) {
+    match &view.hold {
+        Some(hold) => println!(
+            "held at {} by {}: {}",
+            hold.held_at, hold.actor, hold.reason
+        ),
+        None => println!("no delivery hold"),
+    }
+    print_delivery_freezes(None, &view.freezes);
+    for event in &view.audit {
+        println!(
+            "{} {} by {}: {}",
+            event.at, event.action, event.actor, event.reason
+        );
+    }
+}
+
+pub(crate) fn print_delivery_freezes(
+    env: Option<&str>,
+    freezes: &[tenkai::delivery_hold::DeliveryFreeze],
+) {
+    let now = tenkai::now_millis();
+    let prefix = env.map(|name| format!("{name} ")).unwrap_or_default();
+    for freeze in freezes {
+        if freeze.active_at(now) {
+            println!(
+                "{prefix}freeze {} until {} by {}: {}",
+                freeze.name,
+                tenkai::delivery_hold::format_freeze_instant(freeze.until_ms),
+                freeze.actor,
+                freeze.reason
+            );
+        } else {
+            println!(
+                "{prefix}upcoming freeze {} from {} until {} by {}: {}",
+                freeze.name,
+                tenkai::delivery_hold::format_freeze_instant(freeze.from_ms),
+                tenkai::delivery_hold::format_freeze_instant(freeze.until_ms),
+                freeze.actor,
+                freeze.reason
+            );
+        }
+    }
+}
+
 pub(crate) fn print_steps(steps: &[plan::Step]) {
     for s in steps {
         let from = s.from.as_deref().unwrap_or("none");
