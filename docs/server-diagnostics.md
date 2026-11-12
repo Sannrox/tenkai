@@ -112,6 +112,8 @@ tenkaictl --target remote --server-url http://127.0.0.1:8080 fleet watch --once
 **Exit codes (default):** non-zero when an environment *newly* becomes `behind`
 or `unhealthy` relative to the baseline (or prior sample in a continuous run).
 Existing hard drift that was already in the baseline does not fail by default.
+`fleet watch` also exits non-zero when an open exposure's age exceeds the
+environment's `exposure.max_age_ms.<severity>` property.
 
 **Baseline file:** optional JSON schema `tenkai.fleet-posture.v1` mapping
 environment names to postures only. No SQLite persistence of samples; no

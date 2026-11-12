@@ -45,6 +45,28 @@ pub(crate) fn print_fleet_status(report: &plan::FleetStatusReport) {
             );
         }
     }
+    print_open_exposures(report);
+}
+
+fn print_open_exposures(report: &plan::FleetStatusReport) {
+    let mut any_exposure = false;
+    for row in &report.environments {
+        for exposure in &row.open_exposures {
+            if !any_exposure {
+                println!("open exposures:");
+                any_exposure = true;
+            }
+            let overdue = if exposure.overdue { " overdue" } else { "" };
+            println!(
+                "  {} {} {} {} age_ms={}{overdue}",
+                row.name,
+                exposure.release,
+                exposure.advisory_id,
+                exposure.severity,
+                exposure.age_ms
+            );
+        }
+    }
 }
 
 pub(crate) struct FleetWatchOptions {
@@ -74,7 +96,14 @@ where
         let current = plan::fleet_posture_snapshot(&report);
         let delta = plan::compare_fleet_posture(&previous, &current);
         if opts.json {
-            println!("{}", serde_json::to_string_pretty(&delta)?);
+            let mut value = serde_json::to_value(&delta)?;
+            if let serde_json::Value::Object(map) = &mut value {
+                map.insert(
+                    "open_exposures".into(),
+                    serde_json::to_value(watch_open_exposures(&report))?,
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(&value)?);
         } else {
             print_fleet_drift(&delta, &report);
         }
@@ -82,6 +111,20 @@ where
             plan::write_fleet_posture_baseline(path, &current)?;
         }
         samples += 1;
+        let overdue = tenkai::fleet::overdue_exposures(&report);
+        if !overdue.is_empty() {
+            let detail = overdue
+                .iter()
+                .map(|(environment, exposure)| {
+                    format!(
+                        "{environment} {} {} age_ms={}",
+                        exposure.release, exposure.advisory_id, exposure.age_ms
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            bail!("fleet watch: exposure exceeded maximum age ({detail})");
+        }
         let should_exit_error = if opts.exit_on_any_posture_change {
             delta.has_any_posture_change
         } else if opts.exit_on_any_hard_drift {
@@ -130,22 +173,41 @@ pub(crate) fn print_fleet_drift(delta: &plan::FleetDriftSummary, report: &plan::
     );
     if !delta.has_any_posture_change {
         println!("no posture drift vs baseline");
-        return;
+    } else {
+        let print_list = |label: &str, names: &[String]| {
+            if !names.is_empty() {
+                println!("{label}: {}", names.join(", "));
+            }
+        };
+        print_list("entered behind", &delta.entered_behind);
+        print_list("left behind", &delta.left_behind);
+        print_list("entered unhealthy", &delta.entered_unhealthy);
+        print_list("left unhealthy", &delta.left_unhealthy);
+        print_list("entered empty", &delta.entered_empty);
+        print_list("left empty", &delta.left_empty);
+        print_list("entered current", &delta.entered_current);
+        print_list("left current", &delta.left_current);
+        print_list("appeared", &delta.appeared);
+        print_list("disappeared", &delta.disappeared);
+        print_list("new hard drift", &delta.new_hard_drift);
     }
-    let print_list = |label: &str, names: &[String]| {
-        if !names.is_empty() {
-            println!("{label}: {}", names.join(", "));
+    print_open_exposures(report);
+}
+
+fn watch_open_exposures(report: &plan::FleetStatusReport) -> Vec<serde_json::Value> {
+    let mut rows = Vec::new();
+    for row in &report.environments {
+        for exposure in &row.open_exposures {
+            rows.push(serde_json::json!({
+                "environment": row.name,
+                "release": exposure.release,
+                "advisory_id": exposure.advisory_id,
+                "severity": exposure.severity,
+                "first_seen_at": exposure.first_seen_at,
+                "age_ms": exposure.age_ms,
+                "overdue": exposure.overdue,
+            }));
         }
-    };
-    print_list("entered behind", &delta.entered_behind);
-    print_list("left behind", &delta.left_behind);
-    print_list("entered unhealthy", &delta.entered_unhealthy);
-    print_list("left unhealthy", &delta.left_unhealthy);
-    print_list("entered empty", &delta.entered_empty);
-    print_list("left empty", &delta.left_empty);
-    print_list("entered current", &delta.entered_current);
-    print_list("left current", &delta.left_current);
-    print_list("appeared", &delta.appeared);
-    print_list("disappeared", &delta.disappeared);
-    print_list("new hard drift", &delta.new_hard_drift);
+    }
+    rows
 }

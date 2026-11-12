@@ -34,6 +34,11 @@ Carry `notice.json` by any medium. Optional `--wave-name` defaults to
 `recall-<advisory-id>`. Use the existing apply emergency window when executing
 the wave if a maintenance override is required.
 
+When an environment sets `exposure.auto_recall_severity`, admitting a matching
+advisory feed stamps the same catalog recall without that command. Default is
+report only. The signed notice file and fix-forward wave still come from
+`remediate propose`.
+
 ## Import on a spoke
 
 ```bash

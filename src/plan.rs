@@ -51,9 +51,9 @@ pub use crate::deploy_webhook::{
 
 pub use crate::fleet::{
     FleetDriftSummary, FleetEnvironmentRow, FleetPostureSnapshot, FleetStatusReport,
-    compare_fleet_posture, fleet_posture_snapshot, fleet_status_from_inspects,
-    fleet_status_from_rows, is_hard_drift_posture, load_fleet_posture_baseline,
-    write_fleet_posture_baseline,
+    OpenEnvironmentExposure, compare_fleet_posture, fleet_posture_snapshot,
+    fleet_status_from_inspects, fleet_status_from_rows, is_hard_drift_posture,
+    load_fleet_posture_baseline, overdue_exposures, write_fleet_posture_baseline,
 };
 pub use crate::workshop_module::set_observed_compatibility;
 

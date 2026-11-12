@@ -269,6 +269,7 @@ impl FixtureEnvironmentProjection {
                 .map(|plan| plan.status.as_str().into()),
             posture: posture.into(),
             criticality: None,
+            open_exposures: Vec::new(),
         }
     }
 }

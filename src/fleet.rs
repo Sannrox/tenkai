@@ -41,6 +41,22 @@ pub struct FleetEnvironmentRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub criticality: Option<String>,
+    /// Open (release, advisory) matches on this environment (#900).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_exposures: Vec<OpenEnvironmentExposure>,
+}
+
+/// One open deployed exposure, with age, on a fleet row (#900).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct OpenEnvironmentExposure {
+    pub release: String,
+    pub advisory_id: String,
+    pub severity: String,
+    pub first_seen_at: i64,
+    pub age_ms: i64,
+    /// True when `age_ms` exceeds `exposure.max_age_ms.<severity>` on the environment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overdue: bool,
 }
 
 /// Fleet-wide delivery posture (no credentials).
@@ -146,6 +162,7 @@ pub fn fleet_row_from_inspect(report: &EnvironmentInspectReport) -> FleetEnviron
             .criticality
             .as_ref()
             .and_then(|value| value.effective.clone()),
+        open_exposures: Vec::new(),
     }
 }
 
@@ -215,6 +232,19 @@ pub fn fleet_posture_snapshot(report: &FleetStatusReport) -> FleetPostureSnapsho
 /// True for postures that count as hard delivery drift for watch exit codes.
 pub fn is_hard_drift_posture(posture: &str) -> bool {
     matches!(posture, "behind" | "unhealthy")
+}
+
+/// Open exposures whose age exceeds the environment's configured maximum.
+pub fn overdue_exposures(report: &FleetStatusReport) -> Vec<(String, OpenEnvironmentExposure)> {
+    let mut overdue = Vec::new();
+    for row in &report.environments {
+        for exposure in &row.open_exposures {
+            if exposure.overdue {
+                overdue.push((row.name.clone(), exposure.clone()));
+            }
+        }
+    }
+    overdue
 }
 
 /// Compare two posture samples and list environments that entered/left each class.
@@ -801,5 +831,47 @@ mod tests {
         assert!(!raw.contains("Bearer"));
         assert!(!raw.contains("secret"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overdue_exposures_list_configured_max_age_breaches() {
+        let mut report = fleet_status_from_inspects(Vec::new());
+        report.environments = vec![FleetEnvironmentRow {
+            name: "prod".into(),
+            id: "tenkai:env:prod".into(),
+            description: String::new(),
+            subscription_count: 0,
+            products_current: 0,
+            products_behind: 0,
+            products_missing: 0,
+            unhealthy: false,
+            health_summary: "n/a".into(),
+            lease_held: false,
+            latest_plan_state: None,
+            posture: "empty".into(),
+            criticality: None,
+            open_exposures: vec![
+                OpenEnvironmentExposure {
+                    release: "api@1.0.0".into(),
+                    advisory_id: "TENKAI-2026-1".into(),
+                    severity: "high".into(),
+                    first_seen_at: 1,
+                    age_ms: 5,
+                    overdue: true,
+                },
+                OpenEnvironmentExposure {
+                    release: "api@1.0.0".into(),
+                    advisory_id: "TENKAI-2026-2".into(),
+                    severity: "low".into(),
+                    first_seen_at: 1,
+                    age_ms: 5,
+                    overdue: false,
+                },
+            ],
+        }];
+        let overdue = overdue_exposures(&report);
+        assert_eq!(overdue.len(), 1);
+        assert_eq!(overdue[0].0, "prod");
+        assert_eq!(overdue[0].1.advisory_id, "TENKAI-2026-1");
     }
 }
