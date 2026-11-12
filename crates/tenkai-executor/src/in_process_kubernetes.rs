@@ -768,12 +768,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
                 manifests.display()
             );
         }
-        let mut objects = Vec::new();
-        for path in &files {
-            for object in parse_manifest_objects(path, request.instance_name())? {
-                objects.push(object);
-            }
-        }
+        let objects = supported_manifest_objects(&manifests, &files, request.instance_name())?;
         times.plan_ms = planned.elapsed().as_millis() as u64;
         let applied = Instant::now();
         if let Some(json) = tenkai::dependency_document::configmap_json(request) {
@@ -1246,6 +1241,34 @@ fn parse_manifest_objects(path: &Path, instance: &str) -> Result<Vec<Value>> {
             .map_err(|error| anyhow::anyhow!("normalizing manifest {}: {error}", path.display()))?;
         if !value.is_null() {
             objects.push(value);
+        }
+    }
+    Ok(objects)
+}
+
+/// Every object in `files`, refused as a whole when one names a kind or
+/// apiVersion the in-process executor cannot apply, so nothing is applied
+/// from a release that would fail part-way (#1200).
+fn supported_manifest_objects(
+    manifests: &Path,
+    files: &[std::path::PathBuf],
+    instance: &str,
+) -> Result<Vec<Value>> {
+    let mut objects = Vec::new();
+    for path in files {
+        for object in parse_manifest_objects(path, instance)? {
+            let (kind, name) = object_identity(&object)?;
+            let api_version = object
+                .get("apiVersion")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Err(error) = builtin_resource(&kind, api_version) {
+                bail!(
+                    "manifest {} object {kind}/{name}: {error}",
+                    path.strip_prefix(manifests).unwrap_or(path).display()
+                );
+            }
+            objects.push(object);
         }
     }
     Ok(objects)
@@ -2262,6 +2285,7 @@ fn builtin_api_version(kind: &str) -> Result<&'static str> {
         "Job" | "CronJob" => "batch/v1",
         "Ingress" | "NetworkPolicy" => "networking.k8s.io/v1",
         "Role" | "RoleBinding" => "rbac.authorization.k8s.io/v1",
+        "PodDisruptionBudget" => "policy/v1",
         other => bail!(
             "in-process kubernetes apply refuses kind {other}; custom resource operators are out of scope"
         ),
@@ -2291,6 +2315,7 @@ fn builtin_resource(kind: &str, api_version: &str) -> Result<(kube::api::ApiReso
         ("RoleBinding", "rbac.authorization.k8s.io/v1") => {
             ("rbac.authorization.k8s.io", "v1", "rolebindings", true)
         }
+        ("PodDisruptionBudget", "policy/v1") => ("policy", "v1", "poddisruptionbudgets", true),
         _ => bail!(
             "in-process kubernetes apply refuses kind {kind} ({api_version}); custom resource operators are out of scope"
         ),
@@ -2704,6 +2729,32 @@ mod tests {
         assert!(!present(&api, "Service", "a-web"));
         let _ = std::fs::remove_dir_all(&a.workdir);
         let _ = std::fs::remove_dir_all(&b.workdir);
+    }
+
+    #[test]
+    fn an_unsupported_kind_is_refused_before_apply_changes_anything() {
+        let root = unique_root("unsupported-kind");
+        let manifests = root.join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::write(
+            manifests.join("all.yaml"),
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n---\napiVersion: policy/v1\nkind: PodDisruptionBudget\nmetadata:\n  name: web\n---\napiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: web\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("kubeconfig"), "apiVersion: v1\nkind: Config\n").unwrap();
+        let request = request(&root, &root.join("kubeconfig"), "1.0.0");
+        let api = MemoryClusterApi::new();
+        let executor = InProcessKubernetesExecutor::new(&api);
+
+        let error = executor.apply(&request).unwrap_err().to_string();
+
+        assert!(
+            error.contains("manifest all.yaml object HorizontalPodAutoscaler/web")
+                && error.contains("refuses kind HorizontalPodAutoscaler"),
+            "{error}"
+        );
+        assert!(api.object("lab", "Deployment", "web").is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
