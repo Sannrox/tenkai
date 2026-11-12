@@ -48,10 +48,14 @@ pub(crate) async fn release_is_recalled(ctx: &mut Ctx, release_id: &str) -> Resu
     {
         return Ok(true);
     }
-    Ok(ctx
+    if ctx
         .get(&release_recall_id(release_id))
         .await?
-        .is_some_and(|claim| claim.kind == KIND_RELEASE_RECALL))
+        .is_some_and(|claim| claim.kind == KIND_RELEASE_RECALL)
+    {
+        return Ok(true);
+    }
+    super::recall_range::range_recalls(ctx, release_id).await
 }
 
 async fn admit_recall(
@@ -68,6 +72,9 @@ async fn admit_recall(
             .await
             .map_err(CatalogLookupError::Provider)?
             .is_some_and(|claim| claim.kind == KIND_RELEASE_RECALL)
+        || super::recall_range::range_recalls(ctx, &release.id)
+            .await
+            .map_err(CatalogLookupError::Provider)?
     {
         return Err(CatalogLookupError::Recalled {
             release_id: release.id.clone(),
@@ -392,6 +399,7 @@ pub(super) fn verification_view(
                 provenance: Some(evidence.provenance),
                 governance_provenance: stored_provenance(release)?,
                 change_set_pin: change_set_pin::stored_projection(release)?,
+                recall_range: None,
             })
         }
         "unsigned-development" => {
@@ -412,6 +420,7 @@ pub(super) fn verification_view(
                 provenance: None,
                 governance_provenance: stored_provenance(release)?,
                 change_set_pin: change_set_pin::stored_projection(release)?,
+                recall_range: None,
             })
         }
         other => bail!("release has unknown verification status {other:?}"),
@@ -421,7 +430,11 @@ pub(super) fn verification_view(
 pub async fn inspect_release(ctx: &mut Ctx, spec: &str) -> Result<ReleaseVerificationView> {
     let release = release_for_spec(ctx, spec).await?;
     let properties = stored_verification_properties(ctx, &release).await?;
-    verification_view(&release, &properties)
+    let mut view = verification_view(&release, &properties)?;
+    view.recall_range = super::recall_range::covering_recall_range(ctx, &release.id)
+        .await?
+        .map(|range| range.label());
+    Ok(view)
 }
 
 pub async fn reverify_release(

@@ -97,9 +97,31 @@ pub(crate) async fn run(
             Ok(())
         }
         Command::Release {
-            command: ReleaseCommand::Recall { spec },
+            command:
+                ReleaseCommand::Recall {
+                    spec,
+                    from,
+                    before,
+                    close,
+                    reason,
+                },
         } => {
-            let result = client.recall_release(&spec).await?;
+            let result = if let Some(from) = close {
+                let before =
+                    before.ok_or_else(|| anyhow::anyhow!("--before is required with --close"))?;
+                client.close_recall_range(&spec, &from, &before).await?
+            } else if let Some(from) = from {
+                let reason =
+                    reason.ok_or_else(|| anyhow::anyhow!("--reason is required with --from"))?;
+                client
+                    .record_recall_range(&spec, &from, before.as_deref(), &reason)
+                    .await?
+            } else {
+                if before.is_some() {
+                    anyhow::bail!("--before requires --from or --close");
+                }
+                client.recall_release(&spec).await?
+            };
             if machine {
                 return print_machine_result(
                     &CommandResultV1::succeeded(CommandName::Recall).resource("release", spec),

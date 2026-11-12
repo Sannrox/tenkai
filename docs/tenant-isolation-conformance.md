@@ -106,6 +106,8 @@ and are not registered.
 Community catalog and remote management lifecycle routes (`GET /v1/releases`,
 `GET /v1/channels`, `POST /v1/releases`, `POST /v1/channels/{channel}/promote`,
 `POST /v1/releases/{release}/recall`,
+`POST /v1/products/{product}/recall-range`,
+`POST /v1/products/{product}/recall-range/close`,
 `POST /v1/environments/{environment}/subscriptions`,
 `POST /v1/environments/{environment}/plans`, `POST /v1/plans/{plan_id}/approve`,
 `POST /v1/plans/{plan_id}/apply`, `POST /v1/environments/{environment}/rollback`)

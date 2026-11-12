@@ -17,8 +17,8 @@ use crate::ontology::{
     KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN, KIND_PLAN_APPROVAL_ENVELOPE,
     KIND_PLAN_APPROVAL_VERIFICATION, KIND_PRODUCT, KIND_PRODUCT_MAINTENANCE_CONFIG,
     KIND_PROMOTION_AUDIT, KIND_PROMOTION_LOCK, KIND_RELEASE, KIND_RELEASE_RECALL,
-    KIND_RELEASE_VERIFICATION, KIND_RUNTIME_ENROLLMENT, KIND_WAVE, KIND_WORKLOAD_CERTIFICATE,
-    REL_SUBSCRIBES,
+    KIND_RELEASE_RECALL_RANGE, KIND_RELEASE_VERIFICATION, KIND_RUNTIME_ENROLLMENT, KIND_WAVE,
+    KIND_WORKLOAD_CERTIFICATE, REL_SUBSCRIBES,
 };
 use crate::pb::graph_action::{ActionOp, ActionParamDef, ActionTypeDef};
 use crate::pb::sekai::{ObjectType, PropertyDef};
@@ -424,6 +424,23 @@ pub fn known_object_types() -> Vec<ObjectType> {
                 true,
                 "Canonical JSON of the proposed wave identity",
             )],
+        ),
+        object_type(
+            KIND_RELEASE_RECALL_RANGE,
+            "A product recall range: inclusive from, optional exclusive before",
+            vec![
+                prop("product", true, "Product the range recalls"),
+                prop("from", true, "Inclusive semantic version"),
+                prop("before", false, "Exclusive semantic version when closed"),
+                prop("reason", true, "Why the range was recorded"),
+                prop("actor", true, "Principal that recorded the range"),
+                prop("recorded_at", true, "Unix-ms timestamp when recorded"),
+                prop(
+                    "closed_by",
+                    false,
+                    "Principal that set exclusive --before on an open range",
+                ),
+            ],
         ),
         object_type(
             KIND_RELEASE_RECALL,

@@ -29,8 +29,16 @@ Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
   refused; it fails closed if the head no longer matches.
 - **Recall** is an ordered, authenticated mutation (`tenkaictl release recall`)
   that makes subsequent lookup and planning fail closed. The first-writer
-  `tenkai.release_recall` claim records who recalled the release; the release
-  object then carries `recalled_at` / `recalled_by`. Recall does not delete
+  `tenkai.release_recall` claim records who recalled one release; the release
+  object then carries `recalled_at` / `recalled_by`. A product range
+  (`tenkaictl release recall <product> --from <version> [--before <version>]
+  --reason <text>`) records `tenkai.release_recall_range` with inclusive
+  `--from` and exclusive `--before` (omit `--before` for open-ended). Lookup
+  consults ranges at read time, so every published release inside the range
+  is recalled, including a later publish, with the same fail-closed effect.
+  `release recall <product> --close <from> --before <version>` sets the upper
+  bound of an open-ended range; a range never widens. `release inspect` names
+  the range that currently recalls a release. Recall does not delete
   immutable descriptors or bytes. Planning will not target a recalled channel
   head; a deployed recalled release rolls off to a non-recalled head without
   restoring the recalled pin. Rollback onto recalled content is denied unless

@@ -129,6 +129,52 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn record_recall_range(
+        &self,
+        product: &str,
+        from: &str,
+        before: Option<&str>,
+        reason: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/products/{product}/recall-range"),
+            Some(&tenkai::management_lifecycle::RecallRangeRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Recall
+                    .as_str()
+                    .into(),
+                product: product.to_string(),
+                from: from.to_string(),
+                before: before.map(str::to_string),
+                reason: reason.to_string(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn close_recall_range(
+        &self,
+        product: &str,
+        from: &str,
+        before: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/products/{product}/recall-range/close"),
+            Some(&tenkai::management_lifecycle::RecallRangeCloseRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Recall
+                    .as_str()
+                    .into(),
+                product: product.to_string(),
+                from: from.to_string(),
+                before: before.to_string(),
+            }),
+        )
+        .await
+    }
+
     /// `POST /v1/environments`.
     pub async fn register_environment(
         &self,

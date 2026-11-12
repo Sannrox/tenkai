@@ -526,6 +526,31 @@ pub struct RecallRequest {
     pub operation: String,
 }
 
+/// Body of `POST /v1/products/{product}/recall-range`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RecallRangeRequest {
+    pub version: u32,
+    pub operation: String,
+    pub product: String,
+    pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub before: Option<String>,
+    pub reason: String,
+}
+
+/// Body of `POST /v1/products/{product}/recall-range/close`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RecallRangeCloseRequest {
+    pub version: u32,
+    pub operation: String,
+    pub product: String,
+    pub from: String,
+    pub before: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SubscribeRequest {
@@ -912,6 +937,69 @@ pub fn admit_recall(
     )?;
     require_route_operation(admitted.operation, ManagementLifecycleOperation::Recall)?;
     Ok(admitted)
+}
+
+fn admit_catalog_recall(
+    version: u32,
+    operation: &str,
+    product: &str,
+    path_product: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    crate::ontology::validate_identifier("product", product)?;
+    anyhow::ensure!(
+        product == path_product,
+        "recall range product {product} does not match path {path_product}"
+    );
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version,
+            operation: operation.to_string(),
+            environment: None,
+            expected_generation: None,
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(admitted.operation, ManagementLifecycleOperation::Recall)?;
+    Ok(admitted)
+}
+
+pub fn admit_recall_range(
+    request: &RecallRangeRequest,
+    path_product: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    anyhow::ensure!(
+        !request.reason.trim().is_empty(),
+        "recall range reason must not be empty"
+    );
+    admit_catalog_recall(
+        request.version,
+        &request.operation,
+        &request.product,
+        path_product,
+        kind,
+        granted_environment,
+    )
+}
+
+pub fn admit_recall_range_close(
+    request: &RecallRangeCloseRequest,
+    path_product: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    admit_catalog_recall(
+        request.version,
+        &request.operation,
+        &request.product,
+        path_product,
+        kind,
+        granted_environment,
+    )
 }
 
 pub fn admit_subscribe(
