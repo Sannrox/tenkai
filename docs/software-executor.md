@@ -28,6 +28,15 @@ before `SoftwareExecutors::from_process`.
 manifest tree with server-side apply and field manager `tenkai`. Argo/Flux are
 out of scope here. Custom-resource operators are refused.
 
+In-process apply supports the built-in kinds `Namespace`, `ConfigMap`,
+`Secret`, `Service`, `ServiceAccount`, `PersistentVolumeClaim` (`v1`),
+`Deployment`, `StatefulSet`, `DaemonSet` (`apps/v1`), `Job`, `CronJob`
+(`batch/v1`), `Ingress`, `NetworkPolicy` (`networking.k8s.io/v1`), `Role`,
+`RoleBinding` (`rbac.authorization.k8s.io/v1`), and `PodDisruptionBudget`
+(`policy/v1`). A release that names any other kind or apiVersion is refused
+when it is planned, and again before apply changes anything, naming the file
+and the object.
+
 ## Ports
 
 | Type | Role |

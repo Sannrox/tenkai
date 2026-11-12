@@ -129,6 +129,39 @@ fn apply_a_to_b_to_rollback_observes_rollout_conditions() {
     let _ = std::fs::remove_dir_all(root_b);
 }
 
+#[test]
+#[ignore = "requires a kind cluster and TENKAI_CLUSTER_CONFIG"]
+fn pod_disruption_budget_applies_and_is_removed_with_the_product() {
+    let kubeconfig = cluster_config();
+    let env = unique_env("pdb");
+    let root = std::env::temp_dir().join(format!("{env}-pdb"));
+    let _ = std::fs::remove_dir_all(&root);
+    write_workdir(&root, "edge", "registry.k8s.io/pause:3.10", 2);
+    std::fs::write(
+        root.join("manifests/pdb.yaml"),
+        "apiVersion: policy/v1\nkind: PodDisruptionBudget\nmetadata:\n  name: edge\nspec:\n  minAvailable: 1\n  selector:\n    matchLabels:\n      app: edge\n",
+    )
+    .unwrap();
+    let executor =
+        InProcessKubernetesExecutor::new(LiveKubeApi).with_timeout(Duration::from_secs(90));
+    let request = request(&root, &kubeconfig, &env, "1.0.0");
+    executor
+        .apply(&request)
+        .expect("apply with a PodDisruptionBudget");
+    let pdb = ["get", "poddisruptionbudget", "edge", "-n", &env];
+    assert!(kubectl(&kubeconfig, &pdb).status.success());
+
+    executor.remove(&request).expect("remove");
+
+    let after = kubectl(&kubeconfig, &pdb);
+    assert!(
+        !after.status.success(),
+        "PodDisruptionBudget survived removal"
+    );
+    let _ = kubectl(&kubeconfig, &["delete", "namespace", &env, "--wait=false"]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// Busybox from the Kubernetes test image registry, for containers that
 /// need a shell.
 const BUSYBOX: &str = "registry.k8s.io/e2e-test-images/busybox:1.36.1-1";
