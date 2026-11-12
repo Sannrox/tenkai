@@ -1046,20 +1046,6 @@ impl std::fmt::Debug for SoftwareExecutors {
     }
 }
 
-/// Select a software executor from host runtime configuration.
-///
-/// Reads `TENKAI_SOFTWARE_EXECUTOR` (a [`SoftwareExecutorKind`] name, or `fake`).
-/// `None` means the caller should keep the shell `deploy.install` path. An
-/// unknown name or a missing adapter is also `None`; hosts that must refuse
-/// those values call [`SoftwareExecutors::try_from_process`].
-pub fn selected_software_executor() -> Option<Box<dyn SoftwareExecutor>> {
-    let value = std::env::var("TENKAI_SOFTWARE_EXECUTOR").ok()?;
-    if value.eq_ignore_ascii_case("fake") {
-        return Some(Box::new(FakeSoftwareExecutor::new()));
-    }
-    software_executor_for(SoftwareExecutorKind::from_name(&value)?)
-}
-
 /// Process default kind and adapter. `None` kind is the unnamed `fake`
 /// adapter; `None` adapter is the shell path.
 type ProcessDefault = (
@@ -1326,14 +1312,6 @@ mod tests {
                 .require_same_executor("api", None, Some(Shell))
                 .is_err()
         );
-    }
-
-    #[test]
-    fn selected_executor_defaults_to_none() {
-        // When operator env is unset, shell path remains default.
-        if std::env::var_os("TENKAI_SOFTWARE_EXECUTOR").is_none() {
-            assert!(selected_software_executor().is_none());
-        }
     }
 
     #[test]

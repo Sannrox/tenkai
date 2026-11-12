@@ -176,9 +176,7 @@ fn live_postgres_delivery_effects_are_idempotent_and_fenced() {
         })
     ));
 
-    a.inner
-        .expire_lease_for_test(a.schema(), &environment.id)
-        .unwrap();
+    a.expire_lease_for_conformance(&environment.id).unwrap();
     let lease_b = b
         .acquire_lease(
             &environment.id,

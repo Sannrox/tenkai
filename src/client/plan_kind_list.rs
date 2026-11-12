@@ -1,7 +1,5 @@
 //! Tick-scoped remote Plan kind-list sharing for retarget detection.
 
-#[cfg(test)]
-use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::OnceCell;
@@ -62,28 +60,6 @@ impl PlanKindListTick {
 
     pub(super) fn tick_cell(&self) -> Option<PlanKindListCell> {
         self.cell.lock().expect("plan kind-list tick lock").clone()
-    }
-
-    #[cfg(test)]
-    pub(super) async fn get_or_load<F, Fut>(&self, load: F) -> Result<Arc<Vec<Object>>>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<Vec<Object>>>,
-    {
-        let Some(cell) = self.tick_cell() else {
-            return Ok(Arc::new(load().await?));
-        };
-        if let Some(snapshot) = cell.get() {
-            return Ok(Arc::clone(&snapshot.objects));
-        }
-        let _fill = self.fill.lock().await;
-        if let Some(snapshot) = cell.get() {
-            return Ok(Arc::clone(&snapshot.objects));
-        }
-        let snapshot = PlanKindListSnapshot::from_objects(load().await?);
-        let objects = Arc::clone(&snapshot.objects);
-        let _ = cell.set(snapshot);
-        Ok(objects)
     }
 }
 

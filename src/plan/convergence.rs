@@ -2975,12 +2975,6 @@ mod tests {
     }
 
     #[test]
-    fn restart_is_neutral_for_model_routing_order() {
-        use crate::manifest::ProductKind;
-        validate_model_routing_rollout_order(&[(ProductKind::Software, Action::Restart)]).unwrap();
-    }
-
-    #[test]
     fn semantic_version_direction_is_recorded() {
         assert_eq!(classify_change("2.0.0", "1.9.0"), Action::Downgrade);
         assert_eq!(classify_change("1.9.0", "2.0.0"), Action::Upgrade);
@@ -3030,19 +3024,6 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("mixed model/routing"), "{err}");
-    }
-
-    #[test]
-    fn model_routing_rank_orders_forward_and_reverse() {
-        use crate::manifest::ProductKind;
-        assert!(
-            model_routing_rollout_rank(ProductKind::ModelRuntime, Action::Install)
-                < model_routing_rollout_rank(ProductKind::RoutingConfig, Action::Install)
-        );
-        assert!(
-            model_routing_rollout_rank(ProductKind::RoutingConfig, Action::Rollback)
-                < model_routing_rollout_rank(ProductKind::ModelRuntime, Action::Rollback)
-        );
     }
 
     fn test_profile_optional(

@@ -133,11 +133,6 @@ impl Inner {
     }
 
     #[cfg(test)]
-    pub(crate) fn expire_lease_for_test(&self, schema: &str, environment: &str) -> Result<()> {
-        self.expire_lease_for_conformance(schema, environment)
-    }
-
-    #[cfg(test)]
     pub(crate) fn delivery_effect_counts_for_test(
         &self,
         schema: &str,

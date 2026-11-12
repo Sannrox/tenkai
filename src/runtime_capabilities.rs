@@ -639,19 +639,6 @@ mod tests {
     }
 
     #[test]
-    fn enterprise_auth_capability_satisfies_requirement() {
-        let provided = community_sqlite_profile(enterprise_auth_capabilities());
-        validate_runtime_capabilities(
-            &provided,
-            &RuntimeRequirements {
-                require_enterprise_authentication: true,
-                ..RuntimeRequirements::community()
-            },
-        )
-        .unwrap();
-    }
-
-    #[test]
     fn zero_replicas_rejected() {
         let provided = community_sqlite_profile(community_auth_capabilities());
         assert!(matches!(

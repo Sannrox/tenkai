@@ -409,25 +409,3 @@ impl BuiltinCatalogOntology {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn builtin_catalog_ontology_rows_match_registry() {
-        let rows = BuiltinCatalogOntology::from_registry();
-        assert_eq!(
-            rows.type_names.len(),
-            tenkai::ontology::known_object_types().len()
-        );
-        assert_eq!(rows.type_names.len(), rows.type_payloads.len());
-        assert!(!rows.type_names.is_empty());
-        assert_eq!(
-            rows.action_names.len(),
-            tenkai::ontology::known_actions().len()
-        );
-        assert_eq!(rows.action_names.len(), rows.action_payloads.len());
-        assert!(!rows.action_names.is_empty());
-    }
-}

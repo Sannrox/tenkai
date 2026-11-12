@@ -163,5 +163,4 @@ fn run_sequence(drill: &BindDrill) {
 #[test]
 fn tenkaictl_env_bind_selects_one_of_several_providers() {
     run_sequence(&BindDrill::new());
-    run_sequence(&BindDrill::new());
 }

@@ -58,9 +58,8 @@ ordering, authorization, scheduling, observation, and recovery remain separate:
 
 ## Versioned policy prototype
 
-`tests/rollout_policy_view_prototype.rs` preserves a research-only
-`tenkai.rollout-policy-view.v1` representation. It composes references to the
-existing authorities:
+The research sketched a read-only `tenkai.rollout-policy-view.v1`
+representation that composes references to the existing authorities:
 
 ```rust
 struct RolloutPolicyViewV1 {
@@ -72,14 +71,10 @@ struct RolloutPolicyViewV1 {
 }
 ```
 
-The test proves that all eight scenarios can be described in one read model,
-but none can delete its source concepts: the view still needs channel,
-subscription, constraint, fact, canary-policy, maintenance, wave, approval,
-health, and rollback references. It is reproducible with:
-
-```bash
-cargo test --locked --test rollout_policy_view_prototype
-```
+All eight scenarios can be described in one read model, but none can delete
+its source concepts: the view still needs channel, subscription, constraint,
+fact, canary-policy, maintenance, wave, approval, health, and rollback
+references. No production code implements the view.
 
 This is useful as a diagnostic or documentation projection. Making it writable
 would create a new authority that either duplicates existing state or attempts
