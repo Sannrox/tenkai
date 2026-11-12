@@ -42,6 +42,8 @@ call it before the Catalog, planner, or apply core.
 | `publish` | Catalog-wide | `POST /v1/releases` | Implemented ([#394](https://github.com/Sannrox/tenkai/issues/394)) |
 | `promote` | Catalog-wide | `POST /v1/channels/{channel}/promote` | Implemented (#394). The result's `digest` is the promoted release's manifest digest (`sha256:<hex>`). Optional `expected_head` (`<product>@<version>`) refuses the promotion with `409` when the channel heads another release; an empty channel, or one already heading the spec, is promoted either way ([#1158](https://github.com/Sannrox/tenkai/issues/1158)) |
 | `recall` | Catalog-wide | `POST /v1/releases/{release}/recall` | Implemented (#394) |
+| `recall` (range) | Catalog-wide | `POST /v1/products/{product}/recall-range` | Implemented ([#1183](https://github.com/Sannrox/tenkai/issues/1183)). Inclusive `from`, exclusive optional `before`; omit `before` for open-ended. Same catalog-wide Recall grant. |
+| `recall` (close range) | Catalog-wide | `POST /v1/products/{product}/recall-range/close` | Implemented (#1183). Sets exclusive `before` on an open-ended range; a range never widens. |
 | `channel_remove` | Catalog-wide | `POST /v1/products/{product}/channels/{channel}/remove` | Implemented ([#1174](https://github.com/Sannrox/tenkai/issues/1174)). Clears the product's head from the channel; see [channel removal](manage-environments.md#channel-removal). Optional `expected_head` (`<product>@<version>`) refuses with `409` when another release heads the channel. A channel without a head succeeds, so a retry is safe. Every success appends a `channel_head_removed` change event (at least once across a crash) |
 | `subscribe` | Environment | `POST /v1/environments/{environment}/subscriptions` | Implemented (#394). Optional `instance` defaults to the product ([#1014](https://github.com/Sannrox/tenkai/issues/1014)) |
 | `unsubscribe` | Environment | `DELETE /v1/environments/{environment}/subscriptions/{product}` | Implemented ([#969](https://github.com/Sannrox/tenkai/issues/969)). The next approved plan removes the instance (ADR 0049). Optional `instance` defaults to the product (#1014); `expected_version` names the recorded version and is required while one is recorded |
@@ -117,6 +119,10 @@ fencing generation. `hold_schedule` and `hold_cancel` record dated
 environment freezes; a server from before them answers `404`.
 Channel removal is an additive route too; a server from before it answers
 `404`, so a client never mistakes an older server for a removal.
+Product recall-range record and close are additive routes; a server from
+before them answers `404`. An older binary does not consult
+`tenkai.release_recall_range` records, so a range recorded on a newer replica
+does not recall on an older replica until every replica runs this release.
 `GET /v1/environments/{environment}/approval-policy` is an additive
 `tenkai.http.v1` read of the effective plan-approval policy; it does not
 edit the policy file. Environment registration and the configuration

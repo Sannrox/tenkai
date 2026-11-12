@@ -19,12 +19,14 @@ use crate::release_signing::{self, VerificationEvidence};
 
 mod pin_export;
 mod publication;
+mod recall_range;
 mod trust;
 
 pub use pin_export::{
     PIN_BUNDLE_SCHEMA, PinImportReport, PinTransferFailure, ReleasePin, ReleasePinBundleSection,
     WithheldReleasePin, export_release_pins, import_release_pins,
 };
+pub use recall_range::{RecallRange, close_recall_range, record_recall_range};
 pub use trust::{inspect_release, require_deployable_trust, reverify_release};
 pub(crate) use trust::{
     load_deployable_snapshot, load_recoverable_snapshot, release_is_recalled, signature_envelope,
@@ -334,6 +336,9 @@ pub struct ReleaseVerificationView {
     pub governance_provenance: Vec<ProvenanceProjection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_set_pin: Option<ChangeSetPinProjection>,
+    /// Range that currently recalls this release, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_range: Option<String>,
 }
 
 fn parse_release_spec(spec: &str) -> Result<(&str, &str)> {
@@ -526,7 +531,12 @@ async fn backfill_legacy_verification(
     Ok(())
 }
 
-fn object(id: String, kind: &str, name: String, properties: HashMap<String, String>) -> Object {
+pub(super) fn object(
+    id: String,
+    kind: &str,
+    name: String,
+    properties: HashMap<String, String>,
+) -> Object {
     let now = crate::now_millis();
     Object {
         id,

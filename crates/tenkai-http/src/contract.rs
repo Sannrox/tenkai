@@ -33,8 +33,9 @@ use tenkai::host_identity::AuthSession;
 use tenkai::management_lifecycle::{
     ApplyRequest, ApproveRequest, ChannelHoldRequest, ChannelRemoveRequest, DeliveryFreezeRequest,
     DeliveryHoldRequest, ManagementLifecycleResult, PlanRequest, PromoteHttpRequest,
-    PublishRequest, RecallRequest, RetireEnvironmentRequest, RetryFailedTargetRequest,
-    RollbackRequest, SubscribeRequest, UnsubscribeRequest,
+    PublishRequest, RecallRangeCloseRequest, RecallRangeRequest, RecallRequest,
+    RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
+    UnsubscribeRequest,
 };
 use tenkai::observed_runtime::EnvironmentRuntimeReport;
 use tenkai::offline_import::{ImportJob, ImportJobList, ImportRequest, StagedBundle};
@@ -756,6 +757,20 @@ pub fn http_contract() -> Value {
             path: "/v1/releases/{release}/recall",
             auth: Auth::Management,
             request: Some(schema::<RecallRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/products/{product}/recall-range",
+            auth: Auth::Management,
+            request: Some(schema::<RecallRangeRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/products/{product}/recall-range/close",
+            auth: Auth::Management,
+            request: Some(schema::<RecallRangeCloseRequest>(&mut g)),
             response: lifecycle.clone(),
         },
         Route {

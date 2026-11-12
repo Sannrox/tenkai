@@ -73,9 +73,36 @@ pub(crate) async fn run(
                 let evidence = catalog::reverify_release(ctx, &spec, &trust_roots).await?;
                 println!("{}", serde_json::to_string_pretty(&evidence)?);
             }
-            ReleaseCommand::Recall { spec } => {
+            ReleaseCommand::Recall {
+                spec,
+                from,
+                before,
+                close,
+                reason,
+            } => {
                 let actor = embedded_management_actor()?;
-                let message = catalog::recall(ctx, &actor, &spec).await?;
+                let message = if let Some(from) = close {
+                    let before = before
+                        .ok_or_else(|| anyhow::anyhow!("--before is required with --close"))?;
+                    catalog::close_recall_range(ctx, &actor, &spec, &from, &before).await?
+                } else if let Some(from) = from {
+                    let reason = reason
+                        .ok_or_else(|| anyhow::anyhow!("--reason is required with --from"))?;
+                    catalog::record_recall_range(
+                        ctx,
+                        &actor,
+                        &spec,
+                        &from,
+                        before.as_deref(),
+                        &reason,
+                    )
+                    .await?
+                } else {
+                    if before.is_some() {
+                        anyhow::bail!("--before requires --from or --close");
+                    }
+                    catalog::recall(ctx, &actor, &spec).await?
+                };
                 if output == OutputFormat::JsonV1 {
                     print_machine_result(
                         &CommandResultV1::succeeded(CommandName::Recall).resource("release", spec),

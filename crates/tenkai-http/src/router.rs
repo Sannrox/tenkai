@@ -32,9 +32,10 @@ use super::inspect::{
 };
 use super::lifecycle::{
     apply_plan, approve_plan, cancel_environment_freeze, channel_hold, clear_product_criticality,
-    environment_hold, import_derived_criticality, install_model_evaluation_trust, plan_environment,
-    plan_identity_issuer, prepare_identity_issuer, promote_release, publish_release,
-    recall_release, record_model_evaluation_evidence, record_software_compatibility_evidence,
+    close_recall_range, environment_hold, import_derived_criticality,
+    install_model_evaluation_trust, plan_environment, plan_identity_issuer,
+    prepare_identity_issuer, promote_release, publish_release, recall_release,
+    record_model_evaluation_evidence, record_recall_range, record_software_compatibility_evidence,
     release_channel_hold, release_environment_hold, remove_channel_head, retire_environment,
     retry_failed_target, rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment,
     schedule_environment_freeze, set_channel_hold, set_environment_hold, set_product_criticality,
@@ -322,6 +323,14 @@ pub fn router(
             post(record_model_evaluation_evidence),
         )
         .route("/v1/releases/{release}/recall", post(recall_release))
+        .route(
+            "/v1/products/{product}/recall-range",
+            post(record_recall_range),
+        )
+        .route(
+            "/v1/products/{product}/recall-range/close",
+            post(close_recall_range),
+        )
         .route(
             "/v1/environments/{environment}/subscriptions",
             post(subscribe_environment),

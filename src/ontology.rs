@@ -12,6 +12,7 @@ pub const KIND_PRODUCT: &str = "tenkai.product";
 pub const KIND_RELEASE: &str = "tenkai.release";
 pub const KIND_RELEASE_VERIFICATION: &str = "tenkai.release_verification";
 pub const KIND_RELEASE_RECALL: &str = "tenkai.release_recall";
+pub const KIND_RELEASE_RECALL_RANGE: &str = "tenkai.release_recall_range";
 pub const KIND_CHANNEL: &str = "tenkai.channel";
 pub const KIND_ENVIRONMENT: &str = "tenkai.environment";
 pub const KIND_MAINTENANCE_CONFIG: &str = "tenkai.maintenance_config";
@@ -105,6 +106,9 @@ pub fn release_verification_id(release_id: &str) -> String {
 }
 pub fn release_recall_id(release_id: &str) -> String {
     format!("{release_id}:recall")
+}
+pub fn release_recall_range_id(product: &str, from: &str) -> String {
+    format!("tenkai:release_recall_range:{product}:{from}")
 }
 pub fn channel_id(product: &str, channel: &str) -> String {
     format!("tenkai:channel:{product}/{channel}")

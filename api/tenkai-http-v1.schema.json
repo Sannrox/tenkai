@@ -5636,6 +5636,71 @@
       ],
       "type": "object"
     },
+    "RecallRangeCloseRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/products/{product}/recall-range/close`.",
+      "properties": {
+        "before": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "product",
+        "from",
+        "before"
+      ],
+      "type": "object"
+    },
+    "RecallRangeRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/products/{product}/recall-range`.",
+      "properties": {
+        "before": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "product",
+        "from",
+        "reason"
+      ],
+      "type": "object"
+    },
     "RecallRequest": {
       "additionalProperties": false,
       "properties": {
@@ -8248,6 +8313,28 @@
       "path": "/v1/releases/{release}/recall",
       "request": {
         "$ref": "#/$defs/RecallRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/products/{product}/recall-range",
+      "request": {
+        "$ref": "#/$defs/RecallRangeRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/products/{product}/recall-range/close",
+      "request": {
+        "$ref": "#/$defs/RecallRangeCloseRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"

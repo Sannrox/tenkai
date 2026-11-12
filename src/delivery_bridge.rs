@@ -259,12 +259,7 @@ async fn admit_before_delegation(
         }
     }
     for step in &plan.steps {
-        if let Some(release) = ctx.get(&step.release_id).await?
-            && release
-                .properties
-                .get("recalled_at")
-                .is_some_and(|value| !value.is_empty())
-        {
+        if crate::catalog::release_is_recalled(ctx, &step.release_id).await? {
             bail!("recalled release {} cannot be delegated", step.release_id);
         }
     }
@@ -650,6 +645,30 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("recalled"), "{err}");
+
+        let mut ranged = signed_upgrade("range-recall").await;
+        let ranged_actor = crate::auth_context::test_management_context("range-recall");
+        crate::catalog::record_recall_range(
+            &mut ranged.ctx,
+            &ranged_actor,
+            "bridge-app",
+            "1.1.0",
+            None,
+            "bad series",
+        )
+        .await
+        .unwrap();
+        let err = execute_bridged_plan(
+            &mut ranged.ctx,
+            &adapter,
+            &ranged.plan,
+            opts(&ranged.approval, &ranged.trust, crate::now_millis(), true),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("recalled"), "{err}");
+        let _ = std::fs::remove_dir_all(ranged.root);
 
         let mut gated = signed_upgrade("gate").await;
         let gated_approval = gated.approval.clone();

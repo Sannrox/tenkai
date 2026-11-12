@@ -38,8 +38,21 @@ pub(crate) enum ReleaseCommand {
         #[arg(long)]
         trust_roots: PathBuf,
     },
-    /// Recall a published release so lookup and planning fail closed.
-    Recall { spec: String },
+    /// Recall a published release, or a version range of one product.
+    Recall {
+        spec: String,
+        /// Inclusive start of a product recall range.
+        #[arg(long, conflicts_with = "close", requires = "reason")]
+        from: Option<String>,
+        /// Exclusive end of a product recall range.
+        #[arg(long)]
+        before: Option<String>,
+        /// Open-ended range `--from` to close.
+        #[arg(long, conflicts_with = "from", requires = "before")]
+        close: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Pin version and artifact digests, then validate the manifest to sign.
     Render {
         manifest: PathBuf,
@@ -297,6 +310,93 @@ mod tests {
                 command: ReleaseCommand::Verify { spec, trust_roots }
             } if spec == "api@1.2.3" && trust_roots == std::path::Path::new("release-trust.toml")
         ));
+    }
+
+    #[test]
+    fn parses_release_recall_and_range() {
+        let single = Cli::try_parse_from(["tenkaictl", "release", "recall", "api@1.1.0"]).unwrap();
+        assert!(matches!(
+            single.command,
+            Command::Release {
+                command: ReleaseCommand::Recall {
+                    ref spec,
+                    from: None,
+                    close: None,
+                    ..
+                }
+            } if spec == "api@1.1.0"
+        ));
+
+        let range = Cli::try_parse_from([
+            "tenkaictl",
+            "release",
+            "recall",
+            "api",
+            "--from",
+            "1.0.0",
+            "--before",
+            "1.2.0",
+            "--reason",
+            "bad series",
+        ])
+        .unwrap();
+        assert!(matches!(
+            range.command,
+            Command::Release {
+                command: ReleaseCommand::Recall {
+                    ref spec,
+                    from: Some(ref from),
+                    before: Some(ref before),
+                    close: None,
+                    reason: Some(ref reason),
+                }
+            } if spec == "api"
+                && from == "1.0.0"
+                && before == "1.2.0"
+                && reason == "bad series"
+        ));
+
+        let close = Cli::try_parse_from([
+            "tenkaictl",
+            "release",
+            "recall",
+            "api",
+            "--close",
+            "1.0.0",
+            "--before",
+            "1.2.0",
+        ])
+        .unwrap();
+        assert!(matches!(
+            close.command,
+            Command::Release {
+                command: ReleaseCommand::Recall {
+                    ref spec,
+                    from: None,
+                    before: Some(ref before),
+                    close: Some(ref from),
+                    ..
+                }
+            } if spec == "api" && from == "1.0.0" && before == "1.2.0"
+        ));
+
+        assert!(
+            Cli::try_parse_from([
+                "tenkaictl",
+                "release",
+                "recall",
+                "api",
+                "--from",
+                "1.0.0",
+                "--close",
+                "1.0.0",
+                "--before",
+                "1.2.0",
+                "--reason",
+                "bad series",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

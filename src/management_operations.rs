@@ -1680,6 +1680,85 @@ impl ManagementOperations {
         ))
     }
 
+    pub async fn record_recall_range(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        request: crate::management_lifecycle::RecallRangeRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.recall")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_recall_range(
+            &request,
+            product,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.recall.range.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let message = crate::catalog::record_recall_range(
+            &mut ctx,
+            &context,
+            product,
+            &request.from,
+            request.before.as_deref(),
+            &request.reason,
+        )
+        .await
+        .map_err(map_catalog_error)?;
+        self.audit(actor, "catalog.recall.range.completed")?;
+        self.record_change(
+            &context,
+            crate::change_stream::ChangeEventKind::ReleaseRecalled,
+            product,
+            None,
+        )?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Recall,
+            message,
+            Some(product.to_string()),
+        ))
+    }
+
+    pub async fn close_recall_range(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        request: crate::management_lifecycle::RecallRangeCloseRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.recall")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_recall_range_close(
+            &request,
+            product,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.recall.range.close.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let message = crate::catalog::close_recall_range(
+            &mut ctx,
+            &context,
+            product,
+            &request.from,
+            &request.before,
+        )
+        .await
+        .map_err(map_catalog_error)?;
+        self.audit(actor, "catalog.recall.range.close.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Recall,
+            message,
+            Some(product.to_string()),
+        ))
+    }
+
     pub async fn subscribe_environment(
         &self,
         credential: &CredentialMaterial,
