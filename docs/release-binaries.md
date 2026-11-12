@@ -307,6 +307,20 @@ tenkaictl self-upgrade apply --home /opt/tenkai --bundle site.bundle.json \
   --ready-url http://127.0.0.1:8080/readyz -- systemctl restart tenkai-server
 ```
 
+A hosts-only bundle needs `tenkaictl` 0.8.0 or newer. A 0.7.x `tenkaictl`
+refuses it with `bundle must contain releases and entries`. On a 0.7.x
+host, verify the new `tenkaictl` from the same Release
+([verify and install by hand](#verify-and-install-by-hand)), then run
+`plan` and `apply` with that binary:
+
+```bash
+./tenkaictl-linux-x86_64 self-upgrade plan --home /opt/tenkai --bundle site.bundle.json \
+  --trust-roots offline-trust.toml --env site-c --database /var/lib/tenkai/tenkai.db
+./tenkaictl-linux-x86_64 self-upgrade apply --home /opt/tenkai --bundle site.bundle.json \
+  --trust-roots offline-trust.toml --env site-c --database /var/lib/tenkai/tenkai.db \
+  --ready-url http://127.0.0.1:8080/readyz -- systemctl restart tenkai-server
+```
+
 1. **Store check.** The candidate's own `tenkai-server --check-store`
    opens a private copy of the store. A binary that cannot open it, or a
    store newer than the binary, is refused before anything changes. `plan`
