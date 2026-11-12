@@ -678,7 +678,7 @@
           "type": "string"
         },
         "state": {
-          "description": "`waiting` | `soaking` | `ready` | `reset` | `refused` | `promoted`.",
+          "description": "`waiting` | `soaking` | `ready` | `reset` | `refused` | `promoted` | `recalled`.",
           "type": "string"
         },
         "target_channel": {

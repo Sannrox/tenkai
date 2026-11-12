@@ -70,6 +70,13 @@ pub(crate) struct PromotionLock {
     fencing_token: String,
 }
 
+impl PromotionLock {
+    /// Namespace, key, and fencing token for a guarded write under this lock.
+    pub(crate) fn write_fence(&self) -> (&str, &str, &str) {
+        (PROMOTION_LEASE_NAMESPACE, &self.key, &self.fencing_token)
+    }
+}
+
 fn pre_lease_lock_link(lock_id: &str) -> Link {
     Link {
         id: format!("{lock_id}--{REL_ACTIVE_PROMOTION_LOCK}--{lock_id}"),

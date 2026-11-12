@@ -108,6 +108,9 @@ pub(crate) enum ChannelCommand {
         /// Require published evaluation evidence.
         #[arg(long)]
         require_evaluation: bool,
+        /// Recall the soaking source release when failing share exceeds the policy.
+        #[arg(long)]
+        recall_on_failing: bool,
         /// Pause the policy without deleting soak state.
         #[arg(long, conflicts_with = "resume")]
         pause: bool,
@@ -212,6 +215,7 @@ mod tests {
                     require_canary,
                     require_health_slo,
                     require_evaluation,
+                    recall_on_failing,
                     pause,
                     resume,
                 },
@@ -226,6 +230,7 @@ mod tests {
         assert!(require_canary);
         assert!(!require_health_slo);
         assert!(!require_evaluation);
+        assert!(!recall_on_failing);
         assert!(!pause);
         assert!(!resume);
     }

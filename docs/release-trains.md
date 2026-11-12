@@ -69,6 +69,7 @@ the actor.
 
 ```sh
 tenkaictl channel policy api stable --from candidate --soak 24h --require-canary
+tenkaictl channel policy api stable --from candidate --soak 24h --recall-on-failing
 tenkaictl channel policy api stable --pause
 tenkaictl channel policy api stable --resume
 ```
@@ -80,7 +81,11 @@ with no health evidence waits, and `fleet status` names it. The policy
 never promotes on elapsed time alone. Time with every replica healthy, and
 time with any replica failing, are shares of the soak; a failing instance
 resets the clock. Soak resets appear as `promotion_soak_reset` in the
-change-event stream.
+change-event stream. `--recall-on-failing` recalls the soaking source
+release through the same catalog recall as `release recall` when the
+failing share exceeds the policy, naming the policy as actor. The
+default failing share is 0, so any failing replica during soak recalls,
+matching the default soak reset. Without that flag the soak only resets.
 
 Gate flags on a train still refuse automatic promotion; `--approve-gates`
 stays a human action. Pause is durable and does not delete soak state.

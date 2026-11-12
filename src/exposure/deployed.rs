@@ -563,6 +563,7 @@ async fn auto_recall_new_matches(
                     ASSESSMENT_LEASE_KEY,
                     fencing_token,
                 )),
+                &[],
             )
             .await?;
         }

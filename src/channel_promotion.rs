@@ -81,6 +81,10 @@ pub struct ChannelPromotionEvidence {
     /// Maximum share of soak time with any replica failing (0.0–1.0).
     #[serde(default)]
     pub failing_max_share: f64,
+    /// When true, exceeding `failing_max_share` recalls the soaking source
+    /// release instead of only resetting the soak.
+    #[serde(default)]
+    pub recall_on_failing: bool,
 }
 
 fn one() -> f64 {
@@ -95,6 +99,7 @@ impl Default for ChannelPromotionEvidence {
             evaluation: false,
             healthy_min_share: 1.0,
             failing_max_share: 0.0,
+            recall_on_failing: false,
         }
     }
 }
@@ -176,7 +181,7 @@ pub struct ChannelPromotionPolicyStatus {
     pub policy_id: String,
     pub policy_version: u64,
     pub paused: bool,
-    /// `waiting` | `soaking` | `ready` | `reset` | `refused` | `promoted`.
+    /// `waiting` | `soaking` | `ready` | `reset` | `refused` | `promoted` | `recalled`.
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
@@ -226,6 +231,10 @@ enum TickOutcome {
     Promoted {
         spec: String,
     },
+    Recalled {
+        spec: String,
+        reason: String,
+    },
 }
 
 /// Authenticated context used only for the guarded promotion path.
@@ -242,6 +251,27 @@ pub fn policy_request_context(
         POLICY_AUTHENTICATOR,
     )
     .with_delivery_capabilities([DeliveryCapability::Read, DeliveryCapability::Publish])
+    .build()
+    .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+fn policy_recall_context(
+    policy_id: &str,
+    policy_version: u64,
+) -> Result<AuthenticatedRequestContext> {
+    AuthenticatedRequestContextBuilder::new(
+        format!("{POLICY_AUTHENTICATOR}:{policy_id}:{policy_version}"),
+        PrincipalIdentity {
+            id: format!("{policy_id}:{policy_version}"),
+            kind: PrincipalKind::Service,
+        },
+        POLICY_AUTHENTICATOR,
+    )
+    .with_delivery_capabilities([
+        DeliveryCapability::Read,
+        DeliveryCapability::Publish,
+        DeliveryCapability::Management,
+    ])
     .build()
     .map_err(|error| anyhow::anyhow!("{error}"))
 }
@@ -308,7 +338,7 @@ pub(crate) async fn require_soak_still_ready(
     {
         bail!("channel promotion soak for {product}/{target_channel} observation is stale");
     }
-    let (health, missing) = classify_health(
+    let (health, missing, _) = classify_health(
         ctx,
         product,
         &active.policy.source_channel,
@@ -740,7 +770,7 @@ async fn status_for(
         Some(_) if soak.as_ref().is_some_and(|soak| soak.started_at > 0) => "soaking",
         _ => "waiting",
     };
-    let (_, missing) = classify_health(
+    let (_, missing, _) = classify_health(
         ctx,
         &active.policy.product,
         &active.policy.source_channel,
@@ -781,6 +811,12 @@ async fn evaluate_one(
             active,
             "promoted",
             Some(&format!("promoted {spec}")),
+            Vec::new(),
+        )),
+        TickOutcome::Recalled { spec, reason } => Ok(status_row(
+            active,
+            "recalled",
+            Some(&format!("recalled {spec}: {reason}")),
             Vec::new(),
         )),
     }
@@ -939,7 +975,7 @@ async fn evaluate_ready_locked(
         return Ok(LockedTick::Outcome(TickOutcome::Refused { reason }));
     }
 
-    let (health, missing) = classify_health(
+    let (health, missing, failing_labels) = classify_health(
         ctx,
         product,
         source,
@@ -1075,6 +1111,42 @@ async fn evaluate_ready_locked(
             soak.failing_ms as f64 / elapsed as f64
         };
         if failing_share > active.policy.evidence.failing_max_share {
+            if active.policy.evidence.recall_on_failing {
+                let reason = format!("failing share {failing_share:.3}");
+                if crate::catalog::release_is_recalled(ctx, source_release).await? {
+                    return Ok(LockedTick::Outcome(TickOutcome::Recalled { spec, reason }));
+                }
+                let actor = policy_recall_context(&active.id(), active.version)?;
+                let fence = locks
+                    .first()
+                    .map(crate::canary::PromotionLock::write_fence)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("channel promotion recall requires a promotion lock")
+                    })?;
+                crate::catalog::persist_recall_claim_with_fence(
+                    ctx,
+                    &actor,
+                    source_release,
+                    Some(fence),
+                    &[
+                        ("policy_id".into(), active.id()),
+                        ("policy_version".into(), active.version.to_string()),
+                        ("reason".into(), reason.clone()),
+                        ("failing_instances".into(), failing_labels.join(",")),
+                    ],
+                )
+                .await?;
+                soak = reset_soak(
+                    soak,
+                    source_release.to_string(),
+                    now,
+                    format!("recalled: {reason}"),
+                );
+                persist_soak(ctx, product, target, soak, locks).await?;
+                emit_reset(ctx, active, &format!("recalled: {reason}"))?;
+                emit_recall(ctx, &spec)?;
+                return Ok(LockedTick::Outcome(TickOutcome::Recalled { spec, reason }));
+            }
             let reason = format!("reset: failing share {failing_share:.3}");
             soak = reset_soak(soak, source_release.to_string(), now, reason.clone());
             persist_soak(ctx, product, target, soak, locks).await?;
@@ -1229,6 +1301,19 @@ fn emit_reset(ctx: &mut Ctx, active: &ActiveChannelPromotionPolicy, reason: &str
     Ok(())
 }
 
+fn emit_recall(ctx: &mut Ctx, spec: &str) -> Result<()> {
+    let Some(store) = ctx.embedded_arc() else {
+        return Ok(());
+    };
+    store.append_change_event(
+        now_ms(),
+        crate::change_stream::ChangeEventKind::ReleaseRecalled.as_str(),
+        spec,
+        "",
+    )?;
+    Ok(())
+}
+
 async fn channel_head(ctx: &mut Ctx, product: &str, channel: &str) -> Result<Option<String>> {
     let Some(object) = ctx.get(&channel_id(product, channel)).await? else {
         return Ok(None);
@@ -1338,13 +1423,19 @@ async fn classify_health(
     source_release: &str,
     now: i64,
     stale_after_ms: i64,
-) -> Result<(HealthClass, Vec<String>)> {
+) -> Result<(HealthClass, Vec<String>, Vec<String>)> {
     let cid = channel_id(product, source_channel);
     let subscribers = ctx.linked(&cid, REL_SUBSCRIBES, "in").await?;
     let mut missing = Vec::new();
+    let mut failing_labels = Vec::new();
     let mut saw_failing = false;
     let mut saw_healthy = false;
     let mut any = false;
+    let mut observations_by_env = HashMap::new();
+    let deployed_digest = match ctx.get(source_release).await? {
+        Some(release) => release.properties.get("artifact_digest").cloned(),
+        None => None,
+    };
     for subscriber in subscribers {
         let (env_name, instance_key, label) = if subscriber.kind == KIND_ENVIRONMENT {
             (
@@ -1386,30 +1477,69 @@ async fn classify_health(
             missing.push(label);
             continue;
         }
-        if stale_after_ms > 0 && now.saturating_sub(env.updated) > stale_after_ms {
+        if !observations_by_env.contains_key(&env_name) {
+            let reports = crate::instance_health::reported(ctx, &env_name).await?;
+            observations_by_env.insert(env_name.clone(), reports);
+        }
+        let observation = observations_by_env
+            .get(&env_name)
+            .and_then(|reports| reports.get(&instance_key));
+        let live_observation = observation
+            .filter(|report| deployed_digest.as_deref() == Some(report.artifact_digest.as_str()));
+        let apply_health = env
+            .properties
+            .get(&format!("deployment_health.{instance_key}"))
+            .cloned();
+        let (health, checks) = crate::instance_health::overlay(
+            apply_health,
+            observation,
+            deployed_digest.as_deref(),
+            now,
+            crate::instance_health::max_age_ms(&env),
+        );
+        if live_observation.is_none()
+            && stale_after_ms > 0
+            && now.saturating_sub(env.updated) > stale_after_ms
+        {
             missing.push(label);
             continue;
         }
-        match env
-            .properties
-            .get(&format!("deployment_health.{instance_key}"))
-            .map(String::as_str)
-        {
-            Some("unhealthy") => saw_failing = true,
+        match health.as_deref() {
+            Some("unhealthy") => {
+                saw_failing = true;
+                let messages: Vec<String> = checks
+                    .iter()
+                    .filter(|check| {
+                        check.state >= crate::instance_health::HealthCheckState::Failing
+                    })
+                    .map(|check| {
+                        if check.message.is_empty() {
+                            check.name.clone()
+                        } else {
+                            format!("{}: {}", check.name, check.message)
+                        }
+                    })
+                    .collect();
+                if messages.is_empty() {
+                    failing_labels.push(label);
+                } else {
+                    failing_labels.push(format!("{label} ({})", messages.join("; ")));
+                }
+            }
             Some("healthy") => saw_healthy = true,
             _ => missing.push(label),
         }
     }
     if !any {
-        return Ok((HealthClass::Incomplete, missing));
+        return Ok((HealthClass::Incomplete, missing, failing_labels));
     }
     if saw_failing {
-        return Ok((HealthClass::AnyFailing, missing));
+        return Ok((HealthClass::AnyFailing, missing, failing_labels));
     }
     if missing.is_empty() && saw_healthy {
-        Ok((HealthClass::AllHealthy, missing))
+        Ok((HealthClass::AllHealthy, missing, failing_labels))
     } else {
-        Ok((HealthClass::Incomplete, missing))
+        Ok((HealthClass::Incomplete, missing, failing_labels))
     }
 }
 
@@ -1901,6 +2031,140 @@ mod tests {
         let waiting = reconcile_tick(&mut ctx, true).await.unwrap();
         assert_eq!(waiting[0].state, "waiting", "{waiting:?}");
         assert!(head(&mut ctx, "promo", "stable").await.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn failing_soak_with_recall_opt_in_recalls_once() {
+        let _clock = Clock;
+        Clock::set(10_000);
+        let (root, mut ctx, actor) = fixture("recall-failing").await;
+        publish(&mut ctx, &root, "promo", "1.0.0").await;
+        crate::catalog::promote(&mut ctx, &actor, "promo@1.0.0", "candidate")
+            .await
+            .unwrap();
+        crate::environment::env_add(&mut ctx, "lab", "lab")
+            .await
+            .unwrap();
+        crate::plan::subscribe(&mut ctx, "lab", "promo", "candidate")
+            .await
+            .unwrap();
+        observe(&mut ctx, "lab", "promo", "1.0.0", true).await;
+        let mut policy = policy("promo", 5_000);
+        policy.evidence.recall_on_failing = true;
+        configure(&mut ctx, &actor, policy).await.unwrap();
+        Clock::set(10_000);
+        reconcile_tick(&mut ctx, true).await.unwrap();
+        observe(&mut ctx, "lab", "promo", "1.0.0", false).await;
+        Clock::set(12_000);
+        let recalled = reconcile_tick(&mut ctx, true).await.unwrap();
+        assert_eq!(recalled[0].state, "recalled", "{recalled:?}");
+        let rid = release_id("promo", "1.0.0");
+        assert!(
+            crate::catalog::release_is_recalled(&mut ctx, &rid)
+                .await
+                .unwrap()
+        );
+        let claim = ctx
+            .get(&crate::ontology::release_recall_id(&rid))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            claim
+                .properties
+                .get("reason")
+                .is_some_and(|reason| reason.contains("failing share")),
+            "{claim:?}"
+        );
+        assert!(
+            claim
+                .properties
+                .get("policy_id")
+                .is_some_and(|id| !id.is_empty()),
+            "{claim:?}"
+        );
+        assert_eq!(
+            claim.properties.get("policy_version").map(String::as_str),
+            Some("1")
+        );
+        let events = ctx
+            .embedded_arc()
+            .unwrap()
+            .list_change_events_after(0, 20)
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind
+                    == crate::change_stream::ChangeEventKind::ReleaseRecalled)
+                .count(),
+            1,
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| {
+                event.kind == crate::change_stream::ChangeEventKind::PromotionSoakReset
+                    && event.resource.contains("recalled")
+            }),
+            "{events:?}"
+        );
+        Clock::set(13_000);
+        reconcile_tick(&mut ctx, true).await.unwrap();
+        let again = ctx
+            .find_by_property(crate::ontology::KIND_RELEASE_RECALL, "release_id", &rid)
+            .await
+            .unwrap();
+        assert_eq!(again.len(), 1, "{again:?}");
+        let events_after = ctx
+            .embedded_arc()
+            .unwrap()
+            .list_change_events_after(0, 20)
+            .unwrap();
+        assert_eq!(
+            events_after
+                .iter()
+                .filter(|event| event.kind
+                    == crate::change_stream::ChangeEventKind::ReleaseRecalled)
+                .count(),
+            1,
+            "{events_after:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn missing_health_evidence_does_not_recall() {
+        let _clock = Clock;
+        Clock::set(10_000);
+        let (root, mut ctx, actor) = fixture("recall-missing").await;
+        publish(&mut ctx, &root, "promo", "1.0.0").await;
+        crate::catalog::promote(&mut ctx, &actor, "promo@1.0.0", "candidate")
+            .await
+            .unwrap();
+        crate::environment::env_add(&mut ctx, "lab", "lab")
+            .await
+            .unwrap();
+        crate::plan::subscribe(&mut ctx, "lab", "promo", "candidate")
+            .await
+            .unwrap();
+        let mut env = ctx.get(&env_id("lab")).await.unwrap().unwrap();
+        env.properties.insert(
+            "deployed_release.promo".into(),
+            release_id("promo", "1.0.0"),
+        );
+        ctx.put(env).await.unwrap();
+        let mut policy = policy("promo", 1_000);
+        policy.evidence.recall_on_failing = true;
+        configure(&mut ctx, &actor, policy).await.unwrap();
+        Clock::set(12_000);
+        let waiting = reconcile_tick(&mut ctx, true).await.unwrap();
+        assert_eq!(waiting[0].state, "waiting", "{waiting:?}");
+        assert!(
+            !crate::catalog::release_is_recalled(&mut ctx, &release_id("promo", "1.0.0"))
+                .await
+                .unwrap()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

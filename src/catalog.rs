@@ -1147,7 +1147,7 @@ pub(crate) async fn persist_recall_claim(
     actor: &AuthenticatedRequestContext,
     release_id: &str,
 ) -> Result<()> {
-    persist_recall_claim_with_fence(ctx, actor, release_id, None).await
+    persist_recall_claim_with_fence(ctx, actor, release_id, None, &[]).await
 }
 
 /// Stamp a recall claim, optionally under an active write lease so a stale
@@ -1157,6 +1157,7 @@ pub(crate) async fn persist_recall_claim_with_fence(
     actor: &AuthenticatedRequestContext,
     release_id: &str,
     fence: Option<(&str, &str, &str)>,
+    extra: &[(String, String)],
 ) -> Result<()> {
     actor
         .require_delivery_capability(DeliveryCapability::Management)
@@ -1164,19 +1165,23 @@ pub(crate) async fn persist_recall_claim_with_fence(
     let claim_id = release_recall_id(release_id);
     let recalled_at = crate::now_millis().to_string();
     let recalled_by = actor.principal_id().to_string();
+    let mut properties = HashMap::from([
+        ("release_id".into(), release_id.to_string()),
+        ("recalled_at".into(), recalled_at.clone()),
+        ("recalled_by".into(), recalled_by.clone()),
+        (
+            "principal_kind".into(),
+            actor.principal_kind_name().to_string(),
+        ),
+    ]);
+    for (key, value) in extra {
+        properties.insert(key.clone(), value.clone());
+    }
     let proposed = object(
         claim_id.clone(),
         KIND_RELEASE_RECALL,
         format!("recall {release_id}"),
-        HashMap::from([
-            ("release_id".into(), release_id.to_string()),
-            ("recalled_at".into(), recalled_at.clone()),
-            ("recalled_by".into(), recalled_by.clone()),
-            (
-                "principal_kind".into(),
-                actor.principal_kind_name().to_string(),
-            ),
-        ]),
+        properties,
     );
     let claim = match ctx.get(&claim_id).await? {
         Some(existing) => existing,

@@ -122,6 +122,7 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
                     require_canary,
                     require_health_slo,
                     require_evaluation,
+                    recall_on_failing,
                     pause,
                     resume,
                 },
@@ -157,6 +158,7 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
                         canary: require_canary,
                         health_slo: require_health_slo,
                         evaluation: require_evaluation,
+                        recall_on_failing,
                         ..Default::default()
                     },
                 },
