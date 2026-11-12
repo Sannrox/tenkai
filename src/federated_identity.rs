@@ -124,11 +124,6 @@ impl FederatedIdentifier {
         }
         Ok(())
     }
-
-    /// Correlation token for audit logs (issuer + kind + subject). Contains no secrets.
-    pub fn audit_correlation_id(&self) -> String {
-        format!("{}:{}:{}", self.issuer, self.kind.as_str(), self.subject)
-    }
 }
 
 /// Mapping from an external federated identifier into a Tenkai-local handle.
@@ -473,48 +468,6 @@ impl IdentityDirectory {
         replayed.insert(context.assertion_id.clone(), context.expires_at);
         Ok(())
     }
-}
-
-/// Whether an unavailable governance provider blocks the operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderDecisionClass {
-    /// Operation requires provider evidence; unavailability fails closed.
-    Required,
-    /// Provider is optional enrichment; unavailability degrades with retry.
-    Optional,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ProviderAvailabilityOutcome {
-    Proceed,
-    FailClosed { reason: String },
-    Degrade { reason: String },
-}
-
-/// Provider unavailability policy for federated evidence identities.
-pub fn provider_unavailability_outcome(
-    class: ProviderDecisionClass,
-    provider_id: &str,
-) -> ProviderAvailabilityOutcome {
-    match class {
-        ProviderDecisionClass::Required => ProviderAvailabilityOutcome::FailClosed {
-            reason: format!(
-                "required governance provider `{provider_id}` is unavailable; decision fails closed"
-            ),
-        },
-        ProviderDecisionClass::Optional => ProviderAvailabilityOutcome::Degrade {
-            reason: format!(
-                "optional governance provider `{provider_id}` is unavailable; operational recovery continues"
-            ),
-        },
-    }
-}
-
-/// Tenkai standalone enterprise hosts authenticate via a configured issuer and
-/// do not require a governance provider for authentication or recovery.
-pub fn standalone_enterprise_requires_governance_provider() -> bool {
-    false
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -980,19 +933,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_unavailability_policy() {
-        assert!(matches!(
-            provider_unavailability_outcome(ProviderDecisionClass::Required, "gate"),
-            ProviderAvailabilityOutcome::FailClosed { .. }
-        ));
-        assert!(matches!(
-            provider_unavailability_outcome(ProviderDecisionClass::Optional, "audit"),
-            ProviderAvailabilityOutcome::Degrade { .. }
-        ));
-        assert!(!standalone_enterprise_requires_governance_provider());
-    }
-
-    #[test]
     fn community_mode_has_no_required_issuer() {
         let config = FederationConfig::community();
         assert!(config.required_enterprise_issuer.is_none());
@@ -1001,15 +941,6 @@ mod tests {
             dir.mapping_authority(&config),
             Err(FederationError::EnterpriseIssuerNotConfigured)
         ));
-    }
-
-    #[test]
-    fn audit_correlation_contains_no_secrets() {
-        let id = principal();
-        let token = id.audit_correlation_id();
-        assert!(token.contains("user-42"));
-        assert!(!token.contains("password"));
-        assert!(!token.contains("Bearer"));
     }
 
     #[test]

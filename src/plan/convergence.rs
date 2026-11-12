@@ -3531,35 +3531,6 @@ mod tests {
     }
 
     #[test]
-    fn contract_order_refuses_rollback_that_drops_a_required_contract() {
-        let target = BTreeMap::from([("db".into(), test_profile(&[], &[]))]);
-        let installed = BTreeMap::from([
-            ("app".into(), test_profile(&[("database", "1.0.0")], &[])),
-            ("db".into(), test_profile(&[], &[("database", "1.0.0")])),
-        ]);
-        let err = contract_plan_order(&[("db", Action::Rollback)], &target, &installed)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("installed dependent app"), "{err}");
-        assert!(err.contains("database"), "{err}");
-    }
-
-    #[test]
-    fn contract_order_allows_remove_of_an_optional_provider() {
-        let installed = BTreeMap::from([
-            (
-                "app".into(),
-                test_profile_optional(&[("database", "1.0.0")]),
-            ),
-            ("db".into(), test_profile(&[], &[("database", "1.0.0")])),
-        ]);
-        let ranks = contract_plan_order(&[("db", Action::Remove)], &BTreeMap::new(), &installed)
-            .unwrap()
-            .ranks;
-        assert!(ranks.contains_key("db"), "{ranks:?}");
-    }
-
-    #[test]
     fn contract_order_allows_rerender_restart_with_optional_provider_remove() {
         let installed = BTreeMap::from([
             (

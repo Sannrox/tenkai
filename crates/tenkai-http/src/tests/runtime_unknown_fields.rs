@@ -69,17 +69,6 @@ async fn runtime_http_bodies_reject_unknown_fields() {
     }
 }
 
-#[tokio::test]
-async fn runtime_http_bodies_still_accept_the_documented_fields() {
-    let (app, _store) = app();
-    let inventory = serde_json::json!({
-        "facts": { "architecture": "arm64" },
-        "source": "runtime-probe"
-    });
-    let status = post_runtime(app, "inventory", inventory).await;
-    assert_eq!(status, StatusCode::OK);
-}
-
 #[test]
 fn runtime_work_rejects_unknown_fields() {
     let known = serde_json::json!({

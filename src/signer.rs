@@ -20,7 +20,6 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 
 use crate::key_provider::{DeployProfile, ProfileClass};
-use crate::offline_bundle::{BundleEnvelope, BundleStatement};
 use crate::plan_approval::{APPROVAL_SCHEMA, ApprovalEnvelope, ApprovalStatement};
 use crate::release_signing::SignatureEnvelope;
 use crate::secret_source;
@@ -729,15 +728,6 @@ pub fn sign_approval(
     })
 }
 
-/// Sign an offline bundle through the same interface.
-pub fn sign_bundle(
-    signer: &dyn ContentSigner,
-    statement: BundleStatement,
-    payloads: std::collections::BTreeMap<String, (String, Vec<u8>)>,
-) -> Result<BundleEnvelope> {
-    BundleEnvelope::create_with(statement, payloads, signer)
-}
-
 pub fn verifying_key(signer: &dyn ContentSigner) -> Result<VerifyingKey> {
     VerifyingKey::from_bytes(signer.public_key())
         .context("signer public key is not a valid Ed25519 key")
@@ -1119,6 +1109,7 @@ mod tests {
     }
     use super::*;
     use crate::key_provider::{KeyProviderKind, KeyProviderSection, SignerSection};
+    use crate::offline_bundle::{BundleEnvelope, BundleStatement};
     use crate::release_signing::{
         Provenance, ReleaseStatement, TRUST_ROOT_VERSION, TrustRoots, TrustedSigner, verify_release,
     };
@@ -1265,7 +1256,7 @@ mod tests {
         let (statement, payloads) = bundle_payloads();
         let mut statement = statement;
         statement.exporter_identity = "exporter".into();
-        let bundle = sign_bundle(signer, statement, payloads).unwrap();
+        let bundle = BundleEnvelope::create_with(statement, payloads, signer).unwrap();
         bundle
             .verify(
                 &roots_for(signer, "exporter"),
