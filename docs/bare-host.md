@@ -155,7 +155,8 @@ approval policy, and apply:
 ```bash
 tenkaictl --target remote plan --env edge --generation <generation>
 # On a machine that holds the approver key, sign the printed plan digest.
-tenkaictl --target remote apply <plan-id> --approval approval.json --generation <generation>
+tenkaictl --target remote apply <plan-id> --approval approval.json \
+  --approval-trust-roots <approval-trust.toml> --generation <generation>
 ```
 
 The host applier verifies the release signature, the plan, and the approvals

@@ -109,9 +109,8 @@ bundle (for example a managed database provider's CA) to trust it. There is no
 option that skips verification.
 
 Each Postgres store connection owns one handle-free worker thread. Connection
-setup, transactions, health checks, and reconcile fencing all run on that
-thread, so the synchronous `postgres` client never starts its runtime inside a
-Tokio runtime. Calls are serialized through a zero-capacity channel, preserving
+setup, transactions, and health checks all run on that thread, so the
+synchronous `postgres` client never starts its runtime inside a Tokio runtime. Calls are serialized through a zero-capacity channel, preserving
 the adapter's single-connection serialization without creating a thread for
 each operation.
 

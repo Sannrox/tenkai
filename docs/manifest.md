@@ -248,7 +248,7 @@ anti_affinity = "host"   # or "zone"
 ```
 
 The facts are the environments' `host` and `zone` facts, set by the operator
-(`tenkaictl env facts set ledger-a host node-1`) or reported by an environment
+(`tenkaictl env facts set ledger-a host=node-1`) or reported by an environment
 runtime that knows its node. They are not probed: a container's host name is not
 the machine it runs on, so a replica without the fact is refused, not guessed. Planning the release for a replica is refused while two
 replicas share the fact (`replicas ledger-a and ledger-c both have host=h1`),

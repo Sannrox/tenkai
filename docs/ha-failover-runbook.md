@@ -57,7 +57,8 @@ Soft: #874 and #870 can make takeover timing noisy; record the measured
 ## Before you start
 
 - Every replica runs the same binary with the same `TENKAI_POSTGRES_URL` and
-  `--replica-count`, and its own `TENKAI_INSTANCE_ID`.
+  `--replica-count`. Each process picks a random writer-lease holder id at
+  startup.
 - The load balancer or proxy in front of the hub routes only to replicas
   whose `GET /readyz` answers `200`. A standby answers `503`
   (`standby: another replica holds the hub writer lease`) while `/healthz`

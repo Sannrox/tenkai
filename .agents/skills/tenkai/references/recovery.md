@@ -31,17 +31,18 @@ When failed cleanup leaves the external target unknown:
 
 ## After an automatic rollback
 
-A failed health probe rolls back to the previous release and ends the plan
-`failed`. Until the planner keeps a failed-target marker, the next reconcile
-tick computes a new plan for the same failed release, and non-local
-environments report `awaiting_approval` for it. Do not approve that plan.
-Recall the release (`release recall`) or promote a fixed version, then plan
-again.
+A failed health probe rolls back to the previous release, ends the plan
+`failed`, and holds that failed target. The planner does not plan it again
+until an explicit `env retry <env> <product> --reason …`. Prefer recalling the
+release (`release recall`) or promoting a fixed version over retrying a
+known-bad one.
 
 Derive deploy outcomes from the plan's terminal state plus the subscription's
 `deployed` and `health` in `env inspect`, not from `latest_plan` alone: a
-re-plan replaces `latest_plan` right after a rollback. There is no outbound
-deploy-outcome notification yet; poll `env inspect` or `fleet watch`.
+re-plan replaces `latest_plan` right after a rollback. For push
+notification, configure [post-deploy webhooks](../../../../docs/deploy-webhooks.md)
+(`env webhooks`, `product webhooks`); otherwise poll `env inspect` or
+`fleet watch`.
 
 ## Leases and fences
 

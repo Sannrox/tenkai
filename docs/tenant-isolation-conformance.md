@@ -113,6 +113,8 @@ and are not registered.
 | `catalog.list_channels` | `GET /v1/channels` | Same as releases |
 | `catalog.advisory_feed` | `GET /v1/advisory-feed` | Match against the caller's tenant-bound catalog |
 | `catalog.product_criticality` | `GET /v1/products/{product}/criticality` | Same as releases |
+| `catalog.product_owner` | `GET /v1/products/{product}/owner` | Same as releases |
+| `catalog.product_webhooks` | `GET /v1/products/{product}/webhooks` | Same as releases |
 | `catalog.channel_hold` | `GET /v1/products/{product}/channels/{channel}/hold` | Same as releases |
 | `event.list` | `GET /v1/events` | Page the caller tenant's change events; other partitions stay invisible |
 | `runtime.work` / `complete` / `heartbeat` / `inventory` | `/v1/runtime/environments/{env}/…` | Runtime credential scoped to exactly one environment |

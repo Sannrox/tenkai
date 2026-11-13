@@ -1,6 +1,6 @@
-# Staged product kinds (policy, eval suite, agent)
+# Staged product kinds (policy, eval suite, agent, prompt, workshop module)
 
-Three Catalog product kinds deliver **versioned JSON descriptors** through the
+Five Catalog product kinds deliver **versioned JSON descriptors** through the
 same publish → channel → plan → apply path as `routing_config`, without shell
 install scripts as the primary path.
 

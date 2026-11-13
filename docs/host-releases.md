@@ -65,6 +65,7 @@ The command sees only this environment:
 | `HOME` | `/root` (hidden by the unit's `ProtectHome`) |
 | `TENKAI_ENVIRONMENT` | the approved plan's environment |
 | `TENKAI_PRODUCT`, `TENKAI_VERSION` | from the signed manifest |
+| `TENKAI_INSTANCE` | the product instance name; the product when the instance is unnamed |
 | `TENKAI_RELEASE_DIGEST` | sha256 of the signed manifest |
 | `TENKAI_HOST_ACTION` | `install`, `uninstall`, or `health` |
 | `TENKAI_PLAN_ID` | the approved plan's id |
