@@ -1,7 +1,7 @@
 # Multi-replica PostgreSQL compose steps (#130)
 
 Local two-hub recipe for the **Tenkai hub** (`tenkai-server`): PostgreSQL
-tenant isolation, shared replica state, and reconcile fencing. Environment
+tenant isolation, shared replica state, and the hub writer lease. Environment
 runtimes are out of scope. Failover detection, takeover, verification, and
 rollback live in the [hub failover runbook](ha-failover-runbook.md). This
 page is the compose and dump/restore companion, not a product
@@ -53,8 +53,6 @@ cargo build -p tenkai-server --features postgres,ui
 # Required secrets (env only — never argv)
 export TENKAI_MANAGEMENT_TOKEN='…'          # management bearer
 export TENKAI_POSTGRES_URL='postgres://tenkai:tenkai@127.0.0.1:5432/tenkai'
-# Optional stable instance id (defaults to random UUID)
-export TENKAI_INSTANCE_ID='hub-1'
 # Optional runtime credentials JSON
 export TENKAI_RUNTIME_TOKENS='{}'
 ```
@@ -80,7 +78,6 @@ docker run --rm --name tenkai-pg \
 ### 2. Start primary hub
 
 ```bash
-export TENKAI_INSTANCE_ID=hub-1
 export TENKAI_MANAGEMENT_TOKEN=lab-management-token
 export TENKAI_POSTGRES_URL='postgres://tenkai:tenkai@127.0.0.1:5432/tenkai'
 
@@ -98,7 +95,6 @@ terminal-outcome export run in each tenant schema. Product
 ### 3. Start secondary lab peer
 
 ```bash
-export TENKAI_INSTANCE_ID=hub-2
 # same TENKAI_POSTGRES_URL and TENKAI_MANAGEMENT_TOKEN
 
 cargo run -p tenkai-server --features postgres,ui -- \
@@ -130,9 +126,9 @@ Do not print tokens in logs or commit them.
 This drill tests shared hub state and fencing. It is a lab role-switch, not
 product HA.
 
-1. Confirm primary (`hub-1`) is healthy (`/readyz`, reconcile log lines).
+1. Confirm the primary (`hub-1`, port 8080) is healthy (`/readyz`, reconcile log lines).
 2. Stop primary (`Ctrl+C` or kill the process).
-3. Ensure the second peer (`hub-2`) is running with the **same** `TENKAI_POSTGRES_URL`.
+3. Ensure the second peer (`hub-2`, port 8081) is running with the **same** `TENKAI_POSTGRES_URL`.
 4. Point the reverse proxy / operator `TENKAI_SERVER_URL` at the secondary listen
    address.
 5. Re-check `/readyz`, `fleet status`, and one `reconcile` tick.

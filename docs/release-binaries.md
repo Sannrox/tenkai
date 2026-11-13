@@ -234,8 +234,9 @@ validated digest. The attest job then creates:
 
 The upload job checks that the live tag resolves to the tagged commit,
 creates a draft GitHub Release whose body is the tag's `CHANGELOG.md`
-section, attaches the assets, and publishes it: marked latest for `vX.Y.Z`,
-as a pre-release not marked latest for a tag that contains `-`. A rerun
+section, attaches the assets, and publishes it: marked latest for a `vX.Y.Z` tag on `main`, as a pre-release
+not marked latest for a tag that contains `-`, and never marked latest for a
+tag on a `release-*` maintenance line. A rerun
 resumes a draft. An already published Release is refused, not edited. A tag
 mismatch fails closed before assets are uploaded. Pull requests build
 the Linux hosts the same way, run them on older distributions, and run

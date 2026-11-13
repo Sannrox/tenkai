@@ -34,7 +34,7 @@ and signed release identity.
    since the previous final tag (an rc never starts the range). The release
    manifest copies them.
 3. Walk [release readiness](docs/release-readiness.md). Pair with the
-   project-local `prepare-release` skill.
+   shared `prepare-release` skill.
 4. Land the version-bump pull request. Crate versions move in lockstep.
 
 ## Tag

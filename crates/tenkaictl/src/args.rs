@@ -364,8 +364,6 @@ pub(crate) enum Command {
     Backup { destination: PathBuf },
     /// Replace embedded state from a verified backup. The CLI must be the only writer.
     Restore { source: PathBuf },
-    /// Rehearse restoring a server backup into a scratch store and print the
-    /// evidence. Never touches live state.
     /// Export or verify a redacted, signed support bundle.
     SupportBundle {
         #[command(subcommand)]
@@ -376,6 +374,8 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: AuditCommand,
     },
+    /// Rehearse restoring a server backup into a scratch store and print the
+    /// evidence. Never touches live state.
     RestoreDrill {
         /// A `tenkai-backup-<ms>.db` backup with its manifest beside it.
         backup: PathBuf,

@@ -224,7 +224,7 @@ It asserts:
 
 ### Prerequisites
 
-POSIX `sh` and a local Cargo toolchain. No
+POSIX `sh`, `openssl`, and a local Cargo toolchain. No
 cluster, Postgres, or live provider is required. The test sets `TMPDIR`
 under a temporary directory and removes it on exit.
 

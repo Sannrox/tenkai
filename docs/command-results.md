@@ -13,9 +13,11 @@ remains `--output human`; existing scripts and operator output are unchanged.
 | `plan` | yes | yes |
 | `approval submit` (`approve`) | yes | yes |
 | `apply` | yes | yes |
+| `apply cancel` (`apply_cancel`) | yes | yes |
 | `rollback` | yes | yes |
 | `restart` | yes | no |
 | `status` | yes | yes |
+| `explain` | report JSON | report JSON |
 | `env inspect` (`inspect_environment`) | yes | yes |
 | `env history` (`history_environment`) | page JSON | page JSON |
 | `env list` (`list_environments`) | yes | yes |
@@ -44,11 +46,13 @@ output:
 The fixed fields are:
 
 - `schema`: exactly `tenkai.command-result/v1`.
-- `command`: `invocation`, `publish`, `promote`, `plan`, `apply`, `status`,
-  `inspect_environment`, `history_environment`, `rollback`, `restart`, `recall`,
-  `approve`, `subscribe`, `list_environments`, or `fleet_status`.
+- `command`: `invocation`, `publish`, `promote`, `plan`, `apply`,
+  `apply_cancel`, `status`, `explain`, `inspect_environment`,
+  `history_environment`, `rollback`, `restart`, `recall`, `approve`,
+  `subscribe`, `list_environments`, or `fleet_status`.
   `env history --output json-v1` prints the history page JSON on success; a
-  failure still uses a `history_environment` envelope.
+  failure still uses a `history_environment` envelope. `explain` likewise
+  prints its report JSON on success and uses an `explain` envelope on failure.
 - `outcome`: `succeeded`, `failed`, `awaiting_approval`, or `unknown`.
 - `retry`: `not_needed`, `correct_request`, `reconcile_before_retry`, or
   `not_safe`.

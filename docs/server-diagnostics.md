@@ -24,6 +24,7 @@ tenkai.reconcile outcome=ok environments_total=2 environments_failed=0 ...
 | `environments_deferred` | Backed off after prior failure |
 | `environments_awaiting_runtime` | Waiting for scoped runtime work |
 | `environments_awaiting_approval` | Waiting for plan approval |
+| `environments_held` | Plan blocked by a delivery hold |
 
 Cumulative counters are available from `Reconciler::diagnostics_snapshot()` for
 host wiring. Logs never include bearer tokens or raw secrets.
@@ -76,8 +77,9 @@ HTTP: `GET /v1/fleet/status` (management bearer). Domain type:
 ## Change events
 
 `GET /v1/events` is a read-capability page of typed change events (plan,
-hold, release, channel head removal, compatibility, and with `TENKAI_TRUST_CHANGE_EVENTS` trust
-threshold crossings) with a resumable `cursor` and a bounded `limit`
+target, hold, release, channel head removal, promotion soak reset,
+compatibility, and with `TENKAI_TRUST_CHANGE_EVENTS` trust threshold
+crossings) with a resumable `cursor` and a bounded `limit`
 (default 50, max 100). Resume with the returned `next_cursor`. The stream is
 scoped to environments the caller may read. Outbound webhooks stay a separate
 integration surface.
