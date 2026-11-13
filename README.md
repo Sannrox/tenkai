@@ -1,18 +1,21 @@
 # Tenkai
 
-**Ship one product to many environments you don't control.**
+**Tenkai is for governed delivery to environments you do not fully control.**
+
+Customer-owned, disconnected, and regulated sites apply what they verify, not
+what a server tells them. Every change is signed and approved. The control
+plane is not trusted: a pull-only runtime checks the release and the approval
+before it applies, and a failed health probe rolls the site back.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Sannrox/tenkai/ci.yml?branch=main&label=ci)](https://github.com/Sannrox/tenkai/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Sannrox/tenkai)](https://github.com/Sannrox/tenkai/releases)
 [![License](https://img.shields.io/github/license/Sannrox/tenkai)](LICENSE)
 
-[Quickstart](#try-it-in-five-minutes) · [Docs](docs/README.md) · [Design](DESIGN.md) · [Roadmap](docs/capabilities.md)
+[Quickstart](#try-it-in-five-minutes) · [When not to use](#when-not-to-use-tenkai) · [Docs](docs/README.md) · [Design](DESIGN.md) · [Roadmap](docs/capabilities.md)
 
-Tenkai (展開, "deployment") delivers software into customer VPCs, on-prem
-sites, edge hosts, and air-gapped networks. You publish immutable releases and
-promote them into channels. Each environment subscribes to a channel and
-decides for itself what it runs and when. Tenkai plans the change, applies it
-behind health probes, and rolls back automatically when a probe fails.
+Tenkai (展開, "deployment") publishes immutable releases into channels. Each
+environment subscribes, plans the change under its own constraints, and
+applies it behind health probes.
 
 - **Per-environment channels.** Each site follows `stable`, `beta`, or its own pin.
 - **Constraints and maintenance windows.** Each environment carries its own facts and rules.
@@ -20,6 +23,15 @@ behind health probes, and rolls back automatically when a probe fails.
 - **Automatic rollback.** A failed health probe restores the previous release.
 - **Offline bundles.** Deliver to sites that never reach your network.
 - **One binary to start.** Embedded mode needs no server, database, or network.
+
+## When not to use Tenkai
+
+Choose another path when:
+
+- You own a single connected cluster and only need to sync a repository into it.
+- You want a CI builder. Tenkai consumes signed artifacts; it does not compile them.
+- Unsigned or unapproved deploys are the normal path, not a local-lab exception.
+- The environment should trust the control plane instead of verifying what it applies.
 
 ![Deploying a release, then watching Tenkai roll back one whose health probe fails](docs/assets/quickstart-demo.gif)
 
@@ -103,13 +115,6 @@ Tenkai stays operable and recoverable on its own
 The same contract runs three ways: embedded in `tenkaictl` (as above), as the
 networked `tenkai-server`, and as pull-only `tenkai-runtime` processes inside
 environments the server cannot reach.
-
-**Why not a GitOps sync tool or a deploy script?** GitOps tools sync a git
-repo into a connected cluster you own. A deploy script pushes whatever it is
-told to. Tenkai keeps a catalog of immutable releases and lets each
-environment's own constraints decide what it runs and when, including
-environments reachable only by [offline bundle](docs/offline-bundles.md).
-Details in [DESIGN.md](DESIGN.md).
 
 ## Next steps
 

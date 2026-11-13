@@ -1,8 +1,16 @@
 # Tenkai documentation
 
-Operator, integrator, and contributor docs for the Tenkai delivery control
-plane. New here? Run "Try it in five minutes" in the [root README](../README.md)
-first. Then pick a section by what you need:
+Tenkai is for governed delivery to environments you do not fully control:
+customer-owned, disconnected, or regulated sites, where the server is not
+trusted, every change is approved and signed, and runtimes verify what they
+apply. If that is not your problem, read
+[when not to use Tenkai](../README.md#when-not-to-use-tenkai).
+
+A first deploy is [Try it in five minutes](../README.md#try-it-in-five-minutes)
+in the root README. Signing, approval, and what a runtime verifies are under
+[Trust and identity](#trust-and-identity).
+
+Operator, integrator, and contributor docs. Pick a section by what you need:
 
 - **[Tutorials](#tutorials)**: learn Tenkai by running a guided path end to end.
 - **[How-to guides](#how-to-guides)**: carry out one operational task.
