@@ -176,6 +176,39 @@ fn statuses(outcomes: &[Outcome]) -> Vec<StepOutcomeStatus> {
 }
 
 #[tokio::test]
+async fn the_coordinating_server_refuses_tenkai_server_and_releases_the_fence() {
+    let mut fixture = Fixture::new("self-delivery").await;
+    let default = Arc::new(Recorder::default());
+    let executors = SoftwareExecutors::with_default(default.clone());
+    fixture
+        .release(
+            crate::server_self_upgrade::SELF_PRODUCT,
+            "1.0.0",
+            "install = \"true\"",
+        )
+        .await;
+
+    let error = fixture.apply(&executors).await.unwrap_err().to_string();
+    assert!(error.contains("coordinating server"), "{error}");
+    assert!(
+        error.contains(crate::server_self_upgrade::SELF_PRODUCT),
+        "{error}"
+    );
+    assert!(
+        default.applied().is_empty(),
+        "the coordinating host must not run the product: {:?}",
+        default.applied()
+    );
+    let lease = crate::apply::inspect_environment_lease(&mut fixture.ctx, "local")
+        .await
+        .unwrap();
+    assert!(
+        !lease.held,
+        "refusing the coordinating apply must not leave the environment fenced: {lease:?}"
+    );
+}
+
+#[tokio::test]
 async fn one_apply_runs_each_release_with_its_own_executor() {
     let mut fixture = Fixture::new("mixed").await;
     let default = Arc::new(Recorder::default());

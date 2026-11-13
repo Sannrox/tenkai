@@ -167,6 +167,19 @@ async fn execute_with_options_inner(
     };
     crate::plan_approval::record(ctx, &approval_evidence).await?;
     apply_span.set_plan(&stored_plan);
+    // Catalog delivery of this product is the environment runtime. Every
+    // in-process apply refuses it so the process executing the plan cannot
+    // replace tenkai-server (#1080).
+    if stored_plan
+        .steps
+        .iter()
+        .any(|step| step.product == crate::server_self_upgrade::SELF_PRODUCT)
+    {
+        bail!(
+            "{}",
+            crate::server_self_upgrade::coordinating_apply_refusal()
+        );
+    }
     let mut rollback_span = stored_plan
         .steps
         .iter()

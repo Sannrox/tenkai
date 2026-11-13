@@ -300,6 +300,9 @@ The service runs `<home>/current/tenkai-server`:
 <home>/backups/<ms>-<digest>.db     the store before that switch
 ```
 
+Catalog delivery of this host, including the web console, is the
+`tenkai-server` product ([deliver Tenkai with Tenkai](deliver-tenkai.md)).
+
 ```bash
 # Changes nothing: verifies the hosts and runs the candidate's store check.
 tenkaictl self-upgrade plan --home /opt/tenkai --bundle site.bundle.json \
