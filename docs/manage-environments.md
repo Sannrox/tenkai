@@ -698,10 +698,18 @@ tenkaictl env maintenance list prod
 ```
 
 Plans can be computed outside a window, but `apply` records them as blocked and
-exits nonzero while the window is closed. When a window opens, rerun
-`tenkaictl apply <plan-id>`; blocked plans do not resume automatically. Invalid
-rules and ambiguous or skipped DST starts fail closed. Once execution starts
-inside a window, it may finish after that window closes.
+exits nonzero while the window is closed. While the plan waits, Tenkai pre-pulls
+digest-pinned images for software steps (Docker: `docker pull`; Kubernetes: a
+short-lived Job labeled `tenkai.pre-pull=true`). Pre-pull does not change
+serving workloads. Success or failure is recorded on the plan (`pre-pull
+succeeded` or `pre-pull failed for <image>: <cause>`); apply still runs when
+the window opens. Set environment property `pre_pull.timeout_ms` to bound the
+whole pull (default 300000 milliseconds); apply waits up to that bound while
+the window is closed. Leftover pull Jobs and pods are deleted across
+restarts. When a window opens, rerun `tenkaictl apply <plan-id>`; blocked
+plans do not resume automatically. Invalid rules and ambiguous or skipped DST
+starts fail closed. Once execution starts inside a window, it may finish after
+that window closes.
 
 A plan computed while the window is closed is checked against the
 certificates the server serves and trusts (listener, client CA, runner CA,

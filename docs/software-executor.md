@@ -41,7 +41,7 @@ and the object.
 
 | Type | Role |
 | --- | --- |
-| `SoftwareExecutor` | apply / remove / observe / restart, plus `cleanup_failed_apply` (defaults to remove), report-only `observe_spec_drift` (#1028), and `render_target_changes` for plan-time desired-versus-live diffs (#1077) |
+| `SoftwareExecutor` | apply / remove / observe / restart, plus `cleanup_failed_apply` (defaults to remove), report-only `observe_spec_drift` (#1028), `render_target_changes` for plan-time desired-versus-live diffs (#1077), and `pre_pull` / `cleanup_pre_pull` for digest-pinned images while a plan waits on a maintenance window (#1093) |
 | `SoftwareExecutors` | the process default plus adapters for declared kinds; resolves one per release |
 | `FakeSoftwareExecutor` | CI without cluster |
 | `HelmSoftwareExecutor` | Helm chart path (`tenkai-executor`) |
@@ -75,6 +75,29 @@ returns within one call; other executors finish their current call. A
 kubeconfig `exec` credential helper runs synchronously inside the cluster
 client, so a helper that hangs holds that call until it returns. When a step fails and releasing the lease also fails, the error names the
 step failure first and the release failure after it.
+
+## Pre-pull before a maintenance window
+
+An approved plan that is blocked because the environment window is closed may
+pre-pull its digest-pinned images before the window opens. Pre-pull is not a
+plan step and does not change serving workloads. Tenkai records it as a
+preparation event (`tenkai.image_pre_pull`) and reports `pre-pull succeeded`
+or `pre-pull failed for <image>: <cause>` on the plan. Apply still runs when
+the window opens.
+
+- Docker host: `docker pull` by digest.
+- Kubernetes (kubectl and in-process): a short-lived Job per image, named
+  `tenkai-pp-<12 hex>` and labeled `tenkai.pre-pull=true`. Cleanup deletes
+  those Jobs (cascading their pods) and leftover labeled pods by label and
+  by reconstructed name so a restart or replica does not leave pull pods
+  behind. A distroless or scratch image that pulls and then fails to start
+  `true` is still a successful pull. The Job copies `imagePullSecrets` and
+  `serviceAccountName` from the workload that referenced the image.
+- Images that are not `<repository>@sha256:<64 hex>` are reported as failed
+  and are not pulled.
+- Environment property `pre_pull.timeout_ms` bounds the whole pull across
+  steps (default `300000`). `tenkaictl apply` waits up to that bound while
+  the window is closed. Helm has nothing to pull.
 
 ## Per-release selection
 

@@ -5,9 +5,12 @@
 //! stay in operator-managed env files; Tenkai stores only the directory path.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
@@ -17,9 +20,10 @@ use sha2::{Digest as _, Sha256};
 use tenkai::now_millis;
 use tenkai::observed_runtime;
 use tenkai::software_executor::{
-    RolloutPhaseTimes, SoftwareApplyRequest, SoftwareDeployPhase, SoftwareExecutor,
-    SoftwareObserveStatus, format_software_phase_error, run_captured_command,
-    sanitize_diagnostic_text, validate_request, validate_secret_dir_path,
+    PrePullImage, PrePullReport, RolloutPhaseTimes, SoftwareApplyRequest, SoftwareDeployPhase,
+    SoftwareExecutor, SoftwareObserveStatus, digest_pinned_registry_image,
+    format_software_phase_error, run_captured_command, sanitize_diagnostic_text, validate_request,
+    validate_secret_dir_path,
 };
 
 /// Directory under the release workdir that holds the Docker host topology.
@@ -547,6 +551,70 @@ impl SoftwareExecutor for DockerHostExecutor {
             }
         }
         Ok(())
+    }
+
+    fn pre_pull(
+        &self,
+        request: &SoftwareApplyRequest,
+        timeout: Duration,
+        stop: &AtomicBool,
+    ) -> Result<PrePullReport> {
+        validate_request(request)?;
+        let topology = self.topology(request)?;
+        let mut seen = BTreeSet::new();
+        let mut images = Vec::new();
+        let deadline = Instant::now() + timeout;
+        for container in &topology.containers {
+            if !seen.insert(container.image.as_str()) {
+                continue;
+            }
+            if stop.load(Ordering::SeqCst) {
+                images.push(PrePullImage {
+                    image: container.image.clone(),
+                    ok: false,
+                    detail: "stopped".into(),
+                });
+                continue;
+            }
+            if Instant::now() >= deadline {
+                images.push(PrePullImage {
+                    image: container.image.clone(),
+                    ok: false,
+                    detail: "timed out".into(),
+                });
+                continue;
+            }
+            if !digest_pinned_registry_image(&container.image) {
+                images.push(PrePullImage {
+                    image: container.image.clone(),
+                    ok: false,
+                    detail: "image must be digest-pinned as <repository>@sha256:<64 hex>".into(),
+                });
+                continue;
+            }
+            if image_present(self, &container.image)? {
+                images.push(PrePullImage {
+                    image: container.image.clone(),
+                    ok: true,
+                    detail: String::new(),
+                });
+                continue;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match pull_one(self, &container.image, remaining, stop) {
+                Ok(()) => images.push(PrePullImage {
+                    image: container.image.clone(),
+                    ok: true,
+                    detail: String::new(),
+                }),
+                Err(detail) => images.push(PrePullImage {
+                    image: container.image.clone(),
+                    ok: false,
+                    detail,
+                }),
+            }
+        }
+        Ok(PrePullReport { images })
     }
 }
 
@@ -1197,6 +1265,51 @@ fn pull_missing_images(
 fn image_present(executor: &DockerHostExecutor, image: &str) -> Result<bool> {
     let output = docker_output(executor, &["image", "inspect", image])?;
     Ok(output.status.success())
+}
+
+fn pull_one(
+    executor: &DockerHostExecutor,
+    image: &str,
+    timeout: Duration,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    let mut command = executor.docker_command();
+    command.args(["pull", image]);
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("starting docker pull: {error}"))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("stopped".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) => {
+                let mut stderr = String::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    let _ = pipe.read_to_string(&mut stderr);
+                }
+                let detail = sanitize_diagnostic_text(stderr.trim());
+                return Err(if detail.is_empty() {
+                    "docker pull failed".into()
+                } else {
+                    detail
+                });
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("timed out".into());
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(format!("waiting for docker pull: {error}")),
+        }
+    }
 }
 
 /// One container an `apply` created or replaced, in order, so a failed apply
@@ -2556,6 +2669,70 @@ inputs = ["docker"]
 
     fn executor_for(script: &Path, state: &Path, unhealthy: &[&str]) -> DockerHostExecutor {
         DockerHostExecutor::for_binary(script.to_path_buf()).with_fake_env(state, SECRET, unhealthy)
+    }
+
+    #[test]
+    fn pre_pull_pulls_digest_pinned_images_without_starting_containers() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-docker-pre-pull-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (script, state) = fake_docker(&root);
+        let executor = executor_for(&script, &state, &[]);
+        write_release(&root, "1.0.0", DIGEST_B);
+        let request = request_for(&root, &root, "1.0.0");
+        let report = executor
+            .pre_pull(&request, Duration::from_secs(5), &AtomicBool::new(false))
+            .unwrap();
+        assert!(report.succeeded(), "{report:?}");
+        assert!(
+            report.images.iter().any(|image| image.image == DIGEST_A)
+                && report.images.iter().any(|image| image.image == DIGEST_B),
+            "{report:?}"
+        );
+        let data: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        assert!(data["containers"].as_object().is_none_or(|c| c.is_empty()));
+        let images = data["images"].as_array().cloned().unwrap_or_default();
+        assert!(
+            images.iter().any(|value| value.as_str() == Some(DIGEST_A))
+                && images.iter().any(|value| value.as_str() == Some(DIGEST_B)),
+            "{images:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pre_pull_reports_a_missing_image() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-docker-pre-pull-missing-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (script, state) = fake_docker(&root);
+        let executor =
+            executor_for(&script, &state, &[]).with_env("TENKAI_DOCKER_FAKE_MISSING", DIGEST_B);
+        write_release(&root, "1.0.0", DIGEST_B);
+        let request = request_for(&root, &root, "1.0.0");
+        let report = executor
+            .pre_pull(&request, Duration::from_secs(5), &AtomicBool::new(false))
+            .unwrap();
+        assert!(!report.succeeded(), "{report:?}");
+        let missing = report
+            .images
+            .iter()
+            .find(|image| image.image == DIGEST_B)
+            .expect("missing image");
+        assert!(!missing.ok);
+        assert!(
+            missing.detail.contains("does not exist") || missing.detail.contains("not found"),
+            "{}",
+            missing.detail
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

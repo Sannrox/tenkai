@@ -5,26 +5,26 @@
 //! authority: every apply re-reads the signed workdir and admits health from
 //! live workload conditions.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
-use std::collections::BTreeMap;
-#[cfg(test)]
 use std::sync::Mutex;
 
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::workload_stall::{Stall, StallClassifier, WorkloadEvidence};
 
 use tenkai::software_executor::{
-    RolloutPhaseTimes, SoftwareApplyRequest, SoftwareExecutor, SoftwareObserveStatus,
-    TargetUnavailable, k8s_label_value, kubernetes_manifests_dir, list_manifest_files,
-    substitute_instance_placeholder, validate_cluster_config_path, validate_request,
+    PRE_PULL_LABEL, PrePullImage, PrePullReport, RolloutPhaseTimes, SoftwareApplyRequest,
+    SoftwareExecutor, SoftwareObserveStatus, TargetUnavailable, digest_pinned_registry_image,
+    k8s_label_value, kubernetes_manifests_dir, list_manifest_files, pre_pull_job_name,
+    sanitize_diagnostic_text, substitute_instance_placeholder, validate_cluster_config_path,
+    validate_request,
 };
 
 pub const FIELD_MANAGER: &str = "tenkai";
@@ -158,6 +158,15 @@ pub trait ClusterApplyApi: Send + Sync {
         let _ = (cluster_config, namespace);
         Ok(Vec::new())
     }
+    /// Jobs labeled `tenkai.pre-pull=true`. Default none.
+    fn list_pre_pull_resources(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let _ = (cluster_config, namespace);
+        Ok(Vec::new())
+    }
     /// Event reasons and counts for one workload. Messages are not returned.
     fn workload_event_counts(
         &self,
@@ -270,6 +279,14 @@ impl<T: ClusterApplyApi + ?Sized> ClusterApplyApi for &T {
         namespace: &str,
     ) -> Result<Vec<(String, String)>> {
         (**self).list_tenkai_workloads(cluster_config, namespace)
+    }
+
+    fn list_pre_pull_resources(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+    ) -> Result<Vec<(String, String)>> {
+        (**self).list_pre_pull_resources(cluster_config, namespace)
     }
 
     fn workload_event_counts(
@@ -411,11 +428,15 @@ impl ClusterApplyApi for MemoryClusterApi {
             .get(&key)
             .map(|stored| stored.rollout.clone())
             .unwrap_or_else(|| complete_rollout(&kind, object));
+        let mut stored_object = object.clone();
+        if kind == "Job" && stored_object.get("status").is_none() {
+            stored_object["status"] = json!({"succeeded": 1});
+        }
         objects.insert(
             key,
             StoredObject {
                 field_manager: field_manager.into(),
-                object: object.clone(),
+                object: stored_object,
                 conditions: conditions.clone(),
                 rollout,
             },
@@ -565,6 +586,32 @@ impl ClusterApplyApi for MemoryClusterApi {
         Ok(found)
     }
 
+    fn list_pre_pull_resources(
+        &self,
+        _cluster_config: &Path,
+        namespace: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let prefix = format!("{namespace}/");
+        let mut found = Vec::new();
+        for (key, stored) in self.objects.lock().expect("cluster mutex").iter() {
+            let Some(rest) = key.strip_prefix(&prefix) else {
+                continue;
+            };
+            let Some((kind, name)) = rest.split_once('/') else {
+                continue;
+            };
+            let labeled = stored
+                .object
+                .pointer(&format!("/metadata/labels/{PRE_PULL_LABEL}"))
+                .and_then(Value::as_str)
+                == Some("true");
+            if labeled {
+                found.push((kind.to_string(), name.to_string()));
+            }
+        }
+        Ok(found)
+    }
+
     fn workload_event_counts(
         &self,
         _cluster_config: &Path,
@@ -671,6 +718,17 @@ impl ClusterApplyApi for LiveKubeApi {
         )))
     }
 
+    fn list_pre_pull_resources(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+    ) -> Result<Vec<(String, String)>> {
+        block_on(bounded(live_list_pre_pull_resources(
+            cluster_config,
+            namespace,
+        )))
+    }
+
     fn list_tenkai_workloads(
         &self,
         cluster_config: &Path,
@@ -749,6 +807,78 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
             );
         }
         Ok(path)
+    }
+
+    fn pull_one_job(
+        &self,
+        request: &SoftwareApplyRequest,
+        cluster_config: &Path,
+        image: &str,
+        hints: &ImagePullHints,
+        timeout: Duration,
+        stop: &AtomicBool,
+    ) -> Result<(), String> {
+        let mut object = pre_pull_job_object(request, image, hints);
+        stamp_ownership(&mut object, request);
+        if let Err(error) =
+            self.api
+                .apply_server_side(cluster_config, &request.environment, FIELD_MANAGER, &object)
+        {
+            return Err(sanitize_diagnostic_text(&format!("{error:#}")));
+        }
+        let name = pre_pull_job_name(image);
+        let deadline = Instant::now() + timeout;
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                return Err("stopped".into());
+            }
+            match self
+                .api
+                .observe_object(cluster_config, &request.environment, &name, "Job")
+            {
+                Ok(Some(live)) => {
+                    if matches!(job_pull_outcome(&live), Some(Ok(()))) {
+                        return Ok(());
+                    }
+                    if let Some(result) = self.pod_pull_results(cluster_config, request, &name) {
+                        return result;
+                    }
+                    if let Some(Err(detail)) = job_pull_outcome(&live) {
+                        return Err(detail);
+                    }
+                }
+                Ok(None) => {
+                    if let Some(result) = self.pod_pull_results(cluster_config, request, &name) {
+                        return result;
+                    }
+                }
+                Err(error) => return Err(sanitize_diagnostic_text(&format!("{error:#}"))),
+            }
+            if Instant::now() >= deadline {
+                return Err("timed out".into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn pod_pull_results(
+        &self,
+        cluster_config: &Path,
+        request: &SoftwareApplyRequest,
+        job: &str,
+    ) -> Option<Result<(), String>> {
+        self.api
+            .list_pre_pull_resources(cluster_config, &request.environment)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(kind, name)| kind == "Pod" && name.starts_with(job))
+            .filter_map(|(_, name)| {
+                self.api
+                    .observe_object(cluster_config, &request.environment, &name, "Pod")
+                    .ok()
+                    .flatten()
+            })
+            .find_map(|pod| pod_pull_outcome(&pod))
     }
 
     fn apply_manifests_timed(
@@ -1252,6 +1382,272 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
         self.api
             .collect_support_workloads(cluster_config, environment)
     }
+
+    fn pre_pull(
+        &self,
+        request: &SoftwareApplyRequest,
+        timeout: Duration,
+        stop: &AtomicBool,
+    ) -> Result<PrePullReport> {
+        validate_request(request)?;
+        let cluster_config = Self::require_cluster_config(request)?;
+        let images = manifest_images(request)?;
+        let mut report = Vec::new();
+        let deadline = Instant::now() + timeout;
+        for (image, hints) in images {
+            if stop.load(Ordering::SeqCst) {
+                report.push(PrePullImage {
+                    image,
+                    ok: false,
+                    detail: "stopped".into(),
+                });
+                continue;
+            }
+            if Instant::now() >= deadline {
+                report.push(PrePullImage {
+                    image,
+                    ok: false,
+                    detail: "timed out".into(),
+                });
+                continue;
+            }
+            if !digest_pinned_registry_image(&image) {
+                report.push(PrePullImage {
+                    image,
+                    ok: false,
+                    detail: "image must be digest-pinned as <repository>@sha256:<64 hex>".into(),
+                });
+                continue;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.pull_one_job(request, cluster_config, &image, &hints, remaining, stop) {
+                Ok(()) => report.push(PrePullImage {
+                    image,
+                    ok: true,
+                    detail: String::new(),
+                }),
+                Err(detail) => report.push(PrePullImage {
+                    image,
+                    ok: false,
+                    detail,
+                }),
+            }
+        }
+        Ok(PrePullReport { images: report })
+    }
+
+    fn cleanup_pre_pull(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        let Ok(cluster_config) = Self::require_cluster_config(request) else {
+            return Ok(());
+        };
+        let mut names: BTreeSet<(String, String)> = self
+            .api
+            .list_pre_pull_resources(cluster_config, &request.environment)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        if let Ok(images) = manifest_images(request) {
+            for image in images.keys() {
+                names.insert(("Job".into(), pre_pull_job_name(image)));
+            }
+        }
+        for (kind, name) in names {
+            let _ = self
+                .api
+                .remove(cluster_config, &request.environment, &name, &kind);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ImagePullHints {
+    pub secrets: Vec<String>,
+    pub service_account: Option<String>,
+}
+
+fn manifest_images(request: &SoftwareApplyRequest) -> Result<BTreeMap<String, ImagePullHints>> {
+    let manifests = kubernetes_manifests_dir(&request.workdir)?;
+    let mut images = BTreeMap::new();
+    for path in list_manifest_files(&manifests)? {
+        for object in parse_manifest_objects(&path, request.instance_name())? {
+            collect_image_fields(&object, &mut images);
+        }
+    }
+    Ok(images)
+}
+
+pub(crate) fn collect_image_fields(value: &Value, images: &mut BTreeMap<String, ImagePullHints>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Array(containers)) = map.get("containers") {
+                let hints = hints_from_pod_spec(map);
+                let init = match map.get("initContainers") {
+                    Some(Value::Array(init)) => init.as_slice(),
+                    _ => &[],
+                };
+                for container in containers.iter().chain(init) {
+                    if let Some(Value::String(image)) = container.get("image") {
+                        images.entry(image.clone()).or_insert_with(|| hints.clone());
+                    }
+                }
+            }
+            for nested in map.values() {
+                collect_image_fields(nested, images);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                collect_image_fields(nested, images);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn hints_from_pod_spec(spec: &Map<String, Value>) -> ImagePullHints {
+    let secrets = spec
+        .get("imagePullSecrets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| kubernetes_name_ok(name))
+                .map(str::to_string)
+        })
+        .collect();
+    let service_account = spec
+        .get("serviceAccountName")
+        .and_then(Value::as_str)
+        .filter(|name| kubernetes_name_ok(name))
+        .map(str::to_string);
+    ImagePullHints {
+        secrets,
+        service_account,
+    }
+}
+
+fn kubernetes_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 253
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+}
+
+fn pre_pull_job_object(
+    request: &SoftwareApplyRequest,
+    image: &str,
+    hints: &ImagePullHints,
+) -> Value {
+    let mut spec = json!({
+        "restartPolicy": "Never",
+        "containers": [{
+            "name": "pull",
+            "image": image,
+            "command": ["true"],
+            "imagePullPolicy": "Always"
+        }]
+    });
+    if !hints.secrets.is_empty() {
+        spec["imagePullSecrets"] = json!(
+            hints
+                .secrets
+                .iter()
+                .map(|name| json!({"name": name}))
+                .collect::<Vec<_>>()
+        );
+    }
+    if let Some(account) = &hints.service_account {
+        spec["serviceAccountName"] = json!(account);
+    }
+    json!({
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": pre_pull_job_name(image),
+            "labels": {
+                "tenkai.pre-pull": "true",
+                "tenkai.product": k8s_label_value(&request.product),
+            }
+        },
+        "spec": {
+            "ttlSecondsAfterFinished": 60,
+            "backoffLimit": 0,
+            "template": {
+                "metadata": {
+                    "labels": {
+                        "tenkai.pre-pull": "true"
+                    }
+                },
+                "spec": spec
+            }
+        }
+    })
+}
+
+pub(crate) fn job_pull_outcome(object: &Value) -> Option<Result<(), String>> {
+    if object
+        .pointer("/status/failed")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        > 0
+    {
+        return Some(Err("pull job failed".into()));
+    }
+    if object
+        .pointer("/status/succeeded")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        > 0
+    {
+        return Some(Ok(()));
+    }
+    None
+}
+
+/// Distroless and scratch images have no `true` binary. After kubelet pulls
+/// the image, the container fails to start; that is still a successful pull.
+pub(crate) fn pod_pull_outcome(object: &Value) -> Option<Result<(), String>> {
+    let statuses = object.pointer("/status/containerStatuses")?.as_array()?;
+    for status in statuses {
+        let waiting = status.pointer("/state/waiting");
+        let reason = waiting
+            .and_then(|value| value.get("reason"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match reason {
+            "ErrImagePull" | "ImagePullBackOff" | "ErrImageNeverPull" | "InvalidImageName" => {
+                let message = waiting
+                    .and_then(|value| value.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("image pull failed");
+                return Some(Err(sanitize_diagnostic_text(message)));
+            }
+            "CreateContainerError" | "CreateContainerConfigError" | "StartError" => {
+                return Some(Ok(()));
+            }
+            _ => {}
+        }
+        if status
+            .get("imageID")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+        {
+            return Some(Ok(()));
+        }
+        if status
+            .pointer("/state/terminated/exitCode")
+            .and_then(Value::as_i64)
+            == Some(0)
+        {
+            return Some(Ok(()));
+        }
+    }
+    None
 }
 
 fn parse_manifest_objects(path: &Path, instance: &str) -> Result<Vec<Value>> {
@@ -1867,9 +2263,13 @@ async fn live_rollout(
 
 async fn live_remove(cluster_config: &Path, namespace: &str, name: &str, kind: &str) -> Result<()> {
     let client = live_client(cluster_config).await?;
-    let api_version = builtin_api_version(kind)?;
-    let api = dynamic_api(client, namespace, kind, api_version)?;
-    match api.delete(name, &kube::api::DeleteParams::default()).await {
+    let api = cluster_dynamic_api(client, namespace, kind)?;
+    let params = if kind == "Job" {
+        kube::api::DeleteParams::background()
+    } else {
+        kube::api::DeleteParams::default()
+    };
+    match api.delete(name, &params).await {
         Ok(_) => Ok(()),
         Err(error) if is_not_found(&error) => Ok(()),
         Err(error) => Err(anyhow::anyhow!(
@@ -1926,6 +2326,28 @@ async fn live_workload_evidence(
             pods_unavailable: Some(format!("{error:#}")),
         },
     }))
+}
+
+async fn live_list_pre_pull_resources(
+    cluster_config: &Path,
+    namespace: &str,
+) -> Result<Vec<(String, String)>> {
+    let client = live_client(cluster_config).await?;
+    let params = kube::api::ListParams::default().labels(&format!("{PRE_PULL_LABEL}=true"));
+    let mut found = Vec::new();
+    for kind in ["Job", "Pod"] {
+        let api = cluster_dynamic_api(client.clone(), namespace, kind)?;
+        let list = api
+            .list(&params)
+            .await
+            .with_context(|| format!("listing pre-pull {kind}s in {namespace}"))?;
+        found.extend(
+            list.items
+                .into_iter()
+                .filter_map(|object| object.metadata.name.map(|name| (kind.into(), name))),
+        );
+    }
+    Ok(found)
 }
 
 async fn live_list_tenkai_workloads(
@@ -2299,6 +2721,20 @@ fn dynamic_api(
     } else {
         kube::Api::all_with(client, &ar)
     })
+}
+
+/// Cluster API for cleanup kinds, including Pods that apply still refuses.
+fn cluster_dynamic_api(
+    client: kube::Client,
+    namespace: &str,
+    kind: &str,
+) -> Result<kube::Api<kube::api::DynamicObject>> {
+    if kind == "Pod" {
+        let gvk = kube::core::GroupVersionKind::gvk("", "v1", "Pod");
+        let ar = kube::api::ApiResource::from_gvk_with_plural(&gvk, "pods");
+        return Ok(kube::Api::namespaced_with(client, namespace, &ar));
+    }
+    dynamic_api(client, namespace, kind, builtin_api_version(kind)?)
 }
 
 fn builtin_api_version(kind: &str) -> Result<&'static str> {
@@ -4014,5 +4450,166 @@ mod tests {
             ..WorkloadRollout::default()
         };
         assert_eq!(disagreeing_condition(&ds, Some(&ds_rollout)), None);
+    }
+
+    #[test]
+    fn a_job_without_status_is_still_waiting() {
+        assert!(job_pull_outcome(&json!({"kind": "Job"})).is_none());
+        assert!(matches!(
+            job_pull_outcome(&json!({"status": {"succeeded": 1}})),
+            Some(Ok(()))
+        ));
+        assert!(matches!(
+            job_pull_outcome(&json!({"status": {"failed": 1}})),
+            Some(Err(_))
+        ));
+    }
+
+    #[test]
+    fn a_missing_binary_after_pull_still_counts_as_pulled() {
+        let pulled = json!({
+            "status": {
+                "containerStatuses": [{
+                    "state": {"waiting": {"reason": "CreateContainerError", "message": "exec: \"true\": executable file not found in $PATH"}},
+                    "imageID": "sha256:abc"
+                }]
+            }
+        });
+        assert!(matches!(pod_pull_outcome(&pulled), Some(Ok(()))));
+        let missing = json!({
+            "status": {
+                "containerStatuses": [{
+                    "state": {"waiting": {"reason": "ErrImagePull", "message": "not found"}}
+                }]
+            }
+        });
+        assert!(matches!(pod_pull_outcome(&missing), Some(Err(_))));
+    }
+
+    #[test]
+    fn a_pre_pull_job_copies_image_pull_secrets_and_service_account() {
+        let image = format!("registry.example/edge@sha256:{}", "ab".repeat(32));
+        let mut images = BTreeMap::new();
+        collect_image_fields(
+            &json!({
+                "kind": "Deployment",
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "serviceAccountName": "edge-sa",
+                            "imagePullSecrets": [{"name": "regcred"}],
+                            "containers": [{"name": "app", "image": image}]
+                        }
+                    }
+                }
+            }),
+            &mut images,
+        );
+        let hints = images.get(&image).expect("image collected");
+        assert_eq!(hints.service_account.as_deref(), Some("edge-sa"));
+        assert_eq!(hints.secrets, vec!["regcred".to_string()]);
+        let root = unique_root("pre-pull-secrets");
+        std::fs::create_dir_all(&root).unwrap();
+        let kubeconfig = root.join("kubeconfig");
+        std::fs::write(&kubeconfig, "apiVersion: v1\nkind: Config\n").unwrap();
+        let request = request(&root, &kubeconfig, "1.0.0");
+        let job = pre_pull_job_object(&request, &image, hints);
+        assert_eq!(
+            job.pointer("/spec/template/spec/serviceAccountName")
+                .and_then(Value::as_str),
+            Some("edge-sa")
+        );
+        assert_eq!(
+            job.pointer("/spec/template/spec/imagePullSecrets/0/name")
+                .and_then(Value::as_str),
+            Some("regcred")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_runtime_restart_during_pre_pull_does_not_leave_pull_pods_behind() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-ssa-pre-pull-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let image = format!("registry.example/edge@sha256:{}", "ab".repeat(32));
+        let kubeconfig = write_deployment_with_containers(
+            &root,
+            "1.0.0",
+            1,
+            &format!("        - name: app\n          image: {image}\n"),
+        );
+        let api = MemoryClusterApi::new();
+        let executor = InProcessKubernetesExecutor::new(&api)
+            .with_timeout(Duration::from_millis(200))
+            .with_poll_interval(Duration::from_millis(20));
+        let request = request(&root, &kubeconfig, "1.0.0");
+        let report = executor
+            .pre_pull(&request, Duration::from_secs(5), &AtomicBool::new(false))
+            .unwrap();
+        assert!(report.succeeded(), "{report:?}");
+        let job = pre_pull_job_name(&image);
+        assert!(
+            api.observe(Path::new("/unused"), "lab", &job, "Job")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            api.observe(Path::new("/unused"), "lab", "edge", "Deployment")
+                .unwrap()
+                .is_none(),
+            "pre-pull must not apply serving workloads"
+        );
+        executor.cleanup_pre_pull(&request).unwrap();
+        assert!(
+            api.observe(Path::new("/unused"), "lab", &job, "Job")
+                .unwrap()
+                .is_none(),
+            "cleanup must drop pull jobs"
+        );
+        api.apply_server_side(
+            Path::new("/unused"),
+            "lab",
+            FIELD_MANAGER,
+            &serde_json::json!({
+                "kind": "Job",
+                "apiVersion": "batch/v1",
+                "metadata": {
+                    "name": "tenkai-pp-leftover",
+                    "labels": {"tenkai.pre-pull": "true"}
+                }
+            }),
+        )
+        .unwrap();
+        executor.cleanup_pre_pull(&request).unwrap();
+        assert!(
+            api.observe(Path::new("/unused"), "lab", "tenkai-pp-leftover", "Job")
+                .unwrap()
+                .is_none()
+        );
+        api.apply_server_side(
+            Path::new("/unused"),
+            "lab",
+            FIELD_MANAGER,
+            &serde_json::json!({
+                "kind": "Pod",
+                "apiVersion": "v1",
+                "metadata": {
+                    "name": "tenkai-pp-orphan",
+                    "labels": {"tenkai.pre-pull": "true"}
+                }
+            }),
+        )
+        .unwrap();
+        executor.cleanup_pre_pull(&request).unwrap();
+        assert!(
+            api.observe(Path::new("/unused"), "lab", "tenkai-pp-orphan", "Pod")
+                .unwrap()
+                .is_none(),
+            "cleanup must drop orphaned pull pods"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -223,6 +223,15 @@ async fn execute_with_options_inner(
     )
     .await
     {
+        if stored_plan.maintenance_blocked {
+            let _ = crate::image_pre_pull::prepare_waiting_plan(
+                ctx,
+                &lease,
+                &mut stored_plan,
+                &options.software_executors,
+            )
+            .await;
+        }
         let unlock = release_environment(ctx, &lease).await;
         return match unlock {
             Ok(()) => Err(error),

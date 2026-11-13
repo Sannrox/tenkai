@@ -22,6 +22,8 @@ pub const KIND_PLAN_APPROVAL_VERIFICATION: &str = "tenkai.plan_approval_verifica
 pub const KIND_PLAN_APPROVAL_ENVELOPE: &str = "tenkai.plan_approval_envelope";
 /// A host applier record an environment runtime reported (ADR 0048 §2).
 pub const KIND_HOST_RECORD: &str = "tenkai.host_record";
+/// Image pre-pull preparation for a plan waiting on a maintenance window (#1093).
+pub const KIND_IMAGE_PRE_PULL: &str = "tenkai.image_pre_pull";
 pub const KIND_WORKLOAD_CERTIFICATE: &str = "tenkai.workload_certificate";
 /// A runtime's latest health observation of one instance (#1057).
 pub const KIND_INSTANCE_HEALTH: &str = "tenkai.instance_health";
@@ -136,6 +138,10 @@ pub fn upgrade_pace_admit_id(
 pub const CHANNEL_REVISION_FLOOR: &str = "revision_floor";
 pub fn env_id(name: &str) -> String {
     format!("tenkai:env:{name}")
+}
+/// Durable preparation event for one plan's image pre-pull.
+pub fn image_pre_pull_id(plan_id: &str) -> String {
+    format!("tenkai:image-pre-pull:{plan_id}")
 }
 pub fn wave_id(name: &str) -> String {
     format!("tenkai:wave:{name}")

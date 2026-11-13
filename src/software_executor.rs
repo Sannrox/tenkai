@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -416,6 +416,75 @@ pub trait SoftwareExecutor: Send + Sync {
             ..RolloutPhaseTimes::default()
         })
     }
+    /// Pull digest-pinned images for `request` without changing serving
+    /// workloads. Default: nothing to pull. Failures belong in the report;
+    /// they do not fail the later apply.
+    fn pre_pull(
+        &self,
+        request: &SoftwareApplyRequest,
+        timeout: Duration,
+        stop: &AtomicBool,
+    ) -> Result<PrePullReport> {
+        let _ = (request, timeout, stop);
+        Ok(PrePullReport::default())
+    }
+    /// Delete leftover pre-pull Jobs or pods for `request`. Default: none.
+    fn cleanup_pre_pull(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        let _ = request;
+        Ok(())
+    }
+}
+
+/// One image a [`SoftwareExecutor::pre_pull`] attempted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrePullImage {
+    pub image: String,
+    pub ok: bool,
+    /// Empty on success. Image and cause on failure; never a secret.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+/// Images a pre-pull attempted. Empty means the adapter had nothing to pull.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrePullReport {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<PrePullImage>,
+}
+
+impl PrePullReport {
+    pub fn succeeded(&self) -> bool {
+        self.images.iter().all(|image| image.ok)
+    }
+
+    pub fn failures(&self) -> impl Iterator<Item = &PrePullImage> {
+        self.images.iter().filter(|image| !image.ok)
+    }
+}
+
+/// True when `image` is a registry reference pinned by `sha256:<64 hex>`.
+pub fn digest_pinned_registry_image(image: &str) -> bool {
+    let Some((name, digest)) = image.split_once('@') else {
+        return false;
+    };
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return false;
+    };
+    !name.is_empty()
+        && hex.len() == 64
+        && hex
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+}
+
+/// Kubernetes label on short-lived pre-pull Jobs (`tenkai.pre-pull=true`).
+pub const PRE_PULL_LABEL: &str = "tenkai.pre-pull";
+
+/// Kubernetes Job name for one digest-pinned image: `tenkai-pp-` plus 12 hex.
+pub fn pre_pull_job_name(image: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let hex = format!("{:x}", Sha256::digest(image.as_bytes()));
+    format!("tenkai-pp-{}", &hex[..12])
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
