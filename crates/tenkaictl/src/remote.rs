@@ -132,9 +132,13 @@ pub(crate) async fn run(
             Ok(())
         }
         Command::Env {
-            command: EnvCommand::List,
+            command: EnvCommand::List { selector },
         } => {
-            let entries = client.list_environments().await?;
+            let entries = if let Some(selector) = selector.as_deref() {
+                client.list_environments_matching(selector).await?
+            } else {
+                client.list_environments().await?
+            };
             if output == OutputFormat::JsonV1 {
                 return print_machine_result(&crate::output::list_environments_result(
                     entries.len(),
@@ -221,7 +225,41 @@ pub(crate) async fn run(
                     action,
                 },
         } => {
-            crate::remote_hold::environment(&client, &env, generation, action).await?;
+            let selector = tenkai::labels::looks_like_selector(&env);
+            let names = if selector {
+                client
+                    .list_environments_matching(&env)
+                    .await?
+                    .into_iter()
+                    .map(|entry| entry.name)
+                    .collect::<Vec<_>>()
+            } else {
+                vec![env.clone()]
+            };
+            if names.is_empty() {
+                anyhow::bail!("selector {env} matches no environments");
+            }
+            for name in names {
+                // Pass the operator's --generation through. Filling it from
+                // inspect would skip the observed-generation fence (#703).
+                crate::remote_hold::environment(&client, &name, generation, action.clone()).await?;
+            }
+            Ok(())
+        }
+        Command::Env {
+            command:
+                EnvCommand::Labels {
+                    command: crate::env_args::LabelsCommand::List { env },
+                },
+        } => {
+            let labels = client.list_environment_labels(&env).await?;
+            if labels.is_empty() {
+                println!("{env} has no labels");
+            } else {
+                for (key, value) in labels {
+                    println!("{key}={value}");
+                }
+            }
             Ok(())
         }
         Command::Env {

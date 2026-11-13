@@ -53,15 +53,35 @@ pub(super) async fn fleet_status(
     manage_result(state.management.fleet_status(&credential).await)
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct ListEnvironmentsQuery {
+    selector: Option<String>,
+}
+
 pub(super) async fn list_environments(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ListEnvironmentsQuery>,
     headers: HeaderMap,
 ) -> Response {
     let credential = match require_management(&headers) {
         Ok(credential) => credential,
         Err(error) => return *error,
     };
-    manage_result(state.management.list_environments(&credential).await)
+    if let Some(selector) = query
+        .selector
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        manage_result(
+            state
+                .management
+                .list_environments_matching(&credential, selector)
+                .await,
+        )
+    } else {
+        manage_result(state.management.list_environments(&credential).await)
+    }
 }
 
 pub(super) async fn list_releases(

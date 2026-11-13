@@ -124,6 +124,8 @@ pub enum ManagementLifecycleOperation {
     WaiverClear,
     ExposureGrace,
     ChannelExposureGrace,
+    ReleaseLabelSet,
+    ReleaseLabelClear,
     Register,
     Configure,
     Cancel,
@@ -158,6 +160,8 @@ impl ManagementLifecycleOperation {
             Self::WaiverClear => "waiver_clear",
             Self::ExposureGrace => "exposure_grace",
             Self::ChannelExposureGrace => "channel_exposure_grace",
+            Self::ReleaseLabelSet => "release_label_set",
+            Self::ReleaseLabelClear => "release_label_clear",
             Self::Register => "register",
             Self::Configure => "configure",
             Self::Cancel => "cancel",
@@ -180,6 +184,8 @@ impl ManagementLifecycleOperation {
                 | Self::WaiverSet
                 | Self::WaiverClear
                 | Self::ChannelExposureGrace
+                | Self::ReleaseLabelSet
+                | Self::ReleaseLabelClear
                 | Self::Register
         )
     }
@@ -270,6 +276,8 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "waiver_clear" => Ok(ManagementLifecycleOperation::WaiverClear),
         "exposure_grace" => Ok(ManagementLifecycleOperation::ExposureGrace),
         "channel_exposure_grace" => Ok(ManagementLifecycleOperation::ChannelExposureGrace),
+        "release_label_set" => Ok(ManagementLifecycleOperation::ReleaseLabelSet),
+        "release_label_clear" => Ok(ManagementLifecycleOperation::ReleaseLabelClear),
         "register" => Ok(ManagementLifecycleOperation::Register),
         "configure" => Ok(ManagementLifecycleOperation::Configure),
         "cancel" => Ok(ManagementLifecycleOperation::Cancel),
@@ -846,6 +854,18 @@ pub struct ChannelExposureGraceRequest {
     pub operation: String,
     /// Duration (`30`, `250ms`, `2m`, `24h`) or `off`. A bare number is seconds.
     pub grace: String,
+}
+
+/// Body of `PUT`/`DELETE` `/v1/releases/{product}/{version}/labels`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseLabelRequest {
+    pub version: u32,
+    pub operation: String,
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1669,6 +1689,35 @@ pub fn admit_channel_exposure_grace(
         admitted.operation,
         ManagementLifecycleOperation::ChannelExposureGrace,
     )?;
+    Ok(admitted)
+}
+
+pub fn admit_release_label(
+    request: &ReleaseLabelRequest,
+    expected: ManagementLifecycleOperation,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    crate::labels::validate_label_key(&request.key)?;
+    if expected == ManagementLifecycleOperation::ReleaseLabelSet {
+        let value = request.value.as_deref().unwrap_or("");
+        crate::labels::validate_label_value(&request.key, value)?;
+    }
+    anyhow::ensure!(
+        !request.reason.trim().is_empty(),
+        "release label reason must not be empty"
+    );
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: None,
+            expected_generation: None,
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(admitted.operation, expected)?;
     Ok(admitted)
 }
 

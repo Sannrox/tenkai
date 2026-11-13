@@ -14,8 +14,9 @@ use super::auth::{import_development_fixture, reset_development_fixture};
 use super::config::ServerConfig;
 use super::environment_config::{
     configure_approval_policy, configure_bindings, configure_constraints, configure_criticality,
-    configure_facts, configure_maintenance_window, configure_runner_attestation,
-    configure_sealed_secrets, configure_webhooks, list_sealed_secrets, register_environment,
+    configure_facts, configure_labels, configure_maintenance_window, configure_runner_attestation,
+    configure_sealed_secrets, configure_webhooks, list_environment_labels, list_sealed_secrets,
+    register_environment,
 };
 use super::exports::{create_export, download_export, inspect_export, list_exports};
 use super::grant_rules::{create_grant_rule, list_grant_rules, remove_grant_rule};
@@ -33,17 +34,17 @@ use super::inspect::{
 use super::lifecycle::{
     admit_channel_instance, apply_plan, approve_plan, cancel_apply, cancel_environment_freeze,
     channel_hold, clear_environment_failure_threshold, clear_exposure_waiver,
-    clear_product_criticality, close_recall_range, configure_channel_exposure_grace,
-    configure_channel_pace, configure_environment_exposure_grace, environment_hold,
-    import_derived_criticality, install_model_evaluation_trust, plan_environment,
-    plan_identity_issuer, prepare_identity_issuer, promote_release, publish_release,
-    recall_release, record_model_evaluation_evidence, record_recall_range,
-    record_software_compatibility_evidence, release_channel_hold, release_environment_hold,
-    remove_channel_head, retire_environment, retry_failed_target, rewrap_identity_issuer,
-    rewrap_sealed_secrets, rollback_environment, schedule_environment_freeze, set_channel_hold,
-    set_environment_failure_threshold, set_environment_hold, set_exposure_waiver,
-    set_product_criticality, software_compatibility_report, subscribe_environment,
-    unsubscribe_environment,
+    clear_product_criticality, clear_release_label, close_recall_range,
+    configure_channel_exposure_grace, configure_channel_pace, configure_environment_exposure_grace,
+    environment_hold, import_derived_criticality, install_model_evaluation_trust,
+    list_release_labels, plan_environment, plan_identity_issuer, prepare_identity_issuer,
+    promote_release, publish_release, recall_release, record_model_evaluation_evidence,
+    record_recall_range, record_software_compatibility_evidence, release_channel_hold,
+    release_environment_hold, remove_channel_head, retire_environment, retry_failed_target,
+    rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment,
+    schedule_environment_freeze, set_channel_hold, set_environment_failure_threshold,
+    set_environment_hold, set_exposure_waiver, set_product_criticality, set_release_label,
+    software_compatibility_report, subscribe_environment, unsubscribe_environment,
 };
 use super::package_migration::{
     apply_package_migration, package_migration_status, preview_package_migration,
@@ -254,6 +255,12 @@ pub fn router(
             put(configure_facts).delete(configure_facts),
         )
         .route(
+            "/v1/environments/{environment}/labels",
+            get(list_environment_labels)
+                .put(configure_labels)
+                .delete(configure_labels),
+        )
+        .route(
             "/v1/environments/{environment}/bindings",
             put(configure_bindings).delete(configure_bindings),
         )
@@ -333,6 +340,12 @@ pub fn router(
             post(record_model_evaluation_evidence),
         )
         .route("/v1/releases/{release}/recall", post(recall_release))
+        .route(
+            "/v1/releases/{product}/{version}/labels",
+            get(list_release_labels)
+                .put(set_release_label)
+                .delete(clear_release_label),
+        )
         .route(
             "/v1/products/{product}/recall-range",
             post(record_recall_range),

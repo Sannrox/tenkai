@@ -3,8 +3,8 @@ use tenkai::{client, inventory, maintenance, plan};
 
 use crate::env_args::{
     ApprovalPolicyCommand, ArtifactMirrorCommand, ClusterConfigCommand, ConstraintsCommand,
-    CriticalityCommand, DockerSecretsCommand, FactsCommand, MaintenanceCommand, OverlayCommand,
-    RunnerAttestationCommand, WebhooksCommand,
+    CriticalityCommand, DockerSecretsCommand, FactsCommand, LabelsCommand, MaintenanceCommand,
+    OverlayCommand, RunnerAttestationCommand, WebhooksCommand,
 };
 
 pub(crate) async fn maintenance(ctx: &mut client::Ctx, command: MaintenanceCommand) -> Result<()> {
@@ -49,6 +49,35 @@ pub(crate) async fn maintenance(ctx: &mut client::Ctx, command: MaintenanceComma
         }
         MaintenanceCommand::Repair { env } => {
             println!("{}", maintenance::repair(ctx, &env).await?);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn labels(ctx: &mut client::Ctx, command: LabelsCommand) -> Result<()> {
+    match command {
+        LabelsCommand::List { env } => {
+            let labels = tenkai::labels::list_environment(ctx, &env).await?;
+            if labels.is_empty() {
+                println!("{env} has no labels");
+            } else {
+                for (key, value) in labels {
+                    println!("{key}={value}");
+                }
+            }
+        }
+        LabelsCommand::Set { env, spec, .. } => {
+            let (key, value) = tenkai::labels::parse_label_pair(&spec)?;
+            println!(
+                "{}",
+                tenkai::labels::set_environment(ctx, &env, &key, &value).await?
+            );
+        }
+        LabelsCommand::Clear { env, key, .. } => {
+            println!(
+                "{}",
+                tenkai::labels::clear_environment(ctx, &env, &key).await?
+            );
         }
     }
     Ok(())

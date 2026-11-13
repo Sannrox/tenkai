@@ -645,6 +645,55 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn set_release_label(
+        &self,
+        product: &str,
+        version: &str,
+        key: &str,
+        value: &str,
+        reason: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::PUT,
+            &format!("/v1/releases/{product}/{version}/labels"),
+            Some(&tenkai::management_lifecycle::ReleaseLabelRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation:
+                    tenkai::management_lifecycle::ManagementLifecycleOperation::ReleaseLabelSet
+                        .as_str()
+                        .into(),
+                key: key.to_string(),
+                value: Some(value.to_string()),
+                reason: reason.to_string(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn clear_release_label(
+        &self,
+        product: &str,
+        version: &str,
+        key: &str,
+        reason: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::DELETE,
+            &format!("/v1/releases/{product}/{version}/labels"),
+            Some(&tenkai::management_lifecycle::ReleaseLabelRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation:
+                    tenkai::management_lifecycle::ManagementLifecycleOperation::ReleaseLabelClear
+                        .as_str()
+                        .into(),
+                key: key.to_string(),
+                value: None,
+                reason: reason.to_string(),
+            }),
+        )
+        .await
+    }
+
     pub async fn configure_channel_exposure_grace(
         &self,
         product: &str,

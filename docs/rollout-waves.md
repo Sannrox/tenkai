@@ -15,6 +15,7 @@ canary promotion (`src/canary.rs`, closed #7), `src/wave.rs`.
 
 ```bash
 tenkaictl wave run canary,stage,prod
+tenkaictl wave run 'tier=canary'
 tenkaictl wave run canary,stage,prod --continue-on-failure
 ```
 
@@ -44,6 +45,10 @@ tenkaictl wave rollback rollout-1 \
   --approval-dir ./approvals \
   --approval-trust-roots plan-approvers.toml
 ```
+
+`--cohort` also accepts a selector (`tier=canary`, `tier in (canary,stage)`).
+Tenkai resolves it at start and stores the concrete environment names on the
+wave. A later label change does not rewrite that list.
 
 Local-only development bypass is restricted to the built-in `local`
 environment, matching plan apply:

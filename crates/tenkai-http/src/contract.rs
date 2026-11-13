@@ -37,8 +37,9 @@ use tenkai::management_lifecycle::{
     DeliveryFailureThresholdRequest, DeliveryFreezeRequest, DeliveryHoldRequest,
     ExposureGraceRequest, ExposureWaiverClearRequest, ExposureWaiverRequest,
     ManagementLifecycleResult, PlanRequest, PromoteHttpRequest, PublishRequest,
-    RecallRangeCloseRequest, RecallRangeRequest, RecallRequest, RetireEnvironmentRequest,
-    RetryFailedTargetRequest, RollbackRequest, SubscribeRequest, UnsubscribeRequest,
+    RecallRangeCloseRequest, RecallRangeRequest, RecallRequest, ReleaseLabelRequest,
+    RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
+    UnsubscribeRequest,
 };
 use tenkai::observed_runtime::EnvironmentRuntimeReport;
 use tenkai::offline_import::{ImportJob, ImportJobList, ImportRequest, StagedBundle};
@@ -456,6 +457,48 @@ pub fn http_contract() -> Value {
             path: "/v1/environments/{environment}/facts",
             auth: Auth::Management,
             request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/environments/{environment}/labels",
+            auth: Auth::Read,
+            request: None,
+            response: json!({"type": "object", "additionalProperties": {"type": "string"}}),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/environments/{environment}/labels",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/environments/{environment}/labels",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/releases/{product}/{version}/labels",
+            auth: Auth::Read,
+            request: None,
+            response: json!({"type": "object", "additionalProperties": {"type": "string"}}),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/releases/{product}/{version}/labels",
+            auth: Auth::Management,
+            request: Some(schema::<ReleaseLabelRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/releases/{product}/{version}/labels",
+            auth: Auth::Management,
+            request: Some(schema::<ReleaseLabelRequest>(&mut g)),
             response: lifecycle.clone(),
         },
         Route {

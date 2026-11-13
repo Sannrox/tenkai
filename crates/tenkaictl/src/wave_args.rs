@@ -6,7 +6,7 @@ use crate::flags::ApprovalDirFlags;
 pub(crate) enum WaveCommand {
     /// Observe an ordered environment cohort without applying or promoting.
     Run {
-        /// Comma-separated environment names in wave order, e.g. `canary,stage,prod`.
+        /// Comma-separated environment names, or a selector (`tier=canary`).
         cohort: String,
         /// Continue after failures (default: stop and skip remaining).
         #[arg(long)]
@@ -22,7 +22,7 @@ pub(crate) enum WaveCommand {
         version: String,
         #[arg(long)]
         channel: String,
-        /// Comma-separated environment names in wave order.
+        /// Comma-separated environment names, or a selector (`tier=canary`).
         #[arg(long)]
         cohort: String,
         #[arg(long)]

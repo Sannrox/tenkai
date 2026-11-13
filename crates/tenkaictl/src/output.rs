@@ -130,7 +130,7 @@ pub(crate) fn command_name(command: &Command, target: Target) -> Option<CommandN
             command: EnvCommand::Subscribe { .. },
         } => CommandName::Subscribe,
         Command::Env {
-            command: EnvCommand::List,
+            command: EnvCommand::List { .. },
         } => CommandName::ListEnvironments,
         Command::Fleet {
             command: FleetCommand::Status,

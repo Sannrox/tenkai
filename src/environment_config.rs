@@ -2,7 +2,7 @@
 //!
 //! `POST /v1/environments` registers an environment. Generation-fenced
 //! `PUT`/`DELETE` routes under `/v1/environments/{environment}/` change its
-//! facts, constraints, maintenance windows, webhooks, approval policy,
+//! facts, labels, constraints, maintenance windows, webhooks, approval policy,
 //! runner attestation policy (#675), declared criticality (#694),
 //! dependency bindings (ADR 0044), and sealed secret values (ADR 0045). Every
 //! change runs the same embedded function, and so the same validation, as the
@@ -59,6 +59,13 @@ pub enum EnvironmentConfigChange {
         value: String,
     },
     ClearFact {
+        key: String,
+    },
+    SetLabel {
+        key: String,
+        value: String,
+    },
+    ClearLabel {
         key: String,
     },
     SetConstraint {
@@ -159,6 +166,7 @@ pub enum EnvironmentConfigChange {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigResource {
     Facts,
+    Labels,
     Constraints,
     MaintenanceWindow,
     Webhooks,
@@ -173,6 +181,7 @@ impl ConfigResource {
     fn segment(self) -> &'static str {
         match self {
             Self::Facts => "facts",
+            Self::Labels => "labels",
             Self::Constraints => "constraints",
             Self::MaintenanceWindow => "maintenance-windows",
             Self::Webhooks => "webhooks",
@@ -189,6 +198,7 @@ impl EnvironmentConfigChange {
     pub fn resource(&self) -> ConfigResource {
         match self {
             Self::SetFact { .. } | Self::ClearFact { .. } => ConfigResource::Facts,
+            Self::SetLabel { .. } | Self::ClearLabel { .. } => ConfigResource::Labels,
             Self::SetConstraint { .. } | Self::ClearConstraint { .. } => {
                 ConfigResource::Constraints
             }
@@ -215,6 +225,7 @@ impl EnvironmentConfigChange {
         matches!(
             self,
             Self::ClearFact { .. }
+                | Self::ClearLabel { .. }
                 | Self::ClearConstraint { .. }
                 | Self::RemoveMaintenanceWindow { .. }
                 | Self::ClearWebhooks { .. }
@@ -250,6 +261,8 @@ impl EnvironmentConfigChange {
         match self {
             Self::SetFact { .. } => "set_fact",
             Self::ClearFact { .. } => "clear_fact",
+            Self::SetLabel { .. } => "set_label",
+            Self::ClearLabel { .. } => "clear_label",
             Self::SetConstraint { .. } => "set_constraint",
             Self::ClearConstraint { .. } => "clear_constraint",
             Self::SetMaintenanceWindow { .. } => "set_maintenance_window",
@@ -311,6 +324,11 @@ pub fn validate(change: &EnvironmentConfigChange) -> Result<()> {
             crate::environment::validate_fact_value(key, value)
         }
         Change::ClearFact { key } => crate::environment::validate_fact_key(key),
+        Change::SetLabel { key, value } => {
+            crate::labels::validate_label_key(key)?;
+            crate::labels::validate_label_value(key, value)
+        }
+        Change::ClearLabel { key } => crate::labels::validate_label_key(key),
         Change::SetConstraint {
             constraint,
             name,
@@ -546,6 +564,12 @@ async fn mutate(
         }
         Change::ClearFact { key } => {
             crate::environment::clear_environment_fact(ctx, environment, key).await?
+        }
+        Change::SetLabel { key, value } => {
+            crate::labels::set_environment(ctx, environment, key, value).await?
+        }
+        Change::ClearLabel { key } => {
+            crate::labels::clear_environment(ctx, environment, key).await?
         }
         Change::SetConstraint {
             constraint,
@@ -813,6 +837,15 @@ mod tests {
         require_route(&set, ConfigResource::Facts, false, None).unwrap();
         assert!(require_route(&set, ConfigResource::Facts, true, None).is_err());
         assert!(require_route(&set, ConfigResource::Webhooks, false, None).is_err());
+
+        let set_label =
+            change(serde_json::json!({"kind": "set_label", "key": "tier", "value": "canary"}))
+                .unwrap();
+        assert_eq!(set_label.path("prod"), "/v1/environments/prod/labels");
+        require_route(&set_label, ConfigResource::Labels, false, None).unwrap();
+        let clear_label =
+            change(serde_json::json!({"kind": "clear_label", "key": "tier"})).unwrap();
+        require_route(&clear_label, ConfigResource::Labels, true, None).unwrap();
 
         let window = change(serde_json::json!({
             "kind": "remove_maintenance_window", "name": "nightly"

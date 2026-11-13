@@ -34,7 +34,8 @@ use crate::management_lifecycle::{
     DeliveryFailureThresholdRequest, DeliveryFreezeRequest, DeliveryHoldRequest,
     ExposureGraceRequest, ExposureWaiverClearRequest, ExposureWaiverRequest,
     ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest, PromoteRequest,
-    PublishRequest, RecallRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
+    PublishRequest, RecallRequest, ReleaseLabelRequest, RetryFailedTargetRequest, RollbackRequest,
+    SubscribeRequest,
 };
 use crate::observed_runtime::EnvironmentRuntimeReport;
 use crate::package_migration::{
@@ -592,6 +593,42 @@ impl ManagementOperations {
                 .map_err(map_tenant_error);
         }
         self.reconciler.list_environments().await.map_err(internal)
+    }
+
+    pub async fn list_environment_labels(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::labels::list_environment(&mut ctx, environment)
+            .await
+            .map_err(internal)
+    }
+
+    pub async fn list_environments_matching(
+        &self,
+        credential: &CredentialMaterial,
+        selector: &str,
+    ) -> Result<Vec<EnvironmentListEntry>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        let parsed = crate::labels::parse_selector(selector)
+            .map_err(|error| ManagementError::BadRequest(error.to_string()))?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let names: std::collections::BTreeSet<String> =
+            crate::labels::matching_environments(&mut ctx, &parsed)
+                .await
+                .map_err(internal)?
+                .into_iter()
+                .collect();
+        let mut entries = self.list_environments(credential).await?;
+        entries.retain(|entry| names.contains(&entry.name));
+        Ok(entries)
     }
 
     pub async fn list_change_events(
@@ -2826,6 +2863,91 @@ impl ManagementOperations {
             message,
             Some(environment.to_string()),
         ))
+    }
+
+    pub async fn set_release_label(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        version: &str,
+        request: ReleaseLabelRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.release_label_set")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        Self::require_product_grant(&context, product)?;
+        management_lifecycle::admit_release_label(
+            &request,
+            ManagementLifecycleOperation::ReleaseLabelSet,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let value = request.value.as_deref().ok_or_else(|| {
+            ManagementError::BadRequest("release label set requires value".into())
+        })?;
+        let actor = context.audit_principal();
+        self.audit(&actor, "catalog.release_label_set.requested")?;
+        let spec = format!("{product}@{version}");
+        let mut ctx = self.catalog_ctx(&context)?;
+        let message = crate::labels::set_release(&mut ctx, &spec, &request.key, value)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(&actor, "catalog.release_label_set.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::ReleaseLabelSet,
+            message,
+            Some(spec),
+        ))
+    }
+
+    pub async fn clear_release_label(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        version: &str,
+        request: ReleaseLabelRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.release_label_clear")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        Self::require_product_grant(&context, product)?;
+        management_lifecycle::admit_release_label(
+            &request,
+            ManagementLifecycleOperation::ReleaseLabelClear,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = context.audit_principal();
+        self.audit(&actor, "catalog.release_label_clear.requested")?;
+        let spec = format!("{product}@{version}");
+        let mut ctx = self.catalog_ctx(&context)?;
+        let message = crate::labels::clear_release(&mut ctx, &spec, &request.key)
+            .await
+            .map_err(map_catalog_error)?;
+        self.audit(&actor, "catalog.release_label_clear.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::ReleaseLabelClear,
+            message,
+            Some(spec),
+        ))
+    }
+
+    pub async fn list_release_labels(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        version: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        Self::require_product_grant(&context, product)?;
+        let spec = format!("{product}@{version}");
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::labels::list_release(&mut ctx, &spec)
+            .await
+            .map_err(map_catalog_error)
     }
 
     pub async fn configure_channel_exposure_grace(

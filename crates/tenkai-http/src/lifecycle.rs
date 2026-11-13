@@ -755,6 +755,67 @@ pub(super) async fn admit_channel_instance(
     )
 }
 
+pub(super) async fn list_release_labels(
+    State(state): State<Arc<AppState>>,
+    Path((product, version)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .list_release_labels(&credential, &product, &version)
+            .await,
+    )
+}
+
+pub(super) async fn set_release_label(
+    State(state): State<Arc<AppState>>,
+    Path((product, version)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .set_release_label(&credential, &product, &version, request)
+            .await,
+    )
+}
+
+pub(super) async fn clear_release_label(
+    State(state): State<Arc<AppState>>,
+    Path((product, version)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .clear_release_label(&credential, &product, &version, request)
+            .await,
+    )
+}
+
 pub(super) async fn set_exposure_waiver(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

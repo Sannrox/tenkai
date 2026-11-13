@@ -6,6 +6,7 @@ use clap::Subcommand;
 pub(crate) enum CanaryCommand {
     /// Mark an environment as eligible for canary cohorts.
     Designate {
+        /// Environment name, or a selector (`tier=canary`).
         env: String,
         /// Remove the explicit canary designation.
         #[arg(long)]
@@ -16,8 +17,11 @@ pub(crate) enum CanaryCommand {
         spec: String,
         channel: String,
         /// Required canary environment; repeat for the complete cohort.
-        #[arg(long = "env", required = true)]
+        #[arg(long = "env", required_unless_present = "selector")]
         cohort: Vec<String>,
+        /// Resolve this selector to the cohort when the policy is configured.
+        #[arg(long, conflicts_with = "cohort")]
+        selector: Option<String>,
         /// Start a fresh activation; prior evidence remains audited but no longer applies.
         #[arg(long)]
         reactivate: bool,
@@ -53,6 +57,11 @@ pub(crate) enum ReleaseCommand {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Manage operator grouping labels on a published release.
+    Labels {
+        #[command(subcommand)]
+        command: ReleaseLabelsCommand,
+    },
     /// Pin version and artifact digests, then validate the manifest to sign.
     Render {
         manifest: PathBuf,
@@ -68,6 +77,28 @@ pub(crate) enum ReleaseCommand {
         /// Write the rendered manifest here. Without it, validate only.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ReleaseLabelsCommand {
+    /// List labels for a published release.
+    List { spec: String },
+    /// Set a label, e.g. `set api@1.0.0 tier=stable`.
+    Set {
+        spec: String,
+        pair: String,
+        /// Why the label is set; required with --target remote.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Clear one label key.
+    Clear {
+        spec: String,
+        key: String,
+        /// Why the label is cleared; required with --target remote.
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -195,6 +226,7 @@ mod tests {
                     spec,
                     channel,
                     cohort,
+                    selector,
                     reactivate,
                 },
         } = cli.command
@@ -204,7 +236,34 @@ mod tests {
         assert_eq!(spec, "api@1.2.3");
         assert_eq!(channel, "stable");
         assert_eq!(cohort, ["canary-a", "canary-b"]);
+        assert!(selector.is_none());
         assert!(reactivate);
+
+        let selected = Cli::try_parse_from([
+            "tenkaictl",
+            "canary",
+            "policy",
+            "api@1.2.3",
+            "stable",
+            "--selector",
+            "tier=canary",
+        ])
+        .unwrap();
+        let Command::Canary {
+            command:
+                CanaryCommand::Policy {
+                    cohort,
+                    selector,
+                    reactivate,
+                    ..
+                },
+        } = selected.command
+        else {
+            panic!("expected canary policy command");
+        };
+        assert!(cohort.is_empty());
+        assert_eq!(selector.as_deref(), Some("tier=canary"));
+        assert!(!reactivate);
     }
 
     #[test]
@@ -374,6 +433,32 @@ mod tests {
             Command::Release {
                 command: ReleaseCommand::Inspect { spec }
             } if spec == "api@1.2.3"
+        ));
+
+        let labels = Cli::try_parse_from([
+            "tenkaictl",
+            "release",
+            "labels",
+            "set",
+            "api@1.2.3",
+            "tier=stable",
+            "--reason",
+            "grouping",
+        ])
+        .unwrap();
+        assert!(matches!(
+            labels.command,
+            Command::Release {
+                command: ReleaseCommand::Labels {
+                    command: ReleaseLabelsCommand::Set {
+                        ref spec,
+                        ref pair,
+                        ref reason,
+                    }
+                }
+            } if spec == "api@1.2.3"
+                && pair == "tier=stable"
+                && reason.as_deref() == Some("grouping")
         ));
 
         let verify = Cli::try_parse_from([

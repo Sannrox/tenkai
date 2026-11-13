@@ -4,7 +4,9 @@ use tenkai::{canary, catalog, client, maintenance, ontology, plan};
 
 use crate::args::{Command, ExposureCommand, OutputFormat};
 use crate::authorization::embedded_management_actor;
-use crate::catalog_args::{ApprovalCommand, CanaryCommand, EvalEvidenceCommand, ReleaseCommand};
+use crate::catalog_args::{
+    ApprovalCommand, CanaryCommand, EvalEvidenceCommand, ReleaseCommand, ReleaseLabelsCommand,
+};
 use crate::output::print_machine_result;
 
 pub(crate) async fn run(
@@ -111,6 +113,28 @@ pub(crate) async fn run(
                     println!("{message}");
                 }
             }
+            ReleaseCommand::Labels { command } => match command {
+                ReleaseLabelsCommand::List { spec } => {
+                    let labels = tenkai::labels::list_release(ctx, &spec).await?;
+                    if labels.is_empty() {
+                        println!("{spec} has no labels");
+                    } else {
+                        for (key, value) in labels {
+                            println!("{key}={value}");
+                        }
+                    }
+                }
+                ReleaseLabelsCommand::Set { spec, pair, .. } => {
+                    let (key, value) = tenkai::labels::parse_label_pair(&pair)?;
+                    println!(
+                        "{}",
+                        tenkai::labels::set_release(ctx, &spec, &key, &value).await?
+                    );
+                }
+                ReleaseLabelsCommand::Clear { spec, key, .. } => {
+                    println!("{}", tenkai::labels::clear_release(ctx, &spec, &key).await?);
+                }
+            },
             ReleaseCommand::Render { .. } => {
                 unreachable!("handled before opening the embedded database")
             }
@@ -420,18 +444,30 @@ pub(crate) async fn run(
         Command::Canary { command } => match command {
             CanaryCommand::Designate { env, remove } => {
                 let actor = embedded_management_actor()?;
-                println!(
-                    "{}",
-                    canary::set_designated(ctx, &actor, &env, !remove).await?
-                );
+                for name in tenkai::labels::resolve_cohort(ctx, &env).await? {
+                    println!(
+                        "{}",
+                        canary::set_designated(ctx, &actor, &name, !remove).await?
+                    );
+                }
             }
             CanaryCommand::Policy {
                 spec,
                 channel,
                 cohort,
+                selector,
                 reactivate,
             } => {
                 let actor = embedded_management_actor()?;
+                let cohort = if let Some(selector) = selector {
+                    tenkai::labels::require_matching_environments(
+                        ctx,
+                        &tenkai::labels::parse_selector(&selector)?,
+                    )
+                    .await?
+                } else {
+                    cohort
+                };
                 let active =
                     canary::configure(ctx, &actor, &spec, &channel, cohort, reactivate).await?;
                 println!(
