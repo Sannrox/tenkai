@@ -191,6 +191,25 @@ pub(super) async fn configure_maintenance_window(
     .await
 }
 
+pub(super) async fn configure_owner(
+    state: State<Arc<AppState>>,
+    method: Method,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    configure(
+        state,
+        method,
+        environment,
+        None,
+        ConfigResource::Owner,
+        headers,
+        body,
+    )
+    .await
+}
+
 pub(super) async fn configure_webhooks(
     state: State<Arc<AppState>>,
     method: Method,

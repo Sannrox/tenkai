@@ -68,6 +68,8 @@
 //! - [`deploy_webhook`] enqueues signed per-environment HTTPS notifications for
 //!   terminal apply outcomes on the durable provider-event outbox. Delivery
 //!   retries independently of apply.
+//! - [`owner`] stores a contact string and the same webhook endpoint list on
+//!   products and environments, and unions them by URL at enqueue.
 //! - `apply::plan_completion` hides Step outcome classification, terminal Plan
 //!   state selection, execution-error persistence precedence, and ambiguous
 //!   durable transition confirmation behind one private completion interface.
@@ -260,6 +262,7 @@ pub mod oidc_verifier;
 pub mod ontology;
 pub mod operational_events;
 pub mod outbound_tls;
+pub mod owner;
 pub mod package_migration;
 pub mod page;
 pub mod pb;

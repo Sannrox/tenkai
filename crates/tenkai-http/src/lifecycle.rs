@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse as _, Response};
 
@@ -923,6 +923,92 @@ pub(super) async fn remove_channel_head(
             .remove_channel_head(&credential, &product, &channel, request)
             .await,
     )
+}
+
+pub(super) async fn set_product_owner(
+    State(state): State<Arc<AppState>>,
+    Path(product): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .set_product_owner(&credential, &product, request)
+            .await,
+    )
+}
+
+pub(super) async fn clear_product_owner(
+    State(state): State<Arc<AppState>>,
+    Path(product): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .clear_product_owner(&credential, &product)
+            .await,
+    )
+}
+
+pub(super) async fn set_product_webhook(
+    State(state): State<Arc<AppState>>,
+    Path(product): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .set_product_webhook(&credential, &product, request)
+            .await,
+    )
+}
+
+pub(super) async fn clear_product_webhooks(
+    State(state): State<Arc<AppState>>,
+    Path(product): Path<String>,
+    Query(query): Query<ClearProductWebhooksQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .clear_product_webhooks(&credential, &product, query.url.as_deref())
+            .await,
+    )
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ClearProductWebhooksQuery {
+    #[serde(default)]
+    url: Option<String>,
 }
 
 pub(super) async fn set_product_criticality(

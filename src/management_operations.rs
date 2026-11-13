@@ -519,7 +519,28 @@ impl ManagementOperations {
         self.require_community_catalog_host()?;
         self.require_environment_grant(credential, &context, environment, "webhook deliveries")?;
         let scope = environment.unwrap_or(crate::operational_events::HOST_SCOPE);
-        crate::operational_events::deliveries(&*self.store, scope, 100).map_err(internal)
+        let mut deliveries =
+            crate::operational_events::deliveries(&*self.store, scope, 100).map_err(internal)?;
+        if let Some(environment) = environment
+            && let Ok(mut ctx) = self.application_ctx()
+            && let Ok(Some(owner)) = crate::owner::environment_owner(&mut ctx, environment).await
+            && owner.endpoints.is_empty()
+        {
+            deliveries.insert(
+                0,
+                crate::operational_events::WebhookDelivery {
+                    id: format!("tenkai:owner-unconfigured:{environment}"),
+                    event: "owner.unconfigured".into(),
+                    url: String::new(),
+                    state: "unconfigured".into(),
+                    attempts: 0,
+                    next_attempt_at: 0,
+                    delivered_at: None,
+                    last_error: format!("owner {} has no notification endpoint", owner.contact),
+                },
+            );
+        }
+        Ok(deliveries)
     }
 
     /// `GET /v1/content/inventory`: release content present and missing here.
@@ -2111,6 +2132,130 @@ impl ManagementOperations {
             .map_err(internal)?;
         self.audit(actor, "catalog.criticality.set.completed")?;
         Ok(view)
+    }
+
+    pub async fn inspect_product_owner(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+    ) -> Result<Option<crate::owner::OwnerView>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        Self::require_product_grant(&context, product)?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::owner::product_owner(&mut ctx, product)
+            .await
+            .map_err(internal)
+    }
+
+    pub async fn set_product_owner(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        request: crate::owner::SetOwnerRequest,
+    ) -> Result<crate::owner::OwnerView, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.owner.set")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_fleet_management(credential, &context, "product owner")?;
+        Self::require_product_grant(&context, product)?;
+        request
+            .validate()
+            .map_err(|error| ManagementError::BadRequest(error.to_string()))?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.owner.set.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::owner::set_product_owner(&mut ctx, product, &request.contact)
+            .await
+            .map_err(map_config_error)?;
+        let view = crate::owner::product_owner(&mut ctx, product)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| ManagementError::Internal("product owner vanished after set".into()))?;
+        self.audit(actor, "catalog.owner.set.completed")?;
+        Ok(view)
+    }
+
+    pub async fn clear_product_owner(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+    ) -> Result<Option<crate::owner::OwnerView>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.owner.clear")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_fleet_management(credential, &context, "product owner")?;
+        Self::require_product_grant(&context, product)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.owner.clear.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::owner::clear_product_owner(&mut ctx, product)
+            .await
+            .map_err(map_config_error)?;
+        let view = crate::owner::product_owner(&mut ctx, product)
+            .await
+            .map_err(internal)?;
+        self.audit(actor, "catalog.owner.clear.completed")?;
+        Ok(view)
+    }
+
+    pub async fn list_product_webhooks(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+    ) -> Result<Vec<crate::deploy_webhook::WebhookEndpoint>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        Self::require_product_grant(&context, product)?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::owner::list_product_webhooks(&mut ctx, product)
+            .await
+            .map_err(internal)
+    }
+
+    pub async fn set_product_webhook(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        endpoint: crate::deploy_webhook::WebhookEndpoint,
+    ) -> Result<String, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.webhooks.set")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_fleet_management(credential, &context, "product webhooks")?;
+        Self::require_product_grant(&context, product)?;
+        endpoint
+            .validate()
+            .map_err(|error| ManagementError::BadRequest(error.to_string()))?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.webhooks.set.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let message = crate::owner::set_product_webhook(&mut ctx, product, endpoint)
+            .await
+            .map_err(map_config_error)?;
+        self.audit(actor, "catalog.webhooks.set.completed")?;
+        Ok(message)
+    }
+
+    pub async fn clear_product_webhooks(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        url: Option<&str>,
+    ) -> Result<String, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.webhooks.clear")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_fleet_management(credential, &context, "product webhooks")?;
+        Self::require_product_grant(&context, product)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.webhooks.clear.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let message = crate::owner::clear_product_webhooks(&mut ctx, product, url)
+            .await
+            .map_err(map_config_error)?;
+        self.audit(actor, "catalog.webhooks.clear.completed")?;
+        Ok(message)
     }
 
     pub async fn clear_product_criticality(
@@ -4168,6 +4313,7 @@ mod tests {
                     maintenance: None,
                     constraints: Vec::new(),
                     webhooks: Vec::new(),
+                    owner: None,
                     approval_policy: None,
                     terminal_outcomes: Vec::new(),
                     execution_note: "fixture".into(),

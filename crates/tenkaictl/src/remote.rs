@@ -248,6 +248,25 @@ pub(crate) async fn run(
         }
         Command::Env {
             command:
+                EnvCommand::Owner {
+                    command: crate::env_args::OwnerCommand::Show { env },
+                },
+        } => {
+            let report = client.inspect_environment(&env).await?;
+            match report.owner {
+                Some(owner) => {
+                    if owner.endpoints.is_empty() {
+                        println!("{} (no notification endpoint)", owner.contact);
+                    } else {
+                        println!("{} endpoints={}", owner.contact, owner.endpoints.join(","));
+                    }
+                }
+                None => println!("{env} has no owner"),
+            }
+            Ok(())
+        }
+        Command::Env {
+            command:
                 EnvCommand::Labels {
                     command: crate::env_args::LabelsCommand::List { env },
                 },
@@ -400,6 +419,13 @@ pub(crate) async fn run(
                 return print_machine_result(&crate::output::status_result(&env, rows.len()));
             }
             if let Ok(report) = client.inspect_environment(&env).await {
+                if let Some(owner) = &report.owner {
+                    if owner.endpoints.is_empty() {
+                        println!("{env} owner {} (no notification endpoint)", owner.contact);
+                    } else {
+                        println!("{env} owner {}", owner.contact);
+                    }
+                }
                 if let Some(hold) = report.delivery_hold {
                     println!(
                         "{env} held at {} by {}: {}",
@@ -810,6 +836,85 @@ pub(crate) async fn run(
             crate::product_args::ProductCriticalityCommand::Clear { product } => {
                 let view = client.clear_product_criticality(&product).await?;
                 println!("{}", serde_json::to_string_pretty(&view)?);
+                Ok(())
+            }
+        },
+        Command::Product {
+            command: crate::product_args::ProductCommand::Owner { command },
+        } => match command {
+            crate::product_args::ProductOwnerCommand::Show { product } => {
+                match client.inspect_product_owner(&product).await? {
+                    Some(owner) => {
+                        if owner.endpoints.is_empty() {
+                            println!("{} (no notification endpoint)", owner.contact);
+                        } else {
+                            println!("{} endpoints={}", owner.contact, owner.endpoints.join(","));
+                        }
+                    }
+                    None => println!("product {product} has no owner"),
+                }
+                Ok(())
+            }
+            crate::product_args::ProductOwnerCommand::Set { product, contact } => {
+                let view = client
+                    .set_product_owner(&product, &tenkai::owner::SetOwnerRequest { contact })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&view)?);
+                Ok(())
+            }
+            crate::product_args::ProductOwnerCommand::Clear { product } => {
+                let view = client.clear_product_owner(&product).await?;
+                println!("{}", serde_json::to_string_pretty(&view)?);
+                Ok(())
+            }
+        },
+        Command::Product {
+            command: crate::product_args::ProductCommand::Webhooks { command },
+        } => match command {
+            crate::product_args::ProductWebhooksCommand::List { product } => {
+                let endpoints = client.list_product_webhooks(&product).await?;
+                if endpoints.is_empty() {
+                    println!("{product} has no webhooks");
+                } else {
+                    for endpoint in endpoints {
+                        println!(
+                            "{} secret_env={} events={}",
+                            endpoint.url,
+                            endpoint.secret_env,
+                            crate::embedded_env_config::format_webhook_subscription(&endpoint)
+                        );
+                    }
+                }
+                Ok(())
+            }
+            crate::product_args::ProductWebhooksCommand::Set {
+                product,
+                url,
+                secret_env,
+                events,
+            } => {
+                let (events, operational, feedback) =
+                    crate::embedded_env_config::parse_webhook_events(events.as_deref())?;
+                let message = client
+                    .set_product_webhook(
+                        &product,
+                        &tenkai::deploy_webhook::WebhookEndpoint {
+                            url,
+                            secret_env,
+                            events,
+                            operational,
+                            feedback,
+                        },
+                    )
+                    .await?;
+                println!("{message}");
+                Ok(())
+            }
+            crate::product_args::ProductWebhooksCommand::Clear { product, url } => {
+                let message = client
+                    .clear_product_webhooks(&product, url.as_deref())
+                    .await?;
+                println!("{message}");
                 Ok(())
             }
         },

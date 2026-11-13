@@ -68,6 +68,15 @@ pub enum OperationalEvent {
     /// the attestation policy, was refused (#675). The code names why.
     #[serde(rename = "runner.attestation_refused")]
     RunnerAttestationRefused,
+    /// A published release was recalled (#1066).
+    #[serde(rename = "release.recalled")]
+    ReleaseRecalled,
+    /// An automatic failure-threshold hold was set (#1066).
+    #[serde(rename = "hold.automatic")]
+    AutomaticHold,
+    /// An instance health observation aged past its max age (#1066).
+    #[serde(rename = "health.stale")]
+    HealthStale,
 }
 
 impl OperationalEvent {
@@ -80,6 +89,9 @@ impl OperationalEvent {
             Self::ClockDrift => "clock.drift",
             Self::TrustExpiring => "trust.expiring",
             Self::RunnerAttestationRefused => "runner.attestation_refused",
+            Self::ReleaseRecalled => "release.recalled",
+            Self::AutomaticHold => "hold.automatic",
+            Self::HealthStale => "health.stale",
         }
     }
 
@@ -92,6 +104,9 @@ impl OperationalEvent {
             "clock.drift" => Some(Self::ClockDrift),
             "trust.expiring" => Some(Self::TrustExpiring),
             "runner.attestation_refused" => Some(Self::RunnerAttestationRefused),
+            "release.recalled" => Some(Self::ReleaseRecalled),
+            "hold.automatic" => Some(Self::AutomaticHold),
+            "health.stale" => Some(Self::HealthStale),
             _ => None,
         }
     }
@@ -165,7 +180,7 @@ impl WebhookEndpoint {
     pub fn validate(&self) -> Result<()> {
         validate_webhook_url(&self.url)?;
         validate_secret_env(&self.secret_env)?;
-        if self.events.len() > 8 || self.operational.len() > 8 || self.feedback.len() > 8 {
+        if self.events.len() > 8 || self.operational.len() > 16 || self.feedback.len() > 8 {
             bail!("webhook event list is oversized");
         }
         Ok(())
@@ -262,11 +277,11 @@ pub fn parse_endpoints(environment: &Object) -> Result<Vec<WebhookEndpoint>> {
 pub fn parse_endpoints_json(raw: &str) -> Result<Vec<WebhookEndpoint>> {
     let endpoints: Vec<WebhookEndpoint> = serde_json::from_str(raw)
         .map_err(|error| anyhow::anyhow!("parsing {WEBHOOKS_PROPERTY}: {error}"))?;
-    validate_endpoints(&endpoints)?;
+    validate_endpoint_list(&endpoints)?;
     Ok(endpoints)
 }
 
-fn validate_endpoints(endpoints: &[WebhookEndpoint]) -> Result<()> {
+pub(crate) fn validate_endpoint_list(endpoints: &[WebhookEndpoint]) -> Result<()> {
     if endpoints.len() > MAX_ENDPOINTS {
         bail!("at most {MAX_ENDPOINTS} webhook endpoints may be configured");
     }
@@ -299,7 +314,7 @@ pub async fn set_environment_webhook(
     } else {
         endpoints.push(endpoint.clone());
     }
-    validate_endpoints(&endpoints)?;
+    validate_endpoint_list(&endpoints)?;
     env_obj
         .properties
         .insert(WEBHOOKS_PROPERTY.into(), serde_json::to_string(&endpoints)?);
@@ -1094,6 +1109,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rollback_without_env_webhooks_reaches_product_owner() {
+        let fixture = Fixture::start(StatusCode::NO_CONTENT).await;
+        let mut ctx = fixture.ctx();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "local", "webhooks")
+            .await
+            .unwrap();
+        publish_and_apply(&mut ctx, &fixture.root, "1.0.0", "").await;
+        crate::owner::set_product_webhook(
+            &mut ctx,
+            "hook-demo",
+            WebhookEndpoint {
+                url: fixture.url.clone(),
+                secret_env: "TENKAI_WEBHOOK_SECRET".into(),
+                events: vec![WebhookEvent::ApplyRolledBack],
+                operational: Vec::new(),
+                feedback: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        publish_software(
+            &mut ctx,
+            &fixture.root,
+            "1.1.0",
+            "[gate]\nbake_window_seconds = 0\non_fail = \"rollback\"\n\n[[gate.slo]]\nname = \"error_rate\"\nquery = \"error_rate\"\nthreshold = 0.01\n",
+        )
+        .await;
+        let actor = crate::auth_context::test_management_context("webhook-product-owner");
+        crate::catalog::promote(&mut ctx, &actor, "hook-demo@1.1.0", "stable")
+            .await
+            .unwrap();
+        ctx.set_health_metrics(std::sync::Arc::new(
+            crate::health_gate::FakeMetricsSource::new().with_value("error_rate", 1.0),
+        ));
+        let outcomes = apply_current(&mut ctx).await;
+        assert_eq!(
+            outcomes[0].classified_status().unwrap(),
+            StepOutcomeStatus::RolledBack,
+            "{outcomes:?}"
+        );
+        let records = listed(&ctx);
+        let rolled = records
+            .iter()
+            .find(|record| record.payload_json.contains("apply.rolled_back"))
+            .expect("product owner rollback outbox row");
+        assert!(
+            rolled.payload_json.contains(&fixture.url),
+            "{}",
+            rolled.payload_json
+        );
+        let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[tokio::test]
+    async fn product_and_environment_owners_share_one_url_and_keep_distinct_urls() {
+        let fixture = Fixture::start(StatusCode::NO_CONTENT).await;
+        let mut ctx = fixture.ctx();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "local", "webhooks")
+            .await
+            .unwrap();
+        let shared = fixture.url.clone();
+        let distinct = "https://hooks.example.test/product-owner";
+        set_environment_webhook(
+            &mut ctx,
+            "local",
+            WebhookEndpoint {
+                url: shared.clone(),
+                secret_env: "TENKAI_WEBHOOK_SECRET".into(),
+                events: vec![WebhookEvent::ApplyRolledBack],
+                operational: Vec::new(),
+                feedback: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        publish_and_apply(&mut ctx, &fixture.root, "1.0.0", "").await;
+        crate::owner::set_product_webhook(
+            &mut ctx,
+            "hook-demo",
+            WebhookEndpoint {
+                url: shared.clone(),
+                secret_env: "TENKAI_WEBHOOK_SECRET".into(),
+                events: vec![WebhookEvent::ApplyRolledBack],
+                operational: Vec::new(),
+                feedback: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        crate::owner::set_product_webhook(
+            &mut ctx,
+            "hook-demo",
+            WebhookEndpoint {
+                url: distinct.into(),
+                secret_env: "TENKAI_WEBHOOK_SECRET".into(),
+                events: vec![WebhookEvent::ApplyRolledBack],
+                operational: Vec::new(),
+                feedback: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        publish_software(
+            &mut ctx,
+            &fixture.root,
+            "1.1.0",
+            "[gate]\nbake_window_seconds = 0\non_fail = \"rollback\"\n\n[[gate.slo]]\nname = \"error_rate\"\nquery = \"error_rate\"\nthreshold = 0.01\n",
+        )
+        .await;
+        let actor = crate::auth_context::test_management_context("webhook-owner-union");
+        crate::catalog::promote(&mut ctx, &actor, "hook-demo@1.1.0", "stable")
+            .await
+            .unwrap();
+        ctx.set_health_metrics(std::sync::Arc::new(
+            crate::health_gate::FakeMetricsSource::new().with_value("error_rate", 1.0),
+        ));
+        let outcomes = apply_current(&mut ctx).await;
+        assert_eq!(
+            outcomes[0].classified_status().unwrap(),
+            StepOutcomeStatus::RolledBack,
+            "{outcomes:?}"
+        );
+        let mut urls = std::collections::BTreeSet::new();
+        for record in listed(&ctx) {
+            if !record.payload_json.contains("apply.rolled_back") {
+                continue;
+            }
+            let inner: ProviderEvent = serde_json::from_str(&record.payload_json).unwrap();
+            let envelope: DeployWebhookEnvelope =
+                serde_json::from_str(&inner.payload_json).unwrap();
+            urls.insert(envelope.url);
+        }
+        assert_eq!(urls, [shared, distinct.to_string()].into_iter().collect());
+        let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[tokio::test]
     async fn set_list_clear_never_store_secret_bytes() {
         let root = std::env::temp_dir().join(format!(
             "tenkai-webhook-cfg-{}-{}",
@@ -1149,9 +1303,10 @@ mod tests {
     impl Fixture {
         async fn start(status: StatusCode) -> Self {
             let root = std::env::temp_dir().join(format!(
-                "tenkai-webhook-{}-{}",
+                "tenkai-webhook-{}-{}-{}",
                 std::process::id(),
-                crate::now_millis()
+                crate::now_millis(),
+                uuid::Uuid::new_v4()
             ));
             std::fs::create_dir_all(&root).unwrap();
             let received = Arc::new(Mutex::new(Vec::new()));

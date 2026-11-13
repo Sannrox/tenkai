@@ -206,6 +206,7 @@ impl TenantEnvironmentOperations {
         Ok(DeploymentHistoryPage {
             items: Vec::new(),
             next_cursor: None,
+            owner: None,
         })
     }
 
@@ -379,6 +380,7 @@ fn partition_local_fleet_row(name: &str) -> crate::plan::FleetEnvironmentRow {
         posture: "empty".into(),
         criticality: None,
         open_exposures: Vec::new(),
+        owner: None,
     }
 }
 
@@ -402,6 +404,7 @@ fn partition_local_inspect(name: &str) -> EnvironmentInspectReport {
         maintenance: None,
         constraints: Vec::new(),
         webhooks: Vec::new(),
+        owner: None,
         approval_policy: None,
         terminal_outcomes: Vec::new(),
         execution_note: "Tenant partition projection; process-global reconciler rows are not joined by environment name.".into(),
@@ -797,6 +800,7 @@ mod tests {
             maintenance: None,
             constraints: Vec::new(),
             webhooks: Vec::new(),
+            owner: None,
             approval_policy: None,
             terminal_outcomes: Vec::new(),
             execution_note: "foreign".into(),
@@ -840,6 +844,7 @@ mod tests {
                     spec_drift: None,
                     certificate: None,
                     health_checks: Vec::new(),
+                    owner: None,
                 }])
             })
         }

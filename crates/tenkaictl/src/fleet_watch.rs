@@ -34,6 +34,9 @@ pub(crate) fn print_fleet_status(report: &plan::FleetStatusReport) {
             row.health_summary,
             lease
         );
+        if let Some(owner) = &row.owner {
+            println!("  owner {owner}");
+        }
     }
     if !report.promotion_policies.is_empty() {
         println!("promotion policies:");

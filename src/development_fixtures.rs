@@ -159,6 +159,7 @@ impl FixtureEnvironmentProjection {
                     spec_drift: None,
                     certificate: None,
                     health_checks: Vec::new(),
+                    owner: None,
                 }
             })
             .collect()
@@ -221,6 +222,7 @@ impl FixtureEnvironmentProjection {
             maintenance: None,
             constraints: Vec::new(),
             webhooks: Vec::new(),
+            owner: None,
             approval_policy: None,
             terminal_outcomes: Vec::new(),
             execution_note: "Development fixture projection; execution is disabled.".into(),
@@ -271,6 +273,7 @@ impl FixtureEnvironmentProjection {
             posture: posture.into(),
             criticality: None,
             open_exposures: Vec::new(),
+            owner: None,
         }
     }
 }

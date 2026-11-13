@@ -202,6 +202,16 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Catalog,
         },
         TenantVisibleRpc {
+            id: "catalog.product_owner",
+            path_template: "GET /v1/products/{product}/owner",
+            surface: TenantVisibleSurface::Catalog,
+        },
+        TenantVisibleRpc {
+            id: "catalog.product_webhooks",
+            path_template: "GET /v1/products/{product}/webhooks",
+            surface: TenantVisibleSurface::Catalog,
+        },
+        TenantVisibleRpc {
             id: "catalog.channel_hold",
             path_template: "GET /v1/products/{product}/channels/{channel}/hold",
             surface: TenantVisibleSurface::Catalog,

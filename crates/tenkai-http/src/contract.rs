@@ -23,6 +23,7 @@ use tenkai::criticality::{
     DerivedEnvelope, DerivedImportResult, EffectiveCriticality, SetCriticalityRequest,
 };
 use tenkai::delivery_hold::DeliveryHoldView;
+use tenkai::deploy_webhook::WebhookEndpoint;
 use tenkai::deployment_history::{DeploymentHistoryPage, DeploymentHistoryQuery};
 use tenkai::environment::{EnvironmentInspectReport, EnvironmentListEntry, StatusRow};
 use tenkai::environment_config::{EnvironmentConfigRequest, RegisterEnvironmentRequest};
@@ -45,6 +46,7 @@ use tenkai::observed_runtime::EnvironmentRuntimeReport;
 use tenkai::offline_import::{ImportJob, ImportJobList, ImportRequest, StagedBundle};
 use tenkai::oidc_verifier::OidcClientDiscovery;
 use tenkai::operational_events::WebhookDelivery;
+use tenkai::owner::{OwnerView, SetOwnerRequest};
 use tenkai::package_migration::{
     MigrationPage, PackageMigrationApplyRequest, PackageMigrationMutateRequest,
     PackageMigrationPreviewRequest, PackageMigrationResult,
@@ -453,6 +455,48 @@ pub fn http_contract() -> Value {
             response: schema::<EffectiveCriticality>(&mut g),
         },
         Route {
+            method: "GET",
+            path: "/v1/products/{product}/owner",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<Option<OwnerView>>(&mut g),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/products/{product}/owner",
+            auth: Auth::Management,
+            request: Some(schema::<SetOwnerRequest>(&mut g)),
+            response: schema::<OwnerView>(&mut g),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/products/{product}/owner",
+            auth: Auth::Management,
+            request: None,
+            response: schema::<Option<OwnerView>>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/products/{product}/webhooks",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<Vec<WebhookEndpoint>>(&mut g),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/products/{product}/webhooks",
+            auth: Auth::Management,
+            request: Some(schema::<WebhookEndpoint>(&mut g)),
+            response: json!({"type": "string"}),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/products/{product}/webhooks",
+            auth: Auth::Management,
+            request: None,
+            response: json!({"type": "string"}),
+        },
+        Route {
             method: "PUT",
             path: "/v1/environments/{environment}/facts",
             auth: Auth::Management,
@@ -615,6 +659,20 @@ pub fn http_contract() -> Value {
         Route {
             method: "DELETE",
             path: "/v1/environments/{environment}/webhooks",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/environments/{environment}/owner",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/environments/{environment}/owner",
             auth: Auth::Management,
             request: Some(config.clone()),
             response: lifecycle.clone(),
@@ -1011,6 +1069,7 @@ mod tests {
             ("BackupStatus", "last_drill"),
             ("BackupHealth", "age_seconds"),
             ("EnvironmentInspectReport", "maintenance"),
+            ("EnvironmentInspectReport", "owner"),
             ("EnvironmentInspectReport", "observed_type_digest"),
             ("EnvironmentInspectReport", "preview"),
             ("EnvironmentInspectReport", "retirement"),
@@ -1020,6 +1079,10 @@ mod tests {
             ("StatusRow", "delivery_hold"),
             ("StatusRow", "dependency_hold"),
             ("StatusRow", "spec_drift"),
+            ("StatusRow", "owner"),
+            ("FleetEnvironmentRow", "owner"),
+            ("DeploymentHistoryPage", "owner"),
+            ("OwnerView", "endpoints"),
             ("SpecDriftView", "objects"),
             ("SpecDriftObject", "fields"),
             ("ProductDependencyView", "version"),

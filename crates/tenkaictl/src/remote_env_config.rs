@@ -5,7 +5,8 @@ use tenkai::environment_config::EnvironmentConfigChange as Change;
 
 use crate::env_args::{
     ApprovalPolicyCommand, ConstraintsCommand, CriticalityCommand, EnvCommand, FactsCommand,
-    LabelsCommand, MaintenanceCommand, RemoteChange, RunnerAttestationCommand, WebhooksCommand,
+    LabelsCommand, MaintenanceCommand, OwnerCommand, RemoteChange, RunnerAttestationCommand,
+    WebhooksCommand,
 };
 
 /// The environment, change and fence of a configuration command, or `None`
@@ -164,6 +165,23 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, Remot
                 remote.clone(),
             )),
             WebhooksCommand::List { .. } => return None,
+        },
+        EnvCommand::Owner { command } => match command {
+            OwnerCommand::Set {
+                env,
+                contact,
+                remote,
+            } => Ok((
+                env.as_str(),
+                Change::SetOwner {
+                    contact: contact.clone(),
+                },
+                remote.clone(),
+            )),
+            OwnerCommand::Clear { env, remote } => {
+                Ok((env.as_str(), Change::ClearOwner, remote.clone()))
+            }
+            OwnerCommand::Show { .. } => return None,
         },
         EnvCommand::ApprovalPolicy { command } => match command {
             ApprovalPolicyCommand::Set { env, path, remote } => {

@@ -403,7 +403,7 @@ imports envelopes or bundles first, then switch producers to v2.
 ### Remote configuration
 
 With `tenkaictl --target remote`, `env add` needs `--reason`. `facts`,
-`labels`, `constraints`, `maintenance`, `webhooks`, `approval-policy` and `criticality`
+`labels`, `constraints`, `maintenance`, `webhooks`, `owner`, `approval-policy` and `criticality`
 `set`, `clear` and `remove` need `--generation`, the `lease.generation` that remote
 `env inspect` reports (`0` only before the environment's first apply or
 change), and `--reason`. They call the
@@ -413,7 +413,8 @@ audited with the authenticated actor and the reason. An
 environment-scoped token can configure only its own environment and cannot
 register environments. The `list` and `show` commands stay embedded; remote
 `env inspect` shows the same configuration, including `webhooks` (URL,
-`secret_env` and events; never a secret value), `approval_policy`, the
+`secret_env` and events; never a secret value), `owner` (contact and
+endpoint URLs; empty endpoints mean no reachable endpoint), `approval_policy`, the
 policy file path, and `criticality` when set, so a client can read what it edits (#820).
 
 ```bash
@@ -542,6 +543,20 @@ endpoint does not fail apply. See [post-deploy webhooks](deploy-webhooks.md).
 tenkaictl env webhooks set lab --url https://hooks.example.test/tenkai --secret-env TENKAI_WEBHOOK_SECRET
 tenkaictl env webhooks list lab
 tenkaictl env webhooks clear lab
+```
+
+## Owners
+
+A product and an environment may name an owner: a contact string for display
+and audit, plus the same webhook endpoints as post-deploy notifications.
+There is no team directory. Failure, rollback, recall, automatic hold, and
+stale health fan out to both owners, once per URL.
+
+```bash
+tenkaictl env owner set lab lab-oncall@example
+tenkaictl env owner show lab
+tenkaictl product owner set api api-oncall@example
+tenkaictl product webhooks set api --url https://hooks.example.test/product --secret-env TENKAI_WEBHOOK_SECRET
 ```
 
 ## Delivery hold

@@ -47,6 +47,10 @@ pub struct DeploymentHistoryPage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = omitted_when_none)]
     pub next_cursor: Option<String>,
+    /// Environment owner contact and notification URLs (#1066).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = omitted_when_none)]
+    pub owner: Option<crate::owner::OwnerView>,
 }
 
 impl From<Page<DeploymentAttemptView>> for DeploymentHistoryPage {
@@ -54,6 +58,7 @@ impl From<Page<DeploymentAttemptView>> for DeploymentHistoryPage {
         Self {
             items: page.items,
             next_cursor: page.next_cursor,
+            owner: None,
         }
     }
 }
@@ -124,7 +129,12 @@ pub async fn list_deployment_history(
         }
     }
     let next_cursor = has_more.then(|| items.last().map(encode_cursor)).flatten();
-    Ok(Page { items, next_cursor }.into())
+    let mut page = DeploymentHistoryPage::from(Page { items, next_cursor });
+    let reachable = crate::owner::environment_notification_endpoints(ctx, environment_name)
+        .await
+        .unwrap_or_default();
+    page.owner = crate::owner::view_from_object(&env).map(|view| view.with_reachable(&reachable));
+    Ok(page)
 }
 
 /// Latest failed or rolled back attempt per instance, newest instance first.

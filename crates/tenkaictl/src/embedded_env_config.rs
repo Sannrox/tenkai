@@ -4,7 +4,7 @@ use tenkai::{client, inventory, maintenance, plan};
 use crate::env_args::{
     ApprovalPolicyCommand, ArtifactMirrorCommand, ClusterConfigCommand, ConstraintsCommand,
     CriticalityCommand, DockerSecretsCommand, FactsCommand, LabelsCommand, MaintenanceCommand,
-    OverlayCommand, RunnerAttestationCommand, WebhooksCommand,
+    OverlayCommand, OwnerCommand, RunnerAttestationCommand, WebhooksCommand,
 };
 
 pub(crate) async fn maintenance(ctx: &mut client::Ctx, command: MaintenanceCommand) -> Result<()> {
@@ -261,6 +261,34 @@ pub(crate) async fn docker_secrets(
         }
         DockerSecretsCommand::Clear { env } => {
             println!("{}", plan::clear_docker_secret_dir(ctx, &env).await?);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn owner(ctx: &mut client::Ctx, command: OwnerCommand) -> Result<()> {
+    match command {
+        OwnerCommand::Show { env } => match tenkai::owner::environment_owner(ctx, &env).await? {
+            Some(owner) => {
+                if owner.endpoints.is_empty() {
+                    println!("{} (no notification endpoint)", owner.contact);
+                } else {
+                    println!("{} endpoints={}", owner.contact, owner.endpoints.join(","));
+                }
+            }
+            None => println!("{env} has no owner"),
+        },
+        OwnerCommand::Set { env, contact, .. } => {
+            println!(
+                "{}",
+                tenkai::owner::set_environment_owner(ctx, &env, &contact).await?
+            );
+        }
+        OwnerCommand::Clear { env, .. } => {
+            println!(
+                "{}",
+                tenkai::owner::clear_environment_owner(ctx, &env).await?
+            );
         }
     }
     Ok(())

@@ -422,6 +422,17 @@ pub(crate) fn inspect_result(report: &plan::EnvironmentInspectReport) -> Command
 }
 
 pub(crate) fn print_history_page(page: &tenkai::deployment_history::DeploymentHistoryPage) {
+    if let Some(owner) = &page.owner {
+        if owner.endpoints.is_empty() {
+            println!("owner {} (no notification endpoint)", owner.contact);
+        } else {
+            println!(
+                "owner {} endpoints={}",
+                owner.contact,
+                owner.endpoints.join(",")
+            );
+        }
+    }
     if page.items.is_empty() {
         println!("no deployment attempts recorded");
         return;

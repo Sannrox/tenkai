@@ -183,6 +183,9 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
             operational: Vec::new(),
             feedback: Vec::new(),
         },
+        Change::SetOwner {
+            contact: "oncall@example".into(),
+        },
         Change::SetCriticality {
             level: tenkai::criticality::CriticalityLevel::High,
             owner: "alice".into(),
@@ -250,6 +253,7 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
             report.facts,
             report.constraints,
             windows,
+            report.owner.map(|owner| owner.contact),
             report.criticality.map(|view| {
                 (
                     view.effective,

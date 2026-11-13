@@ -270,6 +270,9 @@ pub(crate) async fn run(
         EnvCommand::Webhooks { command } => {
             crate::embedded_env_config::webhooks(ctx, command).await?;
         }
+        EnvCommand::Owner { command } => {
+            crate::embedded_env_config::owner(ctx, command).await?;
+        }
         EnvCommand::RunnerAttestation { command } => {
             crate::embedded_env_config::runner_attestation(ctx, command).await?;
         }

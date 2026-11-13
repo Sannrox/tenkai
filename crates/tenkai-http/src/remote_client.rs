@@ -328,6 +328,82 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn inspect_product_owner(
+        &self,
+        product: &str,
+    ) -> anyhow::Result<Option<tenkai::owner::OwnerView>> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/products/{product}/owner"),
+        )
+        .await
+    }
+
+    pub async fn set_product_owner(
+        &self,
+        product: &str,
+        request: &tenkai::owner::SetOwnerRequest,
+    ) -> anyhow::Result<tenkai::owner::OwnerView> {
+        self.request_json_body(
+            reqwest::Method::PUT,
+            &format!("/v1/products/{product}/owner"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn clear_product_owner(
+        &self,
+        product: &str,
+    ) -> anyhow::Result<Option<tenkai::owner::OwnerView>> {
+        self.request_json(
+            reqwest::Method::DELETE,
+            &format!("/v1/products/{product}/owner"),
+        )
+        .await
+    }
+
+    pub async fn list_product_webhooks(
+        &self,
+        product: &str,
+    ) -> anyhow::Result<Vec<tenkai::deploy_webhook::WebhookEndpoint>> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/products/{product}/webhooks"),
+        )
+        .await
+    }
+
+    pub async fn set_product_webhook(
+        &self,
+        product: &str,
+        endpoint: &tenkai::deploy_webhook::WebhookEndpoint,
+    ) -> anyhow::Result<String> {
+        self.request_json_body(
+            reqwest::Method::PUT,
+            &format!("/v1/products/{product}/webhooks"),
+            Some(endpoint),
+        )
+        .await
+    }
+
+    pub async fn clear_product_webhooks(
+        &self,
+        product: &str,
+        url: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let path = match url {
+            Some(url) => {
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("url", url)
+                    .finish();
+                format!("/v1/products/{product}/webhooks?{query}")
+            }
+            None => format!("/v1/products/{product}/webhooks"),
+        };
+        self.request_json(reqwest::Method::DELETE, &path).await
+    }
+
     pub async fn import_derived_criticality(
         &self,
         envelope: Vec<u8>,
