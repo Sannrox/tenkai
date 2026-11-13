@@ -1,0 +1,31 @@
+# Tenkai
+
+> Tenkai is for governed delivery to environments you do not fully control.
+
+Customer-owned, disconnected, and regulated sites apply what they verify, not what a server tells them. Every change is signed and approved. The control plane is not trusted: a pull-only runtime checks the release and the approval before it applies, and a failed health probe rolls the site back.
+
+## Core concepts
+
+- A product has immutable signed releases. Promoting a release moves a channel to it.
+- An environment subscribes to one channel per product and carries its own constraints, maintenance windows, and trust policy.
+- A plan is a stored dry run. Apply executes it behind health probes. A failed probe restores the previous pin.
+- Agents may create a plan. They must not approve or apply. A human signs the approval bound to that exact plan digest.
+
+## Tasks
+
+- [Deploy with approval](tasks/deploy-with-approval.md): plan, human-signed approval, apply.
+- [Roll back](tasks/roll-back.md): restore the previously deployed version through a plan.
+- [Find why a deploy is blocked](tasks/explain-blocked-deploy.md): status, explain, inspect.
+- [Govern agent deployments](tasks/govern-agent-deployments.md): actor chain, budget, preview, approval brief.
+- [Deliver to a disconnected site](tasks/disconnected-site.md): signed offline bundle, bind, receipt.
+
+## Skill
+
+- [tenkaictl skill](../.agents/skills/tenkai/SKILL.md): read status, propose plans, explain blockers, never approve.
+
+## Reference
+
+- [Command results](command-results.md): `--output json-v1`.
+- [Plan approval](plan-approval.md): envelope and approval brief.
+- [Offline bundles](offline-bundles.md): disconnected archive contract.
+- [Documentation index](README.md)

@@ -46,6 +46,8 @@ mod secret;
 mod self_upgrade;
 mod spoke_standby;
 #[cfg(test)]
+mod task_page_commands;
+#[cfg(test)]
 mod tests;
 mod token_cache;
 mod topology_args;

@@ -1,12 +1,24 @@
 ---
 name: tenkai
-description: Run the Tenkai control loop with tenkaictl. Use when inspecting state, publishing or verifying a release, promoting a channel, configuring an environment, planning or applying delivery, reconciling a fleet, rolling back, migrating packages, or recovering operational state.
+description: Drive tenkaictl. Agents read status, propose plans, and explain blockers; they never submit approval or apply. A human may then run one bounded transition. Use when inspecting Tenkai state, planning delivery, or naming why a deploy is blocked.
 ---
 
 # Tenkai control loop
 
 Every `tenkaictl` run is one **control loop**: observe, transition, verify.
 Tenkai is the authority.
+
+## Agent authority
+
+If you are an agent actor, you may observe and create a forward plan. You
+must not `approval submit`, `apply`, publish, promote, recall, subscribe,
+hold, retry, or reconcile. Rollback and downgrade plans need a human-signed
+envelope. Stop after `plan` and return the plan id, digest, and approval
+brief so a human can sign. Details:
+[govern agent deployments](../../../docs/tasks/govern-agent-deployments.md).
+
+Prefer `--output json-v1` for any result another program will consume. Installed
+`--help` is the syntax authority.
 
 ## 1. Observe
 
@@ -55,7 +67,8 @@ required trust artifact is present and current.
    `--output json-v1` before the subcommand, in embedded or remote mode (see
    `docs/command-results.md`). An `unknown` outcome means observe before any
    retry. Never trust an exit code alone.
-2. Execute the bounded transition once.
+2. If you are an agent actor, stop after `plan`. A human submits approval and
+   apply. Otherwise execute the bounded transition once.
 3. Preserve the complete result envelope, opaque resource identifiers, exit
    status, and sanitized diagnostics. Keep secrets, signing keys, bearer tokens,
    executor output, and deployment payloads out of captures and reports.
