@@ -3907,7 +3907,14 @@ pub(crate) fn environment_plan_summary(plan: Plan) -> Result<EnvironmentPlanSumm
 fn operator_safe_status_detail(plan: &Plan) -> String {
     match plan.state {
         PlanState::Blocked if plan.maintenance_blocked => {
-            "blocked outside the configured maintenance window".into()
+            let mut detail = String::from("blocked outside the configured maintenance window");
+            if let Some(clause) =
+                crate::image_pre_pull::operator_pre_pull_clause(&plan.status_detail)
+            {
+                detail.push('\n');
+                detail.push_str(clause);
+            }
+            detail
         }
         PlanState::Blocked => "blocked by Tenkai approval or policy requirements".into(),
         PlanState::Failed => {

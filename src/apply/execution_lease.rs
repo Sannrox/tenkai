@@ -487,7 +487,7 @@ impl Drop for StopOnDrop {
 ///
 /// The inner result is the work's own. A lost fence is the outer error; when
 /// the work failed too, the outer error names the work's failure first.
-pub(super) async fn run_with_lease_renewal<T>(
+pub(crate) async fn run_with_lease_renewal<T>(
     ctx: &mut Ctx,
     lease: &EnvironmentLease,
     work: impl FnOnce(&AtomicBool) -> Result<T> + Send + 'static,

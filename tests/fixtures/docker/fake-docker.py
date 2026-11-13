@@ -286,6 +286,14 @@ def handle_pull(state: dict, state_path: Path, args: list[str]) -> int:
         sys.stderr.write("docker pull requires an image\n")
         return 1
     image = args[-1]
+    missing = {
+        item
+        for item in os.environ.get("TENKAI_DOCKER_FAKE_MISSING", "").split(",")
+        if item
+    }
+    if image in missing:
+        sys.stderr.write(f"Error: pull access denied for {image}, repository does not exist or may require 'docker login'\n")
+        return 1
     images = state.setdefault("images", [])
     if image not in images:
         images.append(image)

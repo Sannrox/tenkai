@@ -13,13 +13,13 @@ use crate::ontology::{
     KIND_CHANNEL_PROMOTION_DECISION, KIND_CHANNEL_PROMOTION_POLICY,
     KIND_CHANNEL_PROMOTION_POLICY_POINTER, KIND_CHANNEL_PROMOTION_SOAK, KIND_CONNECTIVITY_UPGRADE,
     KIND_DEPLOYMENT, KIND_ENVIRONMENT, KIND_ENVIRONMENT_EXECUTION, KIND_HEALTH_GATE_EVIDENCE,
-    KIND_HOST_RECORD, KIND_INSTANCE, KIND_INSTANCE_HEALTH, KIND_MAINTENANCE_CONFIG,
-    KIND_PACKAGE_MIGRATION, KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN, KIND_PLAN_APPROVAL_ENVELOPE,
-    KIND_PLAN_APPROVAL_VERIFICATION, KIND_PRODUCT, KIND_PRODUCT_MAINTENANCE_CONFIG,
-    KIND_PROMOTION_AUDIT, KIND_PROMOTION_LOCK, KIND_RELEASE, KIND_RELEASE_RECALL,
-    KIND_RELEASE_RECALL_RANGE, KIND_RELEASE_VERIFICATION, KIND_RUNTIME_ENROLLMENT,
-    KIND_UPGRADE_PACE_ADMIT, KIND_UPGRADE_PACE_ADMIT_AUDIT, KIND_WAVE, KIND_WORKLOAD_CERTIFICATE,
-    REL_SUBSCRIBES,
+    KIND_HOST_RECORD, KIND_IMAGE_PRE_PULL, KIND_INSTANCE, KIND_INSTANCE_HEALTH,
+    KIND_MAINTENANCE_CONFIG, KIND_PACKAGE_MIGRATION, KIND_PACKAGE_MIGRATION_LOCK, KIND_PLAN,
+    KIND_PLAN_APPROVAL_ENVELOPE, KIND_PLAN_APPROVAL_VERIFICATION, KIND_PRODUCT,
+    KIND_PRODUCT_MAINTENANCE_CONFIG, KIND_PROMOTION_AUDIT, KIND_PROMOTION_LOCK, KIND_RELEASE,
+    KIND_RELEASE_RECALL, KIND_RELEASE_RECALL_RANGE, KIND_RELEASE_VERIFICATION,
+    KIND_RUNTIME_ENROLLMENT, KIND_UPGRADE_PACE_ADMIT, KIND_UPGRADE_PACE_ADMIT_AUDIT, KIND_WAVE,
+    KIND_WORKLOAD_CERTIFICATE, REL_SUBSCRIBES,
 };
 use crate::pb::graph_action::{ActionOp, ActionParamDef, ActionTypeDef};
 use crate::pb::sekai::{ObjectType, PropertyDef};
@@ -815,6 +815,20 @@ pub fn known_object_types() -> Vec<ObjectType> {
                     false,
                     "Reported tenkai.host-applied-state.v1 record (JSON)",
                 ),
+            ],
+        ),
+        object_type(
+            KIND_IMAGE_PRE_PULL,
+            "Image pre-pull preparation for a plan waiting on a maintenance window",
+            vec![
+                prop("plan_id", true, "Plan whose images were pre-pulled"),
+                prop(
+                    "environment",
+                    true,
+                    "Environment the images were pulled into",
+                ),
+                prop("status", true, "running, succeeded, or failed"),
+                prop("event", true, "tenkai.image_pre_pull.v1 JSON"),
             ],
         ),
         object_type(

@@ -231,6 +231,7 @@ pub mod host_preflight;
 pub mod host_records;
 pub mod hub_ha_qualification;
 pub mod identity_issuer;
+pub mod image_pre_pull;
 pub mod import_progress;
 pub mod import_scanner;
 pub mod instance_explain;

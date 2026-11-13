@@ -1,14 +1,21 @@
 //! Native Kubernetes apply via `kubectl` (plain manifests, not Helm charts).
 
+use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
+use serde::Deserialize;
 
 use tenkai::software_executor::{
-    SoftwareApplyRequest, SoftwareDeployPhase, SoftwareExecutor, SoftwareObserveStatus,
-    instance_selector, k8s_label_value, kubernetes_manifests_dir, list_manifest_files,
-    materialize_kubernetes_manifests, run_captured_command, validate_request,
+    PRE_PULL_LABEL, PrePullImage, PrePullReport, SoftwareApplyRequest, SoftwareDeployPhase,
+    SoftwareExecutor, SoftwareObserveStatus, digest_pinned_registry_image, instance_selector,
+    k8s_label_value, kubernetes_manifests_dir, list_manifest_files,
+    materialize_kubernetes_manifests, pre_pull_job_name, run_captured_command,
+    sanitize_diagnostic_text, substitute_instance_placeholder, validate_request,
 };
 
 /// Native Kubernetes apply via `kubectl` (plain manifests, not Helm charts).
@@ -40,6 +47,171 @@ impl KubernetesSoftwareExecutor {
         }
         command
     }
+
+    fn pull_one_job(
+        &self,
+        request: &SoftwareApplyRequest,
+        image: &str,
+        hints: &crate::in_process_kubernetes::ImagePullHints,
+        timeout: Duration,
+        stop: &AtomicBool,
+    ) -> Result<(), String> {
+        let name = pre_pull_job_name(image);
+        let yaml = pre_pull_job_yaml(request, image, &name, hints);
+        apply_yaml(self, request, &yaml)?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                return Err("stopped".into());
+            }
+            if let Some(job) = kubectl_json(
+                self,
+                request,
+                &[
+                    "get",
+                    "job",
+                    &name,
+                    "--namespace",
+                    &request.environment,
+                    "-o",
+                    "json",
+                ],
+            ) {
+                if matches!(
+                    crate::in_process_kubernetes::job_pull_outcome(&job),
+                    Some(Ok(()))
+                ) {
+                    return Ok(());
+                }
+                if let Some(result) = kubectl_pod_pull_outcome(self, request, &name) {
+                    return result;
+                }
+                if let Some(Err(detail)) = crate::in_process_kubernetes::job_pull_outcome(&job) {
+                    return Err(detail);
+                }
+            } else if let Some(result) = kubectl_pod_pull_outcome(self, request, &name) {
+                return result;
+            }
+            if Instant::now() >= deadline {
+                return Err("timed out".into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+fn pre_pull_job_yaml(
+    request: &SoftwareApplyRequest,
+    image: &str,
+    name: &str,
+    hints: &crate::in_process_kubernetes::ImagePullHints,
+) -> String {
+    let mut spec = format!(
+        "      restartPolicy: Never\n      containers:\n      - name: pull\n        image: {image:?}\n        command: [\"true\"]\n        imagePullPolicy: Always\n"
+    );
+    if let Some(account) = &hints.service_account {
+        spec.push_str(&format!("      serviceAccountName: {account}\n"));
+    }
+    if !hints.secrets.is_empty() {
+        spec.push_str("      imagePullSecrets:\n");
+        for secret in &hints.secrets {
+            spec.push_str(&format!("      - name: {secret}\n"));
+        }
+    }
+    format!(
+        "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: {name}\n  labels:\n    {PRE_PULL_LABEL}: \"true\"\n    tenkai.product: {}\nspec:\n  ttlSecondsAfterFinished: 60\n  backoffLimit: 0\n  template:\n    metadata:\n      labels:\n        {PRE_PULL_LABEL}: \"true\"\n    spec:\n{spec}",
+        k8s_label_value(&request.product)
+    )
+}
+
+fn apply_yaml(
+    executor: &KubernetesSoftwareExecutor,
+    request: &SoftwareApplyRequest,
+    yaml: &str,
+) -> Result<(), String> {
+    let mut child = executor
+        .kubectl(request)
+        .args(["apply", "-f", "-", "--namespace", &request.environment])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("starting kubectl apply: {error}"))?;
+    let write = child
+        .stdin
+        .take()
+        .ok_or_else(|| "kubectl apply has no stdin".to_string())?
+        .write_all(yaml.as_bytes());
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("waiting for kubectl apply: {error}"))?;
+    write.map_err(|error| format!("writing pre-pull job: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(sanitize_diagnostic_text(stderr.trim()))
+    }
+}
+
+fn kubectl_json(
+    executor: &KubernetesSoftwareExecutor,
+    request: &SoftwareApplyRequest,
+    args: &[&str],
+) -> Option<serde_json::Value> {
+    let output = executor.kubectl(request).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+fn kubectl_pod_pull_outcome(
+    executor: &KubernetesSoftwareExecutor,
+    request: &SoftwareApplyRequest,
+    job: &str,
+) -> Option<Result<(), String>> {
+    let list = kubectl_json(
+        executor,
+        request,
+        &[
+            "get",
+            "pods",
+            "-l",
+            &format!("job-name={job}"),
+            "--namespace",
+            &request.environment,
+            "-o",
+            "json",
+        ],
+    )?;
+    list.get("items")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(crate::in_process_kubernetes::pod_pull_outcome)
+}
+
+fn kubectl_manifest_images(
+    request: &SoftwareApplyRequest,
+) -> Result<BTreeMap<String, crate::in_process_kubernetes::ImagePullHints>> {
+    let materialized = materialize_kubernetes_manifests(request)?;
+    let mut images = BTreeMap::new();
+    for path in list_manifest_files(&materialized.dir)? {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading manifest {}", path.display()))?;
+        let raw = substitute_instance_placeholder(&raw, request.instance_name());
+        for document in serde_yaml::Deserializer::from_str(&raw) {
+            let yaml_value = serde_yaml::Value::deserialize(document)
+                .with_context(|| format!("parsing manifest {}", path.display()))?;
+            if yaml_value.is_null() {
+                continue;
+            }
+            let value = serde_json::to_value(yaml_value)?;
+            crate::in_process_kubernetes::collect_image_fields(&value, &mut images);
+        }
+    }
+    Ok(images)
 }
 
 impl SoftwareExecutor for KubernetesSoftwareExecutor {
@@ -203,6 +375,101 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
                 request.instance_name(),
                 request.environment
             );
+        }
+        Ok(())
+    }
+
+    fn pre_pull(
+        &self,
+        request: &SoftwareApplyRequest,
+        timeout: Duration,
+        stop: &AtomicBool,
+    ) -> Result<PrePullReport> {
+        validate_request(request)?;
+        let images = kubectl_manifest_images(request)?;
+        let mut report = Vec::new();
+        let deadline = Instant::now() + timeout;
+        for (image, hints) in images {
+            if stop.load(Ordering::SeqCst) {
+                report.push(PrePullImage {
+                    image,
+                    ok: false,
+                    detail: "stopped".into(),
+                });
+                continue;
+            }
+            if Instant::now() >= deadline {
+                report.push(PrePullImage {
+                    image,
+                    ok: false,
+                    detail: "timed out".into(),
+                });
+                continue;
+            }
+            if !digest_pinned_registry_image(&image) {
+                report.push(PrePullImage {
+                    image,
+                    ok: false,
+                    detail: "image must be digest-pinned as <repository>@sha256:<64 hex>".into(),
+                });
+                continue;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.pull_one_job(request, &image, &hints, remaining, stop) {
+                Ok(()) => report.push(PrePullImage {
+                    image,
+                    ok: true,
+                    detail: String::new(),
+                }),
+                Err(detail) => report.push(PrePullImage {
+                    image,
+                    ok: false,
+                    detail,
+                }),
+            }
+        }
+        Ok(PrePullReport { images: report })
+    }
+
+    fn cleanup_pre_pull(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        let selector = format!("{PRE_PULL_LABEL}=true");
+        let _ = run_kubectl(
+            self.kubectl(request),
+            &[
+                "delete",
+                "job,pod",
+                "-l",
+                &selector,
+                "--namespace",
+                &request.environment,
+                "--ignore-not-found=true",
+                "--wait=false",
+            ],
+            SoftwareDeployPhase::PrePull,
+            "delete pre-pull jobs",
+            &request.product,
+            &request.environment,
+        );
+        if let Ok(images) = kubectl_manifest_images(request) {
+            for image in images.keys() {
+                let name = pre_pull_job_name(image);
+                let _ = run_kubectl(
+                    self.kubectl(request),
+                    &[
+                        "delete",
+                        "job",
+                        &name,
+                        "--namespace",
+                        &request.environment,
+                        "--ignore-not-found=true",
+                        "--wait=false",
+                    ],
+                    SoftwareDeployPhase::PrePull,
+                    "delete pre-pull job",
+                    &request.product,
+                    &request.environment,
+                );
+            }
         }
         Ok(())
     }
