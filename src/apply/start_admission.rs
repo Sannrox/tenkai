@@ -294,12 +294,7 @@ async fn block_for_maintenance(
         },
     )
     .await?;
-    Err(MaintenanceBlocked(detail.to_string()).into())
-}
-
-#[cfg(test)]
-fn is_maintenance_block_error(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<MaintenanceBlocked>().is_some()
+    bail!("{detail}")
 }
 
 enum MaintenanceDecision {
@@ -307,17 +302,6 @@ enum MaintenanceDecision {
     Denied(String),
     EmergencyOverride(String),
 }
-
-#[derive(Debug)]
-struct MaintenanceBlocked(String);
-
-impl std::fmt::Display for MaintenanceBlocked {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for MaintenanceBlocked {}
 
 enum GateDecision {
     Allowed,
@@ -487,8 +471,11 @@ mod tests {
                 block_for_maintenance(&mut ctx, &lease, &mut blocked, false, "window closed")
                     .await
                     .unwrap_err();
-            assert!(is_maintenance_block_error(&error));
+            assert_eq!(error.to_string(), "window closed");
         }
+        let stored = crate::plan::load(&mut ctx, &blocked.id).await.unwrap();
+        assert_eq!(stored.state, crate::plan::PlanState::Blocked);
+        assert!(stored.maintenance_blocked);
         let mut failed = crate::plan::create_from_steps(&mut ctx, "local", vec![fixture_step()])
             .await
             .unwrap();
@@ -540,14 +527,6 @@ mod tests {
         assert!(validate_emergency_override(Some("incident 42")).is_ok());
         assert!(validate_emergency_override(Some("  ")).is_err());
         assert_eq!(validate_emergency_override(None).unwrap(), None);
-    }
-
-    #[test]
-    fn maintenance_block_errors_are_typed() {
-        let maintenance = anyhow::Error::new(MaintenanceBlocked("window closed".into()));
-        let unrelated = anyhow::anyhow!("maintenance window text from another error");
-        assert!(is_maintenance_block_error(&maintenance));
-        assert!(!is_maintenance_block_error(&unrelated));
     }
 
     #[test]
