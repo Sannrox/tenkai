@@ -264,7 +264,10 @@ pub(crate) fn apply_resolved_environment(
 }
 
 pub(crate) fn command_creates_store(command: &Command) -> bool {
-    matches!(command, Command::Init | Command::Restore { .. })
+    matches!(
+        command,
+        Command::Init | Command::Quickstart { .. } | Command::Restore { .. }
+    )
 }
 
 /// True when `--database` / `--database=` is on argv. That names a local

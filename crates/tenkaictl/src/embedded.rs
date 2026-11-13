@@ -266,6 +266,7 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
         | Command::BackupEvidence { .. }
         | Command::Audit { .. }
         | Command::Dev { .. }
+        | Command::Quickstart { .. }
         | Command::ExecutorGuard { .. }
         | Command::Login { .. }
         | Command::Revocations { .. }

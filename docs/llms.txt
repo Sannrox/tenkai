@@ -13,6 +13,7 @@ Customer-owned, disconnected, and regulated sites apply what they verify, not wh
 
 ## Tasks
 
+- [Governed deploy in 15 minutes](../README.md#governed-deploy-in-15-minutes): laptop lab via `tenkaictl quickstart`, then signed apply and rollback.
 - [Deploy with approval](tasks/deploy-with-approval.md): plan, human-signed approval, apply.
 - [Roll back](tasks/roll-back.md): restore the previously deployed version through a plan.
 - [Find why a deploy is blocked](tasks/explain-blocked-deploy.md): status, explain, inspect.

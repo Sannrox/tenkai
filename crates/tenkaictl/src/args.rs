@@ -117,6 +117,15 @@ pub(crate) enum Command {
     },
     /// Initialize Tenkai state and create the `local` environment.
     Init,
+    /// Create lab-only keys, trust roots, approval policy, and environment.
+    Quickstart {
+        /// Directory for lab keys and trust files (default `.tenkai-lab`).
+        #[arg(long, default_value = tenkai::dev_sign::DEFAULT_LAB_DIR)]
+        dir: PathBuf,
+        /// Environment to register. Refuses the built-in `local` environment.
+        #[arg(long, default_value = "lab")]
+        env: String,
+    },
     /// Sign in to a remote server through the configured OIDC provider.
     Login {
         /// Pre-registered OIDC client ID. Defaults to GET /v1/auth/oidc.

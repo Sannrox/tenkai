@@ -21,12 +21,18 @@ use crate::plan_approval::{
 };
 use crate::release_signing::{
     ENVELOPE_SCHEMA, Provenance, ReleaseStatement, SignatureEnvelope, TRUST_ROOT_VERSION,
-    TrustRoots as ReleaseTrustRoots, key_id, verify_release,
+    TrustRootKind, TrustRoots as ReleaseTrustRoots, key_id, verify_release,
 };
 use crate::signature_verification;
 
 /// Default relative directory for laptop dogfood keys (gitignored recommended).
 pub const DEFAULT_DEV_KEYS_DIR: &str = ".tenkai-dev-keys";
+
+/// Default relative directory for the lab-only governed quickstart (gitignored).
+pub const DEFAULT_LAB_DIR: &str = ".tenkai-lab";
+
+/// Manual plan-approval policy used by `tenkaictl quickstart`.
+pub const LAB_APPROVAL_POLICY: &str = "version = 1\nmode = \"manual\"\nttl_ms = 3600000\n";
 
 const RELEASE_KEY_FILE: &str = "release.ed25519";
 const APPROVAL_KEY_FILE: &str = "approval.ed25519";
@@ -560,6 +566,53 @@ pub fn warning_line() -> &'static str {
     WARNING
 }
 
+/// Write release and plan-approval trust-root files from keys, without signing.
+///
+/// `tenkaictl quickstart` uses this so a lab environment has trust roots before
+/// the first product is signed. Signing later rewrites the same public material.
+pub fn write_dev_trust_roots(
+    keys_dir: &Path,
+    release_trust_out: &Path,
+    approval_trust_out: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    init_dev_keys(keys_dir)?;
+    reject_output_path_collisions(keys_dir, release_trust_out, approval_trust_out)?;
+
+    let release_seed = load_private_seed(&keys_dir.join(RELEASE_KEY_FILE))?;
+    let release_key = signing_key_from_seed(&release_seed);
+    let release_public = release_key.verifying_key().to_bytes();
+    let release_roots = trust_roots_toml(
+        &key_id(&release_public),
+        "dogfood-release@localhost",
+        &STANDARD.encode(release_public),
+    );
+    write_text_owner_only(release_trust_out, &release_roots)?;
+
+    let approval_seed = load_private_seed(&keys_dir.join(APPROVAL_KEY_FILE))?;
+    let approval_key = signing_key_from_seed(&approval_seed);
+    let approval_public = approval_key.verifying_key().to_bytes();
+    let approval_roots = trust_roots_toml(
+        &key_id(&approval_public),
+        "dogfood-approver@localhost",
+        &STANDARD.encode(approval_public),
+    );
+    write_text_owner_only(approval_trust_out, &approval_roots)?;
+
+    ReleaseTrustRoots::load(release_trust_out, TrustRootKind::Release)?;
+    ReleaseTrustRoots::load(approval_trust_out, TrustRootKind::PlanApproval)?;
+
+    Ok((
+        release_trust_out.to_path_buf(),
+        approval_trust_out.to_path_buf(),
+    ))
+}
+
+/// Write the lab-only manual approval policy without following symlinks.
+pub fn write_lab_approval_policy(path: &Path) -> Result<PathBuf> {
+    write_text_owner_only(path, LAB_APPROVAL_POLICY)?;
+    Ok(path.to_path_buf())
+}
+
 /// Write a one-file product, sign it, and publish it. Used by fleet drills.
 pub(crate) async fn publish_signed_product(
     ctx: &mut crate::client::Ctx,
@@ -616,6 +669,29 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn write_dev_trust_roots_from_keys_without_signing() {
+        let root = temp_dir("trust-roots");
+        let keys = root.join("keys");
+        init_dev_keys(&keys).unwrap();
+        let release_trust = root.join("release-trust.toml");
+        let approval_trust = root.join("approval-trust.toml");
+        write_dev_trust_roots(&keys, &release_trust, &approval_trust).unwrap();
+        let release_body = fs::read_to_string(&release_trust).unwrap();
+        let approval_body = fs::read_to_string(&approval_trust).unwrap();
+        assert!(release_body.contains("dogfood-release@localhost"));
+        assert!(approval_body.contains("dogfood-approver@localhost"));
+        let seed = load_private_seed(&keys.join(RELEASE_KEY_FILE)).unwrap();
+        let seed_b64 = STANDARD.encode(seed);
+        assert!(!release_body.contains(&seed_b64));
+        assert!(!approval_body.contains(&seed_b64));
+        let same = root.join("same.toml");
+        let err = write_dev_trust_roots(&keys, &same, &same)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("distinct"), "{err}");
     }
 
     #[test]

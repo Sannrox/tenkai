@@ -19,6 +19,7 @@ mod embedded_hold;
 mod embedded_migrate;
 mod embedded_preflight;
 mod embedded_product;
+mod embedded_quickstart;
 mod embedded_reconcile;
 mod embedded_remediate;
 mod embedded_rollback;
@@ -465,6 +466,9 @@ async fn run(mut cli: Cli) -> Result<()> {
     }
     if matches!(cli.command, Command::Dev { .. }) {
         return embedded_dev::run_dev(&cli).await;
+    }
+    if matches!(cli.command, Command::Quickstart { .. }) {
+        return embedded_quickstart::run(&cli).await;
     }
     if matches!(
         cli.command,

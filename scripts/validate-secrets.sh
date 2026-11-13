@@ -17,7 +17,7 @@ while IFS= read -r path; do
       printf 'tracked path looks like secret or local state: %s\n' "$path" >&2
       path_ok=1
       ;;
-    */id_ed25519 | id_ed25519 | .tenkai-state/* | */.tenkai-state/* | .tenkai-dev-keys/* | */.tenkai-dev-keys/*)
+    */id_ed25519 | id_ed25519 | .tenkai-state/* | */.tenkai-state/* | .tenkai-dev-keys/* | */.tenkai-dev-keys/* | .tenkai-lab/* | */.tenkai-lab/*)
       printf 'tracked path looks like secret or local state: %s\n' "$path" >&2
       path_ok=1
       ;;

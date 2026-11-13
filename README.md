@@ -11,7 +11,7 @@ before it applies, and a failed health probe rolls the site back.
 [![Release](https://img.shields.io/github/v/release/Sannrox/tenkai)](https://github.com/Sannrox/tenkai/releases)
 [![License](https://img.shields.io/github/license/Sannrox/tenkai)](LICENSE)
 
-[Quickstart](#try-it-in-five-minutes) · [When not to use](#when-not-to-use-tenkai) · [Docs](docs/README.md) · [Design](DESIGN.md) · [Roadmap](docs/capabilities.md)
+[Quickstart](#try-it-in-five-minutes) · [Governed path](#governed-deploy-in-15-minutes) · [When not to use](#when-not-to-use-tenkai) · [Docs](docs/README.md) · [Design](DESIGN.md) · [Roadmap](docs/capabilities.md)
 
 Tenkai (展開, "deployment") publishes immutable releases into channels. Each
 environment subscribes, plans the change under its own constraints, and
@@ -91,6 +91,47 @@ environment. Every other environment requires
 [signed plan approvals](docs/plan-approval.md). Source builds, server and
 runtime hosts, and manual verification are in
 [GitHub Release binaries](docs/release-binaries.md).
+
+## Governed deploy in 15 minutes
+
+The five-minute path is unsigned and local-only. This path is what Tenkai is
+for: a signed release, a required plan approval, apply under a health probe,
+and automatic rollback of a bad version.
+
+`quickstart` writes lab keys, trust roots, a manual approval policy, and a
+`lab` environment. It is lab-only, not production KMS.
+
+```bash
+./tenkaictl quickstart
+export TENKAI_MANAGEMENT_TOKEN=tenkai-local-management   # any value works in embedded mode
+
+./tenkaictl dev sign-release examples/hello-local/tenkai.toml \
+  --keys .tenkai-lab/keys \
+  --signature .tenkai-lab/hello-local-0.1.0.sig.json \
+  --trust-roots .tenkai-lab/release-trust.toml
+./tenkaictl publish examples/hello-local/tenkai.toml \
+  --signature .tenkai-lab/hello-local-0.1.0.sig.json \
+  --trust-roots .tenkai-lab/release-trust.toml
+./tenkaictl promote hello-local@0.1.0 stable
+./tenkaictl env subscribe lab hello-local=stable
+
+PLAN=$(./tenkaictl plan --env lab | awk '/^plan id:/ {print $3}')
+./tenkaictl apply "$PLAN"   # fails: signed approval required
+
+./tenkaictl dev sign-approval "$PLAN" \
+  --keys .tenkai-lab/keys \
+  --approval .tenkai-lab/plan.approval.json \
+  --trust-roots .tenkai-lab/approval-trust.toml
+./tenkaictl apply "$PLAN" \
+  --approval .tenkai-lab/plan.approval.json \
+  --approval-trust-roots .tenkai-lab/approval-trust.toml
+./tenkaictl status --env lab
+```
+
+Then ship the broken 0.2.0 release the same way (`examples/hello-local/broken.toml`).
+`apply` reports the rollback and exits non-zero; `status` still shows 0.1.0.
+
+CI runs this journey and fails if it takes longer than 15 minutes.
 
 ## How it works
 
