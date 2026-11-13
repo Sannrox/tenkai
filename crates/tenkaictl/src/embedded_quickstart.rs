@@ -85,7 +85,9 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
     println!("approval policy    {}", policy.display());
     println!();
     println!("Next (lab-only):");
-    println!("  export TENKAI_MANAGEMENT_TOKEN=tenkai-local-management");
+    println!(
+        "  export TENKAI_MANAGEMENT_TOKEN=tenkai-local-management   # any value works in embedded mode"
+    );
     println!(
         "  tenkaictl dev sign-release examples/hello-local/tenkai.toml --keys {} --signature {} --trust-roots {}",
         keys.display(),
