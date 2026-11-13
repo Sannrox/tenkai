@@ -104,14 +104,12 @@ pub struct ExposureWaiver {
     pub expires_at: i64,
 }
 
-/// Copy grace so a channel put does not drop it.
+/// Copy grace and scan-age so a channel put does not drop them.
 pub fn copy_channel_properties(dst: &mut HashMap<String, String>, src: &Object) {
-    if let Some(value) = src
-        .properties
-        .get(GRACE_MS_PROPERTY)
-        .filter(|value| !value.is_empty())
-    {
-        dst.insert(GRACE_MS_PROPERTY.into(), value.clone());
+    for key in [GRACE_MS_PROPERTY, super::MAX_INVENTORY_AGE_PROPERTY] {
+        if let Some(value) = src.properties.get(key).filter(|value| !value.is_empty()) {
+            dst.insert(key.into(), value.clone());
+        }
     }
 }
 

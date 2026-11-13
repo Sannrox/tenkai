@@ -649,8 +649,9 @@ mod tests {
         crate::plan::env_add(&mut ctx, "prod", "runtime")
             .await
             .unwrap();
+        // admit() reads now again; +1ms lost the race on a loaded runner (#1270).
         let future = observation(
-            crate::now_millis() + crate::signature_verification::SIGNED_AT_CLOCK_SKEW_MS + 1,
+            crate::now_millis() + crate::signature_verification::SIGNED_AT_CLOCK_SKEW_MS + 60_000,
             HealthCheckState::Healthy,
         );
         let error = admit(&mut ctx, "prod", std::slice::from_ref(&future))

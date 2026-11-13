@@ -642,6 +642,11 @@ pub fn known_object_types() -> Vec<ObjectType> {
                     false,
                     "Grace window in milliseconds before an advisory finding refuses a plan",
                 ),
+                prop(
+                    crate::exposure::MAX_INVENTORY_AGE_PROPERTY,
+                    false,
+                    "Max signed inventory age in milliseconds before install is refused",
+                ),
             ],
         ),
         object_type(
