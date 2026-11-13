@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use tenkai::command_result::{CommandName, CommandResultV1, RetryGuidance};
 use tenkai::{apply, client, plan};
 
-use crate::args::{ApplyCommand, Command, OutputFormat, RecoveryCommand};
+use crate::args::{ApplyCommand, Command, OutputFormat, PlanCommand, RecoveryCommand};
 use crate::authorization::execution_authorization;
 use crate::output::{print_machine_result, print_steps, reported_machine_failure};
 
@@ -22,7 +22,18 @@ pub(crate) async fn run(
     database: &Path,
 ) -> Result<()> {
     match command {
-        Command::Plan { env, generation: _ } => {
+        Command::Plan {
+            command: Some(PlanCommand::Show { plan_id }),
+            ..
+        } => {
+            let stored = plan::load(ctx, &plan_id).await?;
+            crate::output::print_plan(&stored)?;
+        }
+        Command::Plan {
+            command: None,
+            env,
+            generation: _,
+        } => {
             let env = crate::client_config::require_env(env)?;
             if output == OutputFormat::JsonV1 {
                 tenkai::command_result::validate_resource_reference(
@@ -30,6 +41,12 @@ pub(crate) async fn run(
                     &format!("tenkai:plan:{env}:18446744073709551615:{}", "0".repeat(64)),
                 )
                 .map_err(|message| anyhow::anyhow!(message))?;
+            }
+            if let Ok(actor) = crate::authorization::embedded_management_actor() {
+                ctx.set_plan_proposer(tenkai::plan::PlanProposer {
+                    principal: actor.principal_id().to_string(),
+                    actor_chain: actor.actor_chain().to_vec(),
+                });
             }
             let stored = plan::create(ctx, &env).await?;
             if output == OutputFormat::JsonV1 {
@@ -41,12 +58,7 @@ pub(crate) async fn run(
                 )?;
             } else {
                 println!("plan id: {}", stored.id);
-                if stored.steps.is_empty() {
-                    println!("{env} is up to date");
-                } else {
-                    println!("plan for {env}:");
-                    print_steps(&stored.steps);
-                }
+                crate::output::print_plan_human(&stored);
             }
         }
         Command::Apply {

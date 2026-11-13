@@ -11,7 +11,7 @@ make update
 
 `WHAT=<one test filter> make test` (and the same for `make test-integration`)
 runs one Cargo filter without shell evaluation. The default suite is
-`cargo test --locked`. Live Kubernetes, Llama, and PostgreSQL checks stay
+`cargo test --locked --workspace`. Live Kubernetes, Llama, and PostgreSQL checks stay
 opt-in for `make test` and are documented; CI additionally runs the kind
 in-process Kubernetes test on pull requests, pushes to `main`, and weekly.
 
@@ -19,8 +19,8 @@ in-process Kubernetes test on pull requests, pushes to `main`, and weekly.
 
 GitHub Issues are the planning source of truth. Shape new work with the
 `shape-work-item` Skill when you need a repository-consistent body
-(problem, observable outcome, acceptance evidence, non-goals, dependencies,
-impact).
+(tenant or operator problem, observable outcome, acceptance evidence, primary
+area, boundaries and dependencies, compatibility and risk).
 
 One Issue is one delivery lane: one claim branch, one isolated checkout, one
 Pull Request. Agent and parallel-lane policy lives in [AGENTS.md](AGENTS.md).
@@ -39,7 +39,7 @@ base; a reported major break passes only with that marker and label.
 
 Before review, run `make validate` and the focused tests for the change.
 `make validate` runs every `scripts/validate-*.sh`. Clippy matches
-`cargo clippy --all-targets --all-features --locked -- -D warnings`.
+`cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`.
 The CI `Proto breaking` job runs `buf breaking` (rules in `proto/buf.yaml`)
 against the last final `v*` tag. A reported break passes only when the pull
 request title is `type!:` or its body has a `## Breaking` or `## Upgrade`

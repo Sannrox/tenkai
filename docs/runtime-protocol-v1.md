@@ -118,8 +118,8 @@ send `x-tenkai-runtime-version`, which the
 [runner registry](run-tenkai-server.md#runner-registry) shows.
 
 Work pull does not accept supported versions and does not negotiate. The
-capabilities are `workload_identity`, `peer_grants`, and `instance_health`,
-named comma-separated in `x-tenkai-runtime-capabilities`
+capabilities are `workload_identity`, `peer_grants`, `issuer_rotation`,
+`issuer_take_up`, `issuer_removal`, and `instance_health`, named comma-separated in `x-tenkai-runtime-capabilities`
 ([below](#identity-issuer), [instance health](#instance-health)). Completion covers the claimed plan in one request, not one proto
 `CompleteStep` per step. Inventory is an admitted facts map, not a proto
 `Observation`.

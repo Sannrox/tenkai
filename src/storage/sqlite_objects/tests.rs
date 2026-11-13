@@ -454,6 +454,7 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
         prior_warnings: Vec::new(),
         recalled_recovery_reason: None,
         credential_runway: None,
+        approval_brief: None,
     }
 }
 

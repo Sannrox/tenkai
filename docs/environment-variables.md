@@ -93,14 +93,13 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `TENKAI_LISTEN` | `127.0.0.1:8080` | Server listen address; must remain loopback behind a TLS proxy |
+| `TENKAI_LISTEN` | `127.0.0.1:8080` | Server listen address; plaintext must stay loopback behind a TLS proxy; a non-loopback bind requires `TENKAI_TLS_CERT` |
 | `TENKAI_UNIX_SOCKET` | `/run/tenkai/tenkai.sock` on Linux | Unix socket for host identity. `tenkaictl` uses this path when it exists and no `--server-url` or token is set. `--no-unix-socket` disables the server listener |
 | `TENKAI_HOST_GRANTS` | `/etc/tenkai/host-grants.toml` | Root-owned OS-group grant mapping for host identity. Missing disables peer-credential authentication |
 | `TENKAI_RUNTIME_TOKENS` | `{}` | JSON object mapping bearer secrets to one environment each |
 | `TENKAI_ENVIRONMENT_MANAGEMENT_TOKENS` | `{}` | JSON object mapping environment-scoped management bearers to one environment each; distinct from the fleet management token and runtime tokens |
 | `TENKAI_OIDC_CONFIG` | unset | Filesystem path to an OIDC trust TOML file; the server verifies OIDC access tokens sent as `Authorization: Bearer` and maps groups to grants ([configure server authentication](configure-server-authentication.md#oidc-access-tokens-468)). May be set together with `TENKAI_JWT_VERIFIER_CONFIG` when the issuers differ |
 | `TENKAI_POSTGRES_URL` | unset | Sole hub store URL for `--tenant-mode`. Invalid together with `TENKAI_DATABASE`. Embedded `tenkaictl` and spoke `tenkai-server` fail closed when it is set. Non-loopback hosts require verified TLS |
-| `TENKAI_INSTANCE_ID` | random UUID per process | Replica identity used for multi-replica fencing; the server records it as `tenkai-server-<value>` |
 | `TENKAI_TLS_CERT` | unset | `tenkai-server` only: PEM certificate chain for [native TLS](run-tenkai-server.md#native-tls); required for a non-loopback bind |
 | `TENKAI_TLS_KEY` | unset | Secret setting: PEM private key for `TENKAI_TLS_CERT` (also `TENKAI_TLS_KEY_FILE` or the secret directory) |
 | `TENKAI_TLS_CLIENT_CA` | unset | PEM CA bundle that verifies client certificates when presented |

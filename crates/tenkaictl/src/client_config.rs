@@ -220,6 +220,10 @@ pub(crate) fn needs_env_resolution(command: &mut Command) -> bool {
 
 pub(crate) fn command_env_mut(command: &mut Command) -> Option<&mut Option<String>> {
     match command {
+        Command::Plan {
+            command: Some(crate::args::PlanCommand::Show { .. }),
+            ..
+        } => None,
         Command::Plan { env, .. }
         | Command::Status { env, .. }
         | Command::Rollback { env, .. }

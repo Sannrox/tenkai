@@ -936,6 +936,7 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            approval_brief: None,
         };
         plan.bind_content_identity().unwrap();
         crate::plan::store(ctx, &plan).await.unwrap();

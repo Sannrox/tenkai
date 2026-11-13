@@ -2507,7 +2507,7 @@ pub(super) async fn create(
     executors: &crate::software_executor::SoftwareExecutors,
 ) -> Result<Plan> {
     let (inputs, steps) = compute_snapshot(ctx, env, executors).await?;
-    create_with_content(ctx, executors, env, inputs, steps, None).await
+    create_with_content(ctx, executors, env, inputs, steps, None, "embedded").await
 }
 
 /// Persist a catalog-only plan only when it includes `product` at `release`.
@@ -2528,7 +2528,7 @@ pub(super) async fn create_for_held_target(
     {
         bail!("explicit retry did not include held failed target {product} ({release})");
     }
-    create_with_content(ctx, &executors, env, inputs, steps, None).await
+    create_with_content(ctx, &executors, env, inputs, steps, None, "embedded").await
 }
 
 /// Reconcile planning may emit Restart steps from live observe/health evidence.
@@ -2541,9 +2541,9 @@ pub(super) async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Pla
     let (inputs, mut steps) =
         compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile(), &executors).await?;
     if steps.is_empty() {
-        return assemble_plan(env, inputs, &mut steps, None);
+        return assemble_plan(env, inputs, &mut steps, None, None);
     }
-    create_with_content(ctx, &executors, env, inputs, steps, None).await
+    create_with_content(ctx, &executors, env, inputs, steps, None, "reconciler").await
 }
 
 /// Persist a reconcile-policy plan, even with zero steps. Held failed targets
@@ -2552,14 +2552,14 @@ pub(super) async fn create_holding_failed_targets(ctx: &mut Ctx, env: &str) -> R
     let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
     let (inputs, steps) =
         compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile(), &executors).await?;
-    create_with_content(ctx, &executors, env, inputs, steps, None).await
+    create_with_content(ctx, &executors, env, inputs, steps, None, "reconciler").await
 }
 
 /// Persist an explicitly constructed operation, such as a rollback, as a plan.
 pub(super) async fn create_from_steps(ctx: &mut Ctx, env: &str, steps: Vec<Step>) -> Result<Plan> {
     admit_preview_environment(ctx, env).await?;
     let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
-    create_with_content(ctx, &executors, env, Vec::new(), steps, None).await
+    create_with_content(ctx, &executors, env, Vec::new(), steps, None, "embedded").await
 }
 
 pub(super) async fn create_from_steps_with_recovery(
@@ -2570,7 +2570,16 @@ pub(super) async fn create_from_steps_with_recovery(
 ) -> Result<Plan> {
     admit_preview_environment(ctx, env).await?;
     let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
-    create_with_content(ctx, &executors, env, Vec::new(), steps, Some(reason)).await
+    create_with_content(
+        ctx,
+        &executors,
+        env,
+        Vec::new(),
+        steps,
+        Some(reason),
+        "embedded",
+    )
+    .await
 }
 
 async fn admit_preview_environment(ctx: &mut Ctx, env: &str) -> Result<()> {
@@ -2583,6 +2592,7 @@ fn assemble_plan(
     inputs: Vec<DesiredStateInput>,
     steps: &mut [Step],
     recalled_recovery_reason: Option<String>,
+    approval_brief: Option<crate::plan::ApprovalBrief>,
 ) -> Result<Plan> {
     let created_at = crate::now_millis();
     for (order, step) in steps.iter_mut().enumerate() {
@@ -2594,6 +2604,7 @@ fn assemble_plan(
         &inputs,
         steps,
         recalled_recovery_reason.as_deref(),
+        approval_brief.as_ref(),
     )?;
     let id = plan_id(env, created_at, &content_id);
     for (order, step) in steps.iter_mut().enumerate() {
@@ -2614,6 +2625,7 @@ fn assemble_plan(
         prior_warnings: Vec::new(),
         recalled_recovery_reason,
         credential_runway: None,
+        approval_brief,
     })
 }
 
@@ -2634,6 +2646,7 @@ async fn create_with_content(
     inputs: Vec<DesiredStateInput>,
     steps: Vec<Step>,
     recalled_recovery_reason: Option<String>,
+    default_proposer: &str,
 ) -> Result<Plan> {
     let mut steps = bind_host_steps(ctx, executors, env, steps).await?;
     // An identity issuer step names no release to check.
@@ -2644,7 +2657,16 @@ async fn create_with_content(
     refuse_unadmitted_callers(ctx, env, &steps).await?;
     let env_obj = crate::environment::active_environment(ctx, env).await?;
     attach_target_changes(ctx, env, &env_obj, executors, &mut steps).await?;
-    let mut plan = assemble_plan(env, inputs, &mut steps, recalled_recovery_reason)?;
+    let approval_brief = Some(
+        crate::plan::compute_approval_brief(ctx, env, &env_obj, &steps, default_proposer).await,
+    );
+    let mut plan = assemble_plan(
+        env,
+        inputs,
+        &mut steps,
+        recalled_recovery_reason,
+        approval_brief,
+    )?;
     // Optional advisory priors (default off). Never hard-block or change steps.
     if let Ok(inspect) = inspect_environment(ctx, env).await {
         let _ = crate::plan_priors::annotate_plan_with_priors(

@@ -340,6 +340,7 @@ mod tests {
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            approval_brief: None,
         }
     }
 
@@ -596,6 +597,7 @@ mod tests {
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            approval_brief: None,
         };
         assert_eq!(
             classify_candidate(&mut ctx, &leftover).await.unwrap(),

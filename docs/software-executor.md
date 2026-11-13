@@ -233,7 +233,8 @@ its work poll and reports the result; `status` overlays a stale report
 as `unknown`
 ([instance health](runtime-protocol-v1.md#instance-health)). Executors that
 implement `render_target_changes` also record a desired-versus-live diff on
-each step; `tenkaictl plan` prints it, the plan digest covers it, and apply
+each step; embedded human `tenkaictl plan` prints the approval brief first,
+then this diff; the plan digest covers both, and apply
 refuses the step as stale if the live object moved.
 
 ## In-process Kubernetes enablement (#376)

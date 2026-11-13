@@ -1892,6 +1892,10 @@ pub struct EnvironmentPlanSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub digest: Option<String>,
+    /// Bounded approval brief, returned before step detail (#1089).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub approval_brief: Option<crate::plan::ApprovalBrief>,
     /// Bounded operator-facing lifecycle detail; never contains executable payloads.
     #[serde(default)]
     pub status_detail: String,
@@ -3878,6 +3882,7 @@ pub(crate) fn environment_plan_summary(plan: Plan) -> Result<EnvironmentPlanSumm
         created_at: plan.created_at,
         step_count,
         digest: Some(digest),
+        approval_brief: plan.approval_brief,
         status_detail,
         steps_truncated: steps.len() < step_count,
         steps,
@@ -4745,6 +4750,7 @@ mod tests {
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            approval_brief: None,
         };
         install.bind_content_identity().unwrap();
         crate::plan::store(&mut ctx, &install).await.unwrap();
@@ -4989,6 +4995,7 @@ mod tests {
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            approval_brief: None,
         };
         install.bind_content_identity().unwrap();
         crate::plan::store(&mut ctx, &install).await.unwrap();
@@ -5120,6 +5127,7 @@ mod tests {
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            approval_brief: None,
         };
         install.bind_content_identity().unwrap();
         crate::plan::store(&mut ctx, &install).await.unwrap();

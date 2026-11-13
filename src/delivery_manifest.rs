@@ -5,15 +5,11 @@
 //! content-bound identities with no payload.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
-use crate::plan::Plan;
-use crate::plan_approval;
-use crate::release_signing::{self, SignatureEnvelope, TrustRoots, VerificationEvidence};
 use crate::runtime_delivery::{
     RuntimeCompletion, complete_runtime_work, validate_runtime_completion,
 };
@@ -92,24 +88,6 @@ pub fn admit_required_capabilities(required: &[String], supported: &[String]) ->
     Ok(())
 }
 
-pub fn admit_signed_release(
-    envelope: &SignatureEnvelope,
-    roots: &TrustRoots,
-    manifest_digest: &str,
-    artifact_digest: &str,
-) -> Result<VerificationEvidence> {
-    release_signing::verify_release(envelope, roots, manifest_digest, artifact_digest)
-}
-
-pub fn admit_signed_plan(
-    plan: &Plan,
-    approval: &Path,
-    trust_roots: &Path,
-    now: i64,
-) -> Result<plan_approval::VerificationEvidence> {
-    plan_approval::verify(plan, approval, trust_roots, now, false)
-}
-
 pub async fn admit_runtime_completion(
     ctx: &mut Ctx,
     environment: &str,
@@ -125,9 +103,12 @@ mod tests {
     use crate::catalog::PublishOptions;
     use crate::client::Ctx;
     use crate::plan::Plan;
+    use crate::plan_approval;
+    use crate::release_signing::{self, SignatureEnvelope, TrustRoots};
     use crate::runtime_delivery::RuntimeStepReceipt;
     use base64::Engine as _;
     use ed25519_dalek::Signer as _;
+    use std::path::Path;
 
     fn fixture() -> ProfileFixture {
         ProfileFixture {
@@ -195,14 +176,14 @@ install = "true"
             crate::signature_verification::TrustRootKind::Release,
         )
         .unwrap();
-        admit_signed_release(
+        release_signing::verify_release(
             &envelope,
             &roots,
             &envelope.statement.manifest_digest,
             &envelope.statement.artifact_digest,
         )
         .unwrap();
-        let err = admit_signed_release(
+        let err = release_signing::verify_release(
             &envelope,
             &roots,
             &"0".repeat(64),
@@ -239,14 +220,27 @@ install = "true"
         let approval = root.join("approval.json");
         let approval_trust = root.join("approval-trust.toml");
         write_plan_approval(&plan, &approval, &approval_trust);
-        admit_signed_plan(&plan, &approval, &approval_trust, crate::now_millis()).unwrap();
+        plan_approval::verify(
+            &plan,
+            &approval,
+            &approval_trust,
+            crate::now_millis(),
+            false,
+        )
+        .unwrap();
         let raw = std::fs::read_to_string(&approval).unwrap();
         let mut envelope: serde_json::Value = serde_json::from_str(&raw).unwrap();
         envelope["statement"]["environment"] = serde_json::Value::String("other".into());
         std::fs::write(&approval, serde_json::to_vec(&envelope).unwrap()).unwrap();
-        let err = admit_signed_plan(&plan, &approval, &approval_trust, crate::now_millis())
-            .unwrap_err()
-            .to_string();
+        let err = plan_approval::verify(
+            &plan,
+            &approval,
+            &approval_trust,
+            crate::now_millis(),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains("different executable content") || err.contains("signature"),
             "{err}"

@@ -3105,6 +3105,7 @@ mod tests {
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            approval_brief: None,
         };
         plan.bind_content_identity().unwrap();
         let (id, step_id) = (plan.id.clone(), plan.steps[0].id.clone());
@@ -3241,6 +3242,7 @@ mod tests {
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            approval_brief: None,
         };
         let recovered = plan(step(vec![crate::sealed_secret::RecipientWrap {
             secret: "db".into(),
@@ -3465,6 +3467,7 @@ mod tests {
                         prior_warnings: Vec::new(),
                         recalled_recovery_reason: None,
                         credential_runway: None,
+                        approval_brief: None,
                     }
                 };
                 Ok(Some(plan))

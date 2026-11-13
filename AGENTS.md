@@ -12,13 +12,14 @@ requires provider evidence.
 Source code lives in `src/` (application core) and `crates/` (`tenkai-wire`,
 `tenkai-http`, `tenkai-server`, `tenkaictl`, `tenkai-executor`, `tenkai-runtime`,
 `tenkai-host-applier`, `tenkai-keys`, and optional `tenkai-postgres`). `src/lib.rs` exports
-the application core. Shipped binaries are `tenkaictl` (embedded and remote
-CLI), `tenkai-server` (network service), `tenkai-executor-guard` (local process
-fencing), `tenkai-runtime` and `tenkai-runtime-guard` (pull-only environment
-runtime), and `tenkai-worker-lifecycle-fixture` (live worker-lifecycle
-observation host).
-`tenkai-host-applier` is the root-side applier for privileged host releases
-([host releases](docs/host-releases.md)); it is built from source.
+the application core. Shipped binaries ([release binaries](docs/release-binaries.md))
+are `tenkaictl` (embedded and remote CLI), `tenkai-server` (network service,
+plus the `tenkai-server-postgres` hub build), `tenkai-executor-guard` (local
+process fencing), `tenkai-runtime` and `tenkai-runtime-guard` (pull-only
+environment runtime), and `tenkai-host-applier` (root-side applier for
+[privileged host releases](docs/host-releases.md), `linux-x86_64` only).
+`tenkai-worker-lifecycle-fixture` (live worker-lifecycle observation host) is
+source-built.
 The Postgres delivery-effect harness is the `tenkai-delivery-conformance`
 binary in `crates/tenkai-postgres`, behind feature `postgres`; see
 [delivery-effect conformance](docs/delivery-effect-conformance.md). Keep domain
@@ -44,8 +45,8 @@ repository-only operating Skill.
   strict linting when Clippy is available (matches `make validate`).
 - `make test` runs the default test suite.
 - `make validate` runs every `scripts/validate-*.sh` (format, clippy, shell,
-  diff, make dry-run, shared agent-kit stubs, rust filenames, secrets, HTTP API
-  contract, and release packaging).
+  diff, make dry-run, shared agent-kit stubs, rust filenames, secrets, relative
+  Markdown links and anchors, HTTP API contract, and release packaging).
 - `make test-integration` runs all checked-in integration-test targets.
 - `make update` formats Rust, refreshes build-generated protobuf bindings, and
   regenerates the HTTP API contract in `api/`, without changing the locked
@@ -149,7 +150,7 @@ failure and recovery paths, not only success paths. Avoid external-service
 dependencies in the normal suite; isolate and document service-dependent tests.
 
 Verification should be proportional to the change. At minimum, format and run
-the narrowest relevant tests. Before delivery, prefer the project-local
+the narrowest relevant tests. Before delivery, prefer the shared
 `verify-change` Skill to select and report the appropriate broader checks.
 Before commit or PR, run `make validate` and `autoreview` and fix actionable findings (see
 `deliver-ready-issue`).
@@ -166,7 +167,7 @@ summary, tests run, linked issue or decision context, and any protocol,
 persistence, migration, configuration, operational, or security implications.
 
 Do not combine architectural boundary changes with unrelated cleanup. Capture
-accepted architectural or project outcomes with the project-local
+accepted architectural or project outcomes with the shared
 `capture-project-decision` Skill. Use `assess-change-impact` for changes that
 cross product, trust, protocol, ontology, execution, or operational boundaries.
 Do not put hostnames, FQDNs, home directories, absolute worktree paths, LAN
@@ -381,8 +382,8 @@ Rows beyond `## Testing Guidelines`:
 - signing, approval, security, recovery, rollback, and operator actions;
 - after an authorized `vX.Y.Z` or `vX.Y.Z-rc.N` tag, the dispatcher starts
   the Release binaries workflow from main; it attaches the community hosts
-  for `linux-x86_64` and `darwin-aarch64` plus `SHA256SUMS`
-  (`docs/release-binaries.md`); tags before that workflow have none. Do not
+  for `linux-x86_64` and `darwin-aarch64`, `SHA256SUMS`, and the other assets
+  listed in `docs/release-binaries.md`; tags before that workflow have none. Do not
   rewrite existing Release notes when only uploading assets;
 - credit contributors through GitHub's generated release notes.
 

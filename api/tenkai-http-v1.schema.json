@@ -139,6 +139,131 @@
       ],
       "type": "object"
     },
+    "ApprovalBrief": {
+      "additionalProperties": false,
+      "description": "Bounded facts an approver reads before the full step list.",
+      "properties": {
+        "actor_chain": {
+          "items": {
+            "$ref": "#/$defs/ApprovalBriefActor"
+          },
+          "type": "array"
+        },
+        "blast_radius": {
+          "$ref": "#/$defs/ApprovalBriefBlast"
+        },
+        "changes": {
+          "$ref": "#/$defs/ApprovalBriefChanges"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "policy": {
+          "$ref": "#/$defs/ApprovalBriefPolicy"
+        },
+        "proposer": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposer",
+        "blast_radius",
+        "changes",
+        "policy"
+      ],
+      "type": "object"
+    },
+    "ApprovalBriefActor": {
+      "additionalProperties": false,
+      "description": "One actor that called on behalf of the proposer, outermost first.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`human` or `agent`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ApprovalBriefBlast": {
+      "additionalProperties": false,
+      "description": "Environments, instances, criticality, and whether a restore pin exists.",
+      "properties": {
+        "criticality": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "instances": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rollback_available": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "environment",
+        "instances",
+        "rollback_available"
+      ],
+      "type": "object"
+    },
+    "ApprovalBriefChanges": {
+      "additionalProperties": false,
+      "description": "Counts of rendered target-change kinds plus flagged risky changes.",
+      "properties": {
+        "counts": {
+          "additionalProperties": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "risky": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ApprovalBriefPolicy": {
+      "additionalProperties": false,
+      "description": "What the live approval policy would do without a human, and the agent budget.",
+      "properties": {
+        "budget": {
+          "description": "`inside`, `over`, or `not_configured`.",
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "without_human": {
+          "description": "`auto` or `require_human`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "without_human",
+        "budget"
+      ],
+      "type": "object"
+    },
     "ApprovalStatement": {
       "additionalProperties": false,
       "properties": {
@@ -3301,6 +3426,10 @@
         "approval": {
           "$ref": "#/$defs/PlanApprovalView",
           "description": "Whether the latest plan was approved by policy or still needs a human."
+        },
+        "approval_brief": {
+          "$ref": "#/$defs/ApprovalBrief",
+          "description": "Bounded approval brief, returned before step detail (#1089)."
         },
         "created_at": {
           "format": "int64",

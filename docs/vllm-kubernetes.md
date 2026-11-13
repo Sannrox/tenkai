@@ -73,7 +73,7 @@ fail closed with a named error.
 | --- | --- | --- |
 | `vllm` | `--model <dir> --served-model-name <product> --tensor-parallel-size <n> --max-model-len <context>` | `POST /v1/completions`, non-empty `choices[0].text` |
 | `tgi` | `--model-id <dir> --num-shard <n> --max-total-tokens <context>`, `HF_HUB_OFFLINE=1` | `POST /generate`, non-empty `generated_text` |
-| `nim` | Environment: `NIM_MODEL_NAME=<dir>`, `NIM_MANIFEST_ALLOW_UNSAFE=1`, `NIM_SERVED_MODEL_NAME`, `NIM_TENSOR_PARALLEL_SIZE`, `NIM_MAX_MODEL_LEN`, `HF_HUB_OFFLINE=1`; readiness `/v1/health/ready` | `POST /v1/completions`, non-empty `choices[0].text` |
+| `nim` | Environment: `NIM_MODEL_NAME=<dir>`, `NIM_MANIFEST_ALLOW_UNSAFE=1`, `NIM_SERVED_MODEL_NAME`, `NIM_SERVER_PORT`, `NIM_TENSOR_PARALLEL_SIZE`, `NIM_MAX_MODEL_LEN`, `HF_HUB_OFFLINE=1`; readiness `/v1/health/ready` | `POST /v1/completions`, non-empty `choices[0].text` |
 
 NIM also needs an NGC entitlement, held on the host as Kubernetes Secret
 names, never the key and never manifest data. Missing either one fails
@@ -93,8 +93,10 @@ profile, is what serves.
 Weights always come from the verified cache mount; neither engine downloads
 from a hub at start, and weights are never baked into the image.
 
-`TENKAI_CLUSTER_CONFIG` is the environment-scoped kubeconfig already required
-for in-process Kubernetes apply. The executor never reads `KUBECONFIG`.
+The executor uses the environment's cluster configuration
+(`tenkaictl env cluster-config set <env> <path>`), the same kubeconfig
+in-process Kubernetes apply uses. It never reads `KUBECONFIG`. The live tests
+below take that path from `TENKAI_CLUSTER_CONFIG`.
 
 Placement is part of `ServingConfig` when a host constructs the executor
 directly:

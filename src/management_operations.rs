@@ -1575,9 +1575,19 @@ impl ManagementOperations {
             let tenant = context
                 .tenant()
                 .ok_or_else(|| ManagementError::Forbidden(NON_DISCLOSING_DENY.into()))?;
-            return Ok(ctx.with_catalog_tenant(tenant.tenant_id()));
+            let mut ctx = ctx.with_catalog_tenant(tenant.tenant_id());
+            ctx.set_plan_proposer(crate::plan::PlanProposer {
+                principal: context.principal_id().to_string(),
+                actor_chain: context.actor_chain().to_vec(),
+            });
+            return Ok(ctx);
         }
-        self.application_ctx()
+        let mut ctx = self.application_ctx()?;
+        ctx.set_plan_proposer(crate::plan::PlanProposer {
+            principal: context.principal_id().to_string(),
+            actor_chain: context.actor_chain().to_vec(),
+        });
+        Ok(ctx)
     }
 
     pub async fn publish_release(
@@ -4255,6 +4265,7 @@ mod tests {
                     prior_warnings: Vec::new(),
                     recalled_recovery_reason: None,
                     credential_runway: None,
+                    approval_brief: None,
                 }))
             })
         }

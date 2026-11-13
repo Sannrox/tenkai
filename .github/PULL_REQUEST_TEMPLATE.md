@@ -3,6 +3,10 @@
 <!-- Observable behavior, not a file list. Do not include hostnames, home
 paths, absolute worktree paths, or other private environment details. -->
 
+## Issue
+
+Closes #
+
 ## Tests
 
 - [ ] `cargo fmt --check`

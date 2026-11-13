@@ -321,7 +321,10 @@ pub(crate) enum Command {
         command: MigrateCommand,
     },
     /// Show the steps that would converge the environment (dry run).
+    #[command(args_conflicts_with_subcommands = true)]
     Plan {
+        #[command(subcommand)]
+        command: Option<PlanCommand>,
         #[arg(long, env = "TENKAI_ENVIRONMENT")]
         env: Option<String>,
         /// Current fencing generation; required with --target remote.
@@ -364,8 +367,6 @@ pub(crate) enum Command {
     Backup { destination: PathBuf },
     /// Replace embedded state from a verified backup. The CLI must be the only writer.
     Restore { source: PathBuf },
-    /// Rehearse restoring a server backup into a scratch store and print the
-    /// evidence. Never touches live state.
     /// Export or verify a redacted, signed support bundle.
     SupportBundle {
         #[command(subcommand)]
@@ -376,6 +377,8 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: AuditCommand,
     },
+    /// Rehearse restoring a server backup into a scratch store and print the
+    /// evidence. Never touches live state.
     RestoreDrill {
         /// A `tenkai-backup-<ms>.db` backup with its manifest beside it.
         backup: PathBuf,
@@ -858,6 +861,13 @@ pub(crate) enum SpokeStandbyCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+}
+
+/// Stored-plan inspection under `tenkaictl plan`.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlanCommand {
+    /// Show a stored plan's approval brief, then its steps.
+    Show { plan_id: String },
 }
 
 #[derive(Subcommand)]

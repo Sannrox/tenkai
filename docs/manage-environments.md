@@ -530,7 +530,8 @@ tenkaictl env approval-policy clear lab
 Remote `show` reads `GET /v1/environments/{environment}/approval-policy`
 and prints the effective policy (signer key ids, human rules, TTL). Remote
 `set` and `clear` take `--generation` and `--reason`; the path names a file
-on the server host. Inspect reports `latest_plan.approval`.
+on the server host. Inspect reports `latest_plan.approval` and, when the plan
+was computed after #1089, `latest_plan.approval_brief` before step detail.
 
 ## Post-deploy webhooks
 
