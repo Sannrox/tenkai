@@ -113,6 +113,16 @@ to the bundle issued-at, then import time). An environment property
 verify. A bundle whose authenticated revocation list revokes its exporter
 is refused.
 
+An environment or channel may require a recent scan before install:
+`exposure.max_inventory_age_ms`. When set, every image in the target
+release must have a signed inventory no older than that age. The inventory
+is the release `[inventory]` document (native `generated_at`, or CycloneDX
+`metadata.timestamp`), carried in the signed release and therefore in
+bundles. Missing inventory is `exposure_scan_missing` and names the image;
+stale or undated inventory is `exposure_scan_stale`. Default is off.
+Waive a missing or stale scan with advisory id `scan` using the same
+scope, reason, and expiry rules as an advisory waiver.
+
 Admitting a newer feed re-assesses every release the environment subscribes
 to (including named instances) or currently runs. Each new (release, advisory)
 pair is recorded once with its first-seen time; a replay or crash retry does

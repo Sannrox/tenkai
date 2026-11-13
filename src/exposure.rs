@@ -1,5 +1,6 @@
 //! Per-release component inventory, advisory-feed import, exposure query,
-//! advisory waivers, and grace (#692, #645, #1064).
+//! advisory waivers, grace, and the optional recent-scan install gate
+//! (#692, #645, #1064, #1094).
 //!
 //! A signed release may declare `[inventory] document = "..."`; that file is
 //! part of the content digest, stored next to the release, and refused when
@@ -41,6 +42,10 @@ pub const EXPOSURE_PROVIDER_KIND: &str = "exposure";
 pub const LAST_BUNDLE_IMPORT_AT_PROPERTY: &str = "last_bundle_import_at";
 /// Environment property: max advisory-feed age in milliseconds.
 pub const MAX_FEED_AGE_PROPERTY: &str = "exposure.max_feed_age_ms";
+/// Environment or channel property: require a recent signed inventory (#1094).
+pub const MAX_INVENTORY_AGE_PROPERTY: &str = "exposure.max_inventory_age_ms";
+/// Waiver advisory id covering a missing or stale scan under the policy.
+pub const SCAN_ADVISORY_ID: &str = "scan";
 /// Environment property: block plans at this severity or above.
 pub const BLOCK_SEVERITY_PROPERTY: &str = "exposure.block_severity";
 /// Environment property: stamp catalog recall at this severity or above (#900).
@@ -749,10 +754,12 @@ pub fn export_exposures(
     Ok(())
 }
 
-/// Plan-start gate: stale advisory feed or unmitigated severity on a target.
+/// Plan-start gate: stale advisory feed, missing/stale scan, or unmitigated
+/// severity on a target.
 ///
-/// Returns a named reason (`exposure_feed_stale` / `exposure_unmitigated`)
-/// when the environment has configured the corresponding policy property.
+/// Returns a named reason (`exposure_feed_stale` / `exposure_scan_missing` /
+/// `exposure_scan_stale` / `exposure_unmitigated`) when the environment has
+/// configured the corresponding policy property.
 pub async fn plan_gate(ctx: &mut Ctx, environment: &str, steps: &[Step]) -> Result<Option<String>> {
     // Rollbacks and removals deploy nothing new; a removal is often the
     // remediation for the very advisory that would otherwise block it.
@@ -767,6 +774,9 @@ pub async fn plan_gate(ctx: &mut Ctx, environment: &str, steps: &[Step]) -> Resu
     }
     let env = crate::environment::environment(ctx, environment).await?;
     if let Some(detail) = stale_feed_reason(&env, ctx).await? {
+        return Ok(Some(detail));
+    }
+    if let Some(detail) = scan_reason(ctx, &env, steps).await? {
         return Ok(Some(detail));
     }
     let Some(threshold) = env.properties.get(BLOCK_SEVERITY_PROPERTY) else {
@@ -1267,6 +1277,162 @@ async fn stale_feed_reason(env: &Object, ctx: &mut Ctx) -> Result<Option<String>
     Ok(None)
 }
 
+/// Require a recent signed inventory when `exposure.max_inventory_age_ms` is set.
+///
+/// Environment policy wins; otherwise the subscribed channel. Absent means
+/// off. A waiver for [`SCAN_ADVISORY_ID`] uses the same scope, reason, and
+/// expiry rules as an advisory waiver.
+async fn scan_reason(ctx: &mut Ctx, env: &Object, steps: &[Step]) -> Result<Option<String>> {
+    let env_age = match parse_inventory_age_policy(
+        env.properties.get(MAX_INVENTORY_AGE_PROPERTY),
+        "environment",
+    ) {
+        PolicyAge::Invalid(detail) => return Ok(Some(detail)),
+        PolicyAge::Max(age) => Some(age),
+        PolicyAge::Unset => None,
+    };
+    let now_ms = crate::now_millis();
+    for step in steps.iter().filter(|step| {
+        !matches!(
+            step.action,
+            crate::plan::Action::Rollback | crate::plan::Action::Remove
+        )
+    }) {
+        let max_age = match env_age {
+            Some(age) => age,
+            None => match channel_inventory_age(ctx, env, &step.product).await? {
+                PolicyAge::Max(age) => age,
+                PolicyAge::Invalid(detail) => return Ok(Some(detail)),
+                PolicyAge::Unset => continue,
+            },
+        };
+        let release = ctx.get(&step.release_id).await?;
+        let images = scan_images(release.as_ref(), step);
+        let image = images
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("{}@{}", step.product, step.to));
+        let component = scan_component(&image, &step.product);
+        if waiver::matching(
+            ctx,
+            SCAN_ADVISORY_ID,
+            &step.release_id,
+            &step.product,
+            &component,
+            now_ms,
+        )
+        .await?
+        .is_some()
+        {
+            continue;
+        }
+        let Some(release) = release else {
+            return Ok(Some(format!(
+                "exposure_scan_missing: {image} has no inventory"
+            )));
+        };
+        let Some(document) = release.properties.get(INVENTORY_DOCUMENT_PROPERTY) else {
+            return Ok(Some(format!(
+                "exposure_scan_missing: {image} has no inventory"
+            )));
+        };
+        // Digest mismatch is a catalog integrity failure, not a missing scan.
+        let _inventory = stored_inventory(&release)?;
+        let Some(generated_at) = inventory_generated_at(document) else {
+            return Ok(Some(format!(
+                "exposure_scan_stale: {image} inventory has no generated_at"
+            )));
+        };
+        if now_ms.saturating_sub(generated_at) > max_age {
+            return Ok(Some(format!(
+                "exposure_scan_stale: {image} inventory generated_at {generated_at} is older than {max_age} ms"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+enum PolicyAge {
+    Unset,
+    Max(i64),
+    Invalid(String),
+}
+
+async fn channel_inventory_age(ctx: &mut Ctx, env: &Object, product: &str) -> Result<PolicyAge> {
+    let Some(sub) = crate::environment::list_subscriptions(ctx, env)
+        .await?
+        .into_iter()
+        .find(|sub| sub.product == product)
+    else {
+        return Ok(PolicyAge::Unset);
+    };
+    Ok(parse_inventory_age_policy(
+        sub.channel.properties.get(MAX_INVENTORY_AGE_PROPERTY),
+        "channel",
+    ))
+}
+
+fn parse_inventory_age_policy(raw: Option<&String>, source: &str) -> PolicyAge {
+    let Some(raw) = raw else {
+        return PolicyAge::Unset;
+    };
+    match raw.parse::<i64>() {
+        Ok(value) if value > 0 => PolicyAge::Max(value),
+        _ => PolicyAge::Invalid(format!(
+            "exposure_scan_stale: {source} policy {MAX_INVENTORY_AGE_PROPERTY} is invalid"
+        )),
+    }
+}
+
+fn scan_images(release: Option<&Object>, step: &Step) -> Vec<String> {
+    if let Some(release) = release
+        && let Some(raw) = release.properties.get("oci_artifacts")
+        && let Ok(artifacts) = serde_json::from_str::<Vec<crate::oci_artifact::OciArtifactRef>>(raw)
+    {
+        let names: Vec<String> = artifacts
+            .iter()
+            .map(|artifact| {
+                format!(
+                    "{}/{}@{}",
+                    artifact.registry, artifact.repository, artifact.digest
+                )
+            })
+            .collect();
+        if !names.is_empty() {
+            return names;
+        }
+    }
+    vec![format!("{}@{}", step.product, step.to)]
+}
+
+fn scan_component(image: &str, product: &str) -> String {
+    image
+        .rsplit('/')
+        .next()
+        .unwrap_or(image)
+        .split('@')
+        .next()
+        .filter(|name| !name.is_empty() && !name.contains(':'))
+        .unwrap_or(product)
+        .to_string()
+}
+
+fn inventory_generated_at(document: &str) -> Option<i64> {
+    let value: serde_json::Value = serde_json::from_str(document).ok()?;
+    if let Some(ms) = value
+        .get("generated_at")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|ms| *ms > 0)
+    {
+        return Some(ms);
+    }
+    let timestamp = value.pointer("/metadata/timestamp")?.as_str()?;
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|parsed| parsed.timestamp_millis())
+        .filter(|ms| *ms > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1277,6 +1443,15 @@ mod tests {
     fn native_inventory(name: &str, version: &str) -> String {
         serde_json::json!({
             "schema": INVENTORY_SCHEMA,
+            "components": [{"name": name, "version": version}]
+        })
+        .to_string()
+    }
+
+    fn native_inventory_at(name: &str, version: &str, generated_at: i64) -> String {
+        serde_json::json!({
+            "schema": INVENTORY_SCHEMA,
+            "generated_at": generated_at,
             "components": [{"name": name, "version": version}]
         })
         .to_string()
@@ -1321,6 +1496,30 @@ document = "sbom.json"
 
     async fn signed_publish(ctx: &mut Ctx, root: &Path, version: &str, inventory: &str) {
         let product = write_product(root, version, inventory);
+        sign_and_publish(ctx, root, &product).await;
+    }
+
+    async fn signed_publish_without_inventory(ctx: &mut Ctx, root: &Path, version: &str) {
+        let product = root.join("product");
+        std::fs::create_dir_all(&product).unwrap();
+        std::fs::write(
+            product.join("tenkai.toml"),
+            format!(
+                r#"
+[product]
+name = "api"
+version = "{version}"
+
+[deploy]
+install = "true"
+"#
+            ),
+        )
+        .unwrap();
+        sign_and_publish(ctx, root, &product).await;
+    }
+
+    async fn sign_and_publish(ctx: &mut Ctx, root: &Path, product: &Path) {
         let keys = root.join("keys");
         let signature = root.join("signature.json");
         let trust = root.join("trust-roots.toml");
@@ -1338,6 +1537,15 @@ document = "sbom.json"
         )
         .await
         .unwrap();
+    }
+
+    async fn require_scan(ctx: &mut Ctx, environment: &str, max_age_ms: i64) {
+        let mut env = crate::environment::environment(ctx, environment)
+            .await
+            .unwrap();
+        env.properties
+            .insert(MAX_INVENTORY_AGE_PROPERTY.into(), max_age_ms.to_string());
+        ctx.put(env).await.unwrap();
     }
 
     #[test]
@@ -1410,6 +1618,22 @@ document = "sbom.json"
         assert!(!version_in_range("1.3.0", ">=1.0.0,<1.2.0").unwrap());
         assert!(version_in_range("1.1.1k", ">=1.0.0").unwrap());
         assert!(version_in_range("1.1.1k", ">=9.0.0").unwrap());
+        assert_eq!(
+            inventory_generated_at(&native_inventory_at("openssl", "1.1.1", 1_700_000_000_000)),
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(
+            inventory_generated_at(&native_inventory("openssl", "1.1.1")),
+            None
+        );
+        let cdx_dated = serde_json::json!({
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "metadata": {"timestamp": "2023-11-14T00:00:00Z"},
+            "components": [{"type": "library", "name": "openssl", "version": "1.1.1"}]
+        })
+        .to_string();
+        assert_eq!(inventory_generated_at(&cdx_dated), Some(1_699_920_000_000));
         let nested = parse_inventory_bytes(
             serde_json::json!({
                 "bomFormat": "CycloneDX",
@@ -3192,5 +3416,208 @@ document = "sbom.json"
                 ..Default::default()
             }],
         }
+    }
+
+    /// A release whose image has no signed inventory is refused under the
+    /// policy, and admitted when the policy is unset.
+    #[tokio::test]
+    async fn scan_policy_refuses_a_release_without_inventory() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-scan-missing-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish_without_inventory(&mut ctx, &root, "1.0.0").await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        assert_eq!(
+            plan_gate(&mut ctx, "hub", &[upgrade_step("1.0.0")])
+                .await
+                .unwrap(),
+            None
+        );
+        require_scan(&mut ctx, "hub", 86_400_000).await;
+        let missing = plan_gate(&mut ctx, "hub", &[upgrade_step("1.0.0")])
+            .await
+            .unwrap()
+            .expect("missing inventory");
+        assert!(
+            missing.starts_with("exposure_scan_missing:") && missing.contains("api@1.0.0"),
+            "{missing}"
+        );
+        let mut rollback = upgrade_step("1.0.0");
+        rollback.action = crate::plan::Action::Rollback;
+        assert_eq!(
+            plan_gate(&mut ctx, "hub", std::slice::from_ref(&rollback))
+                .await
+                .unwrap(),
+            None
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Stale or undated inventory is refused; a fresh generated_at is admitted.
+    #[tokio::test]
+    async fn scan_policy_refuses_stale_and_admits_fresh_inventory() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-scan-stale-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let now = crate::now_millis();
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &native_inventory("openssl", "1.1.1"),
+        )
+        .await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        require_scan(&mut ctx, "hub", 60_000).await;
+        let undated = plan_gate(&mut ctx, "hub", &[upgrade_step("1.0.0")])
+            .await
+            .unwrap()
+            .expect("undated inventory");
+        assert!(
+            undated.starts_with("exposure_scan_stale:") && undated.contains("api@1.0.0"),
+            "{undated}"
+        );
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.1.0",
+            &native_inventory_at("openssl", "1.1.1", now - 120_000),
+        )
+        .await;
+        let stale = plan_gate(&mut ctx, "hub", &[upgrade_step("1.1.0")])
+            .await
+            .unwrap()
+            .expect("stale inventory");
+        assert!(
+            stale.starts_with("exposure_scan_stale:") && stale.contains("api@1.1.0"),
+            "{stale}"
+        );
+        signed_publish(
+            &mut ctx,
+            &root,
+            "1.2.0",
+            &native_inventory_at("openssl", "1.1.1", now - 1_000),
+        )
+        .await;
+        assert_eq!(
+            plan_gate(&mut ctx, "hub", &[upgrade_step("1.2.0")])
+                .await
+                .unwrap(),
+            None
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A release-scoped scan waiver admits until it expires.
+    #[tokio::test]
+    async fn scan_waiver_admits_until_it_expires() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-scan-waiver-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish_without_inventory(&mut ctx, &root, "1.0.0").await;
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        require_scan(&mut ctx, "hub", 86_400_000).await;
+        let now_ms = crate::now_millis();
+        set_waiver(
+            &mut ctx,
+            ExposureWaiver {
+                advisory_id: SCAN_ADVISORY_ID.into(),
+                scope: WaiverScopeKind::Release,
+                release_id: Some(release_id("api", "1.0.0")),
+                product: None,
+                component: None,
+                category: WaiverCategory::FalsePositive,
+                reason: "scan pending".into(),
+                actor: "operator".into(),
+                expires_at: now_ms + 86_400_000,
+            },
+            now_ms,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            plan_gate(&mut ctx, "hub", &[upgrade_step("1.0.0")])
+                .await
+                .unwrap(),
+            None
+        );
+        let id = format!(
+            "tenkai:exposure_waiver:release:{}:{SCAN_ADVISORY_ID}",
+            release_id("api", "1.0.0")
+        );
+        let mut stored = ctx.get(&id).await.unwrap().unwrap();
+        stored
+            .properties
+            .insert("expires_at".into(), (now_ms - 1).to_string());
+        ctx.put(stored).await.unwrap();
+        let expired = plan_gate(&mut ctx, "hub", &[upgrade_step("1.0.0")])
+            .await
+            .unwrap()
+            .expect("expired scan waiver");
+        assert!(
+            expired.starts_with("exposure_scan_missing:") && expired.contains("api@1.0.0"),
+            "{expired}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Channel policy applies when the environment has not set one.
+    #[tokio::test]
+    async fn scan_policy_on_a_channel_refuses_without_inventory() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-scan-channel-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish_without_inventory(&mut ctx, &root, "1.0.0").await;
+        let actor = crate::auth_context::test_management_context("scan-channel");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        crate::environment::subscribe(&mut ctx, "hub", "api", "stable")
+            .await
+            .unwrap();
+        let channel_id = crate::ontology::channel_id("api", "stable");
+        let mut channel = ctx.get(&channel_id).await.unwrap().unwrap();
+        channel
+            .properties
+            .insert(MAX_INVENTORY_AGE_PROPERTY.into(), "86400000".into());
+        ctx.put(channel).await.unwrap();
+        let missing = plan_gate(&mut ctx, "hub", &[upgrade_step("1.0.0")])
+            .await
+            .unwrap()
+            .expect("channel scan policy");
+        assert!(
+            missing.starts_with("exposure_scan_missing:") && missing.contains("api@1.0.0"),
+            "{missing}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

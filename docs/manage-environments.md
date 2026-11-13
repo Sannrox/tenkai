@@ -660,6 +660,10 @@ A waiver covers one advisory at `release`, `component`, `product`, or
 during the window counted from first-seen; it does not auto-recall. See
 [advisory feed](offline-bundles.md#advisory-feed).
 
+`exposure.max_inventory_age_ms` on the environment, else the subscribed
+channel, requires a recent signed inventory before install. Absent means
+off. A waiver for advisory id `scan` covers a missing or stale inventory.
+
 ### Channel removal
 
 Removing a channel's head stops that channel delivering the product, without
