@@ -387,6 +387,12 @@ pub struct ManagementLifecycleResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub digest: Option<String>,
+    /// `<product>@<version>` the channel headed before this promotion (#1173).
+    /// Omitted when the channel had no head or already named the promoted
+    /// release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub replaced_head: Option<String>,
     /// One entry per step of an applied plan (#1076). Returned only to a
     /// client that asks with `?steps=true`: older clients refuse unknown
     /// fields here, so the default response stays as it was.
@@ -481,12 +487,18 @@ impl ManagementLifecycleResult {
             message: message.into(),
             resource,
             digest: None,
+            replaced_head: None,
             steps: Vec::new(),
         }
     }
 
     pub fn with_digest(mut self, digest: impl Into<String>) -> Self {
         self.digest = Some(digest.into());
+        self
+    }
+
+    pub fn with_replaced_head(mut self, replaced_head: Option<String>) -> Self {
+        self.replaced_head = replaced_head;
         self
     }
 }

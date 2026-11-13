@@ -1734,7 +1734,7 @@ impl ManagementOperations {
         let actor = &context.audit_principal();
         self.audit(actor, "catalog.promote.requested")?;
         let mut ctx = self.catalog_ctx(&context)?;
-        let message = crate::catalog::promote_expecting(
+        let outcome = crate::catalog::promote_expecting_outcome(
             &mut ctx,
             &context,
             &request.spec,
@@ -1757,10 +1757,11 @@ impl ManagementOperations {
         )?;
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Promote,
-            message,
+            outcome.message,
             Some(request.spec),
         )
-        .with_digest(digest))
+        .with_digest(digest)
+        .with_replaced_head(outcome.replaced_head))
     }
 
     pub async fn recall_release(

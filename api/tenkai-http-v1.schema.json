@@ -4898,6 +4898,10 @@
         "operation": {
           "type": "string"
         },
+        "replaced_head": {
+          "description": "`<product>@<version>` the channel headed before this promotion (#1173).\nOmitted when the channel had no head or already named the promoted\nrelease.",
+          "type": "string"
+        },
         "resource": {
           "type": "string"
         },

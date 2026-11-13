@@ -572,6 +572,59 @@ async fn promote_returns_its_digest_and_honours_an_expected_head() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Promote names the channel head it replaced, omits it on an empty channel
+/// or a no-op, and a client from #1172 still decodes the result (#1173).
+#[tokio::test]
+async fn promote_names_the_head_it_replaced() {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-catalog-promote-replaced-{}-{}",
+        std::process::id(),
+        tenkai::now_millis()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (app, _) = catalog_router(&root).await;
+    for version in ["1.0.0", "1.1.0"] {
+        publish(&app, &signed_catalog_fixture(&root, version)).await;
+    }
+
+    let (status, empty) = promote_expecting(&app, "api@1.0.0", None).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert!(empty.get("replaced_head").is_none(), "{empty}");
+
+    let (status, over) = promote_expecting(&app, "api@1.1.0", None).await;
+    assert_eq!(status, StatusCode::OK, "{over}");
+    assert_eq!(over["replaced_head"], "api@1.0.0");
+
+    let (status, noop) = promote_expecting(&app, "api@1.1.0", None).await;
+    assert_eq!(status, StatusCode::OK, "{noop}");
+    assert!(noop.get("replaced_head").is_none(), "{noop}");
+
+    // 0.8.0 clients ignore unknown result fields (#1172), so they still
+    // decode a promote that names the replaced head.
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct ClientFrom1172 {
+        version: u32,
+        operation: String,
+        message: String,
+        resource: Option<String>,
+        digest: Option<String>,
+    }
+    let decoded = serde_json::from_value::<ClientFrom1172>(over)
+        .expect("0.8.0 client decodes the new result");
+    assert_eq!(decoded.operation, "promote");
+    assert!(
+        decoded
+            .digest
+            .as_deref()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "{:?}",
+        decoded.digest
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 async fn remove_stable(
     app: &Router,
     expected_head: Option<&str>,

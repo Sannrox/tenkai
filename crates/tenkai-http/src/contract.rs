@@ -1102,6 +1102,7 @@ mod tests {
             ("PlanApprovalView", "reason"),
             ("PlanApprovalView", "policy_provider"),
             ("ManagementLifecycleResult", "resource"),
+            ("ManagementLifecycleResult", "replaced_head"),
             ("MigrationRecord", "pending_plan_id"),
             ("ChangeEvent", "environment"),
             ("ReleasePage", "next_cursor"),
