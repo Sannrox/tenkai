@@ -1053,6 +1053,23 @@
       ],
       "type": "object"
     },
+    "CommandRefusalReason": {
+      "additionalProperties": false,
+      "description": "Bounded gate that refused a command. `code` reuses instance-explain checks\nplus the closed refusal list; `next` names the action and its actor.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "next": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "next"
+      ],
+      "type": "object"
+    },
     "CompatibilityEvidence": {
       "additionalProperties": false,
       "properties": {
@@ -3841,6 +3858,9 @@
       "properties": {
         "error": {
           "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/CommandRefusalReason"
         }
       },
       "required": [

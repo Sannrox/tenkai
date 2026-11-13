@@ -57,6 +57,16 @@ impl HoldScope {
         }
     }
 
+    /// Operator command that lifts this hold, shared with instance explain.
+    pub fn clear_action(&self) -> String {
+        match self {
+            Self::Environment(env) => format!("tenkaictl env hold {env} clear"),
+            Self::Channel { product, channel } => {
+                format!("tenkaictl channel hold {product} {channel} clear")
+            }
+        }
+    }
+
     fn hold_id(&self) -> String {
         format!("tenkai:delivery_hold:{}", self.key())
     }
@@ -611,13 +621,16 @@ pub async fn require_not_held_at(
     now_ms: i64,
 ) -> Result<()> {
     match active_for_plan_at(ctx, plan, now_ms).await? {
-        Some(DeliveryPause::Hold { hold, scope }) => bail!(
-            "plan {} is paused by delivery hold {} set by {}: {}; clear the hold to execute",
-            plan.id,
-            scope.key(),
-            hold.actor,
-            hold.reason
-        ),
+        Some(DeliveryPause::Hold { hold, scope }) => {
+            Err(crate::command_result::CommandRefusal::delivery_hold(
+                &plan.id,
+                &scope.key(),
+                &hold.actor,
+                &hold.reason,
+                scope.clear_action(),
+            )
+            .into())
+        }
         Some(DeliveryPause::Freeze(freeze)) => bail!(
             "plan {} is paused by freeze {} until {}: {}; cancel the freeze to execute",
             plan.id,
@@ -1580,6 +1593,29 @@ mod tests {
         require_not_held_at(&mut ctx, &rollback, 1_500)
             .await
             .unwrap();
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn apply_refused_by_delivery_hold_names_the_hold_and_who_can_release_it() {
+        let (database, mut ctx) = temp_ctx("hold-refusal").await;
+        crate::environment::env_add(&mut ctx, "lab", "Lab")
+            .await
+            .unwrap();
+        let scope = HoldScope::environment("lab");
+        set(&mut ctx, &scope, "pause", "alice").await.unwrap();
+        let error = require_not_held_at(&mut ctx, &deploy_plan("lab"), 1)
+            .await
+            .unwrap_err();
+        let refusal = error
+            .downcast_ref::<crate::command_result::CommandRefusal>()
+            .expect("named delivery-hold refusal");
+        assert_eq!(refusal.code, crate::command_result::REFUSAL_DELIVERY_HOLD);
+        assert_eq!(refusal.next, "tenkaictl env hold lab clear");
+        assert!(
+            error.to_string().contains("paused by delivery hold"),
+            "{error}"
+        );
         let _ = std::fs::remove_file(&database);
     }
 

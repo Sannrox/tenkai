@@ -117,6 +117,12 @@ pub enum ManagementError {
     Unavailable(String),
     #[error("{0}")]
     Internal(String),
+    /// Named gate refusal. HTTP 400 with `ErrorBody.reason`.
+    #[error("{message}")]
+    Denied {
+        message: String,
+        reason: crate::command_result::CommandRefusalReason,
+    },
 }
 
 /// What a mutating management call does when its token's actor chain names
@@ -305,6 +311,38 @@ impl ManagementOperations {
             AgentActorPolicy::RequireApproval => Ok(()),
             AgentActorPolicy::Forbid => self.refuse_agent(context, operation),
         }
+    }
+
+    /// Name an over-budget agent apply only after the same capability and
+    /// environment-scope checks a human apply uses, so a scoped token cannot
+    /// probe plan ids or policy reasons. Returns `None` to keep the generic
+    /// agent refusal.
+    async fn named_agent_apply_refusal(
+        &self,
+        credential: &CredentialMaterial,
+        context: &AuthenticatedRequestContext,
+        plan_id: &str,
+    ) -> Option<crate::command_result::CommandRefusal> {
+        Self::require_capability(context, DeliveryCapability::Management).ok()?;
+        let mut ctx = self.catalog_ctx(context).ok()?;
+        let stored = crate::plan::load(&mut ctx, plan_id).await.ok()?;
+        self.require_environment_visible(context, &stored.environment)
+            .await
+            .ok()?;
+        self.require_environment_grant(
+            credential,
+            context,
+            Some(&stored.environment),
+            "plan.apply",
+        )
+        .ok()?;
+        let brief = stored
+            .approval_brief
+            .as_ref()
+            .filter(|brief| brief.policy.budget == "over")?;
+        Some(crate::command_result::CommandRefusal::agent_budget(
+            brief.policy.reason.as_deref().unwrap_or("require_human"),
+        ))
     }
 
     fn require_capability(
@@ -3453,7 +3491,19 @@ impl ManagementOperations {
         request: ApplyRequest,
     ) -> Result<ManagementLifecycleResult, ManagementError> {
         let context = self.authenticate(credential)?;
-        self.refuse_agent(&context, "plan.apply")?;
+        if context.acting_agent().is_some() {
+            if let Some(refusal) = self
+                .named_agent_apply_refusal(credential, &context, plan_id)
+                .await
+            {
+                self.audit(&context.audit_principal(), "plan.apply.refused")?;
+                return Err(ManagementError::Denied {
+                    message: refusal.to_string(),
+                    reason: refusal.reason(),
+                });
+            }
+            self.refuse_agent(&context, "plan.apply")?;
+        }
         Self::require_capability(&context, DeliveryCapability::Management)?;
         crate::clock_guard::require_trusted_time("plan apply")
             .map_err(|error| ManagementError::Unavailable(error.to_string()))?;
@@ -4055,6 +4105,12 @@ fn failed_steps_message(
 }
 
 fn map_plan_lifecycle_error(error: anyhow::Error) -> ManagementError {
+    if let Some(refusal) = error.downcast_ref::<crate::command_result::CommandRefusal>() {
+        return ManagementError::Denied {
+            message: refusal.to_string(),
+            reason: refusal.reason(),
+        };
+    }
     let message = format!("{error:#}");
     if message.contains("not registered")
         || message.contains("does not exist")
@@ -5109,11 +5165,24 @@ mod tests {
             .await
             .unwrap();
         let plan_id = planned.resource.expect("plan id");
-        agent_refused(
-            ops.apply_plan(&agent, &plan_id, dummy_apply_request())
-                .await
-                .unwrap_err(),
-        );
+        match ops
+            .apply_plan(&agent, &plan_id, dummy_apply_request())
+            .await
+            .unwrap_err()
+        {
+            ManagementError::Denied { reason, message } => {
+                assert_eq!(reason.code, crate::command_result::REFUSAL_AGENT_BUDGET);
+                assert!(
+                    reason
+                        .next
+                        .starts_with("human principal must approve and apply:"),
+                    "{}",
+                    reason.next
+                );
+                assert!(message.contains("approval budget"), "{message}");
+            }
+            other => panic!("over-budget agent apply must name the budget: {other:?}"),
+        }
         agent_refused(
             ops.publish_release(&agent, signed_publish_request(&root, "2.0.0"))
                 .await
@@ -5132,9 +5201,6 @@ mod tests {
                 .all(|record| record.operation != "plan.apply.requested"),
             "agent apply must not start execution: {audit:?}"
         );
-        assert!(audit.iter().any(|record| {
-            record.operation == "plan.completed" && record.principal == "ci (act: assistant-7)"
-        }));
 
         let mut ctx = ops.application_ctx().unwrap();
         let mut stage = crate::environment::environment(&mut ctx, "stage")
@@ -5157,6 +5223,10 @@ mod tests {
         crate::plan::load(&mut ctx, held.resource.as_deref().unwrap())
             .await
             .expect("an empty agent plan is persisted");
+        let audit = ops.store.audit_events().unwrap();
+        assert!(audit.iter().any(|record| {
+            record.operation == "plan.completed" && record.principal == "ci (act: assistant-7)"
+        }));
         let retry = ops
             .plan_environment(&human, "stage", plan_request.clone())
             .await
