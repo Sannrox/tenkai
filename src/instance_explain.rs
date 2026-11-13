@@ -133,7 +133,7 @@ pub(crate) fn from_inspect(
                 "environment:{environment} held at {} by {}: {}",
                 hold.held_at, hold.actor, hold.reason
             ),
-            unblock: format!("tenkaictl env hold {environment} clear"),
+            unblock: crate::delivery_hold::HoldScope::environment(environment).clear_action(),
         });
     }
     if let Some(hold) = &row.delivery_hold {
@@ -143,10 +143,8 @@ pub(crate) fn from_inspect(
                 "channel:{}/{} held at {} by {}: {}",
                 row.product, row.channel, hold.held_at, hold.actor, hold.reason
             ),
-            unblock: format!(
-                "tenkaictl channel hold {} {} clear",
-                row.product, row.channel
-            ),
+            unblock: crate::delivery_hold::HoldScope::channel(&row.product, &row.channel)
+                .clear_action(),
         });
     }
     let mut freezes: Vec<_> = inspect

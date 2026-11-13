@@ -64,7 +64,13 @@ The fixed fields are:
   return the release followed by `release_provenance` resources whose ids are
   canonical envelope digests.
 - `counts`: optional bounded step or item counts.
-- `error`: optional fixed `code` and sanitized `message`.
+- `error`: optional fixed `code` and sanitized `message`. Gate refusals
+  also carry `reason`: a stable `code` from the closed list (the same
+  names instance `explain` uses, plus `agent_budget`, `quorum`, and
+  `stale_generation`) and a bounded `next` naming the next valid action
+  and its actor. `reason` is omitted when there is no named gate.
+  Receivers map an unknown `reason.code` to `domain_denied`. `next`
+  never includes server detail, identifiers outside Tenkai, or secrets.
 
 Unknown fields and enum values must be rejected. Identifiers are opaque.
 Envelopes never contain manifests, artifacts, database paths, credentials,

@@ -1047,6 +1047,7 @@ mod tests {
         let contract = http_contract();
         let defs = &contract["$defs"];
         for (def, field) in [
+            ("ErrorBody", "reason"),
             ("OidcClientDiscovery", "display_name"),
             ("ServiceStatus", "backup"),
             ("ServiceStatus", "clock"),

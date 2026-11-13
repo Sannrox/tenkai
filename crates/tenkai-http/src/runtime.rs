@@ -346,10 +346,19 @@ pub(super) fn bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 pub(crate) fn error_response(status: StatusCode, error: impl Into<String>) -> Response {
+    error_response_with_reason(status, error, None)
+}
+
+fn error_response_with_reason(
+    status: StatusCode,
+    error: impl Into<String>,
+    reason: Option<tenkai::command_result::CommandRefusalReason>,
+) -> Response {
     (
         status,
         Json(ErrorBody {
             error: error.into(),
+            reason,
         }),
     )
         .into_response()
@@ -417,6 +426,12 @@ pub(super) fn management_error(error: ManagementError) -> Response {
         }
         ManagementError::Internal(message) => {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
+        }
+        // Named refusals use HTTP 400 so remote json-v1 maps to
+        // domain_denied, matching CommandResultV1::refused. Generic
+        // agent apply without a named gate stays Forbidden (403).
+        ManagementError::Denied { message, reason } => {
+            error_response_with_reason(StatusCode::BAD_REQUEST, message, Some(reason))
         }
     }
 }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post, put};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use tenkai::management_operations::ManagementOperations;
 use tenkai::runtime_delivery::{ReconcilePort, RuntimeDeliveryOperations};
@@ -108,9 +108,12 @@ pub(super) struct ServiceStatus {
     pub(super) clock: Option<tenkai::clock_guard::ClockHealth>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub(super) struct ErrorBody {
     pub(super) error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = tenkai::schema_contract::omitted_when_none)]
+    pub(super) reason: Option<tenkai::command_result::CommandRefusalReason>,
 }
 
 pub fn router(

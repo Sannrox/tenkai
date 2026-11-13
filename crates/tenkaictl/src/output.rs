@@ -1,7 +1,10 @@
 use std::ffi::OsString;
 
 use anyhow::Result;
-use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
+use tenkai::command_result::{
+    CommandName, CommandOutcome, CommandRefusal, CommandRefusalReason, CommandResultV1,
+    RetryGuidance,
+};
 use tenkai::{plan, reconciler};
 
 use crate::args::{Command, PlanCommand, Target};
@@ -261,7 +264,29 @@ pub(crate) fn remote_failure_result(
     if unknown {
         result.outcome = CommandOutcome::Unknown;
     }
+    if let RemoteFailure::Rejected { detail, .. } = failure
+        && let Some(reason) = remote_refusal_reason(detail)
+    {
+        result = result.with_reason(reason);
+    }
     result
+}
+
+fn remote_refusal_reason(detail: &str) -> Option<CommandRefusalReason> {
+    #[derive(serde::Deserialize)]
+    struct RemoteErrorWire {
+        #[serde(default)]
+        reason: Option<CommandRefusalReason>,
+    }
+    serde_json::from_str::<RemoteErrorWire>(detail)
+        .ok()
+        .and_then(|body| body.reason)
+        .map(CommandRefusalReason::sanitized)
+        .filter(|reason| !reason.code.is_empty() && !reason.next.is_empty())
+}
+
+pub(crate) fn refusal_result(command: CommandName, refusal: &CommandRefusal) -> CommandResultV1 {
+    CommandResultV1::refused(command, refusal)
 }
 
 /// Success envelopes shared by embedded and remote mode so both targets agree.
@@ -676,6 +701,44 @@ mod tests {
             rejected(500),
             ("server_error".into(), CommandOutcome::Unknown)
         );
+    }
+
+    #[test]
+    fn remote_named_refusal_attaches_reason_without_echoing_detail() {
+        use tenkai_http::RemoteFailure;
+        let result = remote_failure_result(
+            CommandName::Apply,
+            &RemoteFailure::Rejected {
+                status: 400,
+                detail: r#"{"error":"plan paused by secret","reason":{"code":"delivery_hold","next":"tenkaictl env hold lab clear"}}"#.into(),
+            },
+        );
+        let reason = result
+            .error
+            .as_ref()
+            .and_then(|error| error.reason.as_ref())
+            .expect("named reason");
+        assert_eq!(reason.code, "delivery_hold");
+        assert_eq!(reason.next, "tenkaictl env hold lab clear");
+        let encoded = serde_json::to_string(&result).unwrap();
+        assert!(!encoded.contains("secret"));
+        assert!(!encoded.contains("plan paused"));
+        result.validate().unwrap();
+
+        let empty_next = remote_failure_result(
+            CommandName::Apply,
+            &RemoteFailure::Rejected {
+                status: 400,
+                detail: r#"{"error":"plan paused by secret","reason":{"code":"delivery_hold","next":""}}"#.into(),
+            },
+        );
+        assert!(empty_next.error.as_ref().unwrap().reason.is_none());
+        empty_next
+            .validate()
+            .expect("empty next must not drop the envelope");
+        let encoded = serde_json::to_string(&empty_next).unwrap();
+        assert!(!encoded.contains("secret"));
+        assert!(!encoded.contains("plan paused"));
     }
 
     #[test]

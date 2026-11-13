@@ -58,12 +58,12 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use clap::Parser;
 use clap::error::ErrorKind;
-use tenkai::command_result::{CommandName, CommandResultV1, RetryGuidance};
+use tenkai::command_result::{CommandName, CommandRefusal, CommandResultV1, RetryGuidance};
 
 use args::{Cli, Command, OutputFormat, Target};
 use output::{
     ReportedMachineFailure, command_name, machine_output_requested, mutation_retry,
-    print_machine_result, remote_failure_result, reported_machine_failure,
+    print_machine_result, refusal_result, remote_failure_result, reported_machine_failure,
 };
 
 #[tokio::main]
@@ -110,6 +110,12 @@ async fn main() -> ExitCode {
                 let result = error
                     .downcast_ref::<ReportedMachineFailure>()
                     .map(|reported| reported.0.clone())
+                    .or_else(|| {
+                        error
+                            .chain()
+                            .find_map(|cause| cause.downcast_ref::<CommandRefusal>())
+                            .map(|refusal| refusal_result(machine_command, refusal))
+                    })
                     .or_else(|| {
                         remote.map(|failure| remote_failure_result(machine_command, failure))
                     })
