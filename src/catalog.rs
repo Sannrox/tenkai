@@ -852,6 +852,32 @@ pub(crate) async fn pin_isolated_channel(
     Ok(())
 }
 
+/// Message and the channel head this promotion replaced, when it replaced one.
+pub(crate) struct PromoteOutcome {
+    pub message: String,
+    /// `<product>@<version>` the channel headed before this promotion.
+    /// None when the channel had no head or already named the promoted release.
+    pub replaced_head: Option<String>,
+}
+
+/// The previous head as `<product>@<version>`, omitted when the channel had
+/// none or already named `promoted_release`.
+fn replaced_head_spec(product: &str, channel: &Object, promoted_release: &str) -> Option<String> {
+    let current = channel
+        .properties
+        .get("current_release")
+        .filter(|head| !head.is_empty())?;
+    if current == promoted_release {
+        return None;
+    }
+    channel
+        .properties
+        .get("current_version")
+        .filter(|version| !version.is_empty())
+        .map(|version| format!("{product}@{version}"))
+        .or_else(|| current.strip_prefix("tenkai:release:").map(str::to_string))
+}
+
 /// Point a channel of the product at an already-published release.
 pub async fn promote(
     ctx: &mut Ctx,
@@ -859,7 +885,9 @@ pub async fn promote(
     spec: &str,
     channel: &str,
 ) -> Result<String> {
-    promote_inner(ctx, actor, spec, channel, None).await
+    Ok(promote_inner(ctx, actor, spec, channel, None)
+        .await?
+        .message)
 }
 
 /// [`promote`], refused when the channel heads a release other than
@@ -873,8 +901,23 @@ pub async fn promote_expecting(
     channel: &str,
     expected_head: Option<&str>,
 ) -> Result<String> {
+    Ok(
+        promote_expecting_outcome(ctx, actor, spec, channel, expected_head)
+            .await?
+            .message,
+    )
+}
+
+/// [`promote_expecting`], also naming the head the promotion replaced (#1173).
+pub(crate) async fn promote_expecting_outcome(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    spec: &str,
+    channel: &str,
+    expected_head: Option<&str>,
+) -> Result<PromoteOutcome> {
     let Some(expected) = expected_head else {
-        return promote(ctx, actor, spec, channel).await;
+        return promote_inner(ctx, actor, spec, channel, None).await;
     };
     let Some((product, version)) = expected.split_once('@') else {
         bail!("expected head must be <product>@<version>, got {expected:?}");
@@ -991,7 +1034,11 @@ pub(crate) async fn promote_over_replaceable_heads(
     channel: &str,
     replaceable_heads: &[String],
 ) -> Result<String> {
-    promote_inner(ctx, actor, spec, channel, Some(replaceable_heads)).await
+    Ok(
+        promote_inner(ctx, actor, spec, channel, Some(replaceable_heads))
+            .await?
+            .message,
+    )
 }
 
 async fn promote_inner(
@@ -1000,7 +1047,7 @@ async fn promote_inner(
     spec: &str,
     channel: &str,
     replaceable_heads: Option<&[String]>,
-) -> Result<String> {
+) -> Result<PromoteOutcome> {
     actor
         .require_delivery_capability(DeliveryCapability::Publish)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -1065,9 +1112,12 @@ async fn promote_inner(
                     None => String::new(),
                 };
                 if current == promoted_release {
-                    return Ok(format!(
-                        "promoted {promotion_name}@{promotion_version} to channel {promotion_channel}"
-                    ));
+                    return Ok(PromoteOutcome {
+                        message: format!(
+                            "promoted {promotion_name}@{promotion_version} to channel {promotion_channel}"
+                        ),
+                        replaced_head: None,
+                    });
                 }
                 if !current.is_empty() && !replaceable.contains(&current) {
                     anyhow::bail!(
@@ -1081,6 +1131,9 @@ async fn promote_inner(
                 .and_then(|channel| channel.properties.get("current_release"))
                 .cloned()
                 .unwrap_or_default();
+            let replaced_head = existing_channel.as_ref().and_then(|channel| {
+                replaced_head_spec(&promotion_name, channel, &promoted_release)
+            });
             let head_moved = previous_head != promoted_release;
             let mut channel_properties = HashMap::from([
                 ("product".into(), promotion_name.clone()),
@@ -1159,9 +1212,12 @@ async fn promote_inner(
             } else {
                 crate::canary::fenced_put(ctx, std::slice::from_ref(lock), channel_head).await?;
             }
-            Ok::<_, anyhow::Error>(format!(
-                "promoted {promotion_name}@{promotion_version} to channel {promotion_channel}"
-            ))
+            Ok::<_, anyhow::Error>(PromoteOutcome {
+                message: format!(
+                    "promoted {promotion_name}@{promotion_version} to channel {promotion_channel}"
+                ),
+                replaced_head,
+            })
         })
     })
     .await
