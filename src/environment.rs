@@ -1394,9 +1394,9 @@ async fn refuse_dependents(
             .collect();
     let mut after = before.clone();
     after.remove(instance);
-    if let Some(refusal) = crate::software_compatibility::remaining_dependent_refusal_bound(
-        &after, &before, &bindings,
-    )? {
+    if let Some(refusal) =
+        crate::software_compatibility::remaining_dependent_refusal(&after, &before, &bindings)?
+    {
         dependents.insert(refusal.dependent);
     }
     if !dependents.is_empty() {

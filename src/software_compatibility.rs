@@ -477,29 +477,6 @@ fn visit_requirement_edge<'a>(
 }
 
 /// Evaluate in sorted component/contract order so identical evidence yields identical reports.
-pub fn evaluate(
-    profile: &CompatibilityProfile,
-    release_digest: &str,
-    environment: &str,
-    evidence: Option<&CompatibilityEvidence>,
-    facts: &BTreeMap<String, String>,
-    now_ms: i64,
-) -> Result<CompatibilityReport> {
-    evaluate_owned(
-        profile,
-        release_digest,
-        environment,
-        evidence,
-        facts,
-        now_ms,
-        None,
-        &BTreeMap::new(),
-        "",
-        &EnvironmentBindings::default(),
-    )
-    .map(Into::into)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn evaluate_owned(
     profile: &CompatibilityProfile,
@@ -1008,17 +985,9 @@ pub(crate) enum RemainingDependentKind {
     Unsatisfied { minimum: String },
 }
 
-/// First remaining dependent that would be unsatisfied or left without a unique bound provider.
-#[cfg(test)]
+/// First remaining dependent that would be unsatisfied or left without a unique
+/// bound provider, honoring environment bindings (ADR 0044 §3).
 pub(crate) fn remaining_dependent_refusal(
-    remaining: &BTreeMap<String, CompatibilityProfile>,
-    previous: &BTreeMap<String, CompatibilityProfile>,
-) -> Result<Option<RemainingDependentRefusal>> {
-    remaining_dependent_refusal_bound(remaining, previous, &EnvironmentBindings::default())
-}
-
-/// [`remaining_dependent_refusal`] honoring environment bindings (ADR 0044 §3).
-pub(crate) fn remaining_dependent_refusal_bound(
     remaining: &BTreeMap<String, CompatibilityProfile>,
     previous: &BTreeMap<String, CompatibilityProfile>,
     bindings: &EnvironmentBindings,
@@ -1095,20 +1064,12 @@ fn bound_matching_providers(
     })
 }
 
-#[cfg(test)]
 pub(crate) fn refuse_unsatisfied_dependents(
-    remaining: &BTreeMap<String, CompatibilityProfile>,
-    previous: &BTreeMap<String, CompatibilityProfile>,
-) -> Result<()> {
-    refuse_unsatisfied_dependents_bound(remaining, previous, &EnvironmentBindings::default())
-}
-
-pub(crate) fn refuse_unsatisfied_dependents_bound(
     remaining: &BTreeMap<String, CompatibilityProfile>,
     previous: &BTreeMap<String, CompatibilityProfile>,
     bindings: &EnvironmentBindings,
 ) -> Result<()> {
-    match remaining_dependent_refusal_bound(remaining, previous, bindings)? {
+    match remaining_dependent_refusal(remaining, previous, bindings)? {
         None => Ok(()),
         Some(RemainingDependentRefusal {
             dependent,
@@ -1609,16 +1570,7 @@ mod tests {
         profile: &CompatibilityProfile,
         evidence: &CompatibilityEvidence,
     ) -> Vec<CompatibilityFailure> {
-        evaluate(
-            profile,
-            &evidence.release_digest,
-            "test",
-            Some(evidence),
-            &BTreeMap::new(),
-            1_050,
-        )
-        .unwrap()
-        .failures
+        evaluate_with_deployed(profile, evidence, &BTreeMap::new()).failures
     }
 
     const V1_STRING_MANIFEST: &str = concat!(
@@ -1876,15 +1828,20 @@ mod tests {
     fn compatibility_refusals_cover_content_freshness_and_requirements() {
         let (profile, original) = fixture();
         let report = |evidence: &CompatibilityEvidence| {
-            evaluate(
+            evaluate_owned(
                 &profile,
                 &original.release_digest,
                 "test",
                 Some(evidence),
                 &BTreeMap::new(),
                 1_050,
+                None,
+                &BTreeMap::new(),
+                "",
+                &EnvironmentBindings::default(),
             )
             .unwrap()
+            .outcome
         };
         assert!(report(&original).failures.is_empty());
         let cases = [
@@ -1950,17 +1907,8 @@ mod tests {
                 requires: BTreeMap::from([("database".into(), "2.0.0".into())]),
             },
         );
-        let report = evaluate(
-            &profile,
-            &evidence.release_digest,
-            "test",
-            Some(&evidence),
-            &BTreeMap::new(),
-            1_050,
-        )
-        .unwrap();
         assert_eq!(
-            report.failures,
+            failures(&profile, &evidence),
             vec![CompatibilityFailure::IncompatibleContract {
                 contract: "database".into()
             }]
@@ -1971,19 +1919,10 @@ mod tests {
             .unwrap()
             .provides
             .insert("database".into(), "1.3.0".into());
-        let report = evaluate(
-            &profile,
-            &evidence.release_digest,
-            "test",
-            Some(&evidence),
-            &BTreeMap::new(),
-            1_050,
-        )
-        .unwrap();
         // Two observed offers of 1.3.0 are one `observed` instance; the
         // retained requirement of 2.0.0 stays incompatible.
         assert_eq!(
-            report.failures,
+            failures(&profile, &evidence),
             vec![CompatibilityFailure::IncompatibleContract {
                 contract: "database".into()
             }]
@@ -2151,12 +2090,14 @@ mod tests {
 
     #[test]
     fn refuse_unsatisfied_dependents_names_the_dependent() {
+        let unbound = EnvironmentBindings::default();
         let app = remaining_profile(&[("database", "1.0.0", false)], &[]);
         let db = remaining_profile(&[], &[("database", "1.0.0")]);
         let previous = BTreeMap::from([("app".into(), app.clone()), ("db".into(), db.clone())]);
         let err = refuse_unsatisfied_dependents(
             &BTreeMap::from([("app".into(), app.clone())]),
             &previous,
+            &unbound,
         )
         .unwrap_err()
         .to_string();
@@ -2165,17 +2106,20 @@ mod tests {
         refuse_unsatisfied_dependents(
             &BTreeMap::from([("app".into(), app.clone()), ("db".into(), db.clone())]),
             &previous,
+            &unbound,
         )
         .unwrap();
         let optional = remaining_profile(&[("database", "1.0.0", true)], &[]);
         refuse_unsatisfied_dependents(
             &BTreeMap::from([("app".into(), optional.clone())]),
             &BTreeMap::from([("app".into(), optional), ("db".into(), db)]),
+            &unbound,
         )
         .unwrap();
         refuse_unsatisfied_dependents(
             &BTreeMap::from([("app".into(), app.clone())]),
             &BTreeMap::from([("app".into(), app)]),
+            &unbound,
         )
         .unwrap();
         let high = remaining_profile(&[("database", "2.0.0", false)], &[]);
@@ -2184,6 +2128,7 @@ mod tests {
         let err = refuse_unsatisfied_dependents(
             &BTreeMap::from([("app".into(), high.clone()), ("db".into(), low)]),
             &BTreeMap::from([("app".into(), high), ("db".into(), high_db)]),
+            &unbound,
         )
         .unwrap_err()
         .to_string();
@@ -2203,13 +2148,14 @@ mod tests {
         ]);
         let previous = remaining.clone();
         assert_eq!(
-            remaining_dependent_refusal(&remaining, &previous).unwrap(),
+            remaining_dependent_refusal(&remaining, &previous, &EnvironmentBindings::default())
+                .unwrap(),
             None
         );
         let mut bindings = EnvironmentBindings::default();
         bindings.insert("app", "database", "db");
         let without_db = BTreeMap::from([("app".into(), app.clone()), ("db2".into(), db2.clone())]);
-        let refusal = remaining_dependent_refusal_bound(&without_db, &previous, &bindings)
+        let refusal = remaining_dependent_refusal(&without_db, &previous, &bindings)
             .unwrap()
             .expect("bound provider removal");
         assert_eq!(refusal.dependent, "app");
