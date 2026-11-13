@@ -322,16 +322,6 @@ pub(crate) async fn claim_promotion_lock(
     target_channel: &str,
     owner: &str,
 ) -> Result<PromotionLock> {
-    claim_promotion_lock_for(ctx, product, target_channel, owner, PROMOTION_LEASE_TTL_MS).await
-}
-
-async fn claim_promotion_lock_for(
-    ctx: &mut Ctx,
-    product: &str,
-    target_channel: &str,
-    owner: &str,
-    ttl_ms: i64,
-) -> Result<PromotionLock> {
     crate::ontology::require_canary_schema(ctx).await?;
     if ctx
         .get(&legacy_promotion_lock_id(product, target_channel))
@@ -343,7 +333,12 @@ async fn claim_promotion_lock_for(
     let key = promotion_lease_key(product, target_channel);
     let previous = ctx.get_lease(PROMOTION_LEASE_NAMESPACE, &key).await?;
     let lease = match ctx
-        .acquire_lease(PROMOTION_LEASE_NAMESPACE, &key, owner, ttl_ms)
+        .acquire_lease(
+            PROMOTION_LEASE_NAMESPACE,
+            &key,
+            owner,
+            PROMOTION_LEASE_TTL_MS,
+        )
         .await
     {
         Ok(lease) => lease,
@@ -361,7 +356,7 @@ async fn claim_promotion_lock_for(
                 owner,
                 &existing.fencing_token,
                 existing.expires_at_ms,
-                ttl_ms,
+                PROMOTION_LEASE_TTL_MS,
             )
             .await
             .map_err(|_| busy(product, target_channel))?
@@ -1095,7 +1090,7 @@ mod tests {
     async fn a_crashed_promotion_holder_is_recovered_by_expiry() {
         let (mut ctx, root) = canary_ctx("expiry").await;
         // Holder A "crashes": it never releases.
-        let crashed = claim_promotion_lock_for(&mut ctx, "app", "stable", "holder-a", 50)
+        let crashed = claim_promotion_lock(&mut ctx, "app", "stable", "holder-a")
             .await
             .unwrap();
         let live = claim_promotion_lock(&mut ctx, "app", "stable", "holder-b")
@@ -1103,7 +1098,17 @@ mod tests {
             .unwrap_err();
         assert!(live.to_string().contains("already in progress"), "{live:#}");
 
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        // Let A's lease lapse without a sleep as long as the TTL: shorten it,
+        // then wait past it. A slow runner only makes the lease older.
+        ctx.refresh_lease(
+            PROMOTION_LEASE_NAMESPACE,
+            &crashed.key,
+            &crashed.fencing_token,
+            1,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         // B takes over the lease and adopts the link A left behind.
         let next = claim_promotion_lock(&mut ctx, "app", "stable", "holder-b")
             .await
