@@ -2274,6 +2274,44 @@
         {
           "additionalProperties": false,
           "properties": {
+            "key": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "set_label",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "key",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "clear_label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "key"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "constraint": {
               "type": "string"
             },
@@ -6353,6 +6391,39 @@
       ],
       "type": "object"
     },
+    "ReleaseLabelRequest": {
+      "additionalProperties": false,
+      "description": "Body of `PUT`/`DELETE` `/v1/releases/{product}/{version}/labels`.",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "key",
+        "reason"
+      ],
+      "type": "object"
+    },
     "ReleaseListEntry": {
       "description": "Identifying fields and current digest/version for one published release.",
       "properties": {
@@ -8378,6 +8449,74 @@
       "path": "/v1/environments/{environment}/facts",
       "request": {
         "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}/labels",
+      "request": null,
+      "response": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/environments/{environment}/labels",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/environments/{environment}/labels",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/releases/{product}/{version}/labels",
+      "request": null,
+      "response": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/releases/{product}/{version}/labels",
+      "request": {
+        "$ref": "#/$defs/ReleaseLabelRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/releases/{product}/{version}/labels",
+      "request": {
+        "$ref": "#/$defs/ReleaseLabelRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"

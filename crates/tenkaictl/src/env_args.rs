@@ -48,7 +48,11 @@ pub(crate) enum EnvCommand {
     /// Record branch close and tear down a preview environment.
     ClosePreview { env: String },
     /// List registered environments with compact delivery summaries.
-    List,
+    List {
+        /// Show environments matching this selector now (`key=value`, `key!=value`, `key in (a,b)`).
+        #[arg(long)]
+        selector: Option<String>,
+    },
     /// Inspect one environment: subscriptions, deployed versions, lease/fence, latest plan.
     Inspect { env: String },
     /// List recorded deployment attempts newest first.
@@ -141,6 +145,11 @@ pub(crate) enum EnvCommand {
     Facts {
         #[command(subcommand)]
         command: FactsCommand,
+    },
+    /// Manage operator grouping labels. Facts stay host inventory.
+    Labels {
+        #[command(subcommand)]
+        command: LabelsCommand,
     },
     /// Record observed type and runtime digests for workshop-module admission.
     Observe {
@@ -256,7 +265,7 @@ pub(crate) enum DockerSecretsCommand {
 /// Set, clear, or show an environment or channel delivery hold. The actor is
 /// the authenticated management principal. Schedule and cancel are
 /// environment-only dated freezes. Threshold is environment-only.
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub(crate) enum HoldAction {
     /// Pause new execution; in-flight applies finish.
     Set {
@@ -408,6 +417,26 @@ pub(crate) enum OverlayCommand {
         env: String,
         product: String,
         key: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum LabelsCommand {
+    /// List labels for an environment.
+    List { env: String },
+    /// Set a label, e.g. `set prod tier=canary`.
+    Set {
+        env: String,
+        spec: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
+    /// Clear one label key.
+    Clear {
+        env: String,
+        key: String,
+        #[command(flatten)]
+        remote: RemoteChange,
     },
 }
 

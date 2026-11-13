@@ -43,6 +43,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Synthetic thousand-environment workload | `tenkaictl fleet generate`; [fleet workload](fleet-workload.md); #299 |
 | Fleet drift watch (baseline + exit codes) | `tenkaictl fleet watch`; [server diagnostics](server-diagnostics.md#fleet-drift-watch); #107 |
 | Environment capability facts + planner constraints | `env facts` / `env constraints`; #63, #57 |
+| Environment and release labels with selectors | `env labels` / `release labels` / `env list --selector`; wave, canary, and hold resolve at use; #1065 |
 | Planner model_runtime variant selection by facts | [Model runtime](model-runtime.md); #66 |
 | Ordered model_runtime → routing_config rollout | [examples/model-routing-rollout](../examples/model-routing-rollout/); #67 |
 | Governed `routing_config` products | [ADR 0002](decisions/0002-tenkai-owned-routing-configuration.md) |

@@ -94,6 +94,40 @@ impl RemoteClient {
             .await
     }
 
+    pub async fn list_environments_matching(
+        &self,
+        selector: &str,
+    ) -> anyhow::Result<Vec<tenkai::plan::EnvironmentListEntry>> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("selector", selector)
+            .finish();
+        self.request_json(reqwest::Method::GET, &format!("/v1/environments?{query}"))
+            .await
+    }
+
+    pub async fn list_environment_labels(
+        &self,
+        environment: &str,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/environments/{environment}/labels"),
+        )
+        .await
+    }
+
+    pub async fn list_release_labels(
+        &self,
+        product: &str,
+        version: &str,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/releases/{product}/{version}/labels"),
+        )
+        .await
+    }
+
     pub async fn inspect_environment(
         &self,
         environment: &str,

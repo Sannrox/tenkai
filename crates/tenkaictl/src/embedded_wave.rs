@@ -10,12 +10,7 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: WaveCommand) -> Result<(
             cohort,
             continue_on_failure,
         } => {
-            let environments: Vec<String> = cohort
-                .split(',')
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-                .collect();
+            let environments = tenkai::labels::resolve_cohort(ctx, &cohort).await?;
             let spec = wave::WaveSpec::new(environments, !continue_on_failure)?;
             let report = wave::run_wave_observe(ctx, &spec).await?;
             println!("{}", wave::format_report(&report));
@@ -32,12 +27,7 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: WaveCommand) -> Result<(
             continue_on_failure,
             approval,
         } => {
-            let environments: Vec<String> = cohort
-                .split(',')
-                .map(str::trim)
-                .filter(|env| !env.is_empty())
-                .map(str::to_string)
-                .collect();
+            let environments = tenkai::labels::resolve_cohort(ctx, &cohort).await?;
             let spec = wave::ExecutableWaveSpec::new(
                 name,
                 product,

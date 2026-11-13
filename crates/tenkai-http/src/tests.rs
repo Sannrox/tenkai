@@ -19,6 +19,7 @@ mod oidc;
 mod package_migration_closed;
 mod package_migration_preview;
 mod package_migration_scope;
+mod release_labels;
 mod remote_catalog;
 mod remote_failure;
 mod remote_plan;

@@ -117,6 +117,42 @@ pub(super) async fn configure_facts(
     .await
 }
 
+pub(super) async fn list_environment_labels(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .list_environment_labels(&credential, &environment)
+            .await,
+    )
+}
+
+pub(super) async fn configure_labels(
+    state: State<Arc<AppState>>,
+    method: Method,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    configure(
+        state,
+        method,
+        environment,
+        None,
+        ConfigResource::Labels,
+        headers,
+        body,
+    )
+    .await
+}
+
 pub(super) async fn configure_constraints(
     state: State<Arc<AppState>>,
     method: Method,

@@ -58,8 +58,14 @@ pub(crate) async fn run(
                 evidence.environment, evidence.reason, evidence.pin_digest, evidence.plan_digest
             );
         }
-        EnvCommand::List => {
-            let entries = plan::list_environments(ctx).await?;
+        EnvCommand::List { selector } => {
+            let mut entries = plan::list_environments(ctx).await?;
+            if let Some(selector) = selector.as_deref() {
+                let selector = tenkai::labels::parse_selector(selector)?;
+                let names = tenkai::labels::matching_environments(ctx, &selector).await?;
+                let names: std::collections::BTreeSet<_> = names.into_iter().collect();
+                entries.retain(|entry| names.contains(&entry.name));
+            }
             if output == OutputFormat::JsonV1 {
                 return print_machine_result(&crate::output::list_environments_result(
                     entries.len(),
@@ -240,6 +246,9 @@ pub(crate) async fn run(
         EnvCommand::Facts { command } => {
             crate::embedded_env_config::facts(ctx, command).await?;
         }
+        EnvCommand::Labels { command } => {
+            crate::embedded_env_config::labels(ctx, command).await?;
+        }
         EnvCommand::Constraints { command } => {
             crate::embedded_env_config::constraints(ctx, command).await?;
         }
@@ -272,12 +281,14 @@ pub(crate) async fn run(
             generation: _,
             action,
         } => {
-            crate::embedded_hold::run(
-                ctx,
-                tenkai::delivery_hold::HoldScope::environment(&env),
-                action,
-            )
-            .await?;
+            for name in tenkai::labels::resolve_cohort(ctx, &env).await? {
+                crate::embedded_hold::run(
+                    ctx,
+                    tenkai::delivery_hold::HoldScope::environment(&name),
+                    action.clone(),
+                )
+                .await?;
+            }
         }
         EnvCommand::Retry {
             env,

@@ -403,7 +403,7 @@ imports envelopes or bundles first, then switch producers to v2.
 ### Remote configuration
 
 With `tenkaictl --target remote`, `env add` needs `--reason`. `facts`,
-`constraints`, `maintenance`, `webhooks`, `approval-policy` and `criticality`
+`labels`, `constraints`, `maintenance`, `webhooks`, `approval-policy` and `criticality`
 `set`, `clear` and `remove` need `--generation`, the `lease.generation` that remote
 `env inspect` reports (`0` only before the environment's first apply or
 change), and `--reason`. They call the
@@ -489,6 +489,29 @@ Admitted fact keys: `architecture`, `memory_gib`, `accelerator`,
 `gpu_runtime_version` (see [model runtime](model-runtime.md#gpu-requirements)),
 and the placement facts `host` and `zone` that replica topologies check (see
 [manifest](manifest.md#topology)).
+
+## Labels and selectors
+
+Labels are operator grouping keys. Facts stay host inventory.
+
+```bash
+tenkaictl env labels set prod tier=canary
+tenkaictl env labels set prod region=us
+tenkaictl env labels list prod
+tenkaictl env list --selector 'tier=canary,region in (us,eu)'
+tenkaictl release labels set hello@1.0.0 train=weekly
+```
+
+A selector (`key=value`, `key!=value`, `key in (a,b)`, comma meaning AND) can
+stand in for an environment list on `wave run` / `wave execute --cohort`,
+`canary designate`, `canary policy --selector`, and `env hold`. Tenkai
+resolves it when the command runs. Wave and canary policy store the concrete
+names; a later label change does not rewrite that list. Hold applies to each
+match now. The next start, designation, or hold sees the current match.
+`env list --selector` may be empty; wave, canary, and hold refuse a selector
+that matches nothing. An invalid label or selector names the offending part.
+Remote `env hold` with a selector still requires `--generation`; that value
+fences every match, and a stale environment refuses.
 
 ## Plan approval policy
 

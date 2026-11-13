@@ -92,7 +92,9 @@
 //!   bounded paging for the read-capability `GET /v1/events` log.
 //! - [`storage`] and [`tenant_store`] provide operational persistence adapters.
 //! - [`environment`] owns Environment identity, subscriptions, constraints,
-//!   facts, deployment observations, and operator readback behind one interface.
+//!   facts, labels, deployment observations, and operator readback behind one interface.
+//! - [`labels`] owns operator grouping keys on environments and releases, and
+//!   expands a selector to a concrete environment list at use time.
 //! - [`preview`] owns preview-environment admission from a content-addressed
 //!   branch pin, the pin-bound plan digest, channel-promotion refusal, and
 //!   expiry or branch-close teardown evidence. Teardown never deletes a
@@ -235,6 +237,7 @@ pub mod inventory;
 pub mod issuer_auth;
 pub mod key_provider;
 pub mod key_revocation;
+pub mod labels;
 /// KMIP adapter, now in `tenkai-keys`; this path stays for existing importers.
 pub use tenkai_keys::kmip as kmip_provider;
 pub mod maintenance;

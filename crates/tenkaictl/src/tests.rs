@@ -618,6 +618,30 @@ fn remote_configuration_commands_map_to_their_changes() {
         (remote.generation, remote.reason.as_deref()),
         (Some(7), Some("select db-a"))
     );
+
+    let labels = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "labels",
+        "set",
+        "prod",
+        "tier=canary",
+        "--generation",
+        "7",
+        "--reason",
+        "grouping",
+    ])
+    .unwrap();
+    let Command::Env { command } = labels.command else {
+        panic!("expected env command");
+    };
+    let (env, change, remote) = crate::remote_env_config::change(&command).unwrap().unwrap();
+    assert_eq!(env, "prod");
+    assert_eq!(change.path(env), "/v1/environments/prod/labels");
+    assert_eq!(
+        (remote.generation, remote.reason.as_deref()),
+        (Some(7), Some("grouping"))
+    );
 }
 
 #[test]
@@ -969,8 +993,18 @@ fn parses_env_list_and_inspect() {
     assert!(matches!(
         list.command,
         Command::Env {
-            command: EnvCommand::List
+            command: EnvCommand::List { selector: None }
         }
+    ));
+    let selected =
+        Cli::try_parse_from(["tenkaictl", "env", "list", "--selector", "tier=canary"]).unwrap();
+    assert!(matches!(
+        selected.command,
+        Command::Env {
+            command: EnvCommand::List {
+                selector: Some(ref selector)
+            }
+        } if selector == "tier=canary"
     ));
     let inspect = Cli::try_parse_from(["tenkaictl", "env", "inspect", "prod"]).unwrap();
     assert!(matches!(

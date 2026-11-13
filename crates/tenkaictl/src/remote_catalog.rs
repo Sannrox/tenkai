@@ -2,7 +2,9 @@ use anyhow::{Result, bail};
 use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
 
 use crate::args::{Command, OutputFormat};
-use crate::catalog_args::{ApprovalCommand, EvalEvidenceCommand, ReleaseCommand};
+use crate::catalog_args::{
+    ApprovalCommand, EvalEvidenceCommand, ReleaseCommand, ReleaseLabelsCommand,
+};
 use crate::env_args::EnvCommand;
 use crate::output::{print_machine_result, reported_machine_failure, with_remote_resources};
 
@@ -128,6 +130,45 @@ pub(crate) async fn run(
                 );
             }
             println!("{}", result.message);
+            Ok(())
+        }
+        Command::Release {
+            command: ReleaseCommand::Labels { command },
+        } => {
+            match command {
+                ReleaseLabelsCommand::List { spec } => {
+                    let (product, version) = split_release_spec(&spec)?;
+                    let labels = client.list_release_labels(product, version).await?;
+                    if labels.is_empty() {
+                        println!("{spec} has no labels");
+                    } else {
+                        for (key, value) in labels {
+                            println!("{key}={value}");
+                        }
+                    }
+                }
+                ReleaseLabelsCommand::Set { spec, pair, reason } => {
+                    let reason = reason.ok_or_else(|| {
+                        anyhow::anyhow!("--reason is required with --target remote")
+                    })?;
+                    let (product, version) = split_release_spec(&spec)?;
+                    let (key, value) = tenkai::labels::parse_label_pair(&pair)?;
+                    let result = client
+                        .set_release_label(product, version, &key, &value, &reason)
+                        .await?;
+                    println!("{}", result.message);
+                }
+                ReleaseLabelsCommand::Clear { spec, key, reason } => {
+                    let reason = reason.ok_or_else(|| {
+                        anyhow::anyhow!("--reason is required with --target remote")
+                    })?;
+                    let (product, version) = split_release_spec(&spec)?;
+                    let result = client
+                        .clear_release_label(product, version, &key, &reason)
+                        .await?;
+                    println!("{}", result.message);
+                }
+            }
             Ok(())
         }
         Command::Env {
@@ -259,6 +300,11 @@ pub(crate) async fn run(
         }
         other => crate::remote_delivery::run(client, other, output).await,
     }
+}
+
+fn split_release_spec(spec: &str) -> Result<(&str, &str)> {
+    spec.split_once('@')
+        .ok_or_else(|| anyhow::anyhow!("expected <product>@<version>, got {spec:?}"))
 }
 
 /// Add the plan a remote mutation created to `result`. Beyond the embedded
