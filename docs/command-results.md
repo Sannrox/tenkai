@@ -11,6 +11,7 @@ remains `--output human`; existing scripts and operator output are unchanged.
 | `release recall` (`recall`) | yes | yes |
 | `env subscribe` (`subscribe`) | yes | yes |
 | `plan` | yes | yes |
+| `plan show` | no | no |
 | `approval submit` (`approve`) | yes | yes |
 | `apply` | yes | yes |
 | `apply cancel` (`apply_cancel`) | yes | yes |
