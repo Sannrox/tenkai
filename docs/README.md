@@ -10,7 +10,8 @@ A first deploy is [Try it in five minutes](../README.md#try-it-in-five-minutes)
 in the root README. Signing, approval, and what a runtime verifies are under
 [Trust and identity](#trust-and-identity).
 
-Operator, integrator, and contributor docs. Pick a section by what you need:
+Operator, integrator, and contributor docs. Agents start at
+[llms.txt](llms.txt). Pick a section by what you need:
 
 - **[Tutorials](#tutorials)**: learn Tenkai by running a guided path end to end.
 - **[How-to guides](#how-to-guides)**: carry out one operational task.
@@ -30,6 +31,18 @@ will be split over time. Contributor and agent workflow live in
 | [Hello minikube example](../examples/hello-minikube/) | The scripts and manual steps behind the minikube path |
 
 ## How-to guides
+
+### Agent-facing tasks
+
+| Task | Page |
+| --- | --- |
+| Machine-oriented index | [llms.txt](llms.txt) |
+| Deploy with approval | [tasks/deploy-with-approval.md](tasks/deploy-with-approval.md) |
+| Roll back | [tasks/roll-back.md](tasks/roll-back.md) |
+| Find why a deploy is blocked | [tasks/explain-blocked-deploy.md](tasks/explain-blocked-deploy.md) |
+| Govern agent deployments | [tasks/govern-agent-deployments.md](tasks/govern-agent-deployments.md) |
+| Deliver to a disconnected site | [tasks/disconnected-site.md](tasks/disconnected-site.md) |
+| Drive `tenkaictl` as an agent | [tenkai skill](../.agents/skills/tenkai/SKILL.md) |
 
 ### Operate
 
@@ -170,6 +183,7 @@ will be split over time. Contributor and agent workflow live in
 | Topic | Page |
 | --- | --- |
 | Architecture | [DESIGN.md](../DESIGN.md) |
+| Govern agent deployments | [tasks/govern-agent-deployments.md](tasks/govern-agent-deployments.md) |
 | Design history (founding plan and what was decided since) | [design-history.md](design-history.md) |
 | Architecture decisions (ADRs) | [decisions/README.md](decisions/README.md) |
 | Operational storage and recovery authority | [operational-storage.md](operational-storage.md) |

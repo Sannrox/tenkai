@@ -1,4 +1,4 @@
 interface:
   display_name: "Tenkai control loop"
-  short_description: "Run the Tenkai control loop with tenkaictl"
-  default_prompt: "Use $tenkai to observe this Tenkai environment, bound one transition, execute it once, and verify the durable result."
+  short_description: "Read Tenkai status, propose plans, explain blockers"
+  default_prompt: "Use $tenkai to observe this Tenkai environment, explain blockers, and propose a plan. If you are an agent, do not submit approval or apply."
