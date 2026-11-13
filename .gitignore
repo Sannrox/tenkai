@@ -12,6 +12,7 @@ id_ed25519
 .tenkai-demo-multi-env/
 .tenkai-dogfood-minikube/
 .tenkai-dev-keys/
+.tenkai-lab/
 /artifacts/replay/
 
 .agents/*

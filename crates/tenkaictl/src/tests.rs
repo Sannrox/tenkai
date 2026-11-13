@@ -1226,6 +1226,30 @@ fn webhook_list_shows_feedback_and_does_not_imply_apply_for_feedback_only() {
 }
 
 #[test]
+fn parses_quickstart_lab_defaults_and_flags() {
+    let defaults = Cli::try_parse_from(["tenkaictl", "quickstart"]).unwrap();
+    assert!(matches!(
+        defaults.command,
+        Command::Quickstart { ref dir, ref env }
+            if dir == std::path::Path::new(".tenkai-lab") && env == "lab"
+    ));
+    let custom = Cli::try_parse_from([
+        "tenkaictl",
+        "quickstart",
+        "--dir",
+        "/tmp/tenkai-lab",
+        "--env",
+        "stage",
+    ])
+    .unwrap();
+    assert!(matches!(
+        custom.command,
+        Command::Quickstart { ref dir, ref env }
+            if dir == std::path::Path::new("/tmp/tenkai-lab") && env == "stage"
+    ));
+}
+
+#[test]
 fn parses_approval_policy_configuration() {
     let approval_policy = Cli::try_parse_from([
         "tenkaictl",

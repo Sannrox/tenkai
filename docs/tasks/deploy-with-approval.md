@@ -2,7 +2,7 @@
 
 Goal: converge one environment onto its channel heads with a signed plan approval.
 
-The five-minute local path uses development flags that every other environment refuses. This page is the governed path. Signing keys and approval envelopes stay in files; never on argv.
+The five-minute local path uses development flags that every other environment refuses. This page is the governed path. A laptop lab for it is `tenkaictl quickstart` and [Governed deploy in 15 minutes](../../README.md#governed-deploy-in-15-minutes). Signing keys and approval envelopes stay in files; never on argv.
 
 ## Observe
 

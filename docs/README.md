@@ -6,8 +6,10 @@ trusted, every change is approved and signed, and runtimes verify what they
 apply. If that is not your problem, read
 [when not to use Tenkai](../README.md#when-not-to-use-tenkai).
 
-A first deploy is [Try it in five minutes](../README.md#try-it-in-five-minutes)
-in the root README. Signing, approval, and what a runtime verifies are under
+A first unsigned local deploy is [Try it in five minutes](../README.md#try-it-in-five-minutes)
+in the root README. A first governed deploy (signed, approved, rollback) is
+[Governed deploy in 15 minutes](../README.md#governed-deploy-in-15-minutes).
+Signing, approval, and what a runtime verifies are under
 [Trust and identity](#trust-and-identity).
 
 Operator, integrator, and contributor docs. Agents start at
@@ -26,6 +28,7 @@ will be split over time. Contributor and agent workflow live in
 
 | Tutorial | What you do |
 | --- | --- |
+| [Governed deploy in 15 minutes](../README.md#governed-deploy-in-15-minutes) | Sign, approve, apply, and roll back hello-local on a laptop |
 | [Sign in to the web console with Keycloak](console-sign-in-with-keycloak.md) | Connect a local Keycloak, sign in to `/ui/` with OIDC, and see your grants |
 | [Local minikube dogfood](local-dogfood-minikube.md) | Deliver to a laptop Kubernetes cluster, then repeat with signed multi-environment releases and a software canary |
 | [Hello minikube example](../examples/hello-minikube/) | The scripts and manual steps behind the minikube path |
