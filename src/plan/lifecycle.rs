@@ -228,6 +228,7 @@ pub(super) fn from_object(object: &Object) -> Result<Plan> {
         &plan.inputs,
         &plan.steps,
         plan.recalled_recovery_reason.as_deref(),
+        plan.approval_brief.as_ref(),
     )?;
     if plan.content_id != expected_content_id
         || plan.id != plan_id(&plan.environment, plan.created_at, &expected_content_id)
@@ -957,7 +958,8 @@ mod tests {
         let environment = "lifecycle-test".to_string();
         let inputs = Vec::new();
         let steps = Vec::new();
-        let content_id = content_address(&environment, created_at, &inputs, &steps, None).unwrap();
+        let content_id =
+            content_address(&environment, created_at, &inputs, &steps, None, None).unwrap();
         Plan {
             format_version: PLAN_FORMAT_VERSION,
             id: plan_id(&environment, created_at, &content_id),
@@ -973,6 +975,7 @@ mod tests {
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            approval_brief: None,
         }
     }
 

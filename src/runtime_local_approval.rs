@@ -197,6 +197,7 @@ mod tests {
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            approval_brief: None,
         }
     }
 

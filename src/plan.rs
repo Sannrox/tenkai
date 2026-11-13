@@ -11,6 +11,7 @@ use crate::client::Ctx;
 use crate::ontology::*;
 use crate::pb::sekai::Object;
 
+mod approval_brief;
 mod convergence;
 mod lifecycle;
 mod release_selection;
@@ -44,6 +45,12 @@ pub(crate) use crate::environment::{
     inspect_environment_for_policy, update_runtime_deployments_object,
 };
 pub use crate::spec_drift::{SpecDriftObject, SpecDriftView, TargetChange, TargetFieldChange};
+pub(crate) use approval_brief::compute as compute_approval_brief;
+pub use approval_brief::render as approval_brief_render;
+pub use approval_brief::{
+    ApprovalBrief, ApprovalBriefActor, ApprovalBriefBlast, ApprovalBriefChanges,
+    ApprovalBriefPolicy, PlanProposer,
+};
 
 pub use crate::deploy_webhook::{
     clear_environment_webhooks, list_environment_webhooks, set_environment_webhook,
@@ -381,6 +388,10 @@ pub struct Plan {
     /// (#778). Advisory, and outside the content address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_runway: Option<crate::trust_posture::CredentialRunway>,
+    /// Bounded approval brief computed at planning (#1089). Absent on plans
+    /// stored before this field; omitted so their digests stay unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_brief: Option<ApprovalBrief>,
 }
 
 #[derive(Serialize)]
@@ -394,6 +405,8 @@ struct ExecutableContent<'a> {
     steps: &'a [Step],
     #[serde(skip_serializing_if = "Option::is_none")]
     recalled_recovery_reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approval_brief: Option<&'a ApprovalBrief>,
 }
 
 fn content_address(
@@ -402,28 +415,48 @@ fn content_address(
     inputs: &[DesiredStateInput],
     steps: &[Step],
     recalled_recovery_reason: Option<&str>,
+    approval_brief: Option<&ApprovalBrief>,
 ) -> Result<String> {
     let mut normalized_steps = steps.to_vec();
     for step in &mut normalized_steps {
         step.id.clear();
     }
-    let bytes = if let Some(reason) = recalled_recovery_reason.filter(|value| !value.is_empty()) {
-        serde_json::to_vec(&(
+    let bytes = match (
+        recalled_recovery_reason.filter(|value| !value.is_empty()),
+        approval_brief,
+    ) {
+        (Some(reason), Some(brief)) => serde_json::to_vec(&(
             PLAN_FORMAT_VERSION,
             environment,
             created_at,
             inputs,
             normalized_steps,
             reason,
-        ))?
-    } else {
-        serde_json::to_vec(&(
+            brief,
+        ))?,
+        (Some(reason), None) => serde_json::to_vec(&(
             PLAN_FORMAT_VERSION,
             environment,
             created_at,
             inputs,
             normalized_steps,
-        ))?
+            reason,
+        ))?,
+        (None, Some(brief)) => serde_json::to_vec(&(
+            PLAN_FORMAT_VERSION,
+            environment,
+            created_at,
+            inputs,
+            normalized_steps,
+            brief,
+        ))?,
+        (None, None) => serde_json::to_vec(&(
+            PLAN_FORMAT_VERSION,
+            environment,
+            created_at,
+            inputs,
+            normalized_steps,
+        ))?,
     };
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
@@ -439,6 +472,7 @@ impl Plan {
             inputs: &self.inputs,
             steps: &self.steps,
             recalled_recovery_reason: self.recalled_recovery_reason.as_deref(),
+            approval_brief: self.approval_brief.as_ref(),
         };
         let bytes = serde_json::to_vec(&content)?;
         Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -456,6 +490,7 @@ impl Plan {
             &self.inputs,
             &self.steps,
             self.recalled_recovery_reason.as_deref(),
+            self.approval_brief.as_ref(),
         )?;
         self.id = plan_id(&self.environment, self.created_at, &self.content_id);
         for (order, step) in self.steps.iter_mut().enumerate() {
@@ -869,6 +904,7 @@ mod tests {
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            approval_brief: None,
         };
         plan.content_id = content_address(
             &plan.environment,
@@ -876,6 +912,7 @@ mod tests {
             &plan.inputs,
             &plan.steps,
             plan.recalled_recovery_reason.as_deref(),
+            plan.approval_brief.as_ref(),
         )
         .unwrap();
         plan.id = plan_id(&plan.environment, plan.created_at, &plan.content_id);
@@ -907,6 +944,7 @@ mod tests {
                 &unbound.inputs,
                 &unbound.steps,
                 None,
+                None,
             )
             .unwrap(),
             content_address(
@@ -914,6 +952,7 @@ mod tests {
                 bound.created_at,
                 &bound.inputs,
                 &bound.steps,
+                None,
                 None,
             )
             .unwrap()
@@ -940,6 +979,7 @@ mod tests {
                 &default.inputs,
                 &default.steps,
                 None,
+                None,
             )
             .unwrap(),
             content_address(
@@ -947,6 +987,7 @@ mod tests {
                 named.created_at,
                 &named.inputs,
                 &named.steps,
+                None,
                 None,
             )
             .unwrap()
@@ -964,6 +1005,7 @@ mod tests {
             &left.inputs,
             &left.steps,
             left.recalled_recovery_reason.as_deref(),
+            left.approval_brief.as_ref(),
         )
         .unwrap();
         right.content_id = content_address(
@@ -972,6 +1014,7 @@ mod tests {
             &right.inputs,
             &right.steps,
             right.recalled_recovery_reason.as_deref(),
+            right.approval_brief.as_ref(),
         )
         .unwrap();
         assert_ne!(left.content_id, right.content_id);
@@ -979,6 +1022,45 @@ mod tests {
             left.executable_digest().unwrap(),
             right.executable_digest().unwrap()
         );
+    }
+
+    #[test]
+    fn the_approval_brief_changes_the_plan_digest() {
+        let mut left = example_plan();
+        let mut right = example_plan();
+        right.approval_brief = Some(ApprovalBrief {
+            proposer: "user-1".into(),
+            actor_chain: vec![ApprovalBriefActor {
+                id: "assistant-7".into(),
+                kind: "agent".into(),
+            }],
+            blast_radius: ApprovalBriefBlast {
+                environment: "prod".into(),
+                instances: vec!["api".into()],
+                criticality: None,
+                rollback_available: true,
+            },
+            changes: ApprovalBriefChanges {
+                counts: Default::default(),
+                risky: vec!["deleted_volume:Deployment web".into()],
+            },
+            evidence: Vec::new(),
+            policy: ApprovalBriefPolicy {
+                without_human: "require_human".into(),
+                reason: Some("policy mode is manual".into()),
+                budget: "over".into(),
+            },
+        });
+        left.bind_content_identity().unwrap();
+        right.bind_content_identity().unwrap();
+        assert_ne!(
+            left.executable_digest().unwrap(),
+            right.executable_digest().unwrap()
+        );
+        let covered = right.executable_digest().unwrap();
+        right.approval_brief.as_mut().unwrap().proposer = "other".into();
+        right.bind_content_identity().unwrap();
+        assert_ne!(covered, right.executable_digest().unwrap());
     }
 
     #[test]
@@ -999,6 +1081,7 @@ mod tests {
             &plan.inputs,
             &plan.steps,
             plan.recalled_recovery_reason.as_deref(),
+            plan.approval_brief.as_ref(),
         )
         .unwrap();
         plan.id = plan_id(&plan.environment, plan.created_at, &plan.content_id);
@@ -1066,6 +1149,7 @@ mod tests {
             &empty.inputs,
             &empty.steps,
             empty.recalled_recovery_reason.as_deref(),
+            empty.approval_brief.as_ref(),
         )
         .unwrap();
         empty.id = plan_id(&empty.environment, empty.created_at, &empty.content_id);
@@ -1493,6 +1577,7 @@ mod tests {
             &empty.inputs,
             &empty.steps,
             empty.recalled_recovery_reason.as_deref(),
+            empty.approval_brief.as_ref(),
         )
         .unwrap();
         empty.id = plan_id(&empty.environment, empty.created_at, &empty.content_id);

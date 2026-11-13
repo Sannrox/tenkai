@@ -507,6 +507,7 @@ mod tests {
                 created_at: 1,
                 step_count: 1,
                 digest: None,
+                approval_brief: None,
                 status_detail: String::new(),
                 steps: Vec::new(),
                 steps_truncated: false,

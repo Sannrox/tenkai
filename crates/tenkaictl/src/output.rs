@@ -4,7 +4,7 @@ use anyhow::Result;
 use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, RetryGuidance};
 use tenkai::{plan, reconciler};
 
-use crate::args::{Command, Target};
+use crate::args::{Command, PlanCommand, Target};
 use crate::catalog_args::{ApprovalCommand, ReleaseCommand};
 use crate::env_args::EnvCommand;
 use crate::fleet_args::FleetCommand;
@@ -60,6 +60,27 @@ pub(crate) fn print_delivery_freezes(
     }
 }
 
+pub(crate) fn print_plan(stored: &plan::Plan) -> Result<()> {
+    println!("plan id: {}", stored.id);
+    print_plan_human(stored);
+    Ok(())
+}
+
+pub(crate) fn print_plan_human(stored: &plan::Plan) {
+    if let Some(brief) = &stored.approval_brief {
+        println!("approval brief:");
+        for line in tenkai::plan::approval_brief_render(brief) {
+            println!("  {line}");
+        }
+    }
+    if stored.steps.is_empty() {
+        println!("{} is up to date", stored.environment);
+    } else {
+        println!("plan for {}:", stored.environment);
+        print_steps(&stored.steps);
+    }
+}
+
 pub(crate) fn print_steps(steps: &[plan::Step]) {
     for s in steps {
         let from = s.from.as_deref().unwrap_or("none");
@@ -112,6 +133,10 @@ pub(crate) fn command_name(command: &Command, target: Target) -> Option<CommandN
     let name = match command {
         Command::Publish { .. } => CommandName::Publish,
         Command::Promote { .. } => CommandName::Promote,
+        Command::Plan {
+            command: Some(PlanCommand::Show { .. }),
+            ..
+        } => return None,
         Command::Plan { .. } => CommandName::Plan,
         Command::Apply {
             command: Some(crate::args::ApplyCommand::Cancel { .. }),
@@ -585,6 +610,16 @@ mod tests {
 
         let unsupported = Cli::try_parse_from(["tenkaictl", "init", "--output=json-v1"]).unwrap();
         assert_eq!(command_name(&unsupported.command, Target::Remote), None);
+
+        let show = Cli::try_parse_from([
+            "tenkaictl",
+            "plan",
+            "show",
+            "tenkai:plan:prod:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--output=json-v1",
+        ])
+        .unwrap();
+        assert_eq!(command_name(&show.command, Target::Embedded), None);
 
         let help = Cli::try_parse_from(["tenkaictl", "plan", "--output=json-v1", "--help"])
             .err()

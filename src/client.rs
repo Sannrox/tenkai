@@ -94,6 +94,7 @@ pub struct Ctx {
     health_metrics: Option<Arc<dyn crate::health_gate::HealthMetricsSource>>,
     trust_sources: Option<Arc<crate::trust_posture::TrustSources>>,
     pub(crate) held_execution_leases: Vec<HeldExecutionLease>,
+    plan_proposer: Option<crate::plan::PlanProposer>,
 }
 
 #[derive(Clone)]
@@ -240,6 +241,7 @@ pub async fn connect() -> Result<Ctx> {
         health_metrics: None,
         trust_sources: None,
         held_execution_leases: Vec::new(),
+        plan_proposer: None,
     })
 }
 

@@ -78,6 +78,7 @@ impl Ctx {
             health_metrics: None,
             trust_sources: None,
             held_execution_leases: Vec::new(),
+            plan_proposer: None,
         }
     }
 
@@ -112,6 +113,7 @@ impl Ctx {
             health_metrics: None,
             trust_sources: None,
             held_execution_leases: Vec::new(),
+            plan_proposer: None,
         })
     }
 
@@ -141,6 +143,15 @@ impl Ctx {
 
     pub fn set_health_metrics(&mut self, source: Arc<dyn crate::health_gate::HealthMetricsSource>) {
         self.health_metrics = Some(source);
+    }
+
+    /// Record who requested this plan so the approval brief can name them.
+    pub fn set_plan_proposer(&mut self, proposer: crate::plan::PlanProposer) {
+        self.plan_proposer = Some(proposer);
+    }
+
+    pub(crate) fn plan_proposer(&self) -> crate::plan::PlanProposer {
+        self.plan_proposer.clone().unwrap_or_default()
     }
 
     pub fn is_embedded(&self) -> bool {

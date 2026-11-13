@@ -38,8 +38,37 @@ encoding. An approval for normal gated execution cannot authorize
 
 The plan digest is SHA-256 of Tenkai's versioned executable-plan encoding. It
 includes the plan id, content id, environment, creation time, desired-state
-inputs, and ordered executable steps. Lifecycle status and other mutable audit
-fields are excluded.
+inputs, ordered executable steps, and the approval brief (#1089). Lifecycle
+status and other mutable audit fields are excluded. An approval bound to one
+brief cannot cover a plan whose brief changed.
+
+## Approval brief
+
+Every plan carries a bounded brief computed at planning. Embedded human
+`tenkaictl plan` and `tenkaictl plan show <plan-id>` print it before step
+detail. Environment inspect (the versioned API) returns it on
+`latest_plan.approval_brief`. json-v1 `plan` stays resource ids and counts.
+The brief names the proposer and actor chain, blast radius
+(environment, instances, product criticality, whether a restore pin exists),
+counts of rendered target-change kinds, flagged risky changes, attached
+evidence (`preview` when the environment is a preview, `gates` when a
+non-empty SLO spec could be resolved), and what the live policy would have
+done without a human (`auto` or `require_human`) plus the agent budget
+(`inside`, `over`, or `not_configured`). Overlay, digest, or parse errors
+omit `gates` so planning still succeeds; apply still evaluates gates unless
+`--skip-gates`. A malformed policy file is named as
+`malformed plan approval policy`, distinct from a missing file. If
+criticality or delivery-signal lookup fails, the brief records
+`require_human` with reason `approval signals unavailable`.
+
+Risky-change codes are a fixed list, not heuristics:
+
+- `deleted_volume` — a `volumes` field drops a live volume
+- `changed_ports` — a `ports` field differs
+- `widened_grant` — Role/ClusterRole `rules` differ, or an identity grant
+  names more peers than its restore grant
+
+Plans stored before this field omit the brief and keep their original digest.
 
 Production signing uses the same PKCS#11 (or lab) signer as releases and
 offline bundles. A production deploy profile refuses file-based signing keys;

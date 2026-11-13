@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use crate::args::{
-    Cli, Command, DarkSiteCommand, KeysCommand, RemediateCommand, SecretCommand,
+    Cli, Command, DarkSiteCommand, KeysCommand, PlanCommand, RemediateCommand, SecretCommand,
     SpokeStandbyCommand, Target,
 };
 use crate::catalog_args::ChannelCommand;
@@ -1454,4 +1454,31 @@ fn parses_shared_apply_and_wave_approval_flags() {
     assert_eq!(replica, "ledger-a");
     assert_eq!(signing_key, &PathBuf::from("drill.seed"));
     assert_eq!(out, &PathBuf::from("drill.json"));
+}
+
+#[test]
+fn parses_plan_show() {
+    let show = Cli::try_parse_from([
+        "tenkaictl",
+        "plan",
+        "show",
+        "tenkai:plan:prod:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ])
+    .unwrap();
+    assert!(matches!(
+        show.command,
+        Command::Plan {
+            command: Some(PlanCommand::Show { ref plan_id }),
+            ..
+        } if plan_id.starts_with("tenkai:plan:prod:")
+    ));
+    let create = Cli::try_parse_from(["tenkaictl", "plan", "--env", "prod"]).unwrap();
+    assert!(matches!(
+        create.command,
+        Command::Plan {
+            command: None,
+            ref env,
+            ..
+        } if env.as_deref() == Some("prod")
+    ));
 }

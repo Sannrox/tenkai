@@ -321,7 +321,10 @@ pub(crate) enum Command {
         command: MigrateCommand,
     },
     /// Show the steps that would converge the environment (dry run).
+    #[command(args_conflicts_with_subcommands = true)]
     Plan {
+        #[command(subcommand)]
+        command: Option<PlanCommand>,
         #[arg(long, env = "TENKAI_ENVIRONMENT")]
         env: Option<String>,
         /// Current fencing generation; required with --target remote.
@@ -858,6 +861,13 @@ pub(crate) enum SpokeStandbyCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+}
+
+/// Stored-plan inspection under `tenkaictl plan`.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlanCommand {
+    /// Show a stored plan's approval brief, then its steps.
+    Show { plan_id: String },
 }
 
 #[derive(Subcommand)]

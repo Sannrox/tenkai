@@ -7,10 +7,13 @@ health probe of a new release fails, the previous release is restored
 automatically. Optional SLO gates (#590) can also halt the rollout or restore
 that same previously signed pin after a bake-window breach.
 
-`tenkaictl plan` prints each step's desired-versus-live target change (object
-or file). Secret values appear only as a content digest. The recorded diff is
-part of the plan digest; apply refuses the step as stale if that live object
-moved.
+Embedded human `tenkaictl plan` and `tenkaictl plan show <plan-id>` print
+the approval brief first, then each step's desired-versus-live target
+change (object or file). Secret values appear only as a content digest.
+The recorded diff and the brief are part of the plan digest; apply refuses
+the step as stale if that live object moved, and an approval cannot cover a
+different brief. Environment inspect returns the brief on
+`latest_plan.approval_brief`.
 
 After a failed deployment or automatic rollback, the environment retains the
 failed release and originating plan identity. Automatic convergence holds that

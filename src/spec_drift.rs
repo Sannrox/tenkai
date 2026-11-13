@@ -442,6 +442,9 @@ fn diff_canonical(kind: &str, desired: &Value, live: &Value) -> Vec<TargetFieldC
 }
 
 fn field_change(field: &str, from: Option<&Value>, to: Option<&Value>) -> TargetFieldChange {
+    if field == "volumes" {
+        return volumes_field_change(from, to);
+    }
     TargetFieldChange {
         field: field.into(),
         from: from.map(display_field),
@@ -449,11 +452,76 @@ fn field_change(field: &str, from: Option<&Value>, to: Option<&Value>) -> Target
     }
 }
 
-fn display_field(value: &Value) -> String {
-    let raw = match value {
+/// Keep `{name, source}` when it fits. Over the cap, store a name array so
+/// deleted-volume detection still works. Source-only edits over the cap keep
+/// hashed `from`/`to` so the change stays visible.
+fn volumes_field_change(from: Option<&Value>, to: Option<&Value>) -> TargetFieldChange {
+    let from_raw = from.map(render_field);
+    let to_raw = to.map(render_field);
+    let over_cap = from_raw
+        .as_ref()
+        .is_some_and(|raw| raw.len() > TARGET_FIELD_CAP)
+        || to_raw
+            .as_ref()
+            .is_some_and(|raw| raw.len() > TARGET_FIELD_CAP);
+    if !over_cap {
+        return TargetFieldChange {
+            field: "volumes".into(),
+            from: from_raw,
+            to: to_raw,
+        };
+    }
+    let from_names = from.and_then(compact_volume_names);
+    let to_names = to.and_then(compact_volume_names);
+    if from_names == to_names && from_raw != to_raw {
+        return TargetFieldChange {
+            field: "volumes".into(),
+            from: from.map(display_field),
+            to: to.map(display_field),
+        };
+    }
+    TargetFieldChange {
+        field: "volumes".into(),
+        from: from_names.or_else(|| from.map(display_field)),
+        to: to_names.or_else(|| to.map(display_field)),
+    }
+}
+
+fn compact_volume_names(value: &Value) -> Option<String> {
+    let names = volume_name_list(value)?;
+    let raw = Value::Array(names.into_iter().map(Value::String).collect()).to_string();
+    (raw.len() <= TARGET_FIELD_CAP).then_some(raw)
+}
+
+fn volume_name_list(value: &Value) -> Option<Vec<String>> {
+    let array = value.as_array()?;
+    Some(
+        array
+            .iter()
+            .filter_map(|item| {
+                item.get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        item.as_str()
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_string)
+                    })
+            })
+            .collect(),
+    )
+}
+
+fn render_field(value: &Value) -> String {
+    match value {
         Value::String(text) => text.clone(),
         other => other.to_string(),
-    };
+    }
+}
+
+fn display_field(value: &Value) -> String {
+    let raw = render_field(value);
     if raw.len() <= TARGET_FIELD_CAP {
         return raw;
     }

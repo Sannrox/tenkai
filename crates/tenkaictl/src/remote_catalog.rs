@@ -230,7 +230,17 @@ pub(crate) async fn run(
             println!("{}", result.message);
             Ok(())
         }
-        Command::Plan { env, generation } => {
+        Command::Plan {
+            command: Some(crate::args::PlanCommand::Show { .. }),
+            ..
+        } => {
+            anyhow::bail!("plan show is available with --target embedded")
+        }
+        Command::Plan {
+            env,
+            generation,
+            command: None,
+        } => {
             let env = crate::client_config::require_env(env)?;
             let generation = generation
                 .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;

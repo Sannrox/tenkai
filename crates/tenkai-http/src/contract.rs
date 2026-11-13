@@ -1096,7 +1096,10 @@ mod tests {
             ("EnvironmentMaintenanceInspect", "detail"),
             ("EnvironmentMaintenanceWindow", "next_opens_at_ms"),
             ("EnvironmentPlanSummary", "digest"),
+            ("EnvironmentPlanSummary", "approval_brief"),
             ("EnvironmentPlanSummary", "approval"),
+            ("ApprovalBriefBlast", "criticality"),
+            ("ApprovalBriefPolicy", "reason"),
             ("EffectiveApprovalPolicy", "ttl_ms"),
             ("EffectiveApprovalPolicy", "digest"),
             ("PlanApprovalView", "reason"),
@@ -1211,6 +1214,26 @@ mod tests {
         (
             "QuorumRule",
             "the approval policy file a plan is approved against",
+        ),
+        (
+            "ApprovalBrief",
+            "digest-bound plan content; a binary that predates a field fails approval closed",
+        ),
+        (
+            "ApprovalBriefActor",
+            "part of the digest-bound approval brief",
+        ),
+        (
+            "ApprovalBriefBlast",
+            "part of the digest-bound approval brief",
+        ),
+        (
+            "ApprovalBriefChanges",
+            "part of the digest-bound approval brief",
+        ),
+        (
+            "ApprovalBriefPolicy",
+            "part of the digest-bound approval brief",
         ),
     ];
 
