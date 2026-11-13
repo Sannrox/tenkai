@@ -63,3 +63,6 @@ and Docker both work.
 The instance Tenkai deploys should be a separate *workload* instance
 (different ports and data) from the control-plane instance Tenkai talks to: the
 control plane cannot safely restart its own backend mid-apply.
+
+Tenkai's own server and console follow the same rule, as the `tenkai-server`
+catalog product. See [deliver Tenkai with Tenkai](deliver-tenkai.md).

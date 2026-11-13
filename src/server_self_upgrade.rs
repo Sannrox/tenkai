@@ -1,5 +1,13 @@
 //! Verified upgrade and rollback of `tenkai-server` on one host (#678).
 //!
+//! Catalog delivery of the same host, including the web console the release
+//! binary serves at `/ui/`, is the signed software product [`SELF_PRODUCT`]
+//! (#1080). An environment runtime applies that product like any other
+//! component. The coordinating server refuses to execute it itself, so a
+//! plan that would replace the process running the plan cannot fence the
+//! environment and leave it there. In-place replacement of this host's
+//! binaries remains `tenkaictl self-upgrade`.
+//!
 //! The host binaries come from a signed offline bundle (#640) and live in
 //! versions, as the runtime agent's do (#685):
 //!
@@ -31,6 +39,17 @@ use crate::runtime_self_upgrade::{probe, probe_within};
 /// The binaries a version holds, as `tenkaictl upgrade install-hosts`
 /// writes them.
 pub const BINARIES: [&str; 3] = ["tenkai-server", "tenkai-executor-guard", "tenkaictl"];
+
+/// The catalog product whose releases are this control-plane host, including
+/// the web console the `ui`-enabled binary serves (#1080).
+pub const SELF_PRODUCT: &str = "tenkai-server";
+
+/// Why the coordinating server will not execute a plan step of [`SELF_PRODUCT`].
+pub fn coordinating_apply_refusal() -> String {
+    format!(
+        "refusing to apply {SELF_PRODUCT} on the coordinating server: this host is executing the plan. Deliver {SELF_PRODUCT} through an environment runtime, or upgrade this host with `tenkaictl self-upgrade`"
+    )
+}
 
 const RECORD: &str = "upgrade.json";
 

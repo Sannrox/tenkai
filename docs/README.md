@@ -36,6 +36,7 @@ will be split over time. Contributor and agent workflow live in
 | Manage environments and maintenance windows | [manage-environments.md](manage-environments.md) |
 | Notify an external system after apply | [deploy-webhooks.md](deploy-webhooks.md) |
 | Upgrade, roll back, and recover a product | [upgrade-and-rollback.md](upgrade-and-rollback.md) |
+| Deliver Tenkai's own server and console | [deliver-tenkai.md](deliver-tenkai.md) |
 | Deploy releases from GitHub | [deploy-from-github.md](deploy-from-github.md) |
 | Publish a signed release from CI | [examples/ci-publish](../examples/ci-publish/) |
 | Back up and restore embedded state | [backup-restore.md](backup-restore.md) |
@@ -70,6 +71,7 @@ will be split over time. Contributor and agent workflow live in
 | Compose two local Postgres hubs | [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) |
 | Run the 1,000-environment scale drill | [fleet-workload.md](fleet-workload.md) |
 | Check rollout-time budgets | [software-executor.md](software-executor.md#rollout-time-budget) |
+| Drill Tenkai delivering `tenkai-server` | [deliver-tenkai.md](deliver-tenkai.md) |
 
 ## Reference
 

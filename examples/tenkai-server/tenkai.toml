@@ -1,0 +1,19 @@
+# Catalog product for the Tenkai control-plane host (#1080).
+#
+# The `ui`-enabled release binary serves the web console at `/ui/`. Pack host
+# binaries next to this file before signing (`scripts/pack-tenkai-release.sh`).
+# Deliver the product through an environment runtime. The coordinating server
+# refuses to apply it itself; upgrade that host with `tenkaictl self-upgrade`.
+
+[product]
+name = "tenkai-server"
+version = "0.0.0"
+description = "Tenkai control-plane host, including the web console at /ui/"
+kind = "software"
+
+[deploy]
+workdir = "."
+install = "sh install.sh 0.0.0"
+uninstall = "sh uninstall.sh 0.0.0"
+health = "sh health.sh 0.0.0"
+inputs = ["install.sh", "uninstall.sh", "health.sh"]

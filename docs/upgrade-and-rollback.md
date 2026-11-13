@@ -49,7 +49,8 @@ cleanup or add `--deployed <version>` to record the verified live version.
 
 For stateful products whose upgrades need data migration, see
 [package migrations](package-migrations.md). To restore Tenkai's own state, see
-[backup and restore](backup-restore.md).
+[backup and restore](backup-restore.md). To deliver Tenkai's own server and
+console as a catalog product, see [deliver Tenkai with Tenkai](deliver-tenkai.md).
 
 Trust-root files may carry optional signer `not_before` / `not_after` windows
 on format v1 ([ADR 0039](decisions/0039-signer-validity-windows.md)). Upgrade

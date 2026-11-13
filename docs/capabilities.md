@@ -60,6 +60,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Checksummed host binaries on GitHub Releases | [Release binaries](release-binaries.md); [release notes](releases/0.6.0.md); #446 |
 | One-command install script for CLI, server, and runtime hosts, checked against `SHA256SUMS` | [Install with one command](release-binaries.md#install-with-one-command); #905 |
 | Verified server self-upgrade with store check and rollback | [Upgrade a server host](release-binaries.md#upgrade-a-server-host); #678 |
+| Tenkai delivers `tenkai-server` (console included) as a signed catalog product | [Deliver Tenkai with Tenkai](deliver-tenkai.md); #1080 |
 | Optional governance/intelligence provider ports | [Provider contracts](provider-contracts.md) |
 | Web console served at `/ui/` from a pinned, checksum-verified release (feature `ui`, on in release binaries) | [Open the web console](run-tenkai-server.md#open-the-web-console); [ADR 0031](decisions/0031-web-console.md); #463 |
 | OIDC access tokens with group-to-grant mapping, for the web console | [Configure server authentication](configure-server-authentication.md#oidc-access-tokens-468); [ADR 0031](decisions/0031-web-console.md); #468 |
