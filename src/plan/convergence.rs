@@ -2309,7 +2309,7 @@ fn contract_plan_order_bound(
     let target_edges = cross_release_contract_edges(target_profiles, bindings);
     let installed_edges = cross_release_contract_edges(installed_profiles, bindings);
     let remaining = overlay_profiles(installed_profiles, target_profiles, pending);
-    crate::software_compatibility::refuse_unsatisfied_dependents_bound(
+    crate::software_compatibility::refuse_unsatisfied_dependents(
         &remaining,
         installed_profiles,
         bindings,
@@ -2761,9 +2761,7 @@ pub(super) async fn rollback_step_with_recovery(
     }
     let bindings =
         crate::environment_bindings::EnvironmentBindings::from_properties(&env_obj.properties);
-    crate::software_compatibility::refuse_unsatisfied_dependents_bound(
-        &remaining, &previous, &bindings,
-    )?;
+    crate::software_compatibility::refuse_unsatisfied_dependents(&remaining, &previous, &bindings)?;
     crate::software_compatibility::require_release(ctx, env, &prev_id, instance).await?;
     let restore = match current.as_deref() {
         Some(version) => {

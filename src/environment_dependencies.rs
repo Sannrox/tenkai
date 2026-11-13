@@ -554,26 +554,22 @@ fn impact_for(
     }
     let mut without = deployed_profiles.clone();
     without.remove(product);
-    let remove = refusal_view(
-        crate::software_compatibility::remaining_dependent_refusal_bound(
-            &without,
-            deployed_profiles,
-            bindings,
-        )?,
-    );
+    let remove = refusal_view(crate::software_compatibility::remaining_dependent_refusal(
+        &without,
+        deployed_profiles,
+        bindings,
+    )?);
     let mut dropped = deployed_profiles.clone();
     if let Some(profile) = dropped.get_mut(product) {
         for component in profile.components.values_mut() {
             component.provides.clear();
         }
     }
-    let drop_provides = refusal_view(
-        crate::software_compatibility::remaining_dependent_refusal_bound(
-            &dropped,
-            deployed_profiles,
-            bindings,
-        )?,
-    );
+    let drop_provides = refusal_view(crate::software_compatibility::remaining_dependent_refusal(
+        &dropped,
+        deployed_profiles,
+        bindings,
+    )?);
     Ok(ProductImpact {
         remove,
         upgrade: drop_provides.clone(),
