@@ -59,22 +59,6 @@ impl EnvironmentBindings {
             .collect()
     }
 
-    /// Sorted (dependent, contract, provider) triples for plan content identity.
-    pub fn content_identity(&self) -> Vec<(String, String, String)> {
-        self.inner
-            .iter()
-            .map(|((dependent, contract), provider)| {
-                (dependent.clone(), contract.clone(), provider.clone())
-            })
-            .collect()
-    }
-
-    pub fn without(&self, dependent: &str, contract: &str) -> Self {
-        let mut inner = self.inner.clone();
-        inner.remove(&(dependent.to_string(), contract.to_string()));
-        Self { inner }
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str, &str)> {
         self.inner.iter().map(|((dependent, contract), provider)| {
             (dependent.as_str(), contract.as_str(), provider.as_str())
@@ -426,15 +410,13 @@ mod tests {
             ("binding.broken".into(), "x".into()),
         ]);
         let bindings = EnvironmentBindings::from_properties(&properties);
+        // Only well-formed `binding.` keys are read.
+        let mut expected = EnvironmentBindings::default();
+        expected.insert("app", "database", "db-a");
+        expected.insert("app", "connector.capture", "side");
+        assert_eq!(bindings, expected);
         assert_eq!(bindings.get("app", "database"), Some("db-a"));
         assert_eq!(bindings.get("app", "connector.capture"), Some("side"));
-        assert_eq!(
-            bindings.content_identity(),
-            vec![
-                ("app".into(), "connector.capture".into(), "side".into()),
-                ("app".into(), "database".into(), "db-a".into()),
-            ]
-        );
         assert_eq!(
             bindings.for_dependent("app"),
             BTreeMap::from([
