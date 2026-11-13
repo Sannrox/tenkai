@@ -1938,6 +1938,9 @@ pub struct EnvironmentProductConfig {
     /// Declared secret key names. Values are never stored or returned.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
+    /// Declared `rotate_after` durations per secret name (#1078).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rotate_after: BTreeMap<String, String>,
 }
 
 /// One channel subscription, keyed by instance (ADR 0044 §1).
@@ -2026,6 +2029,7 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
     let now_ms = crate::now_millis();
     let now_secs = now_ms / 1000;
     let max_age_ms = crate::instance_health::max_age_ms(env_obj);
+    let rotation = crate::sealed_secret::rotation_policies(ctx, env_obj).await?;
     let mut rows = Vec::new();
     for sub in subscriptions {
         let product = sub.product;
@@ -2086,13 +2090,21 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
                 .and_then(|release| release.properties.get("artifact_digest").cloned()),
             None => None,
         };
-        let (health, health_checks) = crate::instance_health::overlay(
+        let (health, mut health_checks) = crate::instance_health::overlay(
             apply_health,
             observations.get(&applied_key),
             deployed_digest.as_deref(),
             now_ms,
             max_age_ms,
         );
+        if let Some(policies) = rotation.get(&applied_key) {
+            health_checks.extend(crate::sealed_secret::rotation_health_checks(
+                env_obj,
+                &applied_key,
+                policies,
+                now_ms,
+            )?);
+        }
         let owner = crate::owner::product_owner(ctx, &product)
             .await
             .ok()
@@ -3614,6 +3626,7 @@ async fn product_config_views(
                 digest: overlay_digest(&overlay),
                 overlay,
                 secrets: Vec::new(),
+                rotate_after: BTreeMap::new(),
             });
             continue;
         };
@@ -3631,6 +3644,7 @@ async fn product_config_views(
             overlay,
             defaults,
             secrets: schema.secrets,
+            rotate_after: schema.rotate_after,
         });
     }
     Ok(views)

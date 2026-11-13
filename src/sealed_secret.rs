@@ -604,6 +604,19 @@ pub struct SealedSecretEntry {
     pub set_at: i64,
     /// Recipient fingerprints that can open the value.
     pub recipients: Vec<String>,
+    /// Age from [`set_at`], never from the value (#1078).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub age_ms: Option<i64>,
+    /// Declared `rotate_after` duration (`90d`) when the subscribed release
+    /// names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub rotate_after: Option<String>,
+    /// True when `age_ms` is past `rotate_after`. False, and omitted, when
+    /// the secret has no rotation age.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overdue: bool,
     /// The stored ciphertext and wraps, only when the caller asked for them
     /// (`secret recover` opens its wraps offline). Never a value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -627,7 +640,13 @@ pub struct SealedSecretList {
 pub async fn list(ctx: &mut Ctx, environment: &str, with_sealed: bool) -> Result<SealedSecretList> {
     validate_identifier("environment", environment)?;
     let env_obj = crate::environment::environment(ctx, environment).await?;
-    list_from_object(&env_obj, with_sealed)
+    let mut listed = list_from_object(&env_obj, with_sealed)?;
+    apply_rotation(
+        &mut listed,
+        &rotation_policies(ctx, &env_obj).await?,
+        crate::now_millis(),
+    );
+    Ok(listed)
 }
 
 /// [`list`] over an environment object already read.
@@ -655,6 +674,9 @@ pub fn list_from_object(env_obj: &Object, with_sealed: bool) -> Result<SealedSec
                     .iter()
                     .map(|wrap| wrap.fingerprint.clone())
                     .collect(),
+                age_ms: None,
+                rotate_after: None,
+                overdue: false,
                 sealed: with_sealed.then_some(record.sealed),
             });
         }
@@ -699,6 +721,83 @@ impl SealedSecretList {
             ),
         })
     }
+}
+
+/// Declared `rotate_after` per instance and secret name, from the
+/// subscribed release (`[config.rotate_after]`).
+pub(crate) async fn rotation_policies(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>> {
+    let mut policies = BTreeMap::new();
+    for sub in crate::environment::list_subscriptions(ctx, env_obj).await? {
+        let instance = if sub.instance.is_empty() {
+            sub.product.clone()
+        } else {
+            sub.instance.clone()
+        };
+        let declared = match sub.channel.properties.get("current_release") {
+            Some(release) => crate::environment::release_config_schema(ctx, release)
+                .await?
+                .map(|schema| schema.rotate_after)
+                .unwrap_or_default(),
+            None => BTreeMap::new(),
+        };
+        policies.insert(instance, declared);
+    }
+    Ok(policies)
+}
+
+fn apply_rotation(
+    list: &mut SealedSecretList,
+    policies: &BTreeMap<String, BTreeMap<String, String>>,
+    now_ms: i64,
+) {
+    for entry in &mut list.secrets {
+        entry.age_ms = Some(now_ms.saturating_sub(entry.set_at).max(0));
+        let Some(raw) = policies
+            .get(&entry.instance)
+            .and_then(|secrets| secrets.get(&entry.secret))
+        else {
+            entry.rotate_after = None;
+            entry.overdue = false;
+            continue;
+        };
+        entry.rotate_after = Some(raw.clone());
+        entry.overdue = crate::manifest::parse_rotate_after(raw)
+            .is_ok_and(|ms| now_ms.saturating_sub(entry.set_at) >= ms);
+    }
+}
+
+/// Warning checks for overdue sealed keys of `instance` (#1078). Visibility
+/// only: they never change serving health.
+pub(crate) fn rotation_health_checks(
+    env_obj: &Object,
+    instance: &str,
+    policies: &BTreeMap<String, String>,
+    now_ms: i64,
+) -> Result<Vec<crate::instance_health::HealthCheck>> {
+    let mut checks = Vec::new();
+    for (name, record) in instance_records(env_obj, instance)? {
+        let secret = SecretRef::parse(&name)?;
+        let Some(raw) = policies.get(&secret.secret) else {
+            continue;
+        };
+        let Ok(ms) = crate::manifest::parse_rotate_after(raw) else {
+            continue;
+        };
+        if now_ms.saturating_sub(record.set_at) < ms {
+            continue;
+        }
+        checks.push(crate::instance_health::HealthCheck {
+            name: format!("rotate-{}-{}", secret.secret, secret.key),
+            state: crate::instance_health::HealthCheckState::Warning,
+            message: format!(
+                "{secret} is overdue for rotation; set a new value with tenkaictl secret set"
+            ),
+        });
+    }
+    Ok(checks)
 }
 
 /// [`recovery_key`] of `environment` by name; none when the environment
@@ -1771,5 +1870,128 @@ mod tests {
         assert!(SecretRef::parse("db/").is_err());
         assert!(SecretRef::parse("/password").is_err());
         assert!(SecretRef::parse("db/pass/word").is_err());
+    }
+
+    /// Overdue rotation is visibility only: a secret past `rotate_after`
+    /// lists overdue and warns on status; a new set clears it; a secret
+    /// without `rotate_after` never warns (#1078).
+    #[tokio::test]
+    async fn past_rotate_after_lists_overdue_and_warns_until_a_new_value_is_set() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-rotate-after-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "local", "fixture")
+            .await
+            .unwrap();
+        publish(
+            &mut ctx,
+            &root,
+            "api",
+            r#"
+[config]
+secrets = ["db", "cache"]
+
+[config.rotate_after]
+db = "90d"
+"#,
+        )
+        .await;
+        let (_, recipient) = recipient();
+        let db =
+            SealedTarget::new("local", "api", SecretRef::parse("db/password").unwrap()).unwrap();
+        let cache =
+            SealedTarget::new("local", "api", SecretRef::parse("cache/token").unwrap()).unwrap();
+        let record = |target: &SealedTarget, value: &[u8]| {
+            let sealed = seal(target, value, std::slice::from_ref(&recipient)).unwrap();
+            SealedRecord {
+                digest: digest(target, &sealed).unwrap(),
+                sealed,
+                set_by: "operator".into(),
+                set_at: 1,
+            }
+        };
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        persist_instance_records(
+            &mut env,
+            "api",
+            &BTreeMap::from([
+                ("db/password".into(), record(&db, b"old-db")),
+                ("cache/token".into(), record(&cache, b"old-cache")),
+            ]),
+        );
+        ctx.put(env).await.unwrap();
+
+        let listed = list(&mut ctx, "local", false).await.unwrap();
+        let db_entry = listed
+            .secrets
+            .iter()
+            .find(|entry| entry.secret == "db")
+            .unwrap();
+        let cache_entry = listed
+            .secrets
+            .iter()
+            .find(|entry| entry.secret == "cache")
+            .unwrap();
+        assert_eq!(db_entry.rotate_after.as_deref(), Some("90d"));
+        assert!(db_entry.overdue, "{db_entry:?}");
+        assert!(db_entry.age_ms.unwrap() > 0, "{db_entry:?}");
+        assert_eq!(cache_entry.rotate_after, None);
+        assert!(!cache_entry.overdue, "{cache_entry:?}");
+
+        let rows = crate::environment::status(&mut ctx, "local").await.unwrap();
+        let api = rows.iter().find(|row| row.instance == "api").unwrap();
+        assert!(
+            api.health_checks.iter().any(|check| {
+                check.name == "rotate-db-password"
+                    && check.state == crate::instance_health::HealthCheckState::Warning
+                    && check.message.contains("db/password")
+                    && check.message.contains("tenkaictl secret set")
+            }),
+            "{:?}",
+            api.health_checks
+        );
+        assert!(
+            api.health_checks
+                .iter()
+                .all(|check| check.name != "rotate-cache-token"),
+            "{:?}",
+            api.health_checks
+        );
+
+        change(
+            &mut ctx,
+            crate::environment_config::EnvironmentConfigChange::SetSealedSecret {
+                instance: "api".into(),
+                secret: "db".into(),
+                key: "password".into(),
+                sealed: seal(&db, b"fresh-db", std::slice::from_ref(&recipient)).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        let listed = list(&mut ctx, "local", false).await.unwrap();
+        let db_entry = listed
+            .secrets
+            .iter()
+            .find(|entry| entry.secret == "db")
+            .unwrap();
+        assert!(!db_entry.overdue, "{db_entry:?}");
+        let rows = crate::environment::status(&mut ctx, "local").await.unwrap();
+        let api = rows.iter().find(|row| row.instance == "api").unwrap();
+        assert!(
+            api.health_checks
+                .iter()
+                .all(|check| check.name != "rotate-db-password"),
+            "{:?}",
+            api.health_checks
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -166,8 +166,22 @@ pub(crate) fn print_list(list: &tenkai::sealed_secret::SealedSecretList) {
             .recovery_key
             .as_ref()
             .is_some_and(|fingerprint| entry.recipients.contains(fingerprint));
+        let age = entry
+            .age_ms
+            .map(|ms| format!(" age_ms={ms}"))
+            .unwrap_or_default();
+        let rotation = entry
+            .rotate_after
+            .as_ref()
+            .map(|raw| {
+                format!(
+                    " rotate_after={raw} overdue={}",
+                    if entry.overdue { "yes" } else { "no" }
+                )
+            })
+            .unwrap_or_default();
         println!(
-            "{} {}/{} {} set_by={} set_at={} recipients={} recovery={}",
+            "{} {}/{} {} set_by={} set_at={}{age}{rotation} recipients={} recovery={}",
             entry.instance,
             entry.secret,
             entry.key,
@@ -367,6 +381,9 @@ mod tests {
                     .iter()
                     .map(|wrap| wrap.fingerprint.clone())
                     .collect(),
+                age_ms: None,
+                rotate_after: None,
+                overdue: false,
                 sealed: Some(sealed),
             }
         };

@@ -259,6 +259,47 @@ pub struct ConfigSection {
     /// Secret key names this release reads. Names only; values are never stored.
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// Optional rotation age per declared secret (`90d`). Visibility only;
+    /// Tenkai never changes a value on a timer (#1078).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub rotate_after: std::collections::BTreeMap<String, String>,
+}
+
+/// Milliseconds of a `rotate_after` duration (`90d`, `12h`, `30m`, `45s`).
+pub(crate) fn parse_rotate_after(value: &str) -> anyhow::Result<i64> {
+    let value = value.trim();
+    let (number, factor) = if let Some(days) = value.strip_suffix('d') {
+        (days, 86_400_000_i64)
+    } else if let Some(hours) = value.strip_suffix('h') {
+        (hours, 3_600_000)
+    } else if let Some(minutes) = value.strip_suffix('m') {
+        (minutes, 60_000)
+    } else if let Some(seconds) = value.strip_suffix('s') {
+        (seconds, 1_000)
+    } else {
+        bail!("rotate_after {value:?} must end in d, h, m, or s");
+    };
+    let amount: i64 = number
+        .trim()
+        .parse()
+        .with_context(|| format!("rotate_after {value:?} is not a number"))?;
+    let ms = amount
+        .checked_mul(factor)
+        .with_context(|| format!("rotate_after {value:?} overflow"))?;
+    if ms <= 0 {
+        bail!("rotate_after must be greater than zero");
+    }
+    Ok(ms)
+}
+
+fn validate_config(config: &ConfigSection) -> Result<()> {
+    for (name, raw) in &config.rotate_after {
+        if !config.secrets.iter().any(|secret| secret == name) {
+            bail!("[config.rotate_after] {name} is not a declared secret");
+        }
+        parse_rotate_after(raw).with_context(|| format!("[config.rotate_after.{name}]"))?;
+    }
+    Ok(())
 }
 
 /// One overlay key in a release config schema.
@@ -812,6 +853,9 @@ pub fn parse_raw(raw: &str) -> Result<Manifest> {
     manifest.gate.validate_slo()?;
     if let Some(topology) = &manifest.topology {
         topology.validate()?;
+    }
+    if let Some(config) = &manifest.config {
+        validate_config(config)?;
     }
     Ok(manifest)
 }
@@ -1841,5 +1885,79 @@ default = "1"
         assert_eq!(replicas.value_type, OverlayValueType::Integer);
         assert!(replicas.required);
         assert_eq!(replicas.default.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn config_rotate_after_must_name_a_declared_secret_with_a_duration() {
+        let parsed = parse_raw(
+            r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+
+[config]
+secrets = ["db-password"]
+
+[config.rotate_after]
+db-password = "90d"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed
+                .config
+                .unwrap()
+                .rotate_after
+                .get("db-password")
+                .map(String::as_str),
+            Some("90d")
+        );
+
+        let unknown = format!(
+            "{:#}",
+            parse_raw(
+                r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+
+[config]
+secrets = ["db-password"]
+
+[config.rotate_after]
+other = "90d"
+"#,
+            )
+            .unwrap_err()
+        );
+        assert!(unknown.contains("not a declared secret"), "{unknown}");
+
+        let bad = format!(
+            "{:#}",
+            parse_raw(
+                r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+
+[config]
+secrets = ["db-password"]
+
+[config.rotate_after]
+db-password = "90"
+"#,
+            )
+            .unwrap_err()
+        );
+        assert!(bad.contains("must end in d, h, m, or s"), "{bad}");
     }
 }
