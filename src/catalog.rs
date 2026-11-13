@@ -1296,7 +1296,53 @@ pub async fn recall(
         return Ok(format!("release {spec} is already recalled"));
     }
     persist_recall_claim(ctx, actor, &release.id).await?;
+    announce_recall(ctx, &release, spec).await;
     Ok(format!("recalled {spec}"))
+}
+
+async fn announce_recall(ctx: &mut Ctx, release: &Object, spec: &str) {
+    let Some(store) = ctx.embedded_arc() else {
+        return;
+    };
+    let Some(product) = release
+        .properties
+        .get("product")
+        .filter(|name| !name.is_empty())
+        .cloned()
+    else {
+        return;
+    };
+    let mut endpoints = crate::owner::list_product_webhooks(ctx, &product)
+        .await
+        .unwrap_or_default();
+    if let Ok(envs) = ctx.list_kind(KIND_ENVIRONMENT).await {
+        for env in envs {
+            let subscribed = crate::environment::list_subscriptions(ctx, &env)
+                .await
+                .ok()
+                .is_some_and(|subs| subs.iter().any(|sub| sub.product == product));
+            if !subscribed {
+                continue;
+            }
+            let env_hooks = crate::deploy_webhook::parse_endpoints(&env).unwrap_or_default();
+            endpoints = crate::owner::union_endpoints(endpoints, env_hooks);
+        }
+    }
+    if endpoints.is_empty() && crate::smtp_digest::installed().is_empty() {
+        return;
+    }
+    crate::operational_events::announce(
+        store.as_ref(),
+        &endpoints,
+        &crate::operational_events::Transition {
+            event: crate::deploy_webhook::OperationalEvent::ReleaseRecalled,
+            scope: crate::operational_events::HOST_SCOPE,
+            resource: spec,
+            code: "recalled",
+            key: &release.id,
+        },
+        crate::now_millis(),
+    );
 }
 
 #[cfg(test)]
@@ -1596,6 +1642,79 @@ install = "true"
         assert_eq!(
             claim.properties.get("recalled_by").map(String::as_str),
             Some(actor.principal_id())
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn recall_enqueues_release_recalled_on_the_host_outbox() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-recall-announce-{}-{}-{}",
+            std::process::id(),
+            crate::now_millis(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("tenkai.toml"),
+            r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+"#,
+        )
+        .unwrap();
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        crate::owner::set_product_webhook(
+            &mut ctx,
+            "api",
+            crate::deploy_webhook::WebhookEndpoint {
+                url: "https://hooks.example.test/product".into(),
+                secret_env: "TENKAI_WEBHOOK_SECRET".into(),
+                events: Vec::new(),
+                operational: vec![crate::deploy_webhook::OperationalEvent::ReleaseRecalled],
+                feedback: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("recall-announce");
+        assert!(
+            recall(&mut ctx, &actor, "api@1.0.0")
+                .await
+                .unwrap()
+                .contains("recalled")
+        );
+        let store = ctx.embedded_arc().unwrap();
+        let host = crate::operational_events::deliveries(
+            store.as_ref(),
+            crate::operational_events::HOST_SCOPE,
+            10,
+        )
+        .unwrap();
+        assert!(
+            host.iter().any(|row| row.event == "release.recalled"
+                && row.url == "https://hooks.example.test/product"),
+            "{host:?}"
+        );
+        let named_env = crate::operational_events::deliveries(store.as_ref(), "api", 10).unwrap();
+        assert!(
+            named_env.iter().all(|row| row.event != "release.recalled"),
+            "{named_env:?}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

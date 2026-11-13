@@ -32,6 +32,23 @@ tenkaictl env webhooks clear lab --url https://hooks.example.test/tenkai
 tenkaictl env webhooks clear lab
 ```
 
+A product may store the same endpoint list. Apply outcomes, recall, automatic
+hold, and stale health fan out to the environment endpoints and the product
+endpoints, once per URL. Delivery failure is retried and does not fail apply.
+
+```bash
+tenkaictl product webhooks set api \
+  --url https://hooks.example.test/product \
+  --secret-env TENKAI_WEBHOOK_SECRET \
+  --events apply.failed,apply.rolled_back
+tenkaictl env owner set lab lab-oncall@example
+tenkaictl product owner set api api-oncall@example
+```
+
+`status`, `env inspect`, and `env history` show the owner. An owner with no
+reachable endpoint is listed on webhook delivery status as
+`owner.unconfigured`.
+
 ## Events and payload
 
 | Event | When | `alert` |
@@ -106,10 +123,13 @@ names may be mixed; each is stored in its field.
 
 | Event | Scope | Fires when |
 | --- | --- | --- |
-| `plan.held` | Environment webhooks | A reconcile tick finds the environment's plan paused by a delivery hold. `code` is the hold scope |
-| `plan.awaiting_approval` | Environment webhooks | A reconcile tick finds the plan waiting for a signed approval |
+| `plan.held` | Environment and product owner webhooks | A reconcile tick finds the environment's plan paused by a delivery hold. `code` is the hold scope |
+| `plan.awaiting_approval` | Environment and product owner webhooks | A reconcile tick finds the plan waiting for a signed approval |
 | `import.failed` | Environment webhooks | A server-side bundle import is refused. `resource` is the import job id |
 | `runner.attestation_refused` | Environment webhooks | An attested enrollment or certificate renewal, or a runtime inventory report under the runner attestation policy, is refused. `resource` is the runner id (`enrollment` before one exists) and `code` the reason, once per runner, reason and bound evidence ([attested runners](run-tenkai-server.md#attested-runners)) |
+| `release.recalled` | Product and subscribed-environment owner webhooks | A published release is recalled. `resource` is the release spec |
+| `hold.automatic` | Environment and product owner webhooks | A failure-threshold hold is set with actor `automatic`. `code` is `automatic` |
+| `health.stale` | Environment and product owner webhooks | An instance health observation aged past its max age. `resource` is the instance and `code` is `stale` |
 | `backup.stale` | Host webhooks | Backup age turns `stale`, `missing` or `unreadable` |
 | `clock.drift` | Host webhooks | The clock guard turns `warn` or `refuse` |
 | `trust.expiring` | Host webhooks | The worst certificate status turns `warning`, `critical` or `expired` ([trust posture](run-tenkai-server.md#trust-posture)) |

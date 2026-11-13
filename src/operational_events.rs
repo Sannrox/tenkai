@@ -1,11 +1,16 @@
 //! Operational events over signed webhooks (#724).
 //!
 //! Besides apply outcomes, webhook endpoints may subscribe to operational
-//! events. Environment-scoped events go to that environment's webhooks:
-//! `plan.held`, `plan.awaiting_approval` and `import.failed`. Host-scoped
-//! events go to the host webhook list in `TENKAI_HOST_WEBHOOKS` (the same
-//! JSON shape as environment webhooks): `backup.stale`, `clock.drift` and
-//! `trust.expiring` (#775). An
+//! events. Environment-scoped events go to that environment's webhooks and
+//! subscribed product webhooks, once per URL: `plan.held`,
+//! `plan.awaiting_approval`, `hold.automatic`, and `health.stale`.
+//! `import.failed` stays on the environment webhooks. Product-scoped
+//! `release.recalled` fans out to the product webhooks and subscribed
+//! environment webhooks, recorded on the host outbox so it is not stored
+//! under a product name as if it were an environment. Host-scoped events
+//! go to the host webhook list in
+//! `TENKAI_HOST_WEBHOOKS` (the same JSON shape as environment webhooks):
+//! `backup.stale`, `clock.drift` and `trust.expiring` (#775). An
 //! endpoint receives an operational event only when it lists it.
 //!
 //! Each event fires once per transition. Its outbox id is derived from the
@@ -249,8 +254,8 @@ pub async fn announce_failed_imports(
     }
 }
 
-/// Announce the held and approval-waiting plans of one reconcile tick to
-/// each environment's webhooks.
+/// Announce the held and approval-waiting plans of one reconcile tick, plus
+/// stale instance health, to each environment's unioned owner webhooks.
 pub async fn announce_tick(
     ctx: &mut crate::client::Ctx,
     store: &dyn OperationalStore,
@@ -259,6 +264,7 @@ pub async fn announce_tick(
 ) {
     use crate::reconciler::EnvironmentStatus;
     for result in &report.environments {
+        announce_stale_health(ctx, store, &result.environment, now).await;
         let (event, plan_id, code) = match &result.status {
             EnvironmentStatus::Held { plan_id, scope, .. } => {
                 (OperationalEvent::PlanHeld, plan_id, scope.as_str())
@@ -269,7 +275,7 @@ pub async fn announce_tick(
             _ => continue,
         };
         let Ok(endpoints) =
-            crate::deploy_webhook::list_environment_webhooks(ctx, &result.environment).await
+            crate::owner::environment_notification_endpoints(ctx, &result.environment).await
         else {
             continue;
         };
@@ -292,6 +298,46 @@ pub async fn announce_tick(
                 scope: &result.environment,
                 resource: plan_id,
                 code,
+                key: &key,
+            },
+            now,
+        );
+    }
+}
+
+async fn announce_stale_health(
+    ctx: &mut crate::client::Ctx,
+    store: &dyn OperationalStore,
+    environment: &str,
+    now: i64,
+) {
+    let Ok(env_obj) = crate::environment::environment(ctx, environment).await else {
+        return;
+    };
+    let max_age_ms = crate::instance_health::max_age_ms(&env_obj);
+    let Ok(observations) = crate::instance_health::reported(ctx, environment).await else {
+        return;
+    };
+    let Ok(endpoints) = crate::owner::environment_notification_endpoints(ctx, environment).await
+    else {
+        return;
+    };
+    if endpoints.is_empty() && crate::smtp_digest::installed().is_empty() {
+        return;
+    }
+    for (instance, observation) in observations {
+        if now.saturating_sub(observation.observed_at_ms) <= max_age_ms {
+            continue;
+        }
+        let key = format!("{instance}|{}", observation.observed_at_ms);
+        announce(
+            store,
+            &endpoints,
+            &Transition {
+                event: OperationalEvent::HealthStale,
+                scope: environment,
+                resource: &instance,
+                code: "stale",
                 key: &key,
             },
             now,

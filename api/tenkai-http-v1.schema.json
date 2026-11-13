@@ -1957,6 +1957,10 @@
         },
         "next_cursor": {
           "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/OwnerView",
+          "description": "Environment owner contact and notification URLs (#1066)."
         }
       },
       "required": [
@@ -2467,6 +2471,37 @@
                 "string",
                 "null"
               ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Environment owner contact for display, audit, and notification routing (#1066).",
+          "properties": {
+            "contact": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "set_owner",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "contact"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "clear_owner",
+              "type": "string"
             }
           },
           "required": [
@@ -3010,6 +3045,10 @@
           "default": {},
           "description": "Non-secret product overlays as `product.key=value`.",
           "type": "object"
+        },
+        "owner": {
+          "$ref": "#/$defs/OwnerView",
+          "description": "Environment owner contact and notification URLs (#1066). Omitted when unset."
         },
         "preview": {
           "$ref": "#/$defs/PreviewInspect",
@@ -4207,6 +4246,10 @@
             "$ref": "#/$defs/OpenEnvironmentExposure"
           },
           "type": "array"
+        },
+        "owner": {
+          "description": "Environment owner contact when set (#1066).",
+          "type": "string"
         },
         "posture": {
           "description": "Aggregate posture: `empty` | `unhealthy` | `behind` | `current`.",
@@ -5482,8 +5525,43 @@
           "const": "runner.attestation_refused",
           "description": "A runner's attested enrollment or renewal, or its inventory under\nthe attestation policy, was refused (#675). The code names why.",
           "type": "string"
+        },
+        {
+          "const": "release.recalled",
+          "description": "A published release was recalled (#1066).",
+          "type": "string"
+        },
+        {
+          "const": "hold.automatic",
+          "description": "An automatic failure-threshold hold was set (#1066).",
+          "type": "string"
+        },
+        {
+          "const": "health.stale",
+          "description": "An instance health observation aged past its max age (#1066).",
+          "type": "string"
         }
       ]
+    },
+    "OwnerView": {
+      "description": "Contact and notification URLs as inspect, status, and history show them.",
+      "properties": {
+        "contact": {
+          "description": "Display and audit contact. Not an identity.",
+          "type": "string"
+        },
+        "endpoints": {
+          "description": "Configured notification URLs. Empty means no reachable endpoint.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "contact"
+      ],
+      "type": "object"
     },
     "PackageMigrationApplyRequest": {
       "additionalProperties": false,
@@ -7141,6 +7219,19 @@
       ],
       "type": "object"
     },
+    "SetOwnerRequest": {
+      "additionalProperties": false,
+      "description": "Body of `PUT /v1/products/{product}/owner` and environment `set_owner`.",
+      "properties": {
+        "contact": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contact"
+      ],
+      "type": "object"
+    },
     "Severity": {
       "description": "Ordered advisory severities. Higher values are more severe.",
       "enum": [
@@ -7397,6 +7488,10 @@
         "overlay_stale": {
           "default": false,
           "type": "boolean"
+        },
+        "owner": {
+          "description": "Product owner contact when set (#1066).",
+          "type": "string"
         },
         "product": {
           "type": "string"
@@ -8444,6 +8539,81 @@
       }
     },
     {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/products/{product}/owner",
+      "request": null,
+      "response": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/OwnerView"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/products/{product}/owner",
+      "request": {
+        "$ref": "#/$defs/SetOwnerRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/OwnerView"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/products/{product}/owner",
+      "request": null,
+      "response": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/OwnerView"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/products/{product}/webhooks",
+      "request": null,
+      "response": {
+        "items": {
+          "$ref": "#/$defs/WebhookEndpoint"
+        },
+        "type": "array"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/products/{product}/webhooks",
+      "request": {
+        "$ref": "#/$defs/WebhookEndpoint"
+      },
+      "response": {
+        "type": "string"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/products/{product}/webhooks",
+      "request": null,
+      "response": {
+        "type": "string"
+      }
+    },
+    {
       "auth": "management",
       "method": "PUT",
       "path": "/v1/environments/{environment}/facts",
@@ -8689,6 +8859,28 @@
       "auth": "management",
       "method": "DELETE",
       "path": "/v1/environments/{environment}/webhooks",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/environments/{environment}/owner",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/environments/{environment}/owner",
       "request": {
         "$ref": "#/$defs/EnvironmentConfigRequest"
       },

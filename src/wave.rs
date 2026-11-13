@@ -327,6 +327,7 @@ mod tests {
             maintenance: None,
             constraints: Vec::new(),
             webhooks: Vec::new(),
+            owner: None,
             approval_policy: None,
             terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),

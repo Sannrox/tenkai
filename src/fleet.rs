@@ -44,6 +44,10 @@ pub struct FleetEnvironmentRow {
     /// Open (release, advisory) matches on this environment (#900).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_exposures: Vec<OpenEnvironmentExposure>,
+    /// Environment owner contact when set (#1066).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub owner: Option<String>,
 }
 
 /// One open deployed exposure, with age, on a fleet row (#900).
@@ -163,6 +167,7 @@ pub fn fleet_row_from_inspect(report: &EnvironmentInspectReport) -> FleetEnviron
             .as_ref()
             .and_then(|value| value.effective.clone()),
         open_exposures: Vec::new(),
+        owner: report.owner.as_ref().map(|owner| owner.contact.clone()),
     }
 }
 
@@ -510,6 +515,7 @@ mod tests {
             maintenance: None,
             constraints: Vec::new(),
             webhooks: Vec::new(),
+            owner: None,
             approval_policy: None,
             terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
@@ -559,6 +565,7 @@ mod tests {
             maintenance: None,
             constraints: Vec::new(),
             webhooks: Vec::new(),
+            owner: None,
             approval_policy: None,
             terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
@@ -608,6 +615,7 @@ mod tests {
             maintenance: None,
             constraints: Vec::new(),
             webhooks: Vec::new(),
+            owner: None,
             approval_policy: None,
             terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
@@ -643,6 +651,7 @@ mod tests {
             maintenance: None,
             constraints: Vec::new(),
             webhooks: Vec::new(),
+            owner: None,
             approval_policy: None,
             terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
@@ -718,6 +727,7 @@ mod tests {
             maintenance: None,
             constraints: Vec::new(),
             webhooks: Vec::new(),
+            owner: None,
             approval_policy: None,
             terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
@@ -868,6 +878,7 @@ mod tests {
                     overdue: false,
                 },
             ],
+            owner: None,
         }];
         let overdue = overdue_exposures(&report);
         assert_eq!(overdue.len(), 1);

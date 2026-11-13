@@ -12,6 +12,44 @@ pub(crate) enum ProductCommand {
         #[command(subcommand)]
         command: ProductCriticalityCommand,
     },
+    /// Name the product owner contact for display, audit, and notifications.
+    Owner {
+        #[command(subcommand)]
+        command: ProductOwnerCommand,
+    },
+    /// Manage signed notification endpoints on the product. Never secret bytes.
+    Webhooks {
+        #[command(subcommand)]
+        command: ProductWebhooksCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ProductOwnerCommand {
+    Show { product: String },
+    Set { product: String, contact: String },
+    Clear { product: String },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ProductWebhooksCommand {
+    List {
+        product: String,
+    },
+    Set {
+        product: String,
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        secret_env: String,
+        #[arg(long)]
+        events: Option<String>,
+    },
+    Clear {
+        product: String,
+        #[arg(long)]
+        url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

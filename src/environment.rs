@@ -776,10 +776,16 @@ pub(crate) async fn record_deployment_observation(
             }
         }
     }
-    let webhook_endpoints = environment
+    let mut webhook_endpoints = environment
         .as_ref()
         .map(crate::deploy_webhook::configured_endpoints)
         .unwrap_or_default();
+    if !observation.step.product.trim().is_empty() {
+        let product_endpoints = crate::owner::list_product_webhooks(ctx, &observation.step.product)
+            .await
+            .unwrap_or_default();
+        webhook_endpoints = crate::owner::union_endpoints(webhook_endpoints, product_endpoints);
+    }
     let needs_plan = ctx.outcome_export_enabled() || !webhook_endpoints.is_empty();
     let plan = if needs_plan {
         Some(crate::plan::load(ctx, observation.plan_id).await?)
@@ -1566,6 +1572,10 @@ pub struct StatusRow {
     /// Empty when none were reported or the observation is stale.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub health_checks: Vec<crate::instance_health::HealthCheck>,
+    /// Product owner contact when set (#1066).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub owner: Option<String>,
 }
 
 /// Unmet contract named by a dependency hold.
@@ -1693,6 +1703,10 @@ pub struct EnvironmentInspectReport {
     /// or returned. Edits are conditional on `lease.generation`.
     #[serde(default)]
     pub webhooks: Vec<crate::deploy_webhook::WebhookEndpoint>,
+    /// Environment owner contact and notification URLs (#1066). Omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub owner: Option<crate::owner::OwnerView>,
     /// The plan approval policy file this environment uses, as configured,
     /// when one is set (#820).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2075,6 +2089,11 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             now_ms,
             max_age_ms,
         );
+        let owner = crate::owner::product_owner(ctx, &product)
+            .await
+            .ok()
+            .flatten()
+            .map(|owner| owner.contact);
         let certificate = certificates
             .get(&applied_key)
             .map(|report| report.status(now_secs));
@@ -2115,6 +2134,7 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             spec_drift: spec_drift_from_object(env_obj, &applied_key),
             certificate,
             health_checks,
+            owner,
         });
     }
     rows.sort_by(|a, b| {
@@ -2261,6 +2281,11 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
         let delivery_freezes =
             crate::delivery_hold::visible_freezes(ctx, &env_obj.name, crate::now_millis()).await?;
         let criticality = criticality_from_properties(&env_obj.properties, crate::now_millis());
+        let reachable = crate::owner::environment_notification_endpoints(ctx, &env_obj.name)
+            .await
+            .unwrap_or_default();
+        let owner =
+            crate::owner::view_from_object(&env_obj).map(|view| view.with_reachable(&reachable));
         reports.push(EnvironmentInspectReport {
             name: env_obj.name,
             id: env_obj.id,
@@ -2278,6 +2303,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             maintenance: None,
             constraints: Vec::new(),
             webhooks: Vec::new(),
+            owner,
             approval_policy: None,
             terminal_outcomes: Vec::new(),
             execution_note: String::new(),
@@ -2384,6 +2410,11 @@ async fn inspect_environment_base(
     } else {
         Vec::new()
     };
+    let reachable = crate::owner::environment_notification_endpoints(ctx, env)
+        .await
+        .unwrap_or_default();
+    let owner =
+        crate::owner::view_from_object(&env_obj).map(|view| view.with_reachable(&reachable));
     Ok(EnvironmentInspectReport {
         name: env_obj.name,
         id: env_obj.id,
@@ -2401,6 +2432,7 @@ async fn inspect_environment_base(
         maintenance: Some(maintenance),
         constraints,
         webhooks,
+        owner,
         approval_policy,
         terminal_outcomes: Vec::new(),
         execution_note: "Apply leases and runtime credentials are distinct; inspect never prints bearer tokens. Server-side runtime-token environments are not executed by the embedded server executor."
@@ -4215,6 +4247,7 @@ mod tests {
             spec_drift: None,
             certificate: None,
             health_checks: Vec::new(),
+            owner: None,
             dependency_hold: Some(StatusDependencyHold {
                 release_id: "tenkai:release:app@1.0.0".into(),
                 contracts: vec![UnmetContract {

@@ -14,9 +14,9 @@ use super::auth::{import_development_fixture, reset_development_fixture};
 use super::config::ServerConfig;
 use super::environment_config::{
     configure_approval_policy, configure_bindings, configure_constraints, configure_criticality,
-    configure_facts, configure_labels, configure_maintenance_window, configure_runner_attestation,
-    configure_sealed_secrets, configure_webhooks, list_environment_labels, list_sealed_secrets,
-    register_environment,
+    configure_facts, configure_labels, configure_maintenance_window, configure_owner,
+    configure_runner_attestation, configure_sealed_secrets, configure_webhooks,
+    list_environment_labels, list_sealed_secrets, register_environment,
 };
 use super::exports::{create_export, download_export, inspect_export, list_exports};
 use super::grant_rules::{create_grant_rule, list_grant_rules, remove_grant_rule};
@@ -27,24 +27,26 @@ use super::imports::{
 use super::inspect::{
     auth_session, backup_status, change_events, environment_approval_policy,
     environment_dependencies, environment_history, environment_status, fleet_status, health,
-    inspect_advisory_feed, inspect_environment, inspect_product_criticality, instance_explain,
-    list_channels, list_environments, list_migrations, list_releases, observed_runtime,
-    oidc_client, openmetrics, plan_approvals, query_exposures, ready, reconcile, take_backup,
+    inspect_advisory_feed, inspect_environment, inspect_product_criticality, inspect_product_owner,
+    instance_explain, list_channels, list_environments, list_migrations, list_product_webhooks,
+    list_releases, observed_runtime, oidc_client, openmetrics, plan_approvals, query_exposures,
+    ready, reconcile, take_backup,
 };
 use super::lifecycle::{
     admit_channel_instance, apply_plan, approve_plan, cancel_apply, cancel_environment_freeze,
     channel_hold, clear_environment_failure_threshold, clear_exposure_waiver,
-    clear_product_criticality, clear_release_label, close_recall_range,
-    configure_channel_exposure_grace, configure_channel_pace, configure_environment_exposure_grace,
-    environment_hold, import_derived_criticality, install_model_evaluation_trust,
-    list_release_labels, plan_environment, plan_identity_issuer, prepare_identity_issuer,
-    promote_release, publish_release, recall_release, record_model_evaluation_evidence,
-    record_recall_range, record_software_compatibility_evidence, release_channel_hold,
-    release_environment_hold, remove_channel_head, retire_environment, retry_failed_target,
-    rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment,
+    clear_product_criticality, clear_product_owner, clear_product_webhooks, clear_release_label,
+    close_recall_range, configure_channel_exposure_grace, configure_channel_pace,
+    configure_environment_exposure_grace, environment_hold, import_derived_criticality,
+    install_model_evaluation_trust, list_release_labels, plan_environment, plan_identity_issuer,
+    prepare_identity_issuer, promote_release, publish_release, recall_release,
+    record_model_evaluation_evidence, record_recall_range, record_software_compatibility_evidence,
+    release_channel_hold, release_environment_hold, remove_channel_head, retire_environment,
+    retry_failed_target, rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment,
     schedule_environment_freeze, set_channel_hold, set_environment_failure_threshold,
-    set_environment_hold, set_exposure_waiver, set_product_criticality, set_release_label,
-    software_compatibility_report, subscribe_environment, unsubscribe_environment,
+    set_environment_hold, set_exposure_waiver, set_product_criticality, set_product_owner,
+    set_product_webhook, set_release_label, software_compatibility_report, subscribe_environment,
+    unsubscribe_environment,
 };
 use super::package_migration::{
     apply_package_migration, package_migration_status, preview_package_migration,
@@ -301,6 +303,18 @@ pub fn router(
                 .delete(clear_product_criticality),
         )
         .route(
+            "/v1/products/{product}/owner",
+            get(inspect_product_owner)
+                .put(set_product_owner)
+                .delete(clear_product_owner),
+        )
+        .route(
+            "/v1/products/{product}/webhooks",
+            get(list_product_webhooks)
+                .put(set_product_webhook)
+                .delete(clear_product_webhooks),
+        )
+        .route(
             "/v1/environments/{environment}/constraints",
             put(configure_constraints).delete(configure_constraints),
         )
@@ -311,6 +325,10 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/webhooks",
             put(configure_webhooks).delete(configure_webhooks),
+        )
+        .route(
+            "/v1/environments/{environment}/owner",
+            put(configure_owner).delete(configure_owner),
         )
         .route(
             "/v1/environments/{environment}/runtime",

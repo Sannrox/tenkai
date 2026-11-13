@@ -2,7 +2,7 @@
 //!
 //! `POST /v1/environments` registers an environment. Generation-fenced
 //! `PUT`/`DELETE` routes under `/v1/environments/{environment}/` change its
-//! facts, labels, constraints, maintenance windows, webhooks, approval policy,
+//! facts, labels, constraints, maintenance windows, webhooks, owner, approval policy,
 //! runner attestation policy (#675), declared criticality (#694),
 //! dependency bindings (ADR 0044), and sealed secret values (ADR 0045). Every
 //! change runs the same embedded function, and so the same validation, as the
@@ -104,6 +104,11 @@ pub enum EnvironmentConfigChange {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         url: Option<String>,
     },
+    /// Environment owner contact for display, audit, and notification routing (#1066).
+    SetOwner {
+        contact: String,
+    },
+    ClearOwner,
     /// `path` names a policy file on the server host. Never key material.
     SetApprovalPolicy {
         path: String,
@@ -170,6 +175,7 @@ pub enum ConfigResource {
     Constraints,
     MaintenanceWindow,
     Webhooks,
+    Owner,
     ApprovalPolicy,
     RunnerAttestation,
     Criticality,
@@ -185,6 +191,7 @@ impl ConfigResource {
             Self::Constraints => "constraints",
             Self::MaintenanceWindow => "maintenance-windows",
             Self::Webhooks => "webhooks",
+            Self::Owner => "owner",
             Self::ApprovalPolicy => "approval-policy",
             Self::RunnerAttestation => "runner-attestation",
             Self::Criticality => "criticality",
@@ -206,6 +213,7 @@ impl EnvironmentConfigChange {
                 ConfigResource::MaintenanceWindow
             }
             Self::SetWebhook { .. } | Self::ClearWebhooks { .. } => ConfigResource::Webhooks,
+            Self::SetOwner { .. } | Self::ClearOwner => ConfigResource::Owner,
             Self::SetApprovalPolicy { .. } | Self::ClearApprovalPolicy => {
                 ConfigResource::ApprovalPolicy
             }
@@ -229,6 +237,7 @@ impl EnvironmentConfigChange {
                 | Self::ClearConstraint { .. }
                 | Self::RemoveMaintenanceWindow { .. }
                 | Self::ClearWebhooks { .. }
+                | Self::ClearOwner
                 | Self::ClearApprovalPolicy
                 | Self::ClearRunnerAttestation
                 | Self::ClearCriticality
@@ -269,6 +278,8 @@ impl EnvironmentConfigChange {
             Self::RemoveMaintenanceWindow { .. } => "remove_maintenance_window",
             Self::SetWebhook { .. } => "set_webhook",
             Self::ClearWebhooks { .. } => "clear_webhooks",
+            Self::SetOwner { .. } => "set_owner",
+            Self::ClearOwner => "clear_owner",
             Self::SetApprovalPolicy { .. } => "set_approval_policy",
             Self::ClearApprovalPolicy => "clear_approval_policy",
             Self::SetRunnerAttestation { .. } => "set_runner_attestation",
@@ -370,9 +381,11 @@ pub fn validate(change: &EnvironmentConfigChange) -> Result<()> {
         }
         .validate(),
         Change::ClearWebhooks { .. }
+        | Change::ClearOwner
         | Change::ClearApprovalPolicy
         | Change::ClearRunnerAttestation
         | Change::ClearCriticality => Ok(()),
+        Change::SetOwner { contact } => crate::owner::validate_contact(contact),
         Change::Bind {
             dependent,
             contract,
@@ -632,6 +645,10 @@ async fn mutate(
             crate::deploy_webhook::clear_environment_webhooks(ctx, environment, url.as_deref())
                 .await?
         }
+        Change::SetOwner { contact } => {
+            crate::owner::set_environment_owner(ctx, environment, contact).await?
+        }
+        Change::ClearOwner => crate::owner::clear_environment_owner(ctx, environment).await?,
         Change::SetApprovalPolicy { path } => {
             // Loader and parser errors can quote the file; a remote caller
             // names any server path, so only a fixed message leaves here.
@@ -846,6 +863,13 @@ mod tests {
         let clear_label =
             change(serde_json::json!({"kind": "clear_label", "key": "tier"})).unwrap();
         require_route(&clear_label, ConfigResource::Labels, true, None).unwrap();
+
+        let set_owner =
+            change(serde_json::json!({"kind": "set_owner", "contact": "oncall@example"})).unwrap();
+        assert_eq!(set_owner.path("prod"), "/v1/environments/prod/owner");
+        require_route(&set_owner, ConfigResource::Owner, false, None).unwrap();
+        let clear_owner = change(serde_json::json!({"kind": "clear_owner"})).unwrap();
+        require_route(&clear_owner, ConfigResource::Owner, true, None).unwrap();
 
         let window = change(serde_json::json!({
             "kind": "remove_maintenance_window", "name": "nightly"

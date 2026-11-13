@@ -204,6 +204,11 @@ pub(crate) enum EnvCommand {
         #[command(subcommand)]
         command: WebhooksCommand,
     },
+    /// Name the environment owner contact for display, audit, and notifications.
+    Owner {
+        #[command(subcommand)]
+        command: OwnerCommand,
+    },
     /// Pause delivery to an environment. The reconciler still plans.
     Hold {
         env: String,
@@ -297,6 +302,25 @@ pub(crate) enum HoldAction {
     },
     /// Remove the failure threshold. An active hold is unchanged.
     ThresholdClear,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum OwnerCommand {
+    /// Show the owner contact and notification URLs.
+    Show { env: String },
+    /// Set the owner contact string.
+    Set {
+        env: String,
+        contact: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
+    /// Clear the owner contact. Webhooks stay.
+    Clear {
+        env: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
 }
 
 #[derive(Subcommand)]

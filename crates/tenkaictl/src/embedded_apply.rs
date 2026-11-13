@@ -156,6 +156,13 @@ pub(crate) async fn run(
                 print_machine_result(&crate::output::status_result(&env, rows.len()))?;
                 return Ok(());
             }
+            if let Some(owner) = tenkai::owner::environment_owner(ctx, &env).await? {
+                if owner.endpoints.is_empty() {
+                    println!("{env} owner {} (no notification endpoint)", owner.contact);
+                } else {
+                    println!("{env} owner {}", owner.contact);
+                }
+            }
             if let Some(hold) = tenkai::delivery_hold::get(
                 ctx,
                 &tenkai::delivery_hold::HoldScope::environment(&env),
@@ -186,6 +193,9 @@ pub(crate) async fn run(
                     "{:<24} {:<10} {:<12} {:<12} {state}",
                     r.product, r.channel, deployed, r.head
                 );
+                if let Some(owner) = &r.owner {
+                    println!("  owner {owner}");
+                }
                 if let Some(hold) = &r.dependency_hold {
                     let waiting = hold
                         .contracts

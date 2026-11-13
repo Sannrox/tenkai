@@ -543,7 +543,7 @@ pub fn preserve_product_properties(
         return properties;
     };
     for (key, value) in existing {
-        if key.starts_with("criticality.") {
+        if key.starts_with("criticality.") || key == "owner" || key == "webhooks" {
             properties
                 .entry(key.clone())
                 .or_insert_with(|| value.clone());

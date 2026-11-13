@@ -978,10 +978,44 @@ async fn try_set_automatic_hold(
         held_at: crate::now_millis(),
     };
     match ctx.create_once(hold_object(scope, &hold, None)).await {
-        Ok(_) => append_audit(ctx, scope, "set", &hold).await,
+        Ok(_) => {
+            append_audit(ctx, scope, "set", &hold).await?;
+            announce_automatic_hold(ctx, scope, &hold).await;
+            Ok(())
+        }
         Err(status) if crate::client::is_unique_conflict(&status) => Ok(()),
         Err(status) => Err(status.into()),
     }
+}
+
+async fn announce_automatic_hold(ctx: &mut Ctx, scope: &HoldScope, hold: &DeliveryHold) {
+    let Some(store) = ctx.embedded_arc() else {
+        return;
+    };
+    // Automatic holds are environment-scoped; channel holds are operator-set.
+    let HoldScope::Environment(env) = scope else {
+        return;
+    };
+    let endpoints = crate::owner::environment_notification_endpoints(ctx, env)
+        .await
+        .unwrap_or_default();
+    if endpoints.is_empty() && crate::smtp_digest::installed().is_empty() {
+        return;
+    }
+    let scope_key = scope.key();
+    let key = hold.held_at.to_string();
+    crate::operational_events::announce(
+        store.as_ref(),
+        &endpoints,
+        &crate::operational_events::Transition {
+            event: crate::deploy_webhook::OperationalEvent::AutomaticHold,
+            scope: env,
+            resource: &scope_key,
+            code: "automatic",
+            key: &key,
+        },
+        crate::now_millis(),
+    );
 }
 
 async fn try_clear_automatic_hold(ctx: &mut Ctx, scope: &HoldScope) -> Result<()> {
