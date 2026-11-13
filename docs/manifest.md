@@ -140,11 +140,17 @@ a manifest that declares the table.
 
 Optional `[config]` is signed with the release. It names the overlay keys an
 environment may set and the secret names the release reads. Values of secrets
-are never stored here.
+are never stored here. `[config.rotate_after]` is optional per declared
+secret (`90d`, `12h`, `30m`, `45s`): `secret list` and `status` show age from
+the last `secret set` and a `warning` check when overdue. Tenkai never
+changes a value on a timer.
 
 ```toml
 [config]
 secrets = ["db-password"]
+
+[config.rotate_after]
+db-password = "90d"  # d, h, m, or s; visibility only, never a timer
 
 [config.overlay.replicas]
 type = "integer"     # string, integer, boolean, or enum

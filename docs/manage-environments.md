@@ -58,8 +58,8 @@ A release may declare `[config]` overlay keys (type, required, default) and
 secret names. `env overlay set` refuses a key or type the subscribed channel
 head does not declare. Planning refuses a candidate whose schema the
 environment overlays do not satisfy. `env inspect` shows defaults, overlays,
-the digest, and secret names only. A release that omits `[config]` behaves as
-today.
+the digest, secret names, and any `[config.rotate_after]` durations. A release
+that omits `[config]` behaves as today.
 
 ### Sealed secrets
 
@@ -82,7 +82,12 @@ tenkaictl --target remote secret delete prod api db/password --generation 8 --re
   fingerprint.
 - The secret name must be one the instance's subscribed release declares.
 - `secret list` shows instance, `secret/key`, the sealed digest, who set it,
-  when, and how many recipients can open it. No command returns a value.
+  when, age from that set time, and how many recipients can open it. When the
+  subscribed release declares `[config.rotate_after]` for the secret, the line
+  also names that duration and whether the value is overdue. No command
+  returns a value. An overdue secret adds a `warning` health check on the
+  instance (`status`); setting a new value clears it. Tenkai never changes a
+  value on a timer.
 - Deleting a key of a secret the release declares is refused, naming the
   release, unless `--present-in-target` states the key exists in the target
   by other means.

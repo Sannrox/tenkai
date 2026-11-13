@@ -3515,6 +3515,13 @@
         "product": {
           "type": "string"
         },
+        "rotate_after": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Declared `rotate_after` durations per secret name (#1078).",
+          "type": "object"
+        },
         "secrets": {
           "description": "Declared secret key names. Values are never stored or returned.",
           "items": {
@@ -7177,6 +7184,11 @@
     "SealedSecretEntry": {
       "description": "One sealed key as `secret list` shows it. Never a value.",
       "properties": {
+        "age_ms": {
+          "description": "Age from [`set_at`], never from the value (#1078).",
+          "format": "int64",
+          "type": "integer"
+        },
         "digest": {
           "description": "`sha256:` digest of the sealed ciphertext.",
           "type": "string"
@@ -7187,12 +7199,20 @@
         "key": {
           "type": "string"
         },
+        "overdue": {
+          "description": "True when `age_ms` is past `rotate_after`. False, and omitted, when\nthe secret has no rotation age.",
+          "type": "boolean"
+        },
         "recipients": {
           "description": "Recipient fingerprints that can open the value.",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "rotate_after": {
+          "description": "Declared `rotate_after` duration (`90d`) when the subscribed release\nnames one.",
+          "type": "string"
         },
         "sealed": {
           "$ref": "#/$defs/SealedValue",
