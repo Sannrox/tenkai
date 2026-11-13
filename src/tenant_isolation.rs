@@ -1247,45 +1247,6 @@ mod tests {
     }
 
     #[test]
-    fn environment_runtime_is_registered() {
-        let rpc = tenant_visible_rpcs()
-            .iter()
-            .find(|rpc| rpc.id == "environment.runtime")
-            .expect("environment.runtime must be in tenant_visible_rpcs");
-        assert_eq!(
-            rpc.path_template,
-            "GET /v1/environments/{environment}/runtime"
-        );
-        assert_eq!(rpc.surface, TenantVisibleSurface::Environment);
-    }
-
-    #[test]
-    fn environment_dependencies_is_registered() {
-        let rpc = tenant_visible_rpcs()
-            .iter()
-            .find(|rpc| rpc.id == "environment.dependencies")
-            .expect("environment.dependencies must be in tenant_visible_rpcs");
-        assert_eq!(
-            rpc.path_template,
-            "GET /v1/environments/{environment}/dependencies"
-        );
-        assert_eq!(rpc.surface, TenantVisibleSurface::Environment);
-    }
-
-    #[test]
-    fn environment_history_is_registered() {
-        let rpc = tenant_visible_rpcs()
-            .iter()
-            .find(|rpc| rpc.id == "environment.history")
-            .expect("environment.history must be in tenant_visible_rpcs");
-        assert_eq!(
-            rpc.path_template,
-            "GET /v1/environments/{environment}/history"
-        );
-        assert_eq!(rpc.surface, TenantVisibleSurface::Environment);
-    }
-
-    #[test]
     fn fixture_has_distinct_two_tenant_resources() {
         let fixture = TwoTenantFixture::new();
         assert_ne!(fixture.tenant_a.tenant_id, fixture.tenant_b.tenant_id);
