@@ -18,6 +18,12 @@ It must be unexpired and bound to the exact executable plan, environment,
 purpose, gate-bypass choice, policy evidence, and current approver trust roots.
 Create a new approval after any plan change.
 
+Read the plan's approval brief before signing or submitting: proposer, blast
+radius, risky changes, attached evidence, and what policy would have done
+without a human. Embedded: `plan show <plan-id>`. Remote: `env inspect <env>`
+(`latest_plan.approval_brief`). The brief is covered by the plan digest
+([plan approval](../../../../docs/plan-approval.md#approval-brief)).
+
 If continuous reconciliation reports `awaiting_approval`, preserve the plan and
 obtain approval for that exact identifier. Two delivery paths exist:
 
