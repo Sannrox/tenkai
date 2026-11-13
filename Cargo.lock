@@ -835,7 +835,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 [[package]]
 name = "fencing-lease"
 version = "0.1.0"
-source = "git+https://github.com/Sannrox/agent-kit?rev=7adf5da3254b6a78f93c49837ab9f7cd6103b2d0#7adf5da3254b6a78f93c49837ab9f7cd6103b2d0"
+source = "git+https://github.com/Sannrox/fencing-lease?tag=v0.1.0#907c5743bd13c4be6c683a4155b479491823fbff"
 dependencies = [
  "libc",
  "serde",
