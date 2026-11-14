@@ -5930,6 +5930,120 @@
       ],
       "type": "object"
     },
+    "PaceAdmitAudit": {
+      "description": "One immutable early-admission event.",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "actor": {
+          "type": "string"
+        },
+        "at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "reason",
+        "actor",
+        "at"
+      ],
+      "type": "object"
+    },
+    "PaceInstanceProgress": {
+      "description": "Where one subscribed instance stands in the pace.",
+      "properties": {
+        "early_admission": {
+          "$ref": "#/$defs/PaceAdmitAudit",
+          "description": "The audited early admission of this instance on this head."
+        },
+        "eligible_at_ms": {
+          "description": "Server time the instance may start, while `waiting` or `paused`:\nits remaining counted time projected through the maintenance\nwindows. Omitted when the windows cannot be projected.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "next_opens_at_ms": {
+          "description": "When the closed maintenance window next opens, while `paused` and known.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/PaceInstanceState"
+        }
+      },
+      "required": [
+        "environment",
+        "instance",
+        "state"
+      ],
+      "type": "object"
+    },
+    "PaceInstanceState": {
+      "oneOf": [
+        {
+          "const": "started",
+          "description": "Already runs the head.",
+          "type": "string"
+        },
+        {
+          "const": "admitted",
+          "description": "May upgrade now: its slot came or it was admitted early, and its\nmaintenance windows are open.",
+          "type": "string"
+        },
+        {
+          "const": "waiting",
+          "description": "Waits for its slot; `eligible_at_ms` says when.",
+          "type": "string"
+        },
+        {
+          "const": "paused",
+          "description": "Waits while its maintenance window is closed; pace time is not counted.\nAn admitted instance whose window is closed reads as paused too.",
+          "type": "string"
+        }
+      ]
+    },
+    "PaceProgress": {
+      "description": "Upgrade pacing on a channel's current head (#1276). Only upgrades wait;\nrollbacks, recall removals, installs, and restarts are never paced.",
+      "properties": {
+        "duration_ms": {
+          "description": "Counted maintenance-window time over which all instances start.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "instances": {
+          "items": {
+            "$ref": "#/$defs/PaceInstanceProgress"
+          },
+          "type": "array"
+        },
+        "promoted_at_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "release": {
+          "description": "Release id of the channel head being paced.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "release",
+        "duration_ms",
+        "promoted_at_ms",
+        "instances"
+      ],
+      "type": "object"
+    },
     "PackageMigrationApplyRequest": {
       "additionalProperties": false,
       "properties": {
@@ -9767,6 +9881,15 @@
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/products/{product}/channels/{channel}/pace",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/PaceProgress"
       }
     },
     {

@@ -885,6 +885,13 @@ pub fn http_contract() -> Value {
         },
         Route {
             method: "GET",
+            path: "/v1/products/{product}/channels/{channel}/pace",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<tenkai::upgrade_pace::PaceProgress>(&mut g),
+        },
+        Route {
+            method: "GET",
             path: "/v1/products/{product}/channels/{channel}/policy",
             auth: Auth::Read,
             request: None,
@@ -1179,6 +1186,9 @@ mod tests {
             ("RecallView", "policy_version"),
             ("RecallView", "range"),
             ("RecallRangeView", "before"),
+            ("PaceInstanceProgress", "eligible_at_ms"),
+            ("PaceInstanceProgress", "next_opens_at_ms"),
+            ("PaceInstanceProgress", "early_admission"),
             ("ReleasePage", "next_cursor"),
             ("ChannelPage", "next_cursor"),
             ("MigrationPage", "next_cursor"),

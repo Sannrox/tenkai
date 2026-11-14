@@ -608,6 +608,18 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn channel_pace_progress(
+        &self,
+        product: &str,
+        channel: &str,
+    ) -> anyhow::Result<tenkai::upgrade_pace::PaceProgress> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/products/{product}/channels/{channel}/pace"),
+        )
+        .await
+    }
+
     pub async fn channel_promotion_policy(
         &self,
         product: &str,

@@ -728,6 +728,23 @@ pub(super) async fn channel_promotion_policy(
     )
 }
 
+pub(super) async fn channel_pace_progress(
+    State(state): State<Arc<AppState>>,
+    Path((product, channel)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .channel_pace_progress(&credential, &product, &channel)
+            .await,
+    )
+}
+
 pub(super) async fn pause_channel_policy(
     State(state): State<Arc<AppState>>,
     Path((product, channel)): Path<(String, String)>,
