@@ -47,6 +47,15 @@ pub trait OperationalStore: Send + Sync {
         environment_id: &str,
         limit: usize,
     ) -> Result<Vec<ProviderEventRecord>>;
+    /// Undelivered provider events with the most failed attempts first,
+    /// bounded. Unlike [`Self::list_provider_events`], newer traffic cannot
+    /// push a long-failing delivery out of this view.
+    fn list_failing_provider_events(
+        &self,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderEventRecord>>;
     fn claim_provider_events(
         &self,
         now: i64,

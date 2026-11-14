@@ -329,6 +329,7 @@ mod tests {
             webhooks: Vec::new(),
             owner: None,
             approval_policy: None,
+            exposure_grace_ms: None,
             terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
             observed_type_digest: None,

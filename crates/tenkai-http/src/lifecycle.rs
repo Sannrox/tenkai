@@ -1067,7 +1067,7 @@ pub(super) async fn set_product_webhook(
 pub(super) async fn clear_product_webhooks(
     State(state): State<Arc<AppState>>,
     Path(product): Path<String>,
-    Query(query): Query<ClearProductWebhooksQuery>,
+    Query(query): Query<tenkai::owner::ClearProductWebhooksQuery>,
     headers: HeaderMap,
 ) -> Response {
     let credential = match require_management(&headers) {
@@ -1080,13 +1080,6 @@ pub(super) async fn clear_product_webhooks(
             .clear_product_webhooks(&credential, &product, query.url.as_deref())
             .await,
     )
-}
-
-#[derive(Debug, Default, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ClearProductWebhooksQuery {
-    #[serde(default)]
-    url: Option<String>,
 }
 
 pub(super) async fn set_product_criticality(

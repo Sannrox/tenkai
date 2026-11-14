@@ -68,12 +68,13 @@ use deployed::{
 };
 pub use deployed::{DeployedExposure, open_environment_exposures, reassess_deployed};
 pub use waiver::{
-    ExposureWaiver, GRACE_MS_PROPERTY, KIND_EXPOSURE_WAIVER, KIND_EXPOSURE_WAIVER_AUDIT,
-    WaiverCategory, WaiverScopeKind, annotate_matches, clear as clear_waiver,
+    EnvironmentGrace, ExposureWaiver, ExposureWaiverList, ExposureWaiverListQuery,
+    GRACE_MS_PROPERTY, KIND_EXPOSURE_WAIVER, KIND_EXPOSURE_WAIVER_AUDIT, WaiverCategory,
+    WaiverScopeKind, annotate_matches, clear as clear_waiver,
     configure_channel as configure_channel_grace,
     configure_environment as configure_environment_grace,
-    copy_channel_properties as copy_channel_grace, in_grace, matching as matching_waiver,
-    parse_expiry, parse_grace, set as set_waiver,
+    copy_channel_properties as copy_channel_grace, grace_property, in_grace, list as list_waivers,
+    matching as matching_waiver, parse_expiry, parse_grace, set as set_waiver,
 };
 
 const FEED_ID: &str = "tenkai:advisory-feed";
@@ -191,6 +192,10 @@ pub struct MatchedExposure {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub waiver: Option<ExposureWaiver>,
+    /// Grace per environment that runs or subscribes to this release, for
+    /// findings with a first-seen stamp. Omitted when no grace applies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grace: Vec<EnvironmentGrace>,
 }
 
 /// Imported feed age and the releases it currently flags.
@@ -650,6 +655,13 @@ pub async fn inspect(ctx: &mut Ctx) -> Result<AdvisoryFeedStatus> {
         matches: {
             let mut matches = match_advisories(ctx).await?;
             waiver::annotate_matches(ctx, &mut matches, now).await?;
+            let grace = deployed::grace_by_match(ctx, now).await?;
+            for matched in &mut matches {
+                matched.grace = grace
+                    .get(&(matched.release_id.clone(), matched.advisory_id.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+            }
             matches
         },
     })
@@ -704,6 +716,7 @@ pub async fn match_advisories(ctx: &mut Ctx) -> Result<Vec<MatchedExposure>> {
                         release: spec.clone(),
                         release_id: release.id.clone(),
                         waiver: None,
+                        grace: Vec::new(),
                     });
                 }
             }
@@ -2131,6 +2144,47 @@ install = "true"
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A waiver is listed without any current match; an expired one only on request.
+    #[tokio::test]
+    async fn waiver_list_includes_unmatched_and_expired_on_request() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-waiver-list-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let now_ms = 1_700_000_000_000;
+        let waiver = |advisory_id: &str, expires_at: i64| ExposureWaiver {
+            advisory_id: advisory_id.into(),
+            scope: WaiverScopeKind::Product,
+            release_id: None,
+            product: Some("api".into()),
+            component: None,
+            category: WaiverCategory::Mitigated,
+            reason: "patched in front".into(),
+            actor: "operator".into(),
+            expires_at,
+        };
+        let active = set_waiver(&mut ctx, waiver("TENKAI-2026-9", now_ms + 60_000), now_ms)
+            .await
+            .unwrap();
+        let expiring = set_waiver(&mut ctx, waiver("TENKAI-2026-1", now_ms + 1), now_ms)
+            .await
+            .unwrap();
+        let later = now_ms + 10;
+        assert_eq!(
+            list_waivers(&mut ctx, later, false).await.unwrap(),
+            vec![active.clone()]
+        );
+        assert_eq!(
+            list_waivers(&mut ctx, later, true).await.unwrap(),
+            vec![expiring, active]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// An expired waiver does not admit, even when it is the only match.
     #[tokio::test]
     async fn expired_waiver_refuses_the_plan() {
@@ -2729,6 +2783,40 @@ install = "true"
         let by_env = open_environment_exposures(&mut ctx).await.unwrap();
         assert_eq!(by_env.get("hub").map(Vec::len), Some(1));
         assert_eq!(by_env.get("spoke").map(Vec::len), Some(1));
+        assert_eq!(by_env["hub"][0].grace_ends_at, None);
+
+        // The environment's own grace applies to hub; spoke inherits the
+        // grace of the channel it subscribes to.
+        let hour = 3_600_000;
+        configure_environment_grace(&mut ctx, "hub", Some(hour), |_| Ok(()))
+            .await
+            .unwrap();
+        configure_channel_grace(&mut ctx, "api", "stable", Some(2 * hour))
+            .await
+            .unwrap();
+        let by_env = open_environment_exposures(&mut ctx).await.unwrap();
+        assert_eq!(by_env["hub"][0].grace_ends_at, Some(first_seen + hour));
+        assert!(by_env["hub"][0].in_grace);
+        assert_eq!(
+            by_env["spoke"][0].grace_ends_at,
+            Some(first_seen + 2 * hour)
+        );
+        let feed = inspect(&mut ctx).await.unwrap();
+        assert_eq!(
+            feed.matches[0].grace,
+            vec![
+                EnvironmentGrace {
+                    environment: "hub".into(),
+                    grace_ends_at: first_seen + hour,
+                    in_grace: true,
+                },
+                EnvironmentGrace {
+                    environment: "spoke".into(),
+                    grace_ends_at: first_seen + 2 * hour,
+                    in_grace: true,
+                },
+            ]
+        );
         assert!(
             !crate::catalog::release_is_recalled(&mut ctx, &release_id("api", "1.0.0"))
                 .await

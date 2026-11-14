@@ -29,8 +29,9 @@ use super::inspect::{
     environment_dependencies, environment_history, environment_status, fleet_status, health,
     inspect_advisory_feed, inspect_environment, inspect_plan, inspect_product_criticality,
     inspect_product_owner, inspect_recall, instance_explain, list_channels, list_environments,
-    list_migrations, list_product_webhooks, list_recall_ranges, list_releases, observed_runtime,
-    oidc_client, openmetrics, plan_approvals, query_exposures, ready, reconcile, take_backup,
+    list_exposure_waivers, list_migrations, list_product_webhooks, list_recall_ranges,
+    list_releases, observed_runtime, oidc_client, openmetrics, plan_approvals, query_exposures,
+    ready, reconcile, take_backup,
 };
 use super::lifecycle::{
     admit_channel_instance, apply_plan, approve_plan, cancel_apply, cancel_environment_freeze,
@@ -219,7 +220,10 @@ pub fn router(
                 )),
         )
         .route("/v1/exposures", get(query_exposures))
-        .route("/v1/exposures/waivers", post(set_exposure_waiver))
+        .route(
+            "/v1/exposures/waivers",
+            get(list_exposure_waivers).post(set_exposure_waiver),
+        )
         .route("/v1/exposures/waivers/clear", post(clear_exposure_waiver))
         .route("/v1/advisory-feed", get(inspect_advisory_feed))
         .route("/v1/criticality/derived", post(import_derived_criticality))

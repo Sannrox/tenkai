@@ -795,7 +795,43 @@ impl ManagementOperations {
                     .is_some_and(|(product, _)| context.product_bindings().contains(product))
             });
         }
+        if let Some(granted) = self.granted_environment(credential, &context) {
+            for item in &mut status.matches {
+                item.grace.retain(|grace| grace.environment == granted);
+            }
+        }
         Ok(status)
+    }
+
+    /// Stored advisory waivers. A product-bound credential sees catalog-wide
+    /// (global and component) waivers plus those on its own products.
+    pub async fn list_exposure_waivers(
+        &self,
+        credential: &CredentialMaterial,
+        include_expired: bool,
+    ) -> Result<crate::exposure::ExposureWaiverList, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let mut waivers =
+            crate::exposure::list_waivers(&mut ctx, crate::now_millis(), include_expired)
+                .await
+                .map_err(internal)?;
+        let bindings = context.product_bindings();
+        if !bindings.is_empty() {
+            waivers.retain(|waiver| {
+                let product = waiver.product.as_deref().or_else(|| {
+                    waiver
+                        .release_id
+                        .as_deref()
+                        .and_then(|id| id.strip_prefix("tenkai:release:"))
+                        .and_then(|spec| spec.split_once('@'))
+                        .map(|(product, _)| product)
+                });
+                product.is_none_or(|product| bindings.contains(product))
+            });
+        }
+        Ok(crate::exposure::ExposureWaiverList { waivers })
     }
 
     pub async fn list_releases(
@@ -906,6 +942,16 @@ impl ManagementOperations {
         if report.terminal_outcomes.is_empty() {
             report.terminal_outcomes =
                 terminal_outcomes_from_store(self.store.as_ref(), environment).map_err(internal)?;
+        }
+        if let Some(owner) = report.owner.take() {
+            // Recent deliveries give the last success; failing ones are read
+            // separately so newer traffic cannot hide a delivery still failing.
+            let recent = crate::operational_events::deliveries(&*self.store, environment, 100)
+                .map_err(internal)?;
+            let failing =
+                crate::operational_events::failing_deliveries(&*self.store, environment, 128)
+                    .map_err(internal)?;
+            report.owner = Some(owner.with_reachability(&recent, &failing));
         }
         Ok(report)
     }
@@ -4568,6 +4614,7 @@ mod tests {
                     webhooks: Vec::new(),
                     owner: None,
                     approval_policy: None,
+                    exposure_grace_ms: None,
                     terminal_outcomes: Vec::new(),
                     execution_note: "fixture".into(),
                     observed_type_digest: None,
@@ -5147,6 +5194,54 @@ mod tests {
                 .await,
             Err(ManagementError::Forbidden(message)) if message.contains("publication grant")
         ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn waiver_list_hides_other_products_from_a_product_grant() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-waiver-list-grant-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = catalog_ops(&root, grant_auth([DeliveryCapability::Read], [])).await;
+        let mut ctx = ops.application_ctx().unwrap();
+        let now_ms = crate::now_millis();
+        let waiver = |scope, product: Option<&str>, release_id: Option<&str>| {
+            crate::exposure::ExposureWaiver {
+                advisory_id: "TENKAI-2026-1".into(),
+                scope,
+                release_id: release_id.map(Into::into),
+                product: product.map(Into::into),
+                component: None,
+                category: crate::exposure::WaiverCategory::Mitigated,
+                reason: "patched".into(),
+                actor: "operator".into(),
+                expires_at: now_ms + 86_400_000,
+            }
+        };
+        use crate::exposure::WaiverScopeKind::{Global, Product, Release};
+        for waiver in [
+            waiver(Global, None, None),
+            waiver(Product, Some("api"), None),
+            waiver(Product, Some("other"), None),
+            waiver(Release, None, Some("tenkai:release:other@1.0.0")),
+        ] {
+            crate::exposure::set_waiver(&mut ctx, waiver, now_ms)
+                .await
+                .unwrap();
+        }
+        let listed = ops
+            .list_exposure_waivers(&grant_credential(), false)
+            .await
+            .unwrap()
+            .waivers;
+        let visible = listed
+            .iter()
+            .map(|waiver| (waiver.scope, waiver.product.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(visible, [(Global, None), (Product, Some("api"))]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
