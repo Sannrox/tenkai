@@ -386,9 +386,11 @@ server stores each observation as an immutable fact and keeps the newest
 `status` overlays a report onto apply-time health only while the
 artifact digest still matches the deployed release. A report older than
 60s (environment property `health_observation_max_age_ms`, default
-`60000`) reads as `unknown`. Reports of another environment, or two of
-one instance, refuse the report (`400`). An older server answers `404`;
-the runtime logs it and continues with apply-time health.
+`60000`) reads as `unknown`. Each overlaid status row carries
+`health_observed_at_ms`, stale or not, and the non-healthy checks
+(`repairing`, `warning`, `failing`) of a fresh report. Reports of another
+environment, or two of one instance, refuse the report (`400`). An
+older server answers `404`; the runtime logs it and continues with apply-time health.
 
 ## Typed proto contract
 

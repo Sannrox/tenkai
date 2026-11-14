@@ -1568,10 +1568,17 @@ pub struct StatusRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub certificate: Option<crate::certificate_reports::CertificateStatus>,
-    /// Failing and warning checks from the latest health observation (#1057).
-    /// Empty when none were reported or the observation is stale.
+    /// Repairing, warning, and failing checks from the latest health
+    /// observation (#1057, #1273), plus secret rotation warnings. Empty when
+    /// none were reported or the observation is stale.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub health_checks: Vec<crate::instance_health::HealthCheck>,
+    /// Unix milliseconds of the latest health observation for the deployed
+    /// release (#1273), also when it is stale and `health` reads `unknown`.
+    /// Omitted when health is the apply-time value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub health_observed_at_ms: Option<i64>,
     /// Product owner contact when set (#1066).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
@@ -2090,7 +2097,11 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
                 .and_then(|release| release.properties.get("artifact_digest").cloned()),
             None => None,
         };
-        let (health, mut health_checks) = crate::instance_health::overlay(
+        let crate::instance_health::HealthStatus {
+            health,
+            checks: mut health_checks,
+            observed_at_ms: health_observed_at_ms,
+        } = crate::instance_health::overlay(
             apply_health,
             observations.get(&applied_key),
             deployed_digest.as_deref(),
@@ -2150,6 +2161,7 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             spec_drift: spec_drift_from_object(env_obj, &applied_key),
             certificate,
             health_checks,
+            health_observed_at_ms,
             owner,
         });
     }
@@ -4273,6 +4285,7 @@ mod tests {
             spec_drift: None,
             certificate: None,
             health_checks: Vec::new(),
+            health_observed_at_ms: None,
             owner: None,
             dependency_hold: Some(StatusDependencyHold {
                 release_id: "tenkai:release:app@1.0.0".into(),

@@ -1103,6 +1103,7 @@ mod tests {
             ("StatusRow", "dependency_hold"),
             ("StatusRow", "spec_drift"),
             ("StatusRow", "owner"),
+            ("StatusRow", "health_observed_at_ms"),
             ("FleetEnvironmentRow", "owner"),
             ("DeploymentHistoryPage", "owner"),
             ("OwnerView", "endpoints"),
