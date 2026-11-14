@@ -1863,6 +1863,34 @@ impl ManagementOperations {
         ))
     }
 
+    pub async fn inspect_recall(
+        &self,
+        credential: &CredentialMaterial,
+        release: &str,
+    ) -> Result<crate::catalog::RecallView, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_environment_grant(credential, &context, None, "recall")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::catalog::inspect_recall(&mut ctx, release)
+            .await
+            .map_err(map_catalog_error)
+    }
+
+    pub async fn list_recall_ranges(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+    ) -> Result<crate::catalog::RecallRangePage, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_environment_grant(credential, &context, None, "recall")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::catalog::list_recall_ranges(&mut ctx, product)
+            .await
+            .map_err(map_catalog_error)
+    }
+
     pub async fn record_recall_range(
         &self,
         credential: &CredentialMaterial,
@@ -4199,6 +4227,7 @@ fn map_catalog_error(error: anyhow::Error) -> ManagementError {
         || message.contains("not registered")
         || message.contains("does not exist")
         || message.contains("no channel promotion policy")
+        || message.contains("is not recalled")
     {
         ManagementError::NotFound(message)
     } else if message.contains("digest")

@@ -26,7 +26,10 @@ pub use pin_export::{
     PIN_BUNDLE_SCHEMA, PinImportReport, PinTransferFailure, ReleasePin, ReleasePinBundleSection,
     WithheldReleasePin, export_release_pins, import_release_pins,
 };
-pub use recall_range::{RecallRange, close_recall_range, record_recall_range};
+pub use recall_range::{
+    RecallRange, RecallRangePage, RecallRangeView, close_recall_range, list_recall_ranges,
+    record_recall_range,
+};
 pub use trust::{inspect_release, require_deployable_trust, reverify_release};
 pub(crate) use trust::{
     load_deployable_snapshot, load_recoverable_snapshot, release_is_recalled, signature_envelope,
@@ -51,6 +54,47 @@ pub struct ReleasePage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub next_cursor: Option<String>,
+}
+
+/// One environment instance still holding a recalled release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecallRemovalProgress {
+    pub environment: String,
+    pub instance: String,
+    pub deployed: String,
+    pub remaining: bool,
+}
+
+/// Recorded recall of one published release for `GET /v1/releases/{release}/recall`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RecallView {
+    pub release: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub recalled_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub recalled_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub principal_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub policy_version: Option<String>,
+    #[serde(default)]
+    pub failing_instances: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub range: Option<String>,
+    pub covers_future: bool,
+    #[serde(default)]
+    pub removal_progress: Vec<RecallRemovalProgress>,
 }
 
 impl From<crate::page::Page<ReleaseListEntry>> for ReleasePage {
@@ -1356,6 +1400,93 @@ pub async fn recall(
     Ok(format!("recalled {spec}"))
 }
 
+fn optional_claim_property(properties: &HashMap<String, String>, key: &str) -> Option<String> {
+    properties
+        .get(key)
+        .cloned()
+        .filter(|value| !value.is_empty())
+}
+
+/// Read the recorded recall for `spec`, including covering range and remaining
+/// deployments. Unpublished or unrecalled releases fail closed.
+pub async fn inspect_recall(ctx: &mut Ctx, spec: &str) -> Result<RecallView> {
+    let release = release_for_spec(ctx, spec).await?;
+    let claim = ctx
+        .get(&release_recall_id(&release.id))
+        .await?
+        .filter(|object| object.kind == KIND_RELEASE_RECALL);
+    let range = recall_range::covering_recall_range(ctx, &release.id).await?;
+    if claim.is_none() && range.is_none() {
+        bail!("release {spec} is not recalled");
+    }
+    let properties = claim.as_ref().map(|object| &object.properties);
+    let failing_instances = properties
+        .and_then(|properties| properties.get("failing_instances"))
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(RecallView {
+        release: spec.to_string(),
+        recalled_at: properties
+            .and_then(|properties| properties.get("recalled_at"))
+            .and_then(|value| value.parse().ok()),
+        recalled_by: properties
+            .and_then(|properties| optional_claim_property(properties, "recalled_by")),
+        principal_kind: properties
+            .and_then(|properties| optional_claim_property(properties, "principal_kind")),
+        reason: properties.and_then(|properties| optional_claim_property(properties, "reason")),
+        policy_id: properties
+            .and_then(|properties| optional_claim_property(properties, "policy_id")),
+        policy_version: properties
+            .and_then(|properties| optional_claim_property(properties, "policy_version")),
+        failing_instances,
+        range: range.as_ref().map(RecallRange::label),
+        covers_future: range.as_ref().is_some_and(|range| range.before.is_none()),
+        removal_progress: recall_removal_progress(ctx, &release.id).await?,
+    })
+}
+
+async fn recall_removal_progress(
+    ctx: &mut Ctx,
+    release_id: &str,
+) -> Result<Vec<RecallRemovalProgress>> {
+    let spec = release_id
+        .strip_prefix("tenkai:release:")
+        .unwrap_or(release_id);
+    let mut progress = Vec::new();
+    for environment in ctx.list_kind(KIND_ENVIRONMENT).await? {
+        if environment.kind != KIND_ENVIRONMENT {
+            continue;
+        }
+        for (key, value) in &environment.properties {
+            let Some(instance) = key.strip_prefix("deployed_release.") else {
+                continue;
+            };
+            if value != release_id {
+                continue;
+            }
+            progress.push(RecallRemovalProgress {
+                environment: environment.name.clone(),
+                instance: instance.to_string(),
+                deployed: spec.to_string(),
+                remaining: true,
+            });
+        }
+    }
+    progress.sort_by(|left, right| {
+        left.environment
+            .cmp(&right.environment)
+            .then(left.instance.cmp(&right.instance))
+    });
+    Ok(progress)
+}
+
 async fn announce_recall(ctx: &mut Ctx, release: &Object, spec: &str) {
     let Some(store) = ctx.embedded_arc() else {
         return;
@@ -1699,6 +1830,90 @@ install = "true"
             claim.properties.get("recalled_by").map(String::as_str),
             Some(actor.principal_id())
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn inspect_recall_names_claim_range_and_remaining_deployments() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-inspect-recall-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("tenkai.toml"),
+            r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+"#,
+        )
+        .unwrap();
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let options = PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        };
+        publish(&mut ctx, &root.join("tenkai.toml"), &options)
+            .await
+            .unwrap();
+        let missing = inspect_recall(&mut ctx, "api@1.0.0")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("is not recalled"), "{missing}");
+        let actor = crate::auth_context::test_management_context("inspect-recall");
+        persist_recall_claim_with_fence(
+            &mut ctx,
+            &actor,
+            &release_id("api", "1.0.0"),
+            None,
+            &[
+                (
+                    "policy_id".into(),
+                    "tenkai:channel-promotion-policy:api/stable:1".into(),
+                ),
+                ("policy_version".into(), "1".into()),
+                ("reason".into(), "failing share 1.000".into()),
+                ("failing_instances".into(), "lab (boom)".into()),
+            ],
+        )
+        .await
+        .unwrap();
+        record_recall_range(&mut ctx, &actor, "api", "1.0.0", None, "open defect")
+            .await
+            .unwrap();
+        crate::environment::env_add(&mut ctx, "lab", "lab")
+            .await
+            .unwrap();
+        let mut environment = ctx.get(&env_id("lab")).await.unwrap().unwrap();
+        environment
+            .properties
+            .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
+        ctx.put(environment).await.unwrap();
+        let view = inspect_recall(&mut ctx, "api@1.0.0").await.unwrap();
+        assert_eq!(view.recalled_by.as_deref(), Some(actor.principal_id()));
+        assert_eq!(
+            view.policy_id.as_deref(),
+            Some("tenkai:channel-promotion-policy:api/stable:1")
+        );
+        assert_eq!(view.policy_version.as_deref(), Some("1"));
+        assert_eq!(view.reason.as_deref(), Some("failing share 1.000"));
+        assert_eq!(view.failing_instances, vec!["lab (boom)".to_string()]);
+        assert_eq!(view.range.as_deref(), Some("api [1.0.0, ∞)"));
+        assert!(view.covers_future, "{view:?}");
+        assert_eq!(view.removal_progress.len(), 1, "{view:?}");
+        assert_eq!(view.removal_progress[0].environment, "lab");
+        assert!(view.removal_progress[0].remaining);
+        let ranges = list_recall_ranges(&mut ctx, "api").await.unwrap();
+        assert_eq!(ranges.items.len(), 1);
+        assert!(ranges.items[0].covers_future);
         let _ = std::fs::remove_dir_all(root);
     }
 

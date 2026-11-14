@@ -28,9 +28,9 @@ use super::inspect::{
     auth_session, backup_status, change_events, environment_approval_policy,
     environment_dependencies, environment_history, environment_status, fleet_status, health,
     inspect_advisory_feed, inspect_environment, inspect_plan, inspect_product_criticality,
-    inspect_product_owner, instance_explain, list_channels, list_environments, list_migrations,
-    list_product_webhooks, list_releases, observed_runtime, oidc_client, openmetrics,
-    plan_approvals, query_exposures, ready, reconcile, take_backup,
+    inspect_product_owner, inspect_recall, instance_explain, list_channels, list_environments,
+    list_migrations, list_product_webhooks, list_recall_ranges, list_releases, observed_runtime,
+    oidc_client, openmetrics, plan_approvals, query_exposures, ready, reconcile, take_backup,
 };
 use super::lifecycle::{
     admit_channel_instance, apply_plan, approve_plan, cancel_apply, cancel_environment_freeze,
@@ -361,12 +361,19 @@ pub fn router(
             "/v1/model-evaluation/evidence",
             post(record_model_evaluation_evidence),
         )
-        .route("/v1/releases/{release}/recall", post(recall_release))
+        .route(
+            "/v1/releases/{release}/recall",
+            get(inspect_recall).post(recall_release),
+        )
         .route(
             "/v1/releases/{product}/{version}/labels",
             get(list_release_labels)
                 .put(set_release_label)
                 .delete(clear_release_label),
+        )
+        .route(
+            "/v1/products/{product}/recall-ranges",
+            get(list_recall_ranges),
         )
         .route(
             "/v1/products/{product}/recall-range",

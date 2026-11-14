@@ -223,6 +223,35 @@ pub(super) async fn inspect_plan(
     manage_result(state.management.inspect_plan(&credential, &plan_id).await)
 }
 
+pub(super) async fn inspect_recall(
+    State(state): State<Arc<AppState>>,
+    Path(release): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(state.management.inspect_recall(&credential, &release).await)
+}
+
+pub(super) async fn list_recall_ranges(
+    State(state): State<Arc<AppState>>,
+    Path(product): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .list_recall_ranges(&credential, &product)
+            .await,
+    )
+}
+
 pub(super) async fn plan_approvals(
     State(state): State<Arc<AppState>>,
     Path(plan_id): Path<String>,

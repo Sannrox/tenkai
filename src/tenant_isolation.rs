@@ -187,6 +187,16 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Catalog,
         },
         TenantVisibleRpc {
+            id: "catalog.inspect_recall",
+            path_template: "GET /v1/releases/{release}/recall",
+            surface: TenantVisibleSurface::Catalog,
+        },
+        TenantVisibleRpc {
+            id: "catalog.list_recall_ranges",
+            path_template: "GET /v1/products/{product}/recall-ranges",
+            surface: TenantVisibleSurface::Catalog,
+        },
+        TenantVisibleRpc {
             id: "catalog.list_channels",
             path_template: "GET /v1/channels",
             surface: TenantVisibleSurface::Catalog,
