@@ -349,6 +349,24 @@ impl RemoteClient {
         .await
     }
 
+    /// Designated canary environments with who set each, when, and by
+    /// which selector.
+    pub async fn canary_designations(
+        &self,
+    ) -> anyhow::Result<Vec<tenkai::canary::CanaryDesignation>> {
+        self.request_json(reqwest::Method::GET, "/v1/canaries")
+            .await
+    }
+
+    /// Designate or undesignate canary environments by name or selector.
+    pub async fn designate_canaries(
+        &self,
+        request: &tenkai::canary::CanaryDesignationRequest,
+    ) -> anyhow::Result<tenkai::canary::CanaryDesignationResult> {
+        self.request_json_body(reqwest::Method::POST, "/v1/canaries", Some(request))
+            .await
+    }
+
     pub async fn inspect_product_owner(
         &self,
         product: &str,

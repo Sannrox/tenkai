@@ -120,7 +120,7 @@ pub struct HoldSelector {
 }
 
 impl HoldSelector {
-    fn write(&self, properties: &mut HashMap<String, String>) {
+    pub(crate) fn write(&self, properties: &mut HashMap<String, String>) {
         properties.insert("selector".into(), self.selector.clone());
         // Environment names are identifiers, so a comma never occurs in one.
         properties.insert("selector_environments".into(), self.environments.join(","));

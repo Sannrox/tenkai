@@ -1,5 +1,6 @@
 mod approval_policy;
 mod auth_support;
+mod canary_designation;
 mod catalog_list;
 mod change_events;
 mod channel_promotion;
