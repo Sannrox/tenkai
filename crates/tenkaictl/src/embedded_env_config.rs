@@ -61,23 +61,32 @@ pub(crate) async fn labels(ctx: &mut client::Ctx, command: LabelsCommand) -> Res
             if labels.is_empty() {
                 println!("{env} has no labels");
             } else {
-                for (key, value) in labels {
-                    println!("{key}={value}");
+                for (key, label) in labels {
+                    println!("{}", tenkai::labels::render_label(&key, &label));
                 }
             }
         }
-        LabelsCommand::Set { env, spec, .. } => {
+        LabelsCommand::Set { env, spec, remote } => {
             let (key, value) = tenkai::labels::parse_label_pair(&spec)?;
+            let actor = crate::embedded_env::local_actor();
+            let reason = remote.reason.unwrap_or_default();
             println!(
                 "{}",
-                tenkai::labels::set_environment(ctx, &env, &key, &value).await?
+                tenkai::labels::set_environment(ctx, &env, &key, &value, &actor, &reason).await?
             );
         }
-        LabelsCommand::Clear { env, key, .. } => {
+        LabelsCommand::Clear { env, key, remote } => {
+            let actor = crate::embedded_env::local_actor();
+            let reason = remote.reason.unwrap_or_default();
             println!(
                 "{}",
-                tenkai::labels::clear_environment(ctx, &env, &key).await?
+                tenkai::labels::clear_environment(ctx, &env, &key, &actor, &reason).await?
             );
+        }
+        LabelsCommand::History { env } => {
+            for change in tenkai::labels::environment_history(ctx, &env).await? {
+                println!("{}", tenkai::labels::render_change(&change));
+            }
         }
     }
     Ok(())

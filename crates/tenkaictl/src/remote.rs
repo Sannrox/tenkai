@@ -283,9 +283,20 @@ pub(crate) async fn run(
             if labels.is_empty() {
                 println!("{env} has no labels");
             } else {
-                for (key, value) in labels {
-                    println!("{key}={value}");
+                for (key, label) in labels {
+                    println!("{}", tenkai::labels::render_label(&key, &label));
                 }
+            }
+            Ok(())
+        }
+        Command::Env {
+            command:
+                EnvCommand::Labels {
+                    command: crate::env_args::LabelsCommand::History { env },
+                },
+        } => {
+            for change in client.environment_label_history(&env).await? {
+                println!("{}", tenkai::labels::render_change(&change));
             }
             Ok(())
         }

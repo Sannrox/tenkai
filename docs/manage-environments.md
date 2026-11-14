@@ -506,7 +506,20 @@ tenkaictl env labels set prod region=us
 tenkaictl env labels list prod
 tenkaictl env list --selector 'tier=canary,region in (us,eu)'
 tenkaictl release labels set hello@1.0.0 train=weekly
+tenkaictl env labels history prod
+tenkaictl release labels history hello@1.0.0
 ```
+
+Every label records who set it and when. `labels list` shows both next to the
+value, and `GET /v1/environments/{environment}/labels` and
+`GET /v1/releases/{product}/{version}/labels` return `{key: {value, set_by,
+set_at}}`. A label written before this was recorded carries only `value`.
+Each set and clear also appends a change record (`id`, `sequence`,
+`action`, `value`, `actor`, `reason`, `at`). `labels history` and the `.../labels/history` routes list
+them oldest first. Embedded commands record `TENKAI_PRINCIPAL`, or
+`local-operator` when it is unset. The label and its last change are written
+together before the change record. After a crash between the two, history
+still shows that change, and the next change to the label records it.
 
 A selector (`key=value`, `key!=value`, `key in (a,b)`, comma meaning AND) can
 stand in for an environment list on `wave run` / `wave execute --cohort`,

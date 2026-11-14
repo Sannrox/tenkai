@@ -75,7 +75,7 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, Remot
                 Change::ClearLabel { key: key.clone() },
                 remote.clone(),
             )),
-            LabelsCommand::List { .. } => return None,
+            LabelsCommand::List { .. } | LabelsCommand::History { .. } => return None,
         },
         EnvCommand::Constraints { command } => match command {
             ConstraintsCommand::Set {

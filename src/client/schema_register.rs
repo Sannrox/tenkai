@@ -344,6 +344,20 @@ pub fn known_object_types() -> Vec<ObjectType> {
             ],
         ),
         object_type(
+            crate::labels::LABEL_AUDIT_KIND,
+            "An immutable label set or clear on an environment or release",
+            vec![
+                prop("subject_kind", true, "environment or release"),
+                prop("subject", true, "Environment name or product@version"),
+                prop("key", true, "Label key"),
+                prop("value", false, "Value set; absent on clear"),
+                prop("action", true, "set or clear"),
+                prop("actor", true, "Principal that made the change"),
+                prop("reason", true, "Why the change was made"),
+                prop("at", true, "Unix-ms timestamp of the change"),
+            ],
+        ),
+        object_type(
             crate::environment_config::CONFIG_AUDIT_KIND,
             "An immutable environment registration or configuration change",
             vec![

@@ -134,8 +134,7 @@ pub(crate) async fn run(
             }
         }
         EnvCommand::Retire { env, reason } => {
-            let actor =
-                std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "local-operator".into());
+            let actor = local_actor();
             let retirement =
                 tenkai::environment::retire_environment(ctx, &env, &reason, &actor).await?;
             println!(
@@ -309,4 +308,10 @@ pub(crate) fn parse_preview_expiry(value: &str) -> Result<i64> {
     let parsed = chrono::DateTime::parse_from_rfc3339(value)
         .with_context(|| format!("preview expiry {value:?} is not RFC 3339"))?;
     Ok(parsed.timestamp_millis())
+}
+
+/// Principal recorded for embedded changes: `TENKAI_PRINCIPAL`, or
+/// `local-operator`.
+pub(crate) fn local_actor() -> String {
+    std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "local-operator".into())
 }

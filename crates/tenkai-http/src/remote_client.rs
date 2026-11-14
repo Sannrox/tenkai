@@ -108,10 +108,22 @@ impl RemoteClient {
     pub async fn list_environment_labels(
         &self,
         environment: &str,
-    ) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    ) -> anyhow::Result<std::collections::BTreeMap<String, tenkai::labels::LabelView>> {
         self.request_json(
             reqwest::Method::GET,
             &format!("/v1/environments/{environment}/labels"),
+        )
+        .await
+    }
+
+    /// Recorded label changes on `environment`, oldest first.
+    pub async fn environment_label_history(
+        &self,
+        environment: &str,
+    ) -> anyhow::Result<Vec<tenkai::labels::LabelChange>> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/environments/{environment}/labels/history"),
         )
         .await
     }
@@ -120,10 +132,23 @@ impl RemoteClient {
         &self,
         product: &str,
         version: &str,
-    ) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    ) -> anyhow::Result<std::collections::BTreeMap<String, tenkai::labels::LabelView>> {
         self.request_json(
             reqwest::Method::GET,
             &format!("/v1/releases/{product}/{version}/labels"),
+        )
+        .await
+    }
+
+    /// Recorded label changes on the release, oldest first.
+    pub async fn release_label_history(
+        &self,
+        product: &str,
+        version: &str,
+    ) -> anyhow::Result<Vec<tenkai::labels::LabelChange>> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/releases/{product}/{version}/labels/history"),
         )
         .await
     }

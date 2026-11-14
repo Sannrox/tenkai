@@ -50,7 +50,20 @@ async fn remote_release_labels_require_management() {
         .list_release_labels("api", "1.0.0")
         .await
         .unwrap();
-    assert_eq!(listed.get("tier").map(String::as_str), Some("stable"));
+    let tier = listed.get("tier").unwrap();
+    assert_eq!(tier.value, "stable");
+    let actor = tier.set_by.clone().expect("label read names who set it");
+    assert!(tier.set_at.is_some(), "{tier:?}");
+    management
+        .set_release_label("api", "1.0.0", "tier", "edge", "regroup")
+        .await
+        .unwrap();
+    let changed = management
+        .list_release_labels("api", "1.0.0")
+        .await
+        .unwrap();
+    assert_eq!(changed["tier"].value, "edge");
+    assert!(changed["tier"].set_at >= tier.set_at, "{changed:?}");
     let cleared = management
         .clear_release_label("api", "1.0.0", "tier", "grouping")
         .await
@@ -61,5 +74,30 @@ async fn remote_release_labels_require_management() {
         .await
         .unwrap();
     assert!(empty.is_empty(), "{empty:?}");
+
+    let history = management
+        .release_label_history("api", "1.0.0")
+        .await
+        .unwrap();
+    let summary: Vec<_> = history
+        .iter()
+        .map(|change| {
+            (
+                change.action,
+                change.value.as_deref(),
+                change.actor.as_str(),
+                change.reason.as_deref(),
+            )
+        })
+        .collect();
+    use tenkai::labels::LabelAction::{Clear, Set};
+    assert_eq!(
+        summary,
+        [
+            (Set, Some("stable"), actor.as_str(), Some("grouping")),
+            (Set, Some("edge"), actor.as_str(), Some("regroup")),
+            (Clear, None, actor.as_str(), Some("grouping")),
+        ]
+    );
     let _ = std::fs::remove_dir_all(root);
 }

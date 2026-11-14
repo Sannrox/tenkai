@@ -543,7 +543,7 @@ pub async fn apply(
         fence(lease.generation.saturating_sub(1))?;
         let action = change.action();
         append_audit(ctx, environment, action, "requested", actor, reason).await?;
-        let result = mutate(ctx, environment, change, &lease, actor).await;
+        let result = mutate(ctx, environment, change, &lease, actor, reason).await;
         let outcome = if result.is_ok() {
             "completed"
         } else {
@@ -570,6 +570,7 @@ async fn mutate(
     change: &EnvironmentConfigChange,
     lease: &crate::apply::EnvironmentLease,
     actor: &str,
+    reason: &str,
 ) -> Result<String> {
     use EnvironmentConfigChange as Change;
     Ok(match change {
@@ -580,10 +581,10 @@ async fn mutate(
             crate::environment::clear_environment_fact(ctx, environment, key).await?
         }
         Change::SetLabel { key, value } => {
-            crate::labels::set_environment(ctx, environment, key, value).await?
+            crate::labels::set_environment(ctx, environment, key, value, actor, reason).await?
         }
         Change::ClearLabel { key } => {
-            crate::labels::clear_environment(ctx, environment, key).await?
+            crate::labels::clear_environment(ctx, environment, key, actor, reason).await?
         }
         Change::SetConstraint {
             constraint,

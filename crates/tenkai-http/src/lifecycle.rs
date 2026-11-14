@@ -872,6 +872,24 @@ pub(super) async fn list_release_labels(
     )
 }
 
+/// `GET /v1/releases/{product}/{version}/labels/history`.
+pub(super) async fn release_label_history(
+    State(state): State<Arc<AppState>>,
+    Path((product, version)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .release_label_history(&credential, &product, &version)
+            .await,
+    )
+}
+
 pub(super) async fn set_release_label(
     State(state): State<Arc<AppState>>,
     Path((product, version)): Path<(String, String)>,

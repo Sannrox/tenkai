@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 
 use crate::client::Ctx;
 use crate::ontology::{KIND_ENVIRONMENT, KIND_RELEASE, release_id, validate_identifier};
@@ -198,64 +198,425 @@ pub async fn require_matching_environments(
     Ok(names)
 }
 
-pub async fn set_environment(ctx: &mut Ctx, env: &str, key: &str, value: &str) -> Result<String> {
-    validate_label_key(key)?;
-    validate_label_value(key, value)?;
-    let mut object = crate::environment::environment(ctx, env).await?;
+/// Who set the current value of a label, keyed by label.
+const SET_BY_PREFIX: &str = "label_by.";
+/// When the current value of a label was set, in unix ms, keyed by label.
+const SET_AT_PREFIX: &str = "label_at.";
+
+/// Kind of the append-only label change records.
+pub const LABEL_AUDIT_KIND: &str = "tenkai.label_audit";
+
+/// One label on a read: the value, and who set it and when. Labels set
+/// before provenance was recorded read back without `set_by` and `set_at`.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct LabelView {
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub set_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub set_at: Option<i64>,
+}
+
+/// `set` or `clear`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LabelAction {
+    Set,
+    Clear,
+}
+
+/// One recorded label change, as the history read returns it.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct LabelChange {
+    /// Unique id of this change; replays of it record nothing new.
+    pub id: String,
+    /// Order among this subject's label changes, from 1. Two writers that
+    /// race on one subject can share a sequence; both changes are kept.
+    pub sequence: u64,
+    pub key: String,
+    /// The value set. Omitted on `clear`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub value: Option<String>,
+    pub action: LabelAction,
+    pub actor: String,
+    pub at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub reason: Option<String>,
+}
+
+/// What a label is on, and the name it is recorded under.
+#[derive(Debug, Clone, Copy)]
+enum Subject<'a> {
+    Environment(&'a str),
+    Release(&'a str),
+}
+
+impl Subject<'_> {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Environment(_) => "environment",
+            Self::Release(_) => "release",
+        }
+    }
+
+    fn id(&self) -> &str {
+        match self {
+            Self::Environment(name) | Self::Release(name) => name,
+        }
+    }
+}
+
+/// `key=value`, then `set by <actor> at <ms>` when that is recorded.
+pub fn render_label(key: &str, label: &LabelView) -> String {
+    match (&label.set_by, label.set_at) {
+        (Some(actor), Some(at)) => format!("{key}={} set by {actor} at {at}", label.value),
+        _ => format!("{key}={}", label.value),
+    }
+}
+
+/// One history line: time, actor, action, the label, and the reason.
+pub fn render_change(change: &LabelChange) -> String {
+    let label = match (&change.action, &change.value) {
+        (LabelAction::Set, Some(value)) => format!("set {}={value}", change.key),
+        _ => format!("clear {}", change.key),
+    };
+    match &change.reason {
+        Some(reason) => format!("{} {} {label}: {reason}", change.at, change.actor),
+        None => format!("{} {} {label}", change.at, change.actor),
+    }
+}
+
+/// Every label of `object` with the provenance of its current value.
+pub fn label_views_from_object(object: &Object) -> BTreeMap<String, LabelView> {
+    labels_from_object(object)
+        .into_iter()
+        .map(|(key, value)| {
+            let set_by = object
+                .properties
+                .get(&format!("{SET_BY_PREFIX}{key}"))
+                .cloned();
+            let set_at = object
+                .properties
+                .get(&format!("{SET_AT_PREFIX}{key}"))
+                .and_then(|at| at.parse().ok());
+            (
+                key,
+                LabelView {
+                    value,
+                    set_by,
+                    set_at,
+                },
+            )
+        })
+        .collect()
+}
+
+/// The last change to a label, kept on the subject until the next change
+/// to that key, keyed by label. It makes the history append recoverable.
+const LAST_CHANGE_PREFIX: &str = "label_change.";
+/// Sequence of the subject's latest label change.
+const SEQUENCE_PROPERTY: &str = "label_sequence";
+
+/// Set or clear `key` on `object` with its provenance and the change itself,
+/// in one put, then append the change record. A crash between the two
+/// leaves the change on the subject: history reads include it, and the next
+/// change to that key appends it first. Appends are idempotent, so nothing
+/// is recorded twice.
+async fn write_label(
+    ctx: &mut Ctx,
+    mut object: Object,
+    subject: Subject<'_>,
+    key: &str,
+    value: Option<&str>,
+    actor: &str,
+    reason: &str,
+) -> Result<()> {
+    let last_change = format!("{LAST_CHANGE_PREFIX}{key}");
+    if let Some(previous) = stored_change(&object, &last_change)? {
+        append_change(ctx, subject, &previous).await?;
+    }
+    let at = crate::now_millis();
+    let label = format!("{PROPERTY_PREFIX}{key}");
+    let set_by = format!("{SET_BY_PREFIX}{key}");
+    let set_at = format!("{SET_AT_PREFIX}{key}");
+    match value {
+        Some(value) => {
+            object.properties.insert(label, value.to_string());
+            object.properties.insert(set_by, actor.to_string());
+            object.properties.insert(set_at, at.to_string());
+        }
+        None => {
+            if object.properties.remove(&label).is_none() {
+                bail!("{} {} has no label {key}", subject.kind(), subject.id());
+            }
+            object.properties.remove(&set_by);
+            object.properties.remove(&set_at);
+        }
+    }
+    let sequence = match object.properties.get(SEQUENCE_PROPERTY) {
+        Some(sequence) => sequence
+            .parse::<u64>()
+            .with_context(|| format!("{} has an unreadable {SEQUENCE_PROPERTY}", object.id))?,
+        None => 0,
+    } + 1;
     object
         .properties
-        .insert(format!("{PROPERTY_PREFIX}{key}"), value.to_string());
-    object.updated = crate::now_millis();
+        .insert(SEQUENCE_PROPERTY.into(), sequence.to_string());
+    let change = LabelChange {
+        id: uuid::Uuid::new_v4().to_string(),
+        sequence,
+        key: key.to_string(),
+        value: value.map(str::to_string),
+        action: if value.is_some() {
+            LabelAction::Set
+        } else {
+            LabelAction::Clear
+        },
+        actor: actor.to_string(),
+        at,
+        reason: Some(reason.trim().to_string()).filter(|reason| !reason.is_empty()),
+    };
+    object
+        .properties
+        .insert(last_change, serde_json::to_string(&change)?);
+    object.updated = at;
     ctx.put(object).await?;
+    append_change(ctx, subject, &change).await
+}
+
+fn stored_change(object: &Object, property: &str) -> Result<Option<LabelChange>> {
+    object
+        .properties
+        .get(property)
+        .map(|json| {
+            serde_json::from_str(json)
+                .with_context(|| format!("{} has an unreadable {property}", object.id))
+        })
+        .transpose()
+}
+
+fn change_properties(
+    subject: Subject<'_>,
+    change: &LabelChange,
+) -> std::collections::HashMap<String, String> {
+    let mut properties = std::collections::HashMap::from([
+        ("subject_kind".to_string(), subject.kind().to_string()),
+        ("subject".to_string(), subject.id().to_string()),
+        ("key".to_string(), change.key.clone()),
+        (
+            "action".to_string(),
+            match change.action {
+                LabelAction::Set => "set",
+                LabelAction::Clear => "clear",
+            }
+            .to_string(),
+        ),
+        ("actor".to_string(), change.actor.clone()),
+        (
+            "reason".to_string(),
+            change.reason.clone().unwrap_or_default(),
+        ),
+        ("at".to_string(), change.at.to_string()),
+        ("sequence".to_string(), change.sequence.to_string()),
+        ("change_id".to_string(), change.id.clone()),
+    ]);
+    if let Some(value) = &change.value {
+        properties.insert("value".into(), value.clone());
+    }
+    properties
+}
+
+/// Record `change` once, under its id. A record already there is this
+/// change replayed after a crash, so it counts as written.
+async fn append_change(ctx: &mut Ctx, subject: Subject<'_>, change: &LabelChange) -> Result<()> {
+    let kind = subject.kind();
+    let name = subject.id();
+    let object = Object {
+        id: format!("tenkai:label_audit:{kind}:{name}:{}", change.id),
+        kind: LABEL_AUDIT_KIND.into(),
+        name: format!("label {} on {kind} {name}", change.key),
+        namespace: crate::ontology::NS.into(),
+        external_id: String::new(),
+        properties: change_properties(subject, change),
+        created: change.at,
+        updated: change.at,
+    };
+    match ctx.create_once(object).await {
+        Ok(_) => Ok(()),
+        Err(status) if crate::client::is_unique_conflict(&status) => Ok(()),
+        Err(status) => Err(status.into()),
+    }
+}
+
+/// Recorded changes to the labels of `object`, oldest first, including a
+/// last change whose record a crash left unwritten.
+async fn changes(ctx: &mut Ctx, subject: Subject<'_>, object: &Object) -> Result<Vec<LabelChange>> {
+    let mut objects = ctx.list_kind(LABEL_AUDIT_KIND).await?;
+    objects.retain(|object| {
+        object.properties.get("subject_kind").map(String::as_str) == Some(subject.kind())
+            && object.properties.get("subject").map(String::as_str) == Some(subject.id())
+    });
+    let mut changes = objects
+        .iter()
+        .map(|object| {
+            let field = |key: &str| object.properties.get(key).cloned().unwrap_or_default();
+            Ok(LabelChange {
+                id: field("change_id"),
+                sequence: field("sequence").parse()?,
+                key: field("key"),
+                value: object.properties.get("value").cloned(),
+                action: match field("action").as_str() {
+                    "set" => LabelAction::Set,
+                    "clear" => LabelAction::Clear,
+                    other => bail!("label change {} has action {other:?}", object.id),
+                },
+                actor: field("actor"),
+                at: field("at").parse()?,
+                reason: object
+                    .properties
+                    .get("reason")
+                    .filter(|reason| !reason.is_empty())
+                    .cloned(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for property in object.properties.keys() {
+        if property.starts_with(LAST_CHANGE_PREFIX)
+            && let Some(last) = stored_change(object, property)?
+            && !changes.iter().any(|change| change.id == last.id)
+        {
+            changes.push(last);
+        }
+    }
+    changes.sort_by(|a, b| (a.sequence, a.at, &a.id).cmp(&(b.sequence, b.at, &b.id)));
+    Ok(changes)
+}
+
+pub async fn set_environment(
+    ctx: &mut Ctx,
+    env: &str,
+    key: &str,
+    value: &str,
+    actor: &str,
+    reason: &str,
+) -> Result<String> {
+    validate_label_key(key)?;
+    validate_label_value(key, value)?;
+    let object = crate::environment::environment(ctx, env).await?;
+    write_label(
+        ctx,
+        object,
+        Subject::Environment(env),
+        key,
+        Some(value),
+        actor,
+        reason,
+    )
+    .await?;
     Ok(format!("set {env} label {key}={value}"))
 }
 
-pub async fn clear_environment(ctx: &mut Ctx, env: &str, key: &str) -> Result<String> {
+pub async fn clear_environment(
+    ctx: &mut Ctx,
+    env: &str,
+    key: &str,
+    actor: &str,
+    reason: &str,
+) -> Result<String> {
     validate_label_key(key)?;
-    let mut object = crate::environment::environment(ctx, env).await?;
-    let property = format!("{PROPERTY_PREFIX}{key}");
-    if object.properties.remove(&property).is_none() {
-        bail!("environment {env} has no label {key}");
-    }
-    object.updated = crate::now_millis();
-    ctx.put(object).await?;
+    let object = crate::environment::environment(ctx, env).await?;
+    write_label(
+        ctx,
+        object,
+        Subject::Environment(env),
+        key,
+        None,
+        actor,
+        reason,
+    )
+    .await?;
     Ok(format!("cleared {env} label {key}"))
 }
 
-pub async fn list_environment(ctx: &mut Ctx, env: &str) -> Result<BTreeMap<String, String>> {
+pub async fn list_environment(ctx: &mut Ctx, env: &str) -> Result<BTreeMap<String, LabelView>> {
     let object = crate::environment::environment(ctx, env).await?;
-    Ok(labels_from_object(&object))
+    Ok(label_views_from_object(&object))
 }
 
-/// Mutates only `label.*`. The write replaces the whole KIND_RELEASE object,
-/// matching recall and same-content republish; the store has no per-property merge.
-pub async fn set_release(ctx: &mut Ctx, spec: &str, key: &str, value: &str) -> Result<String> {
+/// Label changes recorded on `env`, oldest first.
+pub async fn environment_history(ctx: &mut Ctx, env: &str) -> Result<Vec<LabelChange>> {
+    let object = crate::environment::environment(ctx, env).await?;
+    changes(ctx, Subject::Environment(env), &object).await
+}
+
+/// Mutates only labels and their provenance. The write replaces the whole
+/// KIND_RELEASE object, matching recall and same-content republish; the store
+/// has no per-property merge.
+pub async fn set_release(
+    ctx: &mut Ctx,
+    spec: &str,
+    key: &str,
+    value: &str,
+    actor: &str,
+    reason: &str,
+) -> Result<String> {
     validate_label_key(key)?;
     validate_label_value(key, value)?;
-    let mut object = release_object(ctx, spec).await?;
-    object
-        .properties
-        .insert(format!("{PROPERTY_PREFIX}{key}"), value.to_string());
-    object.updated = crate::now_millis();
-    ctx.put(object).await?;
+    let object = release_object(ctx, spec).await?;
+    write_label(
+        ctx,
+        object,
+        Subject::Release(spec),
+        key,
+        Some(value),
+        actor,
+        reason,
+    )
+    .await?;
     Ok(format!("set {spec} label {key}={value}"))
 }
 
-pub async fn clear_release(ctx: &mut Ctx, spec: &str, key: &str) -> Result<String> {
+pub async fn clear_release(
+    ctx: &mut Ctx,
+    spec: &str,
+    key: &str,
+    actor: &str,
+    reason: &str,
+) -> Result<String> {
     validate_label_key(key)?;
-    let mut object = release_object(ctx, spec).await?;
-    let property = format!("{PROPERTY_PREFIX}{key}");
-    if object.properties.remove(&property).is_none() {
-        bail!("release {spec} has no label {key}");
-    }
-    object.updated = crate::now_millis();
-    ctx.put(object).await?;
+    let object = release_object(ctx, spec).await?;
+    write_label(
+        ctx,
+        object,
+        Subject::Release(spec),
+        key,
+        None,
+        actor,
+        reason,
+    )
+    .await?;
     Ok(format!("cleared {spec} label {key}"))
 }
 
-pub async fn list_release(ctx: &mut Ctx, spec: &str) -> Result<BTreeMap<String, String>> {
+pub async fn list_release(ctx: &mut Ctx, spec: &str) -> Result<BTreeMap<String, LabelView>> {
     let object = release_object(ctx, spec).await?;
-    Ok(labels_from_object(&object))
+    Ok(label_views_from_object(&object))
+}
+
+/// Label changes recorded on the release `spec`, oldest first.
+pub async fn release_history(ctx: &mut Ctx, spec: &str) -> Result<Vec<LabelChange>> {
+    let object = release_object(ctx, spec).await?;
+    changes(ctx, Subject::Release(spec), &object).await
 }
 
 async fn release_object(ctx: &mut Ctx, spec: &str) -> Result<Object> {
@@ -435,7 +796,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("matches no environments"), "{error}");
-        set_environment(&mut ctx, "alpha", "tier", "canary")
+        set_environment(&mut ctx, "alpha", "tier", "canary", "test", "")
             .await
             .unwrap();
         assert_eq!(
@@ -444,7 +805,7 @@ mod tests {
                 .unwrap(),
             vec!["alpha".to_string()]
         );
-        set_environment(&mut ctx, "beta", "tier", "canary")
+        set_environment(&mut ctx, "beta", "tier", "canary", "test", "")
             .await
             .unwrap();
         assert_eq!(
@@ -464,19 +825,98 @@ mod tests {
         crate::ontology::register(&mut ctx).await.unwrap();
         plan::env_add(&mut ctx, "alpha", "a").await.unwrap();
         plan::env_add(&mut ctx, "beta", "b").await.unwrap();
-        set_environment(&mut ctx, "alpha", "tier", "canary")
+        set_environment(&mut ctx, "alpha", "tier", "canary", "test", "")
             .await
             .unwrap();
         let names = resolve_cohort(&mut ctx, "tier=canary").await.unwrap();
         let spec = crate::wave::WaveSpec::new(names, true).unwrap();
         assert_eq!(spec.environments, ["alpha"]);
-        set_environment(&mut ctx, "beta", "tier", "canary")
+        set_environment(&mut ctx, "beta", "tier", "canary", "test", "")
             .await
             .unwrap();
         assert_eq!(spec.environments, ["alpha"]);
         assert_eq!(
             resolve_cohort(&mut ctx, "tier=canary").await.unwrap(),
             ["alpha", "beta"]
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn a_change_stranded_by_a_crash_is_recorded_once() {
+        let database = temp_db("stranded-change");
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        plan::env_add(&mut ctx, "alpha", "a").await.unwrap();
+        // The state a crash after the label put and before the append leaves.
+        let mut object = crate::environment::environment(&mut ctx, "alpha")
+            .await
+            .unwrap();
+        let stranded = LabelChange {
+            id: "stranded".into(),
+            sequence: 1,
+            key: "tier".into(),
+            value: Some("canary".into()),
+            action: LabelAction::Set,
+            actor: "alice".into(),
+            at: 1,
+            reason: None,
+        };
+        object
+            .properties
+            .insert("label.tier".into(), "canary".into());
+        object
+            .properties
+            .insert(SEQUENCE_PROPERTY.into(), "1".into());
+        object.properties.insert(
+            format!("{LAST_CHANGE_PREFIX}tier"),
+            serde_json::to_string(&stranded).unwrap(),
+        );
+        ctx.put(object).await.unwrap();
+        assert_eq!(
+            environment_history(&mut ctx, "alpha").await.unwrap(),
+            std::slice::from_ref(&stranded)
+        );
+
+        clear_environment(&mut ctx, "alpha", "tier", "bob", "done")
+            .await
+            .unwrap();
+        // Replaying an already recorded change adds nothing.
+        append_change(&mut ctx, Subject::Environment("alpha"), &stranded)
+            .await
+            .unwrap();
+        let history = environment_history(&mut ctx, "alpha").await.unwrap();
+        let actors: Vec<_> = history
+            .iter()
+            .map(|change| (change.action, change.actor.as_str()))
+            .collect();
+        assert_eq!(
+            actors,
+            [(LabelAction::Set, "alice"), (LabelAction::Clear, "bob")]
+        );
+
+        // Identical content is still a distinct change.
+        for value in ["a", "b", "a"] {
+            set_environment(&mut ctx, "alpha", "tier", value, "carol", "")
+                .await
+                .unwrap();
+        }
+        let values: Vec<_> = environment_history(&mut ctx, "alpha")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|change| (change.sequence, change.value))
+            .collect();
+        assert_eq!(
+            values,
+            [
+                (1, Some("canary".into())),
+                (2, None),
+                (3, Some("a".into())),
+                (4, Some("b".into())),
+                (5, Some("a".into())),
+            ]
         );
         let _ = std::fs::remove_file(&database);
     }

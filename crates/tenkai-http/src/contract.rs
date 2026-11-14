@@ -537,10 +537,26 @@ pub fn http_contract() -> Value {
         },
         Route {
             method: "GET",
+            path: "/v1/environments/{environment}/labels/history",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<Vec<tenkai::labels::LabelChange>>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/releases/{product}/{version}/labels/history",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<Vec<tenkai::labels::LabelChange>>(&mut g),
+        },
+        Route {
+            method: "GET",
             path: "/v1/environments/{environment}/labels",
             auth: Auth::Read,
             request: None,
-            response: json!({"type": "object", "additionalProperties": {"type": "string"}}),
+            response: schema::<std::collections::BTreeMap<String, tenkai::labels::LabelView>>(
+                &mut g,
+            ),
         },
         Route {
             method: "PUT",
@@ -561,7 +577,9 @@ pub fn http_contract() -> Value {
             path: "/v1/releases/{product}/{version}/labels",
             auth: Auth::Read,
             request: None,
-            response: json!({"type": "object", "additionalProperties": {"type": "string"}}),
+            response: schema::<std::collections::BTreeMap<String, tenkai::labels::LabelView>>(
+                &mut g,
+            ),
         },
         Route {
             method: "PUT",
@@ -1251,6 +1269,10 @@ mod tests {
             ("CanaryDesignation", "selector"),
             ("CanaryDesignationRequest", "selector"),
             ("CanaryDesignationResult", "selector"),
+            ("LabelView", "set_by"),
+            ("LabelView", "set_at"),
+            ("LabelChange", "value"),
+            ("LabelChange", "reason"),
             ("ObservedRuntimeComponent", "health"),
             ("ObservedRuntimeComponent", "last_init_job"),
             ("ObservedRuntimeComponent", "model_runtime"),

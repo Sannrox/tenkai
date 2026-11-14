@@ -100,6 +100,8 @@ pub(crate) enum ReleaseLabelsCommand {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Recorded label changes, oldest first.
+    History { spec: String },
 }
 
 #[derive(Subcommand)]

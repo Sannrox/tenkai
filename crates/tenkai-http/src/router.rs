@@ -16,7 +16,7 @@ use super::environment_config::{
     configure_approval_policy, configure_bindings, configure_constraints, configure_criticality,
     configure_facts, configure_labels, configure_maintenance_window, configure_owner,
     configure_runner_attestation, configure_sealed_secrets, configure_webhooks,
-    list_environment_labels, list_sealed_secrets, register_environment,
+    environment_label_history, list_environment_labels, list_sealed_secrets, register_environment,
 };
 use super::exports::{create_export, download_export, inspect_export, list_exports};
 use super::grant_rules::{create_grant_rule, list_grant_rules, remove_grant_rule};
@@ -45,8 +45,8 @@ use super::lifecycle::{
     plan_identity_issuer, prepare_identity_issuer, promote_release, publish_release,
     recall_release, record_model_evaluation_evidence, record_recall_range,
     record_software_compatibility_evidence, release_channel_hold, release_environment_hold,
-    remove_channel_head, resume_channel_policy, retire_environment, retry_failed_target,
-    rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment,
+    release_label_history, remove_channel_head, resume_channel_policy, retire_environment,
+    retry_failed_target, rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment,
     schedule_environment_freeze, set_channel_hold, set_channel_recall_rule,
     set_environment_failure_threshold, set_environment_hold, set_exposure_waiver,
     set_product_criticality, set_product_owner, set_product_webhook, set_release_label,
@@ -276,6 +276,10 @@ pub fn router(
             put(configure_facts).delete(configure_facts),
         )
         .route(
+            "/v1/environments/{environment}/labels/history",
+            get(environment_label_history),
+        )
+        .route(
             "/v1/environments/{environment}/labels",
             get(list_environment_labels)
                 .put(configure_labels)
@@ -383,6 +387,10 @@ pub fn router(
         .route(
             "/v1/releases/{release}/recall",
             get(inspect_recall).post(recall_release),
+        )
+        .route(
+            "/v1/releases/{product}/{version}/labels/history",
+            get(release_label_history),
         )
         .route(
             "/v1/releases/{product}/{version}/labels",

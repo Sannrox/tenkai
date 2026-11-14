@@ -672,13 +672,31 @@ impl ManagementOperations {
         &self,
         credential: &CredentialMaterial,
         environment: &str,
-    ) -> Result<std::collections::BTreeMap<String, String>, ManagementError> {
+    ) -> Result<std::collections::BTreeMap<String, crate::labels::LabelView>, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
         self.require_environment_visible(&context, environment)
             .await?;
         let mut ctx = self.catalog_ctx(&context)?;
         crate::labels::list_environment(&mut ctx, environment)
+            .await
+            .map_err(internal)
+    }
+
+    /// `GET /v1/environments/{environment}/labels/history`: recorded label
+    /// changes, oldest first.
+    pub async fn environment_label_history(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+    ) -> Result<Vec<crate::labels::LabelChange>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_environment_grant(credential, &context, Some(environment), "label history")?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::labels::environment_history(&mut ctx, environment)
             .await
             .map_err(internal)
     }
@@ -3603,9 +3621,16 @@ impl ManagementOperations {
         self.audit(&actor, "catalog.release_label_set.requested")?;
         let spec = format!("{product}@{version}");
         let mut ctx = self.catalog_ctx(&context)?;
-        let message = crate::labels::set_release(&mut ctx, &spec, &request.key, value)
-            .await
-            .map_err(map_catalog_error)?;
+        let message = crate::labels::set_release(
+            &mut ctx,
+            &spec,
+            &request.key,
+            value,
+            &actor,
+            &request.reason,
+        )
+        .await
+        .map_err(map_catalog_error)?;
         self.audit(&actor, "catalog.release_label_set.completed")?;
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::ReleaseLabelSet,
@@ -3636,9 +3661,10 @@ impl ManagementOperations {
         self.audit(&actor, "catalog.release_label_clear.requested")?;
         let spec = format!("{product}@{version}");
         let mut ctx = self.catalog_ctx(&context)?;
-        let message = crate::labels::clear_release(&mut ctx, &spec, &request.key)
-            .await
-            .map_err(map_catalog_error)?;
+        let message =
+            crate::labels::clear_release(&mut ctx, &spec, &request.key, &actor, &request.reason)
+                .await
+                .map_err(map_catalog_error)?;
         self.audit(&actor, "catalog.release_label_clear.completed")?;
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::ReleaseLabelClear,
@@ -3652,13 +3678,31 @@ impl ManagementOperations {
         credential: &CredentialMaterial,
         product: &str,
         version: &str,
-    ) -> Result<std::collections::BTreeMap<String, String>, ManagementError> {
+    ) -> Result<std::collections::BTreeMap<String, crate::labels::LabelView>, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
         Self::require_product_grant(&context, product)?;
         let spec = format!("{product}@{version}");
         let mut ctx = self.catalog_ctx(&context)?;
         crate::labels::list_release(&mut ctx, &spec)
+            .await
+            .map_err(map_catalog_error)
+    }
+
+    /// `GET /v1/releases/{product}/{version}/labels/history`: recorded label
+    /// changes, oldest first.
+    pub async fn release_label_history(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        version: &str,
+    ) -> Result<Vec<crate::labels::LabelChange>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        Self::require_product_grant(&context, product)?;
+        let spec = format!("{product}@{version}");
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::labels::release_history(&mut ctx, &spec)
             .await
             .map_err(map_catalog_error)
     }
