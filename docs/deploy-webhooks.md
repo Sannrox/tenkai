@@ -46,8 +46,21 @@ tenkaictl product owner set api api-oncall@example
 ```
 
 `status`, `env inspect`, and `env history` show the owner. An owner with no
-reachable endpoint is listed on webhook delivery status as
-`owner.unconfigured`.
+reachable endpoint is listed on webhook delivery status as one row with event
+`owner.unconfigured` and state `unconfigured`.
+
+Environment inspect also types the owner's `reachability`: a `verdict` for the
+owner and, per endpoint, `consecutive_failures` (failed attempts on the
+longest-retrying outstanding delivery), `last_success_at`, and a `verdict`.
+An endpoint is `unreachable` once an outstanding delivery has failed three
+times, else `reachable`. Inspect reads at most 128 failing deliveries of each
+kind, most failed first. When that bound cuts off deliveries that may have
+failed three times, an endpoint with no known failure is `unknown` rather than
+`reachable`. The owner is `unconfigured` without endpoints, `reachable` when
+any endpoint is, `unreachable` when every endpoint is, and else `unknown`.
+
+`DELETE /v1/products/{product}/webhooks?url=<url>` removes one product
+endpoint and keeps the rest. Without `url` it removes every endpoint.
 
 ## Events and payload
 

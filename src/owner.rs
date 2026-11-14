@@ -28,6 +28,63 @@ pub struct OwnerView {
     /// Configured notification URLs. Empty means no reachable endpoint.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<String>,
+    /// Whether notifications reach this owner, from recorded deliveries.
+    /// Present where delivery records are readable (environment inspect).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub reachability: Option<OwnerReachability>,
+}
+
+/// Failed attempts on one outstanding delivery at which its endpoint
+/// counts as unreachable.
+pub const UNREACHABLE_AFTER_FAILURES: u32 = 3;
+
+/// Whether an owner or one endpoint receives notifications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReachabilityVerdict {
+    /// The owner has no notification endpoint.
+    Unconfigured,
+    /// An outstanding delivery failed [`UNREACHABLE_AFTER_FAILURES`] times
+    /// or more. For an owner: every endpoint is unreachable.
+    Unreachable,
+    /// No outstanding delivery has failed past the threshold.
+    Reachable,
+    /// More failing deliveries are outstanding than one read returns, and
+    /// the ones not read may have failed past the threshold for this URL.
+    /// For an owner: no endpoint is reachable and some are unknown.
+    Unknown,
+}
+
+/// Owner verdict plus one row per notification endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct OwnerReachability {
+    pub verdict: ReachabilityVerdict,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<EndpointReachability>,
+}
+
+/// Delivery health of one notification URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EndpointReachability {
+    pub url: String,
+    pub verdict: ReachabilityVerdict,
+    /// Failed attempts on this URL's longest-retrying outstanding delivery.
+    pub consecutive_failures: u32,
+    /// Latest successful delivery to this URL among the recorded ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub last_success_at: Option<i64>,
+}
+
+/// Query of `DELETE /v1/products/{product}/webhooks`: one endpoint by `url`,
+/// or every endpoint when omitted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClearProductWebhooksQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub url: Option<String>,
 }
 
 /// Body of `PUT /v1/products/{product}/owner` and environment `set_owner`.
@@ -72,7 +129,11 @@ pub fn view_from_object(object: &Object) -> Option<OwnerView> {
         .into_iter()
         .map(|endpoint| endpoint.url)
         .collect();
-    Some(OwnerView { contact, endpoints })
+    Some(OwnerView {
+        contact,
+        endpoints,
+        reachability: None,
+    })
 }
 
 impl OwnerView {
@@ -84,6 +145,68 @@ impl OwnerView {
             .collect();
         self
     }
+
+    /// Attach reachability of `endpoints` judged from recent and failing
+    /// deliveries.
+    pub fn with_reachability(
+        mut self,
+        recent: &[crate::operational_events::WebhookDelivery],
+        failing: &crate::operational_events::FailingDeliveries,
+    ) -> Self {
+        self.reachability = Some(reachability(&self.endpoints, recent, failing));
+        self
+    }
+}
+
+/// Judge each URL from its deliveries. The owner is reachable when any
+/// endpoint is, unreachable when every endpoint is, and unconfigured without
+/// endpoints.
+pub fn reachability(
+    endpoints: &[String],
+    recent: &[crate::operational_events::WebhookDelivery],
+    failing: &crate::operational_events::FailingDeliveries,
+) -> OwnerReachability {
+    let endpoints = endpoints
+        .iter()
+        .map(|url| {
+            let to_url = recent
+                .iter()
+                .chain(&failing.deliveries)
+                .filter(|delivery| &delivery.url == url);
+            let last_success_at = to_url
+                .clone()
+                .filter_map(|delivery| delivery.delivered_at)
+                .max();
+            let consecutive_failures = to_url
+                .filter(|delivery| delivery.delivered_at.is_none())
+                .map(|delivery| delivery.attempts)
+                .max()
+                .unwrap_or(0);
+            EndpointReachability {
+                url: url.clone(),
+                verdict: if consecutive_failures >= UNREACHABLE_AFTER_FAILURES {
+                    ReachabilityVerdict::Unreachable
+                } else if failing.hidden_max_attempts >= UNREACHABLE_AFTER_FAILURES {
+                    ReachabilityVerdict::Unknown
+                } else {
+                    ReachabilityVerdict::Reachable
+                },
+                consecutive_failures,
+                last_success_at,
+            }
+        })
+        .collect::<Vec<_>>();
+    let has = |verdict| endpoints.iter().any(|endpoint| endpoint.verdict == verdict);
+    let verdict = if endpoints.is_empty() {
+        ReachabilityVerdict::Unconfigured
+    } else if has(ReachabilityVerdict::Reachable) {
+        ReachabilityVerdict::Reachable
+    } else if has(ReachabilityVerdict::Unknown) {
+        ReachabilityVerdict::Unknown
+    } else {
+        ReachabilityVerdict::Unreachable
+    };
+    OwnerReachability { verdict, endpoints }
 }
 
 /// One record per URL, environment first. A repeated product URL keeps the
@@ -331,6 +454,7 @@ async fn load_product(ctx: &mut Ctx, product: &str) -> Result<Object> {
 mod tests {
     use super::*;
     use crate::deploy_webhook::WebhookEvent;
+    use crate::operational_events::WebhookDelivery;
 
     fn endpoint(url: &str, event: WebhookEvent) -> WebhookEndpoint {
         WebhookEndpoint {
@@ -340,6 +464,71 @@ mod tests {
             operational: Vec::new(),
             feedback: Vec::new(),
         }
+    }
+
+    fn delivery(url: &str, attempts: u32, delivered_at: Option<i64>) -> WebhookDelivery {
+        WebhookDelivery {
+            id: format!("{url}-{attempts}"),
+            event: "apply_failed".into(),
+            url: url.into(),
+            state: String::new(),
+            attempts,
+            next_attempt_at: 0,
+            delivered_at,
+            last_error: String::new(),
+        }
+    }
+
+    #[test]
+    fn reachability_judges_each_endpoint_from_its_deliveries() {
+        use crate::operational_events::FailingDeliveries;
+        let none = FailingDeliveries::default();
+        assert_eq!(
+            reachability(&[], &[], &none).verdict,
+            ReachabilityVerdict::Unconfigured
+        );
+        let failing = "https://hooks.example/failing";
+        let healthy = "https://hooks.example/healthy";
+        let deliveries = [
+            delivery(failing, 1, Some(10)),
+            delivery(failing, UNREACHABLE_AFTER_FAILURES, None),
+            delivery(healthy, 2, None),
+            delivery(healthy, 1, Some(20)),
+        ];
+        let both = reachability(&[failing.into(), healthy.into()], &deliveries, &none);
+        assert_eq!(both.verdict, ReachabilityVerdict::Reachable);
+        assert_eq!(
+            both.endpoints,
+            vec![
+                EndpointReachability {
+                    url: failing.into(),
+                    verdict: ReachabilityVerdict::Unreachable,
+                    consecutive_failures: UNREACHABLE_AFTER_FAILURES,
+                    last_success_at: Some(10),
+                },
+                EndpointReachability {
+                    url: healthy.into(),
+                    verdict: ReachabilityVerdict::Reachable,
+                    consecutive_failures: 2,
+                    last_success_at: Some(20),
+                },
+            ]
+        );
+        let only_failing = reachability(&[failing.into()], &deliveries, &none);
+        assert_eq!(only_failing.verdict, ReachabilityVerdict::Unreachable);
+        // Deliveries cut off by the read bound may have failed past the
+        // threshold, so an endpoint without a known failure is unknown.
+        let truncated = FailingDeliveries {
+            deliveries: Vec::new(),
+            hidden_max_attempts: UNREACHABLE_AFTER_FAILURES,
+        };
+        let cut_off = reachability(&[failing.into(), healthy.into()], &deliveries, &truncated);
+        assert_eq!(
+            cut_off.endpoints[0].verdict,
+            ReachabilityVerdict::Unreachable
+        );
+        assert_eq!(cut_off.endpoints[1].verdict, ReachabilityVerdict::Unknown);
+        assert_eq!(cut_off.verdict, ReachabilityVerdict::Unknown);
     }
 
     #[test]

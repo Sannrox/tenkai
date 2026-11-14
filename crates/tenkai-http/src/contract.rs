@@ -504,7 +504,7 @@ pub fn http_contract() -> Value {
             method: "DELETE",
             path: "/v1/products/{product}/webhooks",
             auth: Auth::Management,
-            request: None,
+            request: Some(schema::<tenkai::owner::ClearProductWebhooksQuery>(&mut g)),
             response: json!({"type": "string"}),
         },
         Route {
@@ -1196,6 +1196,9 @@ mod tests {
             ("RecallView", "policy_version"),
             ("RecallView", "range"),
             ("RecallRangeView", "before"),
+            ("OwnerView", "reachability"),
+            ("EndpointReachability", "last_success_at"),
+            ("ClearProductWebhooksQuery", "url"),
             ("PaceInstanceProgress", "eligible_at_ms"),
             ("PaceInstanceProgress", "next_opens_at_ms"),
             ("PaceInstanceProgress", "early_admission"),

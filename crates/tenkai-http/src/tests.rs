@@ -17,6 +17,7 @@ mod imports;
 mod lifecycle_support;
 mod observed_runtime;
 mod oidc;
+mod owner_reachability;
 mod package_migration_closed;
 mod package_migration_preview;
 mod package_migration_scope;

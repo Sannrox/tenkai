@@ -1189,6 +1189,16 @@
       ],
       "type": "object"
     },
+    "ClearProductWebhooksQuery": {
+      "additionalProperties": false,
+      "description": "Query of `DELETE /v1/products/{product}/webhooks`: one endpoint by `url`,\nor every endpoint when omitted.",
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "ClockHealth": {
       "description": "The last clock reading, as health reports it.",
       "properties": {
@@ -2545,6 +2555,34 @@
         "identity",
         "key_id",
         "collected"
+      ],
+      "type": "object"
+    },
+    "EndpointReachability": {
+      "description": "Delivery health of one notification URL.",
+      "properties": {
+        "consecutive_failures": {
+          "description": "Failed attempts on this URL's longest-retrying outstanding delivery.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_success_at": {
+          "description": "Latest successful delivery to this URL among the recorded ones.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "url": {
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/ReachabilityVerdict"
+        }
+      },
+      "required": [
+        "url",
+        "verdict",
+        "consecutive_failures"
       ],
       "type": "object"
     },
@@ -5983,6 +6021,24 @@
         }
       ]
     },
+    "OwnerReachability": {
+      "description": "Owner verdict plus one row per notification endpoint.",
+      "properties": {
+        "endpoints": {
+          "items": {
+            "$ref": "#/$defs/EndpointReachability"
+          },
+          "type": "array"
+        },
+        "verdict": {
+          "$ref": "#/$defs/ReachabilityVerdict"
+        }
+      },
+      "required": [
+        "verdict"
+      ],
+      "type": "object"
+    },
     "OwnerView": {
       "description": "Contact and notification URLs as inspect, status, and history show them.",
       "properties": {
@@ -5996,6 +6052,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "reachability": {
+          "$ref": "#/$defs/OwnerReachability",
+          "description": "Whether notifications reach this owner, from recorded deliveries.\nPresent where delivery records are readable (environment inspect)."
         }
       },
       "required": [
@@ -6786,6 +6846,31 @@
         "n"
       ],
       "type": "object"
+    },
+    "ReachabilityVerdict": {
+      "description": "Whether an owner or one endpoint receives notifications.",
+      "oneOf": [
+        {
+          "const": "unconfigured",
+          "description": "The owner has no notification endpoint.",
+          "type": "string"
+        },
+        {
+          "const": "unreachable",
+          "description": "An outstanding delivery failed [`UNREACHABLE_AFTER_FAILURES`] times\nor more. For an owner: every endpoint is unreachable.",
+          "type": "string"
+        },
+        {
+          "const": "reachable",
+          "description": "No outstanding delivery has failed past the threshold.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "More failing deliveries are outstanding than one read returns, and\nthe ones not read may have failed past the threshold for this URL.\nFor an owner: no endpoint is reachable and some are unknown.",
+          "type": "string"
+        }
+      ]
     },
     "RecallRangeCloseRequest": {
       "additionalProperties": false,
@@ -8722,7 +8807,7 @@
           "type": "integer"
         },
         "state": {
-          "description": "`pending`, `retrying` or `delivered`.",
+          "description": "`pending`, `retrying` or `delivered`. The environment list also shows\none synthetic `unconfigured` row (event `owner.unconfigured`) while\nthe environment owner has no notification endpoint.",
           "type": "string"
         },
         "url": {
@@ -9386,7 +9471,9 @@
       "auth": "management",
       "method": "DELETE",
       "path": "/v1/products/{product}/webhooks",
-      "request": null,
+      "request": {
+        "$ref": "#/$defs/ClearProductWebhooksQuery"
+      },
       "response": {
         "type": "string"
       }

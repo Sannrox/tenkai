@@ -656,7 +656,9 @@ pub struct WebhookDelivery {
     pub id: String,
     pub event: String,
     pub url: String,
-    /// `pending`, `retrying` or `delivered`.
+    /// `pending`, `retrying` or `delivered`. The environment list also shows
+    /// one synthetic `unconfigured` row (event `owner.unconfigured`) while
+    /// the environment owner has no notification endpoint.
     pub state: String,
     pub attempts: u32,
     pub next_attempt_at: i64,
@@ -677,6 +679,49 @@ pub fn deliveries(
     scope: &str,
     limit: usize,
 ) -> Result<Vec<WebhookDelivery>> {
+    collect_deliveries(|kind| store.list_provider_events(kind, scope, limit))
+}
+
+/// Most-failed outstanding deliveries, plus how many attempts the ones cut
+/// off by the bound may have.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FailingDeliveries {
+    pub deliveries: Vec<WebhookDelivery>,
+    /// Upper bound on failed attempts of any outstanding delivery not in
+    /// `deliveries`: the last attempt count of each kind that hit the bound.
+    /// Zero when nothing was cut off.
+    pub hidden_max_attempts: u32,
+}
+
+/// Undelivered deliveries for `scope`, the most failed attempts first, at
+/// most `limit` of each kind. Reachability reads these so recent traffic
+/// cannot hide a delivery that keeps failing.
+pub fn failing_deliveries(
+    store: &dyn OperationalStore,
+    scope: &str,
+    limit: usize,
+) -> Result<FailingDeliveries> {
+    // The stores bound inspection at 128 rows per kind.
+    let bound = limit.min(128);
+    let mut hidden_max_attempts = 0;
+    let deliveries = collect_deliveries(|kind| {
+        let rows = store.list_failing_provider_events(kind, scope, limit)?;
+        if rows.len() >= bound
+            && let Some(last) = rows.last()
+        {
+            hidden_max_attempts = hidden_max_attempts.max(last.attempts);
+        }
+        Ok(rows)
+    })?;
+    Ok(FailingDeliveries {
+        deliveries,
+        hidden_max_attempts,
+    })
+}
+
+fn collect_deliveries(
+    mut list: impl FnMut(&str) -> crate::storage::Result<Vec<crate::storage::ProviderEventRecord>>,
+) -> Result<Vec<WebhookDelivery>> {
     let mut deliveries = Vec::new();
     let kinds = [
         crate::deploy_webhook::DEPLOY_WEBHOOK_KIND.to_string(),
@@ -690,7 +735,7 @@ pub fn deliveries(
             .map(|sink| crate::smtp_digest::digest_kind(&sink.id)),
     );
     for kind in kinds {
-        for record in store.list_provider_events(&kind, scope, limit)? {
+        for record in list(&kind)? {
             #[derive(Deserialize)]
             struct Addressed {
                 url: String,
@@ -737,6 +782,61 @@ mod tests {
             operational,
             feedback: Vec::new(),
         }
+    }
+
+    /// Newer traffic to another endpoint pushes a long-failing delivery out
+    /// of the recent list, but not out of the failing list.
+    #[test]
+    fn a_long_failing_delivery_stays_visible_behind_newer_traffic() {
+        let sqlite = SqliteStore::open_in_memory().unwrap();
+        let store: &dyn OperationalStore = &sqlite;
+        let failing = WebhookEndpoint {
+            url: "https://hooks.example/failing".into(),
+            ..endpoint(vec![OperationalEvent::PlanHeld])
+        };
+        let healthy = endpoint(vec![OperationalEvent::PlanHeld]);
+        let held = |key| Transition {
+            event: OperationalEvent::PlanHeld,
+            scope: HOST_SCOPE,
+            resource: "plan-1",
+            code: "environment",
+            key,
+        };
+        announce(store, std::slice::from_ref(&failing), &held("old"), 1);
+        for attempt in 0..3_i64 {
+            let claimed = store
+                .claim_provider_events_for_kind(
+                    OPERATIONAL_WEBHOOK_KIND,
+                    100 + attempt,
+                    1,
+                    "t",
+                    1_000,
+                )
+                .unwrap();
+            assert_eq!(claimed.len(), 1);
+            store
+                .record_provider_failure(
+                    OPERATIONAL_WEBHOOK_KIND,
+                    &claimed[0].id,
+                    "t",
+                    0,
+                    "refused",
+                )
+                .unwrap();
+        }
+        for (tick, key) in [(2, "new-1"), (3, "new-2")] {
+            announce(store, std::slice::from_ref(&healthy), &held(key), tick);
+        }
+        let recent = deliveries(store, HOST_SCOPE, 2).unwrap();
+        assert!(recent.iter().all(|delivery| delivery.url == healthy.url));
+        let failing_now = failing_deliveries(store, HOST_SCOPE, 2).unwrap();
+        assert_eq!(failing_now.deliveries.len(), 1);
+        assert_eq!(failing_now.deliveries[0].url, failing.url);
+        assert_eq!(failing_now.deliveries[0].attempts, 3);
+        assert_eq!(failing_now.hidden_max_attempts, 0);
+        // A read that fills its bound reports what the rest may have reached.
+        let bounded = failing_deliveries(store, HOST_SCOPE, 1).unwrap();
+        assert_eq!(bounded.hidden_max_attempts, 3);
     }
 
     #[test]

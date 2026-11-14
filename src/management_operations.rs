@@ -943,6 +943,16 @@ impl ManagementOperations {
             report.terminal_outcomes =
                 terminal_outcomes_from_store(self.store.as_ref(), environment).map_err(internal)?;
         }
+        if let Some(owner) = report.owner.take() {
+            // Recent deliveries give the last success; failing ones are read
+            // separately so newer traffic cannot hide a delivery still failing.
+            let recent = crate::operational_events::deliveries(&*self.store, environment, 100)
+                .map_err(internal)?;
+            let failing =
+                crate::operational_events::failing_deliveries(&*self.store, environment, 128)
+                    .map_err(internal)?;
+            report.owner = Some(owner.with_reachability(&recent, &failing));
+        }
         Ok(report)
     }
 

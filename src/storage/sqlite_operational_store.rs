@@ -155,6 +155,15 @@ impl OperationalStore for SqliteStore {
         self.list_provider_events_sqlite(provider_kind, environment_id, limit)
     }
 
+    fn list_failing_provider_events(
+        &self,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderEventRecord>> {
+        self.list_failing_provider_events_sqlite(provider_kind, environment_id, limit)
+    }
+
     fn claim_provider_events(
         &self,
         now: i64,

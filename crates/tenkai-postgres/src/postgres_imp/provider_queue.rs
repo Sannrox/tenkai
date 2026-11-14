@@ -100,6 +100,41 @@ impl Inner {
         environment_id: &str,
         limit: usize,
     ) -> Result<Vec<ProviderEventRecord>> {
+        self.inspect_provider_events(
+            schema,
+            provider_kind,
+            environment_id,
+            limit,
+            "ORDER BY observed_at DESC,id DESC",
+        )
+    }
+
+    /// Undelivered events, most failed attempts first.
+    pub fn list_failing_provider_events(
+        &self,
+        schema: &str,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderEventRecord>> {
+        self.inspect_provider_events(
+            schema,
+            provider_kind,
+            environment_id,
+            limit,
+            "AND delivered_at IS NULL AND attempts>0 ORDER BY attempts DESC,observed_at,id",
+        )
+    }
+
+    /// `tail` is a fixed filter and order suffix, never caller input.
+    fn inspect_provider_events(
+        &self,
+        schema: &str,
+        provider_kind: &str,
+        environment_id: &str,
+        limit: usize,
+        tail: &'static str,
+    ) -> Result<Vec<ProviderEventRecord>> {
         if provider_kind.trim().is_empty() || environment_id.trim().is_empty() || limit == 0 {
             return Err(StoreError::InvalidData {
                 kind: "provider event inspection",
@@ -113,11 +148,13 @@ impl Inner {
             let limit_i = limit.min(128) as i64;
             let rows = tx
                 .query(
-                    "SELECT id,provider_kind,binding_digest,payload_json,attempts,
+                    &format!(
+                        "SELECT id,provider_kind,binding_digest,payload_json,attempts,
                             next_attempt_at,delivered_at,last_error,claim_token,claim_until
                     FROM provider_events
                     WHERE provider_kind=$1 AND environment_id=$2
-                     ORDER BY observed_at DESC,id DESC LIMIT $3",
+                     {tail} LIMIT $3"
+                    ),
                     &[&provider_kind, &environment_id, &limit_i],
                 )
                 .map_err(pg)?;
