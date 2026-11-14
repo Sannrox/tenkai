@@ -530,6 +530,20 @@ a fence: a hold never takes the environment lease, so it still pauses an
 environment during an apply, and a label change that lands between the
 resolution and the hold write does not rewrite the record.
 
+`POST /v1/canaries` designates or undesignates canary environments, either by
+name (`{"environments": ["stage"], "designated": true}`) or by selector
+(`{"selector": "tier=edge", "designated": true}`). It needs a fleet
+management credential; an environment-scoped credential is refused. The
+server resolves the selector and checks every name before it writes
+anything, and refuses an invalid selector, one that matches nothing, or an
+unknown name. It then writes each designation under that environment's apply
+lease, so a designation waits behind a running apply. If one write fails, the
+earlier ones stay; repeating the request finishes the rest. `GET /v1/canaries`
+lists each designated environment with `set_by`, `set_at`, and, when a
+selector chose it, the selector and every environment it matched at that
+write. Designations made before this record existed read back with only the
+environment.
+
 ## Plan approval policy
 
 An environment may point at a TOML policy that signs `tenkai.plan-approval.v1`

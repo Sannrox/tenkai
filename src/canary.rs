@@ -370,6 +370,11 @@ pub struct PromotionEvaluation {
 
 mod promotion_lifecycle;
 
+pub use promotion_lifecycle::{
+    CanaryDesignation, CanaryDesignationRequest, CanaryDesignationResult, active_policy,
+    authorize_promotion, configure, confirm_policy_active, designations, set_designated,
+    set_designated_by, unlock_promotion,
+};
 use promotion_lifecycle::{
     POLICY_DISCOVERY_LOCK_CHANNEL, claim_policy_locks, claim_promotion_lock_with_retry,
     fenced_create, object_property, policies_for_release, policy_record_id, release_policy_locks,
@@ -377,10 +382,6 @@ use promotion_lifecycle::{
 pub(crate) use promotion_lifecycle::{
     PromotionLock, claim_promotion_lock, fenced_put, fenced_put_objects, finish_locked,
     release_promotion_lock,
-};
-pub use promotion_lifecycle::{
-    active_policy, authorize_promotion, configure, confirm_policy_active, set_designated,
-    unlock_promotion,
 };
 pub(crate) use promotion_lifecycle::{guarded_promotion, maybe_active_policy};
 

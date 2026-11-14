@@ -1176,3 +1176,37 @@ pub(super) async fn software_compatibility_report(
             .await,
     )
 }
+
+/// `GET /v1/canaries`: designated canary environments with provenance.
+pub(super) async fn canary_designations(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(state.management.canary_designations(&credential).await)
+}
+
+/// `POST /v1/canaries`: designate or undesignate by name or selector.
+pub(super) async fn designate_canaries(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .designate_canaries(&credential, request)
+            .await,
+    )
+}

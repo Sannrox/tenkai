@@ -620,6 +620,73 @@
       ],
       "type": "object"
     },
+    "CanaryDesignation": {
+      "description": "One designated canary environment: who designated it, when, and the\nselector that chose it, when one did. Designations written before this\nprovenance existed read back with only the environment.",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "selector": {
+          "$ref": "#/$defs/HoldSelector",
+          "description": "The selector and the environments it resolved to at write time."
+        },
+        "set_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "set_by": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment"
+      ],
+      "type": "object"
+    },
+    "CanaryDesignationRequest": {
+      "description": "`POST /v1/canaries`: designate or undesignate canary environments named\nby `environments`, or every environment `selector` matches now. Exactly\none of the two is given.",
+      "properties": {
+        "designated": {
+          "type": "boolean"
+        },
+        "environments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "selector": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "designated"
+      ],
+      "type": "object"
+    },
+    "CanaryDesignationResult": {
+      "description": "The environments a designation request changed, by name.",
+      "properties": {
+        "designated": {
+          "type": "boolean"
+        },
+        "environments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "selector": {
+          "$ref": "#/$defs/HoldSelector",
+          "description": "The selector record kept on each designation, when one was given."
+        }
+      },
+      "required": [
+        "designated",
+        "environments"
+      ],
+      "type": "object"
+    },
     "CertificateEntry": {
       "properties": {
         "days_left": {
@@ -9614,6 +9681,29 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/EffectiveCriticality"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/canaries",
+      "request": null,
+      "response": {
+        "items": {
+          "$ref": "#/$defs/CanaryDesignation"
+        },
+        "type": "array"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/canaries",
+      "request": {
+        "$ref": "#/$defs/CanaryDesignationRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/CanaryDesignationResult"
       }
     },
     {

@@ -2634,12 +2634,11 @@ impl ManagementOperations {
         .await
     }
 
-    /// Resolve the selector a hold is placed by, over the environments the
-    /// credential can see. Refuses when `environment` does not match now.
-    async fn hold_selector(
+    /// Resolve `selector` over the environments the credential can see, now:
+    /// the canonical selector and each matching environment name once.
+    async fn resolve_selector(
         &self,
         credential: &CredentialMaterial,
-        environment: &str,
         selector: &str,
     ) -> Result<crate::delivery_hold::HoldSelector, ManagementError> {
         let source = crate::labels::parse_selector(selector)?
@@ -2654,15 +2653,121 @@ impl ManagementOperations {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        if !environments.iter().any(|name| name == environment) {
-            return Err(ManagementError::Conflict(format!(
-                "environment {environment} does not match selector {source}"
-            )));
-        }
         Ok(crate::delivery_hold::HoldSelector {
             selector: source,
             environments,
         })
+    }
+
+    /// Resolve the selector a hold is placed by. Refuses when `environment`
+    /// does not match now.
+    async fn hold_selector(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        selector: &str,
+    ) -> Result<crate::delivery_hold::HoldSelector, ManagementError> {
+        let resolved = self.resolve_selector(credential, selector).await?;
+        if !resolved.environments.iter().any(|name| name == environment) {
+            return Err(ManagementError::Conflict(format!(
+                "environment {environment} does not match selector {}",
+                resolved.selector
+            )));
+        }
+        Ok(resolved)
+    }
+
+    /// `POST /v1/canaries`: resolve and validate every environment before
+    /// writing, then designate each under its own apply lease. A failed
+    /// write leaves earlier ones in place; repeating the request finishes it.
+    pub async fn designate_canaries(
+        &self,
+        credential: &CredentialMaterial,
+        request: crate::canary::CanaryDesignationRequest,
+    ) -> Result<crate::canary::CanaryDesignationResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "canary.designation.set")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_fleet_management(credential, &context, "canary designation")?;
+        self.require_community_catalog_host()?;
+        let (environments, selector) = match (request.selector.as_deref(), request.environments) {
+            (Some(selector), names) if names.is_empty() => {
+                let resolved = self.resolve_selector(credential, selector).await?;
+                if resolved.environments.is_empty() {
+                    return Err(ManagementError::Conflict(format!(
+                        "selector {} matches no environment",
+                        resolved.selector
+                    )));
+                }
+                (resolved.environments.clone(), Some(resolved))
+            }
+            (None, names) if !names.is_empty() => {
+                let visible: std::collections::BTreeSet<String> = self
+                    .list_environments(credential)
+                    .await?
+                    .into_iter()
+                    .map(|entry| entry.name)
+                    .collect();
+                let names: std::collections::BTreeSet<String> = names.into_iter().collect();
+                for name in &names {
+                    crate::ontology::validate_identifier("environment", name)
+                        .map_err(|error| ManagementError::BadRequest(error.to_string()))?;
+                    if !visible.contains(name) {
+                        return Err(ManagementError::NotFound(format!(
+                            "environment {name} is not registered"
+                        )));
+                    }
+                }
+                (names.into_iter().collect(), None)
+            }
+            _ => {
+                return Err(ManagementError::BadRequest(
+                    "give exactly one of selector or environments".into(),
+                ));
+            }
+        };
+        let actor = &context.audit_principal();
+        self.audit(actor, "canary.designation.set.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        // The selector is provenance of a designation; clearing keeps none.
+        let recorded = selector.as_ref().filter(|_| request.designated);
+        for environment in &environments {
+            crate::canary::set_designated_by(
+                &mut ctx,
+                &context,
+                environment,
+                request.designated,
+                recorded,
+            )
+            .await
+            .map_err(map_catalog_error)?;
+        }
+        self.audit(actor, "canary.designation.set.completed")?;
+        Ok(crate::canary::CanaryDesignationResult {
+            designated: request.designated,
+            environments,
+            selector: recorded.cloned(),
+        })
+    }
+
+    /// `GET /v1/canaries`: designated canary environments the credential can
+    /// read, with who designated each, when, and by which selector.
+    pub async fn canary_designations(
+        &self,
+        credential: &CredentialMaterial,
+    ) -> Result<Vec<crate::canary::CanaryDesignation>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_community_catalog_host()?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let mut designations = crate::canary::designations(&mut ctx)
+            .await
+            .map_err(internal)?;
+        designations.retain(|designation| {
+            self.require_environment_grant(credential, &context, Some(&designation.environment), "")
+                .is_ok()
+        });
+        Ok(designations)
     }
 
     async fn mutate_environment_hold(

@@ -609,11 +609,94 @@ async fn active_from_pointer(ctx: &mut Ctx, pointer: &Object) -> Result<ActiveCa
     Ok(active)
 }
 
+/// One designated canary environment: who designated it, when, and the
+/// selector that chose it, when one did. Designations written before this
+/// provenance existed read back with only the environment.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct CanaryDesignation {
+    pub environment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub set_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub set_at: Option<i64>,
+    /// The selector and the environments it resolved to at write time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub selector: Option<crate::delivery_hold::HoldSelector>,
+}
+
+/// `POST /v1/canaries`: designate or undesignate canary environments named
+/// by `environments`, or every environment `selector` matches now. Exactly
+/// one of the two is given.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct CanaryDesignationRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<String>,
+    pub designated: bool,
+}
+
+/// The environments a designation request changed, by name.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct CanaryDesignationResult {
+    pub designated: bool,
+    pub environments: Vec<String>,
+    /// The selector record kept on each designation, when one was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub selector: Option<crate::delivery_hold::HoldSelector>,
+}
+
+/// Every designated canary environment, by name.
+pub async fn designations(ctx: &mut Ctx) -> Result<Vec<CanaryDesignation>> {
+    let mut out: Vec<CanaryDesignation> = ctx
+        .list_kind(KIND_CANARY_DESIGNATION)
+        .await?
+        .iter()
+        .filter_map(|object| {
+            Some(CanaryDesignation {
+                environment: object.properties.get("environment")?.clone(),
+                set_by: object.properties.get("set_by").cloned(),
+                set_at: object
+                    .properties
+                    .get("set_at")
+                    .and_then(|at| at.parse().ok()),
+                selector: crate::delivery_hold::HoldSelector::read(object),
+            })
+        })
+        .collect();
+    out.sort_by(|left, right| left.environment.cmp(&right.environment));
+    Ok(out)
+}
+
 pub async fn set_designated(
     ctx: &mut Ctx,
     actor: &AuthenticatedRequestContext,
     environment: &str,
     designated: bool,
+) -> Result<String> {
+    set_designated_by(ctx, actor, environment, designated, None).await
+}
+
+/// [`set_designated`], recording the actor, the time, and the selector the
+/// environment was designated by, if any. Runs under the environment's
+/// apply lease; repeating it rewrites the same designation.
+pub async fn set_designated_by(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    environment: &str,
+    designated: bool,
+    selector: Option<&crate::delivery_hold::HoldSelector>,
 ) -> Result<String> {
     require_management(actor)?;
     crate::ontology::require_canary_schema(ctx).await?;
@@ -639,13 +722,21 @@ pub async fn set_designated(
         let designation_id = designation_id(environment);
         if designated {
             let now = crate::now_millis();
+            let mut properties = HashMap::from([
+                ("environment".into(), environment.into()),
+                ("set_by".into(), actor.audit_principal()),
+                ("set_at".into(), now.to_string()),
+            ]);
+            if let Some(selector) = selector {
+                selector.write(&mut properties);
+            }
             ctx.put(Object {
                 id: designation_id,
                 kind: KIND_CANARY_DESIGNATION.into(),
                 name: format!("{environment} canary designation"),
                 namespace: NS.into(),
                 external_id: String::new(),
-                properties: HashMap::from([("environment".into(), environment.into())]),
+                properties,
                 created: now,
                 updated: now,
             })
