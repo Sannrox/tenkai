@@ -784,6 +784,7 @@ async fn channel_hold_index(
         holds.insert(
             scope.clone(),
             crate::delivery_hold::DeliveryHold {
+                selector: crate::delivery_hold::HoldSelector::read(&object),
                 reason: reason.clone(),
                 actor: actor.clone(),
                 held_at,

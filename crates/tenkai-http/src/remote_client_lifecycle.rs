@@ -384,11 +384,15 @@ impl RemoteClient {
         .await
     }
 
+    /// Hold `environment`. `selector` records the selector the operator
+    /// placed the hold by; the server refuses it unless the environment
+    /// matches it now.
     pub async fn set_environment_hold(
         &self,
         environment: &str,
         reason: &str,
         expected_generation: u64,
+        selector: Option<&str>,
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
@@ -401,6 +405,7 @@ impl RemoteClient {
                 environment: environment.to_string(),
                 expected_generation,
                 reason: Some(reason.to_string()),
+                selector: selector.map(str::to_string),
             }),
         )
         .await
@@ -422,6 +427,7 @@ impl RemoteClient {
                 environment: environment.to_string(),
                 expected_generation,
                 reason: None,
+                selector: None,
             }),
         )
         .await
@@ -878,6 +884,7 @@ impl RemoteClient {
                 environment: environment.to_string(),
                 expected_generation,
                 reason,
+                selector: None,
             }),
         )
         .await

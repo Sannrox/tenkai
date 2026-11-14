@@ -158,7 +158,7 @@ async fn remote_hold_set_release_retry_and_stale_generation() {
         .unwrap();
 
     let held = client
-        .set_environment_hold("stage", "change freeze", current)
+        .set_environment_hold("stage", "change freeze", current, None)
         .await
         .unwrap();
     assert!(held.message.contains("change freeze"), "{}", held.message);

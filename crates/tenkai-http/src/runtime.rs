@@ -359,6 +359,7 @@ fn error_response_with_reason(
         Json(ErrorBody {
             error: error.into(),
             reason,
+            clause: None,
         }),
     )
         .into_response()
@@ -433,6 +434,18 @@ pub(super) fn management_error(error: ManagementError) -> Response {
         ManagementError::Denied { message, reason } => {
             error_response_with_reason(StatusCode::BAD_REQUEST, message, Some(reason))
         }
+        ManagementError::InvalidSelector(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                reason: Some(tenkai::command_result::CommandRefusalReason {
+                    code: tenkai::command_result::REFUSAL_INVALID_SELECTOR.into(),
+                    next: "correct the selector and retry".into(),
+                }),
+                clause: error.clause,
+                error: error.message,
+            }),
+        )
+            .into_response(),
     }
 }
 

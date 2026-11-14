@@ -77,17 +77,46 @@ pub fn parse_label_pair(spec: &str) -> Result<(String, String)> {
     Ok((key.to_string(), value.to_string()))
 }
 
-pub fn parse_selector(input: &str) -> Result<Selector> {
+/// Query of `GET /v1/environments`.
+#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct EnvironmentListQuery {
+    /// Only environments matching this selector (`key=value`, `key!=value`,
+    /// `key in (a,b)`). Omitted or blank lists every environment.
+    #[serde(default)]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub selector: Option<String>,
+}
+
+/// Why a selector does not parse. `clause` names the clause that is wrong,
+/// and is `None` when the selector as a whole is malformed (empty, an empty
+/// clause, or unbalanced parentheses).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct SelectorError {
+    pub clause: Option<String>,
+    pub message: String,
+}
+
+impl SelectorError {
+    fn whole(error: impl std::fmt::Display) -> Self {
+        Self {
+            clause: None,
+            message: error.to_string(),
+        }
+    }
+}
+
+pub fn parse_selector(input: &str) -> std::result::Result<Selector, SelectorError> {
     let source = input.trim();
     if source.is_empty() {
-        bail!("selector must not be empty");
+        return Err(SelectorError::whole("selector must not be empty"));
     }
     let mut clauses = Vec::new();
-    for clause in split_clauses(source)? {
-        clauses.push(parse_clause(clause)?);
-    }
-    if clauses.is_empty() {
-        bail!("selector {source:?} has no clauses");
+    for clause in split_clauses(source).map_err(SelectorError::whole)? {
+        clauses.push(parse_clause(clause).map_err(|error| SelectorError {
+            clause: Some(clause.to_string()),
+            message: error.to_string(),
+        })?);
     }
     Ok(Selector {
         source: source.to_string(),
@@ -366,9 +395,10 @@ mod tests {
 
     #[test]
     fn parse_refuses_the_offending_clause() {
-        let error = parse_selector("tier=canary,=prod").unwrap_err().to_string();
-        assert!(error.contains("=prod"), "{error}");
-        assert!(error.contains("invalid selector clause"), "{error}");
+        let error = parse_selector("tier=canary,=prod").unwrap_err();
+        assert_eq!(error.clause.as_deref(), Some("=prod"));
+        assert!(error.message.contains("invalid selector clause"), "{error}");
+        assert_eq!(parse_selector("tier=a,").unwrap_err().clause, None);
         let error = parse_label_pair("=x").unwrap_err().to_string();
         assert!(error.contains("invalid label key"), "{error}");
         let error = parse_selector("tier in ()").unwrap_err().to_string();

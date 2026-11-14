@@ -101,6 +101,7 @@ pub const REFUSAL_DEPENDENCY_HOLD: &str = "dependency_hold";
 pub const REFUSAL_RECALL: &str = "recall";
 pub const REFUSAL_STALE_GENERATION: &str = "stale_generation";
 pub const REFUSAL_LEASE: &str = "apply_lease";
+pub const REFUSAL_INVALID_SELECTOR: &str = "invalid_selector";
 
 const KNOWN_REFUSAL_CODES: &[&str] = &[
     REFUSAL_APPROVAL,
@@ -113,6 +114,7 @@ const KNOWN_REFUSAL_CODES: &[&str] = &[
     REFUSAL_RECALL,
     REFUSAL_STALE_GENERATION,
     REFUSAL_LEASE,
+    REFUSAL_INVALID_SELECTOR,
 ];
 
 const MAX_RESOURCES: usize = 8;
