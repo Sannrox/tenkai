@@ -319,8 +319,39 @@ pub(crate) async fn run(
             Ok(())
         }
         Command::Channel {
-            command: crate::catalog_args::ChannelCommand::Policy { .. },
-        } => anyhow::bail!("channel policy is available only with --target embedded"),
+            command:
+                crate::catalog_args::ChannelCommand::Policy {
+                    product,
+                    channel,
+                    source,
+                    soak,
+                    pause,
+                    resume,
+                    ..
+                },
+        } => {
+            if pause {
+                let result = client.pause_channel_policy(&product, &channel).await?;
+                println!("{}", result.message);
+            } else if resume {
+                let result = client.resume_channel_policy(&product, &channel).await?;
+                println!("{}", result.message);
+            } else if source.is_some() || soak.is_some() {
+                anyhow::bail!(
+                    "declaring a channel policy is available only with --target embedded"
+                );
+            } else {
+                let view = client.channel_promotion_policy(&product, &channel).await?;
+                println!(
+                    "channel promotion policy {} {} for {product}/{channel} soak {}ms{}",
+                    view.policy_id,
+                    view.state,
+                    view.soak_duration_ms,
+                    if view.paused { " paused" } else { "" }
+                );
+            }
+            Ok(())
+        }
         Command::Channel {
             command:
                 crate::catalog_args::ChannelCommand::Configure {

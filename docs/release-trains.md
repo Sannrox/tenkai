@@ -89,6 +89,10 @@ matching the default soak reset. Without that flag the soak only resets.
 
 Gate flags on a train still refuse automatic promotion; `--approve-gates`
 stays a human action. Pause is durable and does not delete soak state.
-`channel policy` runs with `--target embedded`. A replica that does not
+`GET /v1/products/{product}/channels/{channel}/policy` returns soak rules,
+pause actor, and soak progress. Pause and resume are
+`POST .../policy/pause` and `POST .../policy/resume`. Remote `tenkaictl
+channel policy --pause/--resume` uses those routes; declaring a policy
+still needs `--target embedded`. A replica that does not
 advertise `channel_promotion_policy` does not evaluate policies; stored
 policies stay inert.

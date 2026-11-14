@@ -30,9 +30,9 @@ use crate::host_identity::AuthSession;
 use crate::instance_explain::InstanceExplainReport;
 use crate::management_lifecycle::{
     self, ApplyRequest, ApproveRequest, ChannelAdmitRequest, ChannelConfigureRequest,
-    ChannelExposureGraceRequest, ChannelHoldRequest, ChannelRemoveRequest,
-    DeliveryFailureThresholdRequest, DeliveryFreezeRequest, DeliveryHoldRequest,
-    ExposureGraceRequest, ExposureWaiverClearRequest, ExposureWaiverRequest,
+    ChannelExposureGraceRequest, ChannelHoldRequest, ChannelPolicyPauseRequest,
+    ChannelRemoveRequest, DeliveryFailureThresholdRequest, DeliveryFreezeRequest,
+    DeliveryHoldRequest, ExposureGraceRequest, ExposureWaiverClearRequest, ExposureWaiverRequest,
     ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest, PromoteRequest,
     PublishRequest, RecallRequest, ReleaseLabelRequest, RetryFailedTargetRequest, RollbackRequest,
     SubscribeRequest,
@@ -2862,6 +2862,101 @@ impl ManagementOperations {
         ))
     }
 
+    pub async fn channel_promotion_policy(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+    ) -> Result<crate::channel_promotion::ChannelPromotionPolicyView, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_environment_grant(credential, &context, None, "channel promotion policy")?;
+        Self::require_channel_binding(&context, channel)?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::channel_promotion::view(&mut ctx, product, channel)
+            .await
+            .map_err(map_catalog_error)
+    }
+
+    pub async fn pause_channel_policy(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+        request: ChannelPolicyPauseRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        self.set_channel_policy_paused(
+            credential,
+            product,
+            channel,
+            request,
+            ManagementLifecycleOperation::ChannelPolicyPause,
+            true,
+        )
+        .await
+    }
+
+    pub async fn resume_channel_policy(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+        request: ChannelPolicyPauseRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        self.set_channel_policy_paused(
+            credential,
+            product,
+            channel,
+            request,
+            ManagementLifecycleOperation::ChannelPolicyResume,
+            false,
+        )
+        .await
+    }
+
+    async fn set_channel_policy_paused(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+        request: ChannelPolicyPauseRequest,
+        operation: ManagementLifecycleOperation,
+        paused: bool,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let verb = if paused { "pause" } else { "resume" };
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, &format!("catalog.channel_policy_{verb}"))?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        Self::require_channel_binding(&context, channel)?;
+        Self::require_product_grant(&context, product)?;
+        management_lifecycle::admit_channel_policy_pause(
+            &request,
+            operation,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, &format!("catalog.channel_policy_{verb}.requested"))?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let active =
+            crate::channel_promotion::set_paused(&mut ctx, &context, product, channel, paused)
+                .await
+                .map_err(map_catalog_error)?;
+        self.audit(actor, &format!("catalog.channel_policy_{verb}.completed"))?;
+        let resource = format!("{product}/{channel}");
+        let message = format!(
+            "channel promotion policy {} {} for {resource}",
+            active.id(),
+            if active.paused { "paused" } else { "resumed" }
+        );
+        Ok(ManagementLifecycleResult::new(
+            operation,
+            message,
+            Some(resource),
+        ))
+    }
+
     pub async fn admit_channel_instance(
         &self,
         credential: &CredentialMaterial,
@@ -4063,6 +4158,7 @@ fn map_catalog_error(error: anyhow::Error) -> ManagementError {
     } else if message.contains("not published")
         || message.contains("not registered")
         || message.contains("does not exist")
+        || message.contains("no channel promotion policy")
     {
         ManagementError::NotFound(message)
     } else if message.contains("digest")

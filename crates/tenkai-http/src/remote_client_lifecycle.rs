@@ -577,6 +577,62 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn channel_promotion_policy(
+        &self,
+        product: &str,
+        channel: &str,
+    ) -> anyhow::Result<tenkai::channel_promotion::ChannelPromotionPolicyView> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/products/{product}/channels/{channel}/policy"),
+        )
+        .await
+    }
+
+    pub async fn pause_channel_policy(
+        &self,
+        product: &str,
+        channel: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/products/{product}/channels/{channel}/policy/pause"),
+            Some(&tenkai::management_lifecycle::ChannelPolicyPauseRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation:
+                    tenkai::management_lifecycle::ManagementLifecycleOperation::ChannelPolicyPause
+                        .as_str()
+                        .into(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn resume_channel_policy(
+        &self,
+        product: &str,
+        channel: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/products/{product}/channels/{channel}/policy/resume"),
+            Some(&tenkai::management_lifecycle::ChannelPolicyPauseRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation:
+                    tenkai::management_lifecycle::ManagementLifecycleOperation::ChannelPolicyResume
+                        .as_str()
+                        .into(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn list_change_events(
+        &self,
+    ) -> anyhow::Result<tenkai::change_stream::ChangeEventPage> {
+        self.request_json(reqwest::Method::GET, "/v1/events").await
+    }
+
     pub async fn configure_channel_pace(
         &self,
         product: &str,

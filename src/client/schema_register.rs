@@ -1058,6 +1058,8 @@ pub fn known_object_types() -> Vec<ObjectType> {
                     true,
                     "Whether the reconciler must skip this policy",
                 ),
+                prop("paused_by", false, "Principal that paused the policy"),
+                prop("paused_at", false, "Pause time in Unix milliseconds"),
             ],
         ),
         object_type(

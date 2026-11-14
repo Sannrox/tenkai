@@ -852,6 +852,60 @@
       ],
       "type": "object"
     },
+    "ChannelPolicyPauseRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/products/{product}/channels/{channel}/policy/pause`\nand `.../policy/resume`.",
+      "properties": {
+        "operation": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation"
+      ],
+      "type": "object"
+    },
+    "ChannelPromotionEvidence": {
+      "description": "Evidence the soak must keep true.",
+      "properties": {
+        "canary": {
+          "default": false,
+          "type": "boolean"
+        },
+        "evaluation": {
+          "default": false,
+          "type": "boolean"
+        },
+        "failing_max_share": {
+          "default": 0.0,
+          "description": "Maximum share of soak time with any replica failing (0.0–1.0).",
+          "format": "double",
+          "type": "number"
+        },
+        "health_slo": {
+          "default": false,
+          "type": "boolean"
+        },
+        "healthy_min_share": {
+          "default": 1.0,
+          "description": "Minimum share of soak time with every replica healthy (0.0–1.0).",
+          "format": "double",
+          "type": "number"
+        },
+        "recall_on_failing": {
+          "default": false,
+          "description": "When true, exceeding `failing_max_share` recalls the soaking source\nrelease instead of only resetting the soak.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "ChannelPromotionPolicyStatus": {
       "description": "Operator-visible soak row for `fleet status`.",
       "properties": {
@@ -897,6 +951,98 @@
         "policy_version",
         "paused",
         "state"
+      ],
+      "type": "object"
+    },
+    "ChannelPromotionPolicyView": {
+      "description": "Policy rules, pause actor, and soak progress for `GET /v1/products/{product}/channels/{channel}/policy`.",
+      "properties": {
+        "elapsed_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "evidence": {
+          "$ref": "#/$defs/ChannelPromotionEvidence"
+        },
+        "failing_share": {
+          "format": "double",
+          "type": "number"
+        },
+        "healthy_share": {
+          "format": "double",
+          "type": "number"
+        },
+        "instances_without_evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "last_reset_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "last_reset_cause": {
+          "type": "string"
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "paused_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "paused_by": {
+          "type": "string"
+        },
+        "policy_id": {
+          "type": "string"
+        },
+        "policy_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "product": {
+          "type": "string"
+        },
+        "promoted_by": {
+          "type": "string"
+        },
+        "promoted_by_kind": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "soak_duration_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "soaking_release": {
+          "type": "string"
+        },
+        "source_channel": {
+          "type": "string"
+        },
+        "state": {
+          "description": "`waiting` | `soaking` | `ready` | `reset` | `refused` | `promoted` | `recalled`.",
+          "type": "string"
+        },
+        "target_channel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "product",
+        "target_channel",
+        "source_channel",
+        "policy_id",
+        "policy_version",
+        "paused",
+        "state",
+        "soak_duration_ms",
+        "evidence"
       ],
       "type": "object"
     },
@@ -9357,6 +9503,37 @@
       "path": "/v1/products/{product}/channels/{channel}/pace",
       "request": {
         "$ref": "#/$defs/ChannelConfigureRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/products/{product}/channels/{channel}/policy",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/ChannelPromotionPolicyView"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/products/{product}/channels/{channel}/policy/pause",
+      "request": {
+        "$ref": "#/$defs/ChannelPolicyPauseRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/products/{product}/channels/{channel}/policy/resume",
+      "request": {
+        "$ref": "#/$defs/ChannelPolicyPauseRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"

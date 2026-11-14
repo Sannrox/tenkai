@@ -18,6 +18,7 @@ use tenkai::approval_policy::EffectiveApprovalPolicy;
 use tenkai::backup::{BackupManifest, BackupStatus};
 use tenkai::catalog::{ChannelPage, ReleasePage};
 use tenkai::change_stream::ChangeEventPage;
+use tenkai::channel_promotion::ChannelPromotionPolicyView;
 use tenkai::content_inventory::ContentInventory;
 use tenkai::criticality::{
     DerivedEnvelope, DerivedImportResult, EffectiveCriticality, SetCriticalityRequest,
@@ -34,9 +35,9 @@ use tenkai::host_identity::AuthSession;
 use tenkai::instance_explain::InstanceExplainReport;
 use tenkai::management_lifecycle::{
     ApplyRequest, ApproveRequest, ChannelAdmitRequest, ChannelConfigureRequest,
-    ChannelExposureGraceRequest, ChannelHoldRequest, ChannelRemoveRequest,
-    DeliveryFailureThresholdRequest, DeliveryFreezeRequest, DeliveryHoldRequest,
-    ExposureGraceRequest, ExposureWaiverClearRequest, ExposureWaiverRequest,
+    ChannelExposureGraceRequest, ChannelHoldRequest, ChannelPolicyPauseRequest,
+    ChannelRemoveRequest, DeliveryFailureThresholdRequest, DeliveryFreezeRequest,
+    DeliveryHoldRequest, ExposureGraceRequest, ExposureWaiverClearRequest, ExposureWaiverRequest,
     ManagementLifecycleResult, PlanRequest, PromoteHttpRequest, PublishRequest,
     RecallRangeCloseRequest, RecallRangeRequest, RecallRequest, ReleaseLabelRequest,
     RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
@@ -883,6 +884,27 @@ pub fn http_contract() -> Value {
             response: lifecycle.clone(),
         },
         Route {
+            method: "GET",
+            path: "/v1/products/{product}/channels/{channel}/policy",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<ChannelPromotionPolicyView>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/products/{product}/channels/{channel}/policy/pause",
+            auth: Auth::Management,
+            request: Some(schema::<ChannelPolicyPauseRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/products/{product}/channels/{channel}/policy/resume",
+            auth: Auth::Management,
+            request: Some(schema::<ChannelPolicyPauseRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
             method: "POST",
             path: "/v1/products/{product}/channels/{channel}/admit",
             auth: Auth::Management,
@@ -1109,6 +1131,18 @@ mod tests {
             ("ManagementLifecycleResult", "replaced_head"),
             ("MigrationRecord", "pending_plan_id"),
             ("ChangeEvent", "environment"),
+            ("ChannelPromotionPolicyView", "reason"),
+            ("ChannelPromotionPolicyView", "paused_by"),
+            ("ChannelPromotionPolicyView", "paused_at"),
+            ("ChannelPromotionPolicyView", "soaking_release"),
+            ("ChannelPromotionPolicyView", "elapsed_ms"),
+            ("ChannelPromotionPolicyView", "healthy_share"),
+            ("ChannelPromotionPolicyView", "failing_share"),
+            ("ChannelPromotionPolicyView", "last_reset_at"),
+            ("ChannelPromotionPolicyView", "last_reset_cause"),
+            ("ChannelPromotionPolicyView", "promoted_by"),
+            ("ChannelPromotionPolicyView", "promoted_by_kind"),
+            ("ChannelPromotionPolicyStatus", "reason"),
             ("ReleasePage", "next_cursor"),
             ("ChannelPage", "next_cursor"),
             ("MigrationPage", "next_cursor"),

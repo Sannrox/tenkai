@@ -711,6 +711,67 @@ pub(super) async fn release_channel_hold(
     )
 }
 
+pub(super) async fn channel_promotion_policy(
+    State(state): State<Arc<AppState>>,
+    Path((product, channel)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .channel_promotion_policy(&credential, &product, &channel)
+            .await,
+    )
+}
+
+pub(super) async fn pause_channel_policy(
+    State(state): State<Arc<AppState>>,
+    Path((product, channel)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .pause_channel_policy(&credential, &product, &channel, request)
+            .await,
+    )
+}
+
+pub(super) async fn resume_channel_policy(
+    State(state): State<Arc<AppState>>,
+    Path((product, channel)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .resume_channel_policy(&credential, &product, &channel, request)
+            .await,
+    )
+}
+
 pub(super) async fn configure_channel_pace(
     State(state): State<Arc<AppState>>,
     Path((product, channel)): Path<(String, String)>,

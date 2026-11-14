@@ -136,7 +136,8 @@ before them answers `404`. An older binary does not consult
 does not recall on an older replica until every replica runs this release.
 `GET /v1/environments/{environment}/approval-policy` is an additive
 `tenkai.http.v1` read of the effective plan-approval policy; it does not
-edit the policy file. Environment registration and the configuration
+edit the policy file. Channel promotion policy read, pause, and resume are
+additive `tenkai.http.v1` routes; a server from before them answers `404`. Environment registration and the configuration
 `PUT`/`DELETE` routes are additive `tenkai.http.v1` routes on the same
 envelope.
 
