@@ -406,6 +406,44 @@ pub struct ManagementLifecycleResult {
     /// fields here, so the default response stays as it was.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<ApplyStepResult>,
+    /// What a cancel did (#1274). Present only on a cancel result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub cancel: Option<ApplyCancelResult>,
+}
+
+/// Whether a cancel named the live apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyCancelMatch {
+    /// The live apply stops after its current step.
+    Matched,
+    /// `expected_generation` was not the live apply; nothing changed.
+    Stale,
+}
+
+/// Typed outcome of `POST /v1/environments/{environment}/apply/cancel`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ApplyCancelResult {
+    pub outcome: ApplyCancelMatch,
+    /// Generation of the live apply lease.
+    pub live_generation: u64,
+    /// True when this cancel set the environment hold.
+    pub hold_set: bool,
+}
+
+impl ApplyCancelResult {
+    pub fn from_report(report: &crate::apply::CancelApplyReport, expected_generation: u64) -> Self {
+        Self {
+            outcome: if report.matched {
+                ApplyCancelMatch::Matched
+            } else {
+                ApplyCancelMatch::Stale
+            },
+            live_generation: report.generation.unwrap_or(expected_generation),
+            hold_set: report.hold.is_some(),
+        }
+    }
 }
 
 /// Longest step detail an apply response carries, in characters.
@@ -418,7 +456,8 @@ pub struct ApplyStepResult {
     pub product: String,
     pub instance: String,
     pub action: String,
-    /// `succeeded`, `blocked`, `failed` or `rolled_back`.
+    /// `succeeded`, `blocked`, `failed`, `rolled_back`, or `skipped` for a
+    /// step a cancel stopped before it ran (#1274).
     pub status: String,
     pub to_version: String,
     /// The step's detail, cut to [`STEP_DETAIL_CHARS`].
@@ -458,7 +497,11 @@ impl ApplyStepResult {
             product: step.product.clone(),
             instance: step.instance_name().to_string(),
             action: step.action.to_string(),
-            status: status.as_str().into(),
+            status: if outcome.is_cancel_skipped() {
+                "skipped".into()
+            } else {
+                status.as_str().into()
+            },
             to_version: step.to.clone(),
             detail: outcome.detail.chars().take(STEP_DETAIL_CHARS).collect(),
             detail_truncated,
@@ -497,6 +540,7 @@ impl ManagementLifecycleResult {
             digest: None,
             replaced_head: None,
             steps: Vec::new(),
+            cancel: None,
         }
     }
 
@@ -694,6 +738,10 @@ pub struct ApplyRequest {
     pub skip_gates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emergency_reason: Option<String>,
+    /// Skip the hold a rollback-only plan sets when it succeeds (#1274), as
+    /// embedded `rollback --no-hold` does. Refused on other plans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_hold_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1312,6 +1360,11 @@ pub fn admit_apply(
         && reason.trim().is_empty()
     {
         bail!("apply emergency_reason must not be empty when set");
+    }
+    if let Some(reason) = request.no_hold_reason.as_deref()
+        && reason.trim().is_empty()
+    {
+        bail!("apply no_hold_reason must not be empty when set");
     }
     let admitted = admit_environment_operation(
         request.version,
@@ -2199,6 +2252,7 @@ pub fn load_apply_request(
         trust_roots: TrustRoots::load(trust_roots, TrustRootKind::PlanApproval)?,
         skip_gates,
         emergency_reason,
+        no_hold_reason: None,
     })
 }
 

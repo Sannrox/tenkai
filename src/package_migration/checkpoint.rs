@@ -135,6 +135,7 @@ pub(super) async fn apply_pin(
         ctx,
         &plan_id,
         ExecutionOptions {
+            rollback_hold: true,
             skip_gates: false,
             emergency_reason: None,
             authorization: exec,

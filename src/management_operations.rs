@@ -3641,10 +3641,24 @@ impl ManagementOperations {
                 .executable_digest()
                 .map_err(map_plan_lifecycle_error)?
         );
+        // Like embedded `rollback --no-hold`, but the execution never sets
+        // the hold, so a hold someone else sets meanwhile stays.
+        if request.no_hold_reason.is_some()
+            && (stored.steps.is_empty()
+                || stored
+                    .steps
+                    .iter()
+                    .any(|step| step.action != crate::plan::Action::Rollback))
+        {
+            return Err(ManagementError::BadRequest(format!(
+                "no_hold_reason applies only to a rollback plan; {plan_id} is not one"
+            )));
+        }
         let outcomes = crate::apply::execute_with_options(
             &mut ctx,
             plan_id,
             crate::apply::ExecutionOptions {
+                rollback_hold: request.no_hold_reason.is_none(),
                 skip_gates: request.skip_gates,
                 emergency_reason: request.emergency_reason.as_deref(),
                 authorization: crate::apply::ExecutionAuthorization::Signed {
@@ -3680,6 +3694,11 @@ impl ManagementOperations {
             )?;
             return Err(ManagementError::StepsFailed { message, steps });
         }
+        let mut message = format!("applied {} step(s) for {plan_id}", outcomes.len());
+        if let Some(reason) = request.no_hold_reason.as_deref() {
+            self.audit(actor, "plan.rollback.hold.skipped")?;
+            message.push_str(&format!("; skipped the rollback hold: {reason}"));
+        }
         self.audit(actor, "plan.apply.completed")?;
         self.record_change(
             &context,
@@ -3689,7 +3708,7 @@ impl ManagementOperations {
         )?;
         let mut result = ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Apply,
-            format!("applied {} step(s) for {plan_id}", outcomes.len()),
+            message,
             Some(stored.id),
         )
         .with_digest(digest);
@@ -3736,11 +3755,16 @@ impl ManagementOperations {
                 Some(environment),
             )?;
         }
-        Ok(ManagementLifecycleResult::new(
+        let mut result = ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Cancel,
-            report.message,
+            report.message.clone(),
             Some(environment.into()),
-        ))
+        );
+        result.cancel = Some(crate::management_lifecycle::ApplyCancelResult::from_report(
+            &report,
+            request.expected_generation,
+        ));
+        Ok(result)
     }
 
     pub async fn rollback_environment(

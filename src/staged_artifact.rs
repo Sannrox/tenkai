@@ -735,6 +735,7 @@ document = "agent.json"
             &mut ctx,
             &plan.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {

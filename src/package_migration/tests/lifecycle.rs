@@ -61,6 +61,7 @@ async fn compatible_migration_approves_executes_resumes_and_rolls_back() {
         &mut ctx,
         &sneak.id,
         crate::apply::ExecutionOptions {
+            rollback_hold: true,
             skip_gates: false,
             emergency_reason: None,
             authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {

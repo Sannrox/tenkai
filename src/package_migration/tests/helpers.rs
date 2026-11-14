@@ -118,6 +118,7 @@ pub(super) async fn deploy_source(ctx: &mut Ctx) {
         ctx,
         &plan.id,
         crate::apply::ExecutionOptions {
+            rollback_hold: true,
             skip_gates: false,
             emergency_reason: None,
             authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {

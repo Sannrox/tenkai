@@ -934,6 +934,7 @@ async fn execute_plan(
         ctx,
         plan_id,
         ExecutionOptions {
+            rollback_hold: true,
             skip_gates: false,
             emergency_reason: None,
             authorization,

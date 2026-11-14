@@ -128,6 +128,7 @@ pub(crate) async fn run(
                 ctx,
                 &plan_id,
                 apply::ExecutionOptions {
+                    rollback_hold: true,
                     skip_gates,
                     emergency_reason: emergency_reason.as_deref(),
                     authorization,
@@ -284,6 +285,7 @@ pub(crate) async fn run_plan(
     let worker_lifecycle =
         tenkai::worker_pool::selected_worker_lifecycle()?.map(std::sync::Arc::from);
     let execution = apply::ExecutionOptions {
+        rollback_hold: true,
         skip_gates: execution.skip_gates,
         emergency_reason: execution.emergency_reason,
         authorization: execution.authorization,

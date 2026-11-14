@@ -663,6 +663,7 @@ replicas = 1
             &mut ctx,
             &plan.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -1038,6 +1039,7 @@ drain_timeout_ms = 1000
             &mut ctx,
             &plan.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {

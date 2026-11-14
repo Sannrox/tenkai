@@ -181,7 +181,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!report.matched);
+        assert_eq!(
+            crate::management_lifecycle::ApplyCancelResult::from_report(&report, 0),
+            crate::management_lifecycle::ApplyCancelResult {
+                outcome: crate::management_lifecycle::ApplyCancelMatch::Stale,
+                live_generation: lease.generation,
+                hold_set: false,
+            }
+        );
         assert!(
             delivery_hold::get(&mut ctx, &HoldScope::environment("local"))
                 .await
@@ -209,7 +216,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(report.matched);
+        assert_eq!(
+            crate::management_lifecycle::ApplyCancelResult::from_report(&report, lease.generation),
+            crate::management_lifecycle::ApplyCancelResult {
+                outcome: crate::management_lifecycle::ApplyCancelMatch::Matched,
+                live_generation: lease.generation,
+                hold_set: true,
+            }
+        );
         assert_eq!(report.hold.as_ref().unwrap().reason, "stop");
         assert!(matches_lease(&mut ctx, &lease).await.unwrap());
         crate::apply::release_environment(&mut ctx, &lease)
@@ -358,6 +372,7 @@ mod tests {
         executors: crate::software_executor::SoftwareExecutors,
     ) -> crate::apply::ExecutionOptions<'static> {
         crate::apply::ExecutionOptions {
+            rollback_hold: true,
             skip_gates: true,
             emergency_reason: None,
             authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -399,6 +414,13 @@ mod tests {
         assert_eq!(outcomes[1].status, "succeeded");
         assert_eq!(outcomes[2].status, "failed");
         assert_eq!(outcomes[2].detail, SKIP_DETAIL);
+        let wire = |outcome| {
+            crate::management_lifecycle::ApplyStepResult::from_outcome(outcome)
+                .unwrap()
+                .status
+        };
+        assert_eq!(wire(&outcomes[1]), "succeeded");
+        assert_eq!(wire(&outcomes[2]), "skipped");
         assert_eq!(executor.applied.lock().unwrap().len(), 2);
         let hold = delivery_hold::get(&mut ctx, &HoldScope::environment("local"))
             .await

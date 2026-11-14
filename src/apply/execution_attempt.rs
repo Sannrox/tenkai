@@ -38,6 +38,9 @@ pub struct ExecutionOptions<'a> {
     pub artifact_registry: Option<Arc<dyn crate::oci_artifact::ArtifactRegistry>>,
     /// Host-selected external delivery adapter. `None` keeps built-in execution.
     pub delivery_adapter: Option<std::sync::Arc<dyn crate::delivery_bridge::DeliveryAdapter>>,
+    /// Hold the environment after a rollback-only plan succeeds. Hosts pass
+    /// `true`; an operator opt-out (#1274) passes `false`, so no hold is set.
+    pub rollback_hold: bool,
 }
 
 impl std::fmt::Debug for ExecutionOptions<'_> {
@@ -55,6 +58,7 @@ impl std::fmt::Debug for ExecutionOptions<'_> {
             .field("worker_lifecycle", &self.worker_lifecycle.is_some())
             .field("artifact_registry", &self.artifact_registry.is_some())
             .field("delivery_adapter", &self.delivery_adapter.is_some())
+            .field("rollback_hold", &self.rollback_hold)
             .finish()
     }
 }
@@ -71,6 +75,7 @@ pub(super) struct AttemptExecutionPolicy<'a> {
     pub delivery_adapter: Option<std::sync::Arc<dyn crate::delivery_bridge::DeliveryAdapter>>,
     pub approval: Option<(std::path::PathBuf, std::path::PathBuf)>,
     pub requester: Option<String>,
+    pub rollback_hold: bool,
 }
 
 /// Compatibility entry point retained so downstream crates receive an
@@ -248,6 +253,7 @@ async fn execute_with_options_inner(
     let worker_lifecycle = options.worker_lifecycle;
     let artifact_registry = options.artifact_registry;
     let delivery_adapter = options.delivery_adapter.clone();
+    let rollback_hold = options.rollback_hold;
     let (approval, requester) = match options.authorization {
         ExecutionAuthorization::Signed {
             approval,
@@ -276,6 +282,7 @@ async fn execute_with_options_inner(
                         delivery_adapter,
                         approval,
                         requester,
+                        rollback_hold,
                     },
                     &execution_lease,
                 )

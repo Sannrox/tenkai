@@ -67,6 +67,7 @@ pub(crate) async fn run(
                     ctx,
                     &stored.id,
                     apply::ExecutionOptions {
+                        rollback_hold: true,
                         skip_gates: true,
                         emergency_reason: emergency_reason.as_deref(),
                         authorization: apply::ExecutionAuthorization::LocalDevelopment {
@@ -144,6 +145,7 @@ pub(crate) async fn run(
                     ctx,
                     &stored.id,
                     apply::ExecutionOptions {
+                        rollback_hold: true,
                         skip_gates: true,
                         emergency_reason: emergency_reason.as_deref(),
                         authorization: apply::ExecutionAuthorization::LocalDevelopment {

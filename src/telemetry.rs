@@ -649,6 +649,7 @@ mod tests {
                     &mut ctx,
                     &first.id,
                     crate::apply::ExecutionOptions {
+                        rollback_hold: true,
                         skip_gates: false,
                         emergency_reason: None,
                         authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -676,6 +677,7 @@ mod tests {
                     &mut ctx,
                     &upgrade.id,
                     crate::apply::ExecutionOptions {
+                        rollback_hold: true,
                         skip_gates: false,
                         emergency_reason: None,
                         authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -706,6 +708,7 @@ mod tests {
                     &mut ctx,
                     &rollback.id,
                     crate::apply::ExecutionOptions {
+                        rollback_hold: true,
                         skip_gates: false,
                         emergency_reason: None,
                         authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {

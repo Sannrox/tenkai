@@ -147,8 +147,76 @@ async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
         signed_plan_requests(&root, "approve-r", "stage", &rollback_digest, current);
     client.approve_plan(&rollback_id, &approve_r).await.unwrap();
     apply_r.expected_generation = current;
+    // A rollback-only opt-out on another plan is refused before it runs.
+    let mut misplaced = apply_r.clone();
+    misplaced.no_hold_reason = Some("hotfix follows".into());
+    let refused = client
+        .apply_plan(&plan_b_id, &misplaced)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("applies only to a rollback plan"),
+        "{refused}"
+    );
     client.apply_plan(&rollback_id, &apply_r).await.unwrap();
     assert_eq!(deployed_version(&client, "stage", "api").await, "1.0.0");
+    // A remote rollback holds the environment like an embedded one (#1274).
+    let hold = client.environment_hold("stage").await.unwrap().hold;
+    assert_eq!(hold.map(|hold| hold.reason).as_deref(), Some("rollback"));
+
+    // Opting out with a reason leaves the environment unheld.
+    let current = current_generation(&client, "stage").await;
+    client
+        .release_environment_hold("stage", current)
+        .await
+        .unwrap();
+    let plan_c = client.plan_environment("stage", current).await.unwrap();
+    let plan_c_id = plan_c.resource.clone().expect("re-upgrade plan id");
+    let (approve_c, mut apply_c) = signed_plan_requests(
+        &root,
+        "approve-c",
+        "stage",
+        &plan_c.digest.clone().expect("re-upgrade digest"),
+        current,
+    );
+    client.approve_plan(&plan_c_id, &approve_c).await.unwrap();
+    apply_c.expected_generation = current;
+    client.apply_plan(&plan_c_id, &apply_c).await.unwrap();
+    assert_eq!(deployed_version(&client, "stage", "api").await, "1.1.0");
+    let current = current_generation(&client, "stage").await;
+    let unheld = client
+        .rollback_environment("stage", "api", current, None)
+        .await
+        .unwrap();
+    let unheld_id = unheld.resource.clone().expect("rollback plan id");
+    let (approve_u, mut apply_u) = signed_plan_requests(
+        &root,
+        "approve-u",
+        "stage",
+        &unheld.digest.clone().expect("rollback digest"),
+        current,
+    );
+    client.approve_plan(&unheld_id, &approve_u).await.unwrap();
+    apply_u.expected_generation = current;
+    apply_u.no_hold_reason = Some("hotfix follows".into());
+    let applied = client.apply_plan(&unheld_id, &apply_u).await.unwrap();
+    assert!(
+        applied
+            .message
+            .contains("skipped the rollback hold: hotfix follows"),
+        "{}",
+        applied.message
+    );
+    assert_eq!(deployed_version(&client, "stage", "api").await, "1.0.0");
+    assert!(
+        client
+            .environment_hold("stage")
+            .await
+            .unwrap()
+            .hold
+            .is_none()
+    );
     assert_eq!(
         tenkai::management_lifecycle::plan_environment_from_id(&rollback_id).unwrap(),
         "stage"

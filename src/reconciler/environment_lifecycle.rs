@@ -314,6 +314,7 @@ async fn execute_authorized(
         ctx,
         plan_id,
         apply::ExecutionOptions {
+            rollback_hold: true,
             skip_gates,
             emergency_reason: None,
             authorization,

@@ -1129,6 +1129,7 @@ mod tests {
             ("PlanApprovalView", "policy_provider"),
             ("ManagementLifecycleResult", "resource"),
             ("ManagementLifecycleResult", "replaced_head"),
+            ("ManagementLifecycleResult", "cancel"),
             ("MigrationRecord", "pending_plan_id"),
             ("ChangeEvent", "environment"),
             ("ChannelPromotionPolicyView", "reason"),
