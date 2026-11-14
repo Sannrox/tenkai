@@ -470,6 +470,9 @@ pub struct Outcome {
     /// one in this execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<String>,
+    /// The live object that moved since planning, when apply refused the step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_target: Option<crate::spec_drift::StaleTarget>,
 }
 
 impl Outcome {
@@ -499,6 +502,7 @@ impl Outcome {
             cause,
             restore,
             attempt_id: None,
+            stale_target: None,
         }
     }
 
@@ -509,6 +513,11 @@ impl Outcome {
 
     pub fn with_restore(mut self, restore: DeploymentCause) -> Self {
         self.restore = Some(restore);
+        self
+    }
+
+    pub fn with_stale_target(mut self, stale_target: crate::spec_drift::StaleTarget) -> Self {
+        self.stale_target = Some(stale_target);
         self
     }
 
@@ -575,6 +584,7 @@ mod tests {
             cause: None,
             restore: None,
             attempt_id: None,
+            stale_target: None,
         };
 
         assert!(outcome.classified_status().is_err());

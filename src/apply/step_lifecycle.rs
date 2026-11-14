@@ -154,10 +154,18 @@ pub(super) async fn execute(
                     .render_target_changes(&request)
                     .map_err(|error| error.to_string())
             });
+        let stale_target = match &live {
+            Some(Ok(observed)) => crate::spec_drift::stale_object(&step.target_changes, observed)
+                .map(crate::spec_drift::StaleTarget::from_change),
+            _ => None,
+        };
         if let Some(detail) =
             crate::spec_drift::stale_step_detail(&step.id, &step.target_changes, live)
         {
             let mut outcome = Outcome::new(step.clone(), StepOutcomeStatus::Failed, detail);
+            if let Some(stale_target) = stale_target {
+                outcome = outcome.with_stale_target(stale_target);
+            }
             record(
                 ctx,
                 started_at_ms,

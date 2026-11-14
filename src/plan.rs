@@ -482,8 +482,8 @@ impl Plan {
         lifecycle::to_object(self)
     }
 
-    #[cfg(test)]
-    pub(crate) fn bind_content_identity(&mut self) -> Result<()> {
+    /// Bind `content_id`, `id`, and step ids to the executable contents.
+    pub fn bind_content_identity(&mut self) -> Result<()> {
         self.content_id = content_address(
             &self.environment,
             self.created_at,
