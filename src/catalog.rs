@@ -121,6 +121,11 @@ pub struct ChannelListEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub exposure_grace_ms: Option<i64>,
+    /// Configured upgrade pace in milliseconds. Omitted means pacing is off.
+    /// A changed duration applies from the next promotion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub upgrade_pace_ms: Option<i64>,
 }
 
 /// One page of [`ChannelListEntry`] values.
@@ -739,6 +744,7 @@ fn channel_list_entry(object: Object) -> ChannelListEntry {
         .unwrap_or_default();
     ChannelListEntry {
         exposure_grace_ms: crate::exposure::grace_property(&object),
+        upgrade_pace_ms: crate::upgrade_pace::configured_ms(&object),
         id: object.id,
         product,
         name,
