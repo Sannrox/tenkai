@@ -5540,6 +5540,77 @@
       ],
       "type": "object"
     },
+    "LabelAction": {
+      "description": "`set` or `clear`.",
+      "enum": [
+        "set",
+        "clear"
+      ],
+      "type": "string"
+    },
+    "LabelChange": {
+      "description": "One recorded label change, as the history read returns it.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/LabelAction"
+        },
+        "actor": {
+          "type": "string"
+        },
+        "at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "description": "Unique id of this change; replays of it record nothing new.",
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "sequence": {
+          "description": "Order among this subject's label changes, from 1. Two writers that\nrace on one subject can share a sequence; both changes are kept.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "value": {
+          "description": "The value set. Omitted on `clear`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "sequence",
+        "key",
+        "action",
+        "actor",
+        "at"
+      ],
+      "type": "object"
+    },
+    "LabelView": {
+      "description": "One label on a read: the value, and who set it and when. Labels set\nbefore provenance was recorded read back without `set_by` and `set_at`.",
+      "properties": {
+        "set_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "set_by": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
     "ManagementLifecycleResult": {
       "description": "Versioned result shared by catalog lifecycle routes. A client ignores\nfields it does not know, so a newer server can add one (#1172);\nrequests stay strict.",
       "properties": {
@@ -9797,11 +9868,35 @@
     {
       "auth": "read",
       "method": "GET",
+      "path": "/v1/environments/{environment}/labels/history",
+      "request": null,
+      "response": {
+        "items": {
+          "$ref": "#/$defs/LabelChange"
+        },
+        "type": "array"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/releases/{product}/{version}/labels/history",
+      "request": null,
+      "response": {
+        "items": {
+          "$ref": "#/$defs/LabelChange"
+        },
+        "type": "array"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
       "path": "/v1/environments/{environment}/labels",
       "request": null,
       "response": {
         "additionalProperties": {
-          "type": "string"
+          "$ref": "#/$defs/LabelView"
         },
         "type": "object"
       }
@@ -9835,7 +9930,7 @@
       "request": null,
       "response": {
         "additionalProperties": {
-          "type": "string"
+          "$ref": "#/$defs/LabelView"
         },
         "type": "object"
       }

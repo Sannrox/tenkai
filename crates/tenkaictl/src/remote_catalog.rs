@@ -142,9 +142,15 @@ pub(crate) async fn run(
                     if labels.is_empty() {
                         println!("{spec} has no labels");
                     } else {
-                        for (key, value) in labels {
-                            println!("{key}={value}");
+                        for (key, label) in labels {
+                            println!("{}", tenkai::labels::render_label(&key, &label));
                         }
+                    }
+                }
+                ReleaseLabelsCommand::History { spec } => {
+                    let (product, version) = split_release_spec(&spec)?;
+                    for change in client.release_label_history(product, version).await? {
+                        println!("{}", tenkai::labels::render_change(&change));
                     }
                 }
                 ReleaseLabelsCommand::Set { spec, pair, reason } => {

@@ -462,6 +462,8 @@ pub(crate) enum LabelsCommand {
         #[command(flatten)]
         remote: RemoteChange,
     },
+    /// Recorded label changes, oldest first.
+    History { env: String },
 }
 
 #[derive(Subcommand)]

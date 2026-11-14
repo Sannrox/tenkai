@@ -134,6 +134,24 @@ pub(super) async fn list_environment_labels(
     )
 }
 
+/// `GET /v1/environments/{environment}/labels/history`.
+pub(super) async fn environment_label_history(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .environment_label_history(&credential, &environment)
+            .await,
+    )
+}
+
 pub(super) async fn configure_labels(
     state: State<Arc<AppState>>,
     method: Method,

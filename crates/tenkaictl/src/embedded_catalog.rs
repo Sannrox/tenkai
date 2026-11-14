@@ -119,20 +119,33 @@ pub(crate) async fn run(
                     if labels.is_empty() {
                         println!("{spec} has no labels");
                     } else {
-                        for (key, value) in labels {
-                            println!("{key}={value}");
+                        for (key, label) in labels {
+                            println!("{}", tenkai::labels::render_label(&key, &label));
                         }
                     }
                 }
-                ReleaseLabelsCommand::Set { spec, pair, .. } => {
+                ReleaseLabelsCommand::Set { spec, pair, reason } => {
                     let (key, value) = tenkai::labels::parse_label_pair(&pair)?;
+                    let actor = crate::embedded_env::local_actor();
+                    let reason = reason.unwrap_or_default();
                     println!(
                         "{}",
-                        tenkai::labels::set_release(ctx, &spec, &key, &value).await?
+                        tenkai::labels::set_release(ctx, &spec, &key, &value, &actor, &reason)
+                            .await?
                     );
                 }
-                ReleaseLabelsCommand::Clear { spec, key, .. } => {
-                    println!("{}", tenkai::labels::clear_release(ctx, &spec, &key).await?);
+                ReleaseLabelsCommand::Clear { spec, key, reason } => {
+                    let actor = crate::embedded_env::local_actor();
+                    let reason = reason.unwrap_or_default();
+                    println!(
+                        "{}",
+                        tenkai::labels::clear_release(ctx, &spec, &key, &actor, &reason).await?
+                    );
+                }
+                ReleaseLabelsCommand::History { spec } => {
+                    for change in tenkai::labels::release_history(ctx, &spec).await? {
+                        println!("{}", tenkai::labels::render_change(&change));
+                    }
                 }
             },
             ReleaseCommand::Render { .. } => {
