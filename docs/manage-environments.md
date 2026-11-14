@@ -669,6 +669,17 @@ A waiver covers one advisory at `release`, `component`, `product`, or
 during the window counted from first-seen; it does not auto-recall. See
 [advisory feed](offline-bundles.md#advisory-feed).
 
+`GET /v1/exposures/waivers` lists stored waivers with scope, category,
+reason, actor, and expiry, whether or not they match a finding today.
+Expired waivers stay stored until cleared and are listed only with
+`?include_expired=true`. A product-bound credential sees global and
+component waivers plus those on its own products.
+
+Environment inspect and the channel list show `exposure_grace_ms` when
+declared. Fleet exposure rows carry `grace_ends_at` and `in_grace`, and
+advisory-feed matches carry `grace` with one entry per environment that runs
+or subscribes to the release and has a grace window.
+
 `exposure.max_inventory_age_ms` on the environment, else the subscribed
 channel, requires a recent signed inventory before install. Absent means
 off. A waiver for advisory id `scan` covers a missing or stale inventory.

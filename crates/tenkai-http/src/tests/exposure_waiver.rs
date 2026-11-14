@@ -80,6 +80,12 @@ async fn remote_waiver_and_grace_require_management() {
 
     let set = management.set_exposure_waiver(waiver_set()).await.unwrap();
     assert!(set.message.contains("TENKAI-2026-1"), "{}", set.message);
+    // Listed without any current match, to read credentials only.
+    assert!(runtime.list_exposure_waivers(false).await.is_err());
+    let listed = scoped.list_exposure_waivers(false).await.unwrap().waivers;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].advisory_id, "TENKAI-2026-1");
+    assert_eq!(listed[0].reason, "scanner noise");
     let cleared = management
         .clear_exposure_waiver(waiver_clear())
         .await
@@ -88,6 +94,14 @@ async fn remote_waiver_and_grace_require_management() {
         cleared.message.contains("TENKAI-2026-1"),
         "{}",
         cleared.message
+    );
+    assert!(
+        management
+            .list_exposure_waivers(true)
+            .await
+            .unwrap()
+            .waivers
+            .is_empty()
     );
 
     let runtime_grace = runtime
@@ -109,6 +123,8 @@ async fn remote_waiver_and_grace_require_management() {
         "{}",
         env_grace.message
     );
+    let stage = management.inspect_environment("stage").await.unwrap();
+    assert_eq!(stage.exposure_grace_ms, Some(86_400_000));
     let scoped_channel = scoped
         .configure_channel_exposure_grace("api", "stable", "24h")
         .await
@@ -127,6 +143,19 @@ async fn remote_waiver_and_grace_require_management() {
             || channel_grace.message.contains("exposure grace"),
         "{}",
         channel_grace.message
+    );
+    let channels: serde_json::Value = reqwest::Client::new()
+        .get(format!("{base}/v1/channels"))
+        .bearer_auth("management-secret")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        channels["items"][0]["exposure_grace_ms"],
+        serde_json::json!(86_400_000)
     );
     let _ = std::fs::remove_dir_all(root);
 }

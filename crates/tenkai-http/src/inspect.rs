@@ -170,6 +170,23 @@ pub(super) async fn inspect_advisory_feed(
     manage_result(state.management.inspect_advisory_feed(&credential).await)
 }
 
+pub(super) async fn list_exposure_waivers(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<tenkai::exposure::ExposureWaiverListQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .list_exposure_waivers(&credential, query.include_expired)
+            .await,
+    )
+}
+
 pub(super) async fn list_channels(
     State(state): State<Arc<AppState>>,
     Query(query): Query<tenkai::page::PageQuery>,

@@ -104,6 +104,30 @@ pub struct ExposureWaiver {
     pub expires_at: i64,
 }
 
+/// Query parameters for `GET /v1/exposures/waivers`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExposureWaiverListQuery {
+    /// Also return waivers whose expiry has passed but are not yet cleared.
+    #[serde(default)]
+    pub include_expired: bool,
+}
+
+/// Waivers returned by `GET /v1/exposures/waivers`, active ones only unless
+/// expired ones were requested.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExposureWaiverList {
+    pub waivers: Vec<ExposureWaiver>,
+}
+
+/// Grace on one open finding in one environment. `grace_ends_at` is the
+/// first-seen stamp plus the environment's (or its channel's) grace window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentGrace {
+    pub environment: String,
+    pub grace_ends_at: i64,
+    pub in_grace: bool,
+}
+
 /// Copy grace and scan-age so a channel put does not drop them.
 pub fn copy_channel_properties(dst: &mut HashMap<String, String>, src: &Object) {
     for key in [GRACE_MS_PROPERTY, super::MAX_INVENTORY_AGE_PROPERTY] {
@@ -191,6 +215,19 @@ pub async fn matching(
         }
     }
     Ok(best.filter(|waiver| waiver.expires_at > now_ms))
+}
+
+/// Every stored waiver, ordered by advisory then scope. Expired waivers stay
+/// stored until cleared; they are returned only when `include_expired`.
+pub async fn list(
+    ctx: &mut Ctx,
+    now_ms: i64,
+    include_expired: bool,
+) -> Result<Vec<ExposureWaiver>> {
+    let mut waivers = load_waivers(ctx).await?;
+    waivers.retain(|waiver| include_expired || waiver.expires_at > now_ms);
+    waivers.sort_by_cached_key(|waiver| (waiver.advisory_id.clone(), waiver_id(waiver)));
+    Ok(waivers)
 }
 
 /// True when counted time since first-seen is still inside the declared grace.
@@ -364,7 +401,13 @@ pub fn parse_expiry(value: &str, now_ms: i64) -> Result<i64> {
     Ok(ms)
 }
 
-async fn grace_ms(ctx: &mut Ctx, environment: &str, product: &str) -> Result<Option<i64>> {
+/// Grace window that applies to `product` in `environment`: the environment's
+/// own, else the subscribed channel's.
+pub(super) async fn grace_ms(
+    ctx: &mut Ctx,
+    environment: &str,
+    product: &str,
+) -> Result<Option<i64>> {
     let env = crate::environment::environment(ctx, environment).await?;
     if let Some(ms) = parse_optional_positive(env.properties.get(GRACE_MS_PROPERTY)) {
         return Ok(Some(ms));
@@ -440,7 +483,7 @@ fn scope_matches(
     }
 }
 
-fn product_of(release_id: &str, spec: &str) -> String {
+pub(super) fn product_of(release_id: &str, spec: &str) -> String {
     release_id
         .strip_prefix("tenkai:release:")
         .and_then(|rest| rest.split_once('@'))
@@ -687,6 +730,11 @@ fn require_local_catalog(ctx: &Ctx) -> Result<()> {
         "exposure waivers through a remote catalog must use the authenticated management route"
     );
     Ok(())
+}
+
+/// Positive grace window stored on an environment or channel object.
+pub fn grace_property(object: &Object) -> Option<i64> {
+    parse_optional_positive(object.properties.get(GRACE_MS_PROPERTY))
 }
 
 fn parse_optional_positive(value: Option<&String>) -> Option<i64> {
