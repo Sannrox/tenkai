@@ -38,7 +38,9 @@ Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
   is recalled, including a later publish, with the same fail-closed effect.
   `release recall <product> --close <from> --before <version>` sets the upper
   bound of an open-ended range; a range never widens. `release inspect` names
-  the range that currently recalls a release. Recall does not delete
+  the range that currently recalls a release. `GET /v1/releases/{release}/recall`
+  and `GET /v1/products/{product}/recall-ranges` project those recorded facts,
+  including remaining `deployed_release` instances, over `tenkai.http.v1`. Recall does not delete
   immutable descriptors or bytes. Planning will not target a recalled channel
   head; a deployed recalled release rolls off to a non-recalled head without
   restoring the recalled pin. Rollback onto recalled content is denied unless

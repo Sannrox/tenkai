@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 
 use anyhow::{Context as _, Result, bail};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::auth_context::{AuthenticatedRequestContext, DeliveryCapability};
 use crate::client::Ctx;
@@ -21,6 +23,40 @@ pub struct RecallRange {
     pub reason: String,
     pub actor: String,
     pub recorded_at: i64,
+}
+
+/// Operator-visible recall range for `GET /v1/products/{product}/recall-ranges`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecallRangeView {
+    pub product: String,
+    pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub before: Option<String>,
+    pub reason: String,
+    pub actor: String,
+    pub recorded_at: i64,
+    pub covers_future: bool,
+}
+
+impl From<&RecallRange> for RecallRangeView {
+    fn from(range: &RecallRange) -> Self {
+        Self {
+            product: range.product.clone(),
+            from: range.from.clone(),
+            before: range.before.clone(),
+            reason: range.reason.clone(),
+            actor: range.actor.clone(),
+            recorded_at: range.recorded_at,
+            covers_future: range.before.is_none(),
+        }
+    }
+}
+
+/// Recorded recall ranges for one product.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecallRangePage {
+    pub items: Vec<RecallRangeView>,
 }
 
 impl RecallRange {
@@ -138,6 +174,22 @@ async fn list_product_ranges(ctx: &mut Ctx, product: &str) -> Result<Vec<RecallR
         ranges.push(range);
     }
     Ok(ranges)
+}
+
+/// Recorded ranges for `product`, ordered by `--from`.
+pub async fn list_recall_ranges(ctx: &mut Ctx, product: &str) -> Result<RecallRangePage> {
+    validate_identifier("product", product)?;
+    let mut items: Vec<RecallRangeView> = list_product_ranges(ctx, product)
+        .await?
+        .iter()
+        .map(RecallRangeView::from)
+        .collect();
+    items.sort_by(|left, right| {
+        left.from
+            .cmp(&right.from)
+            .then(left.product.cmp(&right.product))
+    });
+    Ok(RecallRangePage { items })
 }
 
 /// The first recorded range that currently covers `release_id`.

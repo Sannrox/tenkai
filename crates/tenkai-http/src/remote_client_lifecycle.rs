@@ -129,6 +129,26 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn inspect_recall(&self, spec: &str) -> anyhow::Result<tenkai::catalog::RecallView> {
+        let encoded = spec.replace('@', "%40");
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/releases/{encoded}/recall"),
+        )
+        .await
+    }
+
+    pub async fn list_recall_ranges(
+        &self,
+        product: &str,
+    ) -> anyhow::Result<tenkai::catalog::RecallRangePage> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/products/{product}/recall-ranges"),
+        )
+        .await
+    }
+
     pub async fn record_recall_range(
         &self,
         product: &str,

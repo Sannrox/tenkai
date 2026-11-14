@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use super::router::{ErrorBody, ServiceStatus};
 use tenkai::approval_policy::EffectiveApprovalPolicy;
 use tenkai::backup::{BackupManifest, BackupStatus};
-use tenkai::catalog::{ChannelPage, ReleasePage};
+use tenkai::catalog::{ChannelPage, RecallRangePage, RecallView, ReleasePage};
 use tenkai::change_stream::ChangeEventPage;
 use tenkai::channel_promotion::ChannelPromotionPolicyView;
 use tenkai::content_inventory::ContentInventory;
@@ -956,11 +956,25 @@ pub fn http_contract() -> Value {
             response: lifecycle.clone(),
         },
         Route {
+            method: "GET",
+            path: "/v1/releases/{release}/recall",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<RecallView>(&mut g),
+        },
+        Route {
             method: "POST",
             path: "/v1/releases/{release}/recall",
             auth: Auth::Management,
             request: Some(schema::<RecallRequest>(&mut g)),
             response: lifecycle.clone(),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/products/{product}/recall-ranges",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<RecallRangePage>(&mut g),
         },
         Route {
             method: "POST",
@@ -1157,6 +1171,14 @@ mod tests {
             ("ChannelPromotionPolicyView", "promoted_by"),
             ("ChannelPromotionPolicyView", "promoted_by_kind"),
             ("ChannelPromotionPolicyStatus", "reason"),
+            ("RecallView", "recalled_at"),
+            ("RecallView", "recalled_by"),
+            ("RecallView", "principal_kind"),
+            ("RecallView", "reason"),
+            ("RecallView", "policy_id"),
+            ("RecallView", "policy_version"),
+            ("RecallView", "range"),
+            ("RecallRangeView", "before"),
             ("ReleasePage", "next_cursor"),
             ("ChannelPage", "next_cursor"),
             ("MigrationPage", "next_cursor"),

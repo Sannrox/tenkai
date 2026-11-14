@@ -21,6 +21,7 @@ mod package_migration_closed;
 mod package_migration_preview;
 mod package_migration_scope;
 mod plan_target_changes;
+mod recall;
 mod release_labels;
 mod remote_catalog;
 mod remote_failure;

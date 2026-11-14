@@ -6631,6 +6631,21 @@
       ],
       "type": "object"
     },
+    "RecallRangePage": {
+      "description": "Recorded recall ranges for one product.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/RecallRangeView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
     "RecallRangeRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/products/{product}/recall-range`.",
@@ -6665,6 +6680,66 @@
       ],
       "type": "object"
     },
+    "RecallRangeView": {
+      "description": "Operator-visible recall range for `GET /v1/products/{product}/recall-ranges`.",
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "before": {
+          "type": "string"
+        },
+        "covers_future": {
+          "type": "boolean"
+        },
+        "from": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "recorded_at": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "product",
+        "from",
+        "reason",
+        "actor",
+        "recorded_at",
+        "covers_future"
+      ],
+      "type": "object"
+    },
+    "RecallRemovalProgress": {
+      "description": "One environment instance still holding a recalled release.",
+      "properties": {
+        "deployed": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "remaining": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "environment",
+        "instance",
+        "deployed",
+        "remaining"
+      ],
+      "type": "object"
+    },
     "RecallRequest": {
       "additionalProperties": false,
       "properties": {
@@ -6680,6 +6755,58 @@
       "required": [
         "version",
         "operation"
+      ],
+      "type": "object"
+    },
+    "RecallView": {
+      "description": "Recorded recall of one published release for `GET /v1/releases/{release}/recall`.",
+      "properties": {
+        "covers_future": {
+          "type": "boolean"
+        },
+        "failing_instances": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "policy_id": {
+          "type": "string"
+        },
+        "policy_version": {
+          "type": "string"
+        },
+        "principal_kind": {
+          "type": "string"
+        },
+        "range": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "recalled_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "recalled_by": {
+          "type": "string"
+        },
+        "release": {
+          "type": "string"
+        },
+        "removal_progress": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RecallRemovalProgress"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "release",
+        "covers_future"
       ],
       "type": "object"
     },
@@ -9747,6 +9874,15 @@
       }
     },
     {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/releases/{release}/recall",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/RecallView"
+      }
+    },
+    {
       "auth": "management",
       "method": "POST",
       "path": "/v1/releases/{release}/recall",
@@ -9755,6 +9891,15 @@
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/products/{product}/recall-ranges",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/RecallRangePage"
       }
     },
     {
