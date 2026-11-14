@@ -417,6 +417,18 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn list_exposure_waivers(
+        &self,
+        include_expired: bool,
+    ) -> anyhow::Result<tenkai::exposure::ExposureWaiverList> {
+        let path = if include_expired {
+            "/v1/exposures/waivers?include_expired=true"
+        } else {
+            "/v1/exposures/waivers"
+        };
+        self.request_json(reqwest::Method::GET, path).await
+    }
+
     pub async fn inspect_advisory_feed(
         &self,
     ) -> anyhow::Result<tenkai::exposure::AdvisoryFeedStatus> {

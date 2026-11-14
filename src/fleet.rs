@@ -61,6 +61,14 @@ pub struct OpenEnvironmentExposure {
     /// True when `age_ms` exceeds `exposure.max_age_ms.<severity>` on the environment.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub overdue: bool,
+    /// First-seen plus the environment's (or its channel's) exposure grace.
+    /// Omitted when no grace applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub grace_ends_at: Option<i64>,
+    /// True while `grace_ends_at` is in the future.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_grace: bool,
 }
 
 /// Fleet-wide delivery posture (no credentials).
@@ -518,6 +526,7 @@ mod tests {
             webhooks: Vec::new(),
             owner: None,
             approval_policy: None,
+            exposure_grace_ms: None,
             terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
             observed_type_digest: None,
@@ -568,6 +577,7 @@ mod tests {
             webhooks: Vec::new(),
             owner: None,
             approval_policy: None,
+            exposure_grace_ms: None,
             terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
             observed_type_digest: None,
@@ -618,6 +628,7 @@ mod tests {
             webhooks: Vec::new(),
             owner: None,
             approval_policy: None,
+            exposure_grace_ms: None,
             terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
             observed_type_digest: None,
@@ -654,6 +665,7 @@ mod tests {
             webhooks: Vec::new(),
             owner: None,
             approval_policy: None,
+            exposure_grace_ms: None,
             terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
             observed_type_digest: None,
@@ -730,6 +742,7 @@ mod tests {
             webhooks: Vec::new(),
             owner: None,
             approval_policy: None,
+            exposure_grace_ms: None,
             terminal_outcomes: Vec::new(),
             execution_note: "fixture".into(),
             observed_type_digest: None,
@@ -869,6 +882,8 @@ mod tests {
                     first_seen_at: 1,
                     age_ms: 5,
                     overdue: true,
+                    grace_ends_at: None,
+                    in_grace: false,
                 },
                 OpenEnvironmentExposure {
                     release: "api@1.0.0".into(),
@@ -877,6 +892,8 @@ mod tests {
                     first_seen_at: 1,
                     age_ms: 5,
                     overdue: false,
+                    grace_ends_at: None,
+                    in_grace: false,
                 },
             ],
             owner: None,

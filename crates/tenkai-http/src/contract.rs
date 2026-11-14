@@ -29,7 +29,10 @@ use tenkai::deployment_history::{DeploymentHistoryPage, DeploymentHistoryQuery};
 use tenkai::environment::{EnvironmentInspectReport, EnvironmentListEntry, StatusRow};
 use tenkai::environment_config::{EnvironmentConfigRequest, RegisterEnvironmentRequest};
 use tenkai::environment_dependencies::EnvironmentDependencies;
-use tenkai::exposure::{AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryResult};
+use tenkai::exposure::{
+    AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryResult, ExposureWaiverList,
+    ExposureWaiverListQuery,
+};
 use tenkai::fleet::FleetStatusReport;
 use tenkai::host_identity::AuthSession;
 use tenkai::instance_explain::InstanceExplainReport;
@@ -307,6 +310,13 @@ pub fn http_contract() -> Value {
             auth: Auth::Read,
             request: Some(schema::<ExposureQueryRequest>(&mut g)),
             response: schema::<ExposureQueryResult>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/exposures/waivers",
+            auth: Auth::Read,
+            request: Some(schema::<ExposureWaiverListQuery>(&mut g)),
+            response: schema::<ExposureWaiverList>(&mut g),
         },
         Route {
             method: "POST",
@@ -1189,6 +1199,9 @@ mod tests {
             ("PaceInstanceProgress", "eligible_at_ms"),
             ("PaceInstanceProgress", "next_opens_at_ms"),
             ("PaceInstanceProgress", "early_admission"),
+            ("OpenEnvironmentExposure", "grace_ends_at"),
+            ("EnvironmentInspectReport", "exposure_grace_ms"),
+            ("ChannelListEntry", "exposure_grace_ms"),
             ("ReleasePage", "next_cursor"),
             ("ChannelPage", "next_cursor"),
             ("MigrationPage", "next_cursor"),

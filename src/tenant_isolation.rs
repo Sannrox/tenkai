@@ -202,6 +202,11 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Catalog,
         },
         TenantVisibleRpc {
+            id: "catalog.list_exposure_waivers",
+            path_template: "GET /v1/exposures/waivers",
+            surface: TenantVisibleSurface::Catalog,
+        },
+        TenantVisibleRpc {
             id: "catalog.advisory_feed",
             path_template: "GET /v1/advisory-feed",
             surface: TenantVisibleSurface::Catalog,

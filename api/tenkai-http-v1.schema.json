@@ -860,6 +860,11 @@
     "ChannelListEntry": {
       "description": "Identifying fields, current head, and active hold for one channel.",
       "properties": {
+        "exposure_grace_ms": {
+          "description": "Exposure grace window declared on this channel, in milliseconds.\nAn environment's own grace takes precedence. Omitted when unset.",
+          "format": "int64",
+          "type": "integer"
+        },
         "head": {
           "type": "string"
         },
@@ -3269,6 +3274,27 @@
       ],
       "type": "object"
     },
+    "EnvironmentGrace": {
+      "description": "Grace on one open finding in one environment. `grace_ends_at` is the\nfirst-seen stamp plus the environment's (or its channel's) grace window.",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "grace_ends_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "in_grace": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "environment",
+        "grace_ends_at",
+        "in_grace"
+      ],
+      "type": "object"
+    },
     "EnvironmentInspectReport": {
       "description": "Detailed inspect report for one environment (no credentials).",
       "properties": {
@@ -3312,6 +3338,11 @@
         "execution_note": {
           "description": "Execution ownership note: Tenkai never prints runtime bearer tokens.",
           "type": "string"
+        },
+        "exposure_grace_ms": {
+          "description": "Exposure grace window declared on this environment, in milliseconds.\nOmitted when unset; a subscribed channel may still declare its own.",
+          "format": "int64",
+          "type": "integer"
         },
         "facts": {
           "additionalProperties": {
@@ -4464,6 +4495,32 @@
       ],
       "type": "object"
     },
+    "ExposureWaiverList": {
+      "description": "Waivers returned by `GET /v1/exposures/waivers`, active ones only unless\nexpired ones were requested.",
+      "properties": {
+        "waivers": {
+          "items": {
+            "$ref": "#/$defs/ExposureWaiver"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "waivers"
+      ],
+      "type": "object"
+    },
+    "ExposureWaiverListQuery": {
+      "description": "Query parameters for `GET /v1/exposures/waivers`.",
+      "properties": {
+        "include_expired": {
+          "default": false,
+          "description": "Also return waivers whose expiry has passed but are not yet cleared.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "ExposureWaiverRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/exposures/waivers`.",
@@ -5300,6 +5357,13 @@
         "component_version": {
           "type": "string"
         },
+        "grace": {
+          "description": "Grace per environment that runs or subscribes to this release, for\nfindings with a first-seen stamp. Omitted when no grace applies.",
+          "items": {
+            "$ref": "#/$defs/EnvironmentGrace"
+          },
+          "type": "array"
+        },
         "release": {
           "type": "string"
         },
@@ -5849,6 +5913,15 @@
         "first_seen_at": {
           "format": "int64",
           "type": "integer"
+        },
+        "grace_ends_at": {
+          "description": "First-seen plus the environment's (or its channel's) exposure grace.\nOmitted when no grace applies.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "in_grace": {
+          "description": "True while `grace_ends_at` is in the future.",
+          "type": "boolean"
         },
         "overdue": {
           "description": "True when `age_ms` exceeds `exposure.max_age_ms.<severity>` on the environment.",
@@ -9012,6 +9085,17 @@
       },
       "response": {
         "$ref": "#/$defs/ExposureQueryResult"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/exposures/waivers",
+      "request": {
+        "$ref": "#/$defs/ExposureWaiverListQuery"
+      },
+      "response": {
+        "$ref": "#/$defs/ExposureWaiverList"
       }
     },
     {

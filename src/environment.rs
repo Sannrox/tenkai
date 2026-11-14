@@ -1719,6 +1719,11 @@ pub struct EnvironmentInspectReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub approval_policy: Option<String>,
+    /// Exposure grace window declared on this environment, in milliseconds.
+    /// Omitted when unset; a subscribed channel may still declare its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub exposure_grace_ms: Option<i64>,
     /// Bounded terminal-outcome identities and outbox delivery state. Event
     /// payloads and retry errors are intentionally excluded.
     #[serde(default)]
@@ -2336,6 +2341,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             webhooks: Vec::new(),
             owner,
             approval_policy: None,
+            exposure_grace_ms: None,
             terminal_outcomes: Vec::new(),
             execution_note: String::new(),
             observed_type_digest: None,
@@ -2423,6 +2429,7 @@ async fn inspect_environment_base(
         .properties
         .get(crate::approval_policy::PLAN_APPROVAL_POLICY_PROPERTY)
         .cloned();
+    let exposure_grace_ms = crate::exposure::grace_property(&env_obj);
     let now = chrono::DateTime::from_timestamp_millis(crate::now_millis())
         .context("current time is outside the supported maintenance-window range")?;
     let maintenance = maintenance_inspect(crate::maintenance::list(ctx, env).await, now);
@@ -2465,6 +2472,7 @@ async fn inspect_environment_base(
         webhooks,
         owner,
         approval_policy,
+        exposure_grace_ms,
         terminal_outcomes: Vec::new(),
         execution_note: "Apply leases and runtime credentials are distinct; inspect never prints bearer tokens. Server-side runtime-token environments are not executed by the embedded server executor."
             .into(),

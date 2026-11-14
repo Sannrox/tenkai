@@ -215,6 +215,7 @@ pub async fn open_environment_exposures(
     let mut environments = ctx.list_kind(KIND_ENVIRONMENT).await?;
     environments.sort_by(|left, right| left.name.cmp(&right.name));
     let now = crate::now_millis();
+    let mut grace = GraceCache::default();
     let mut by_env = BTreeMap::new();
     for environment in environments {
         if crate::environment::retirement_from_object(&environment).is_some() {
@@ -230,6 +231,7 @@ pub async fn open_environment_exposures(
             }
             let age_ms = now.saturating_sub(record.first_seen_at);
             let max_age_ms = max_age_ms_for(&environment, record.severity);
+            let grace_ends_at = grace.ends_at(ctx, &environment.name, record).await?;
             rows.push(OpenEnvironmentExposure {
                 release: record.release.clone(),
                 advisory_id: record.advisory_id.clone(),
@@ -237,6 +239,8 @@ pub async fn open_environment_exposures(
                 first_seen_at: record.first_seen_at,
                 age_ms,
                 overdue: max_age_ms.is_some_and(|max| age_ms > max),
+                grace_ends_at,
+                in_grace: grace_ends_at.is_some_and(|ends| now < ends),
             });
         }
         rows.sort_by(|left, right| {
@@ -249,6 +253,66 @@ pub async fn open_environment_exposures(
         }
     }
     Ok(by_env)
+}
+
+/// Grace per open (release id, advisory id) finding, one row per scoped
+/// environment whose environment or channel declares a grace window.
+pub(super) async fn grace_by_match(
+    ctx: &mut Ctx,
+    now_ms: i64,
+) -> Result<HashMap<(String, String), Vec<super::EnvironmentGrace>>> {
+    let records = list_open_records(ctx).await?;
+    if records.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let scoped = scoped_release_ids(ctx).await?;
+    let mut grace = GraceCache::default();
+    let mut by_match: HashMap<(String, String), Vec<super::EnvironmentGrace>> = HashMap::new();
+    for (environment, release_ids) in &scoped {
+        for record in records
+            .iter()
+            .filter(|record| release_ids.contains(&record.release_id))
+        {
+            let Some(grace_ends_at) = grace.ends_at(ctx, environment, record).await? else {
+                continue;
+            };
+            by_match
+                .entry((record.release_id.clone(), record.advisory_id.clone()))
+                .or_default()
+                .push(super::EnvironmentGrace {
+                    environment: environment.clone(),
+                    grace_ends_at,
+                    in_grace: now_ms < grace_ends_at,
+                });
+        }
+    }
+    Ok(by_match)
+}
+
+/// Grace windows per (environment, product), read once per request.
+#[derive(Default)]
+struct GraceCache(HashMap<(String, String), Option<i64>>);
+
+impl GraceCache {
+    /// End of grace for `record` in `environment`, or `None` without a window.
+    async fn ends_at(
+        &mut self,
+        ctx: &mut Ctx,
+        environment: &str,
+        record: &DeployedExposure,
+    ) -> Result<Option<i64>> {
+        let product = super::waiver::product_of(&record.release_id, &record.release);
+        let key = (environment.to_string(), product);
+        let grace_ms = match self.0.get(&key) {
+            Some(grace_ms) => *grace_ms,
+            None => {
+                let grace_ms = super::waiver::grace_ms(ctx, environment, &key.1).await?;
+                self.0.insert(key, grace_ms);
+                grace_ms
+            }
+        };
+        Ok(grace_ms.map(|ms| record.first_seen_at.saturating_add(ms)))
+    }
 }
 
 async fn match_scoped(

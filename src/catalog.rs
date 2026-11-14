@@ -116,6 +116,11 @@ pub struct ChannelListEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub hold: Option<crate::delivery_hold::DeliveryHold>,
+    /// Exposure grace window declared on this channel, in milliseconds.
+    /// An environment's own grace takes precedence. Omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub exposure_grace_ms: Option<i64>,
 }
 
 /// One page of [`ChannelListEntry`] values.
@@ -733,6 +738,7 @@ fn channel_list_entry(object: Object) -> ChannelListEntry {
         })
         .unwrap_or_default();
     ChannelListEntry {
+        exposure_grace_ms: crate::exposure::grace_property(&object),
         id: object.id,
         product,
         name,
