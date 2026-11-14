@@ -117,6 +117,9 @@ pub enum ManagementError {
     Unavailable(String),
     #[error("{0}")]
     Internal(String),
+    /// A selector that does not parse. HTTP 400 naming the bad clause.
+    #[error(transparent)]
+    InvalidSelector(#[from] crate::labels::SelectorError),
     /// Named gate refusal. HTTP 400 with `ErrorBody.reason`.
     #[error("{message}")]
     Denied {
@@ -676,8 +679,7 @@ impl ManagementOperations {
     ) -> Result<Vec<EnvironmentListEntry>, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
-        let parsed = crate::labels::parse_selector(selector)
-            .map_err(|error| ManagementError::BadRequest(error.to_string()))?;
+        let parsed = crate::labels::parse_selector(selector)?;
         let mut ctx = self.catalog_ctx(&context)?;
         let names: std::collections::BTreeSet<String> =
             crate::labels::matching_environments(&mut ctx, &parsed)
@@ -2516,6 +2518,37 @@ impl ManagementOperations {
         .await
     }
 
+    /// Resolve the selector a hold is placed by, over the environments the
+    /// credential can see. Refuses when `environment` does not match now.
+    async fn hold_selector(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        selector: &str,
+    ) -> Result<crate::delivery_hold::HoldSelector, ManagementError> {
+        let source = crate::labels::parse_selector(selector)?
+            .source()
+            .to_string();
+        // The list has a row per environment and subscription; keep names once.
+        let environments: Vec<String> = self
+            .list_environments_matching(credential, &source)
+            .await?
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if !environments.iter().any(|name| name == environment) {
+            return Err(ManagementError::Conflict(format!(
+                "environment {environment} does not match selector {source}"
+            )));
+        }
+        Ok(crate::delivery_hold::HoldSelector {
+            selector: source,
+            environments,
+        })
+    }
+
     async fn mutate_environment_hold(
         &self,
         credential: &CredentialMaterial,
@@ -2536,6 +2569,17 @@ impl ManagementOperations {
         .map_err(map_lifecycle_error)?;
         self.require_environment_visible(&context, environment)
             .await?;
+        // Resolve before the generation fence, so a label change that
+        // bumped the generation before this check refuses as stale. The
+        // record is provenance of this resolution, not a lease-held fence:
+        // a hold must still land while an apply holds the lease.
+        let selector = match request.selector.as_deref() {
+            Some(selector) => Some(
+                self.hold_selector(credential, environment, selector)
+                    .await?,
+            ),
+            None => None,
+        };
         self.require_current_generation(&context, environment, request.expected_generation)
             .await?;
         let actor = &context.audit_principal();
@@ -2545,11 +2589,12 @@ impl ManagementOperations {
         let scope = crate::delivery_hold::HoldScope::environment(environment);
         let hold = match operation {
             ManagementLifecycleOperation::Hold => {
-                crate::delivery_hold::set(
+                crate::delivery_hold::set_by(
                     &mut ctx,
                     &scope,
                     request.reason.as_deref().unwrap_or(""),
                     actor,
+                    selector,
                 )
                 .await
             }

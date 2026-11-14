@@ -519,6 +519,17 @@ that matches nothing. An invalid label or selector names the offending part.
 Remote `env hold` with a selector still requires `--generation`; that value
 fences every match, and a stale environment refuses.
 
+Over HTTP, `GET /v1/environments?selector=` filters the list. An invalid
+selector is refused with `400`, `reason.code` `invalid_selector`, and the bad
+clause in `clause` when one clause is wrong. Remote `env hold` with a selector
+sends it on each hold (`selector` on the hold request). The server resolves
+the selector, refuses unless the environment matches it, then checks
+`expected_generation`. The hold and its `set` audit event record the selector
+and every environment it matched at that resolution. This is provenance, not
+a fence: a hold never takes the environment lease, so it still pauses an
+environment during an apply, and a label change that lands between the
+resolution and the hold write does not rewrite the record.
+
 ## Plan approval policy
 
 An environment may point at a TOML policy that signs `tenkai.plan-approval.v1`
@@ -656,7 +667,8 @@ instance on the current head as `started`, `admitted` (may start now),
 A waiting or paused instance carries `eligible_at_ms`: its remaining counted
 time projected through the environment and product windows, omitted when they
 cannot be projected. An early admission shows its actor, reason, and time. A
-channel without a pace answers `404`.
+channel without a pace answers `404`. `GET /v1/channels` shows each channel's
+configured `upgrade_pace_ms`, omitted when pacing is off.
 
 A failed target stays held until an explicit retry. Remote and embedded
 operators plan that retry with `tenkaictl env retry <env> <product> --reason …`.

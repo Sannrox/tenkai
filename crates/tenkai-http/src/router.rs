@@ -116,6 +116,11 @@ pub(super) struct ErrorBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = tenkai::schema_contract::omitted_when_none)]
     pub(super) reason: Option<tenkai::command_result::CommandRefusalReason>,
+    /// The selector clause that does not parse, on an `invalid_selector`
+    /// refusal of a malformed clause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = tenkai::schema_contract::omitted_when_none)]
+    pub(super) clause: Option<String>,
 }
 
 pub fn router(

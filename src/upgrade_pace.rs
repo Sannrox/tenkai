@@ -905,6 +905,11 @@ async fn append_audit(
     bail!("could not allocate an upgrade-pace admit audit event")
 }
 
+/// Configured pace on a channel object, or `None` when pacing is off.
+pub fn configured_ms(channel: &Object) -> Option<i64> {
+    parse_optional_i64(channel.properties.get(PACE_MS_PROPERTY))
+}
+
 fn parse_optional_i64(value: Option<&String>) -> Option<i64> {
     value
         .and_then(|value| value.parse().ok())

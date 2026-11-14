@@ -879,6 +879,11 @@
         },
         "product": {
           "type": "string"
+        },
+        "upgrade_pace_ms": {
+          "description": "Configured upgrade pace in milliseconds. Omitted means pacing is off.\nA changed duration applies from the next promotion.",
+          "format": "int64",
+          "type": "integer"
         }
       },
       "required": [
@@ -2071,6 +2076,10 @@
         },
         "reason": {
           "type": "string"
+        },
+        "selector": {
+          "$ref": "#/$defs/HoldSelector",
+          "description": "The selector this hold was placed by, when it was. Omitted for a hold\nplaced on the environment by name."
         }
       },
       "required": [
@@ -2099,6 +2108,10 @@
             "string",
             "null"
           ]
+        },
+        "selector": {
+          "description": "Selector this hold is placed by. Hold only: the environment must\nmatch it when the server resolves it, and the hold records it with\nevery environment it matched then. A server that predates the field\nrefuses it.",
+          "type": "string"
         },
         "version": {
           "format": "uint32",
@@ -3583,6 +3596,17 @@
       ],
       "type": "object"
     },
+    "EnvironmentListQuery": {
+      "description": "Query of `GET /v1/environments`.",
+      "properties": {
+        "selector": {
+          "default": null,
+          "description": "Only environments matching this selector (`key=value`, `key!=value`,\n`key in (a,b)`). Omitted or blank lists every environment.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "EnvironmentMaintenanceInspect": {
       "description": "Read-only view of the environment's own maintenance schedule, evaluated\nwith the same rules as apply admission. Product maintenance windows\n(`tenkaictl product maintenance`) are not included and may further\nrestrict when a plan touching that product can apply.",
       "properties": {
@@ -4135,6 +4159,10 @@
     },
     "ErrorBody": {
       "properties": {
+        "clause": {
+          "description": "The selector clause that does not parse, on an `invalid_selector`\nrefusal of a malformed clause.",
+          "type": "string"
+        },
         "error": {
           "type": "string"
         },
@@ -4986,6 +5014,10 @@
         },
         "reason": {
           "type": "string"
+        },
+        "selector": {
+          "$ref": "#/$defs/HoldSelector",
+          "description": "The selector a `set` was placed by. Omitted otherwise."
         }
       },
       "required": [
@@ -4993,6 +5025,25 @@
         "reason",
         "actor",
         "at"
+      ],
+      "type": "object"
+    },
+    "HoldSelector": {
+      "description": "A selector and every environment it resolved to when the hold was set.",
+      "properties": {
+        "environments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "selector": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "selector",
+        "environments"
       ],
       "type": "object"
     },
@@ -9131,7 +9182,9 @@
       "auth": "read",
       "method": "GET",
       "path": "/v1/environments",
-      "request": null,
+      "request": {
+        "$ref": "#/$defs/EnvironmentListQuery"
+      },
       "response": {
         "items": {
           "$ref": "#/$defs/EnvironmentListEntry"

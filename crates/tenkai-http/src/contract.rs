@@ -287,7 +287,7 @@ pub fn http_contract() -> Value {
             method: "GET",
             path: "/v1/environments",
             auth: Auth::Read,
-            request: None,
+            request: Some(schema::<tenkai::labels::EnvironmentListQuery>(&mut g)),
             response: schema::<Vec<EnvironmentListEntry>>(&mut g),
         },
         Route {
@@ -1108,6 +1108,11 @@ mod tests {
         let defs = &contract["$defs"];
         for (def, field) in [
             ("ErrorBody", "reason"),
+            ("ErrorBody", "clause"),
+            ("EnvironmentListQuery", "selector"),
+            ("DeliveryHoldRequest", "selector"),
+            ("DeliveryHold", "selector"),
+            ("HoldAuditEvent", "selector"),
             ("OidcClientDiscovery", "display_name"),
             ("ServiceStatus", "backup"),
             ("ServiceStatus", "clock"),
@@ -1205,6 +1210,7 @@ mod tests {
             ("OpenEnvironmentExposure", "grace_ends_at"),
             ("EnvironmentInspectReport", "exposure_grace_ms"),
             ("ChannelListEntry", "exposure_grace_ms"),
+            ("ChannelListEntry", "upgrade_pace_ms"),
             ("ReleasePage", "next_cursor"),
             ("ChannelPage", "next_cursor"),
             ("MigrationPage", "next_cursor"),

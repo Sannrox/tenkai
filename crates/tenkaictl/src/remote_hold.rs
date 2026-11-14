@@ -2,9 +2,12 @@ use anyhow::Result;
 
 use crate::env_args::HoldAction;
 
+/// Run a hold action on `env`. `selector` is the selector the operator named
+/// to reach `env`; a hold set records it.
 pub(crate) async fn environment(
     client: &tenkai_http::RemoteClient,
     env: &str,
+    selector: Option<&str>,
     generation: Option<u64>,
     action: HoldAction,
 ) -> Result<()> {
@@ -12,7 +15,7 @@ pub(crate) async fn environment(
         HoldAction::Set { reason } => {
             let generation = require_generation(generation)?;
             let result = client
-                .set_environment_hold(env, &reason, generation)
+                .set_environment_hold(env, &reason, generation, selector)
                 .await?;
             println!("{}", result.message);
         }

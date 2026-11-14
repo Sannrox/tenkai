@@ -7,6 +7,7 @@ mod config;
 mod delivery_hold;
 mod deployment_history;
 mod environment_config;
+mod environment_selector;
 mod exports;
 mod exposure_waiver;
 mod fixtures;

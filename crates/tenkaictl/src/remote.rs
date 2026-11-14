@@ -232,17 +232,25 @@ pub(crate) async fn run(
                     .await?
                     .into_iter()
                     .map(|entry| entry.name)
-                    .collect::<Vec<_>>()
+                    .collect::<std::collections::BTreeSet<_>>()
             } else {
-                vec![env.clone()]
+                std::collections::BTreeSet::from([env.clone()])
             };
             if names.is_empty() {
                 anyhow::bail!("selector {env} matches no environments");
             }
+            let selector = selector.then_some(env.as_str());
             for name in names {
                 // Pass the operator's --generation through. Filling it from
                 // inspect would skip the observed-generation fence (#703).
-                crate::remote_hold::environment(&client, &name, generation, action.clone()).await?;
+                crate::remote_hold::environment(
+                    &client,
+                    &name,
+                    selector,
+                    generation,
+                    action.clone(),
+                )
+                .await?;
             }
             Ok(())
         }

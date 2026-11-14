@@ -53,14 +53,9 @@ pub(super) async fn fleet_status(
     manage_result(state.management.fleet_status(&credential).await)
 }
 
-#[derive(serde::Deserialize)]
-pub(super) struct ListEnvironmentsQuery {
-    selector: Option<String>,
-}
-
 pub(super) async fn list_environments(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<ListEnvironmentsQuery>,
+    Query(query): Query<tenkai::labels::EnvironmentListQuery>,
     headers: HeaderMap,
 ) -> Response {
     let credential = match require_management(&headers) {

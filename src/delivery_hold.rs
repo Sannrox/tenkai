@@ -103,6 +103,49 @@ pub struct DeliveryHold {
     pub reason: String,
     pub actor: String,
     pub held_at: i64,
+    /// The selector this hold was placed by, when it was. Omitted for a hold
+    /// placed on the environment by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub selector: Option<HoldSelector>,
+}
+
+/// A selector and every environment it resolved to when the hold was set.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct HoldSelector {
+    pub selector: String,
+    pub environments: Vec<String>,
+}
+
+impl HoldSelector {
+    fn write(&self, properties: &mut HashMap<String, String>) {
+        properties.insert("selector".into(), self.selector.clone());
+        // Environment names are identifiers, so a comma never occurs in one.
+        properties.insert("selector_environments".into(), self.environments.join(","));
+    }
+
+    pub(crate) fn read(object: &Object) -> Option<Self> {
+        let selector = object
+            .properties
+            .get("selector")
+            .filter(|s| !s.is_empty())?;
+        Some(Self {
+            selector: selector.clone(),
+            environments: object
+                .properties
+                .get("selector_environments")
+                .map(|names| {
+                    names
+                        .split(',')
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
 }
 
 /// One immutable set, clear, or retry transition.
@@ -114,6 +157,10 @@ pub struct HoldAuditEvent {
     pub reason: String,
     pub actor: String,
     pub at: i64,
+    /// The selector a `set` was placed by. Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub selector: Option<HoldSelector>,
 }
 
 /// Active hold plus set/clear/retry history for one scope.
@@ -251,6 +298,7 @@ pub async fn record_retry(
         &HoldScope::environment(environment),
         "retry",
         &DeliveryHold {
+            selector: None,
             reason: reason.into(),
             actor: actor.into(),
             held_at: crate::now_millis(),
@@ -266,6 +314,17 @@ pub async fn set(
     reason: &str,
     actor: &str,
 ) -> Result<DeliveryHold> {
+    set_by(ctx, scope, reason, actor, None).await
+}
+
+/// [`set`], recording the selector the hold was placed by, if any.
+pub async fn set_by(
+    ctx: &mut Ctx,
+    scope: &HoldScope,
+    reason: &str,
+    actor: &str,
+    selector: Option<HoldSelector>,
+) -> Result<DeliveryHold> {
     require_embedded(ctx)?;
     let reason = reason.trim();
     anyhow::ensure!(!reason.is_empty(), "delivery hold reason must not be empty");
@@ -280,6 +339,7 @@ pub async fn set(
     );
     scope.require_exists(ctx).await?;
     let hold = DeliveryHold {
+        selector,
         reason: reason.into(),
         actor: actor.into(),
         held_at: crate::now_millis(),
@@ -324,6 +384,7 @@ pub(crate) async fn set_if_absent_fenced(
         return Ok(None);
     }
     let hold = DeliveryHold {
+        selector: None,
         reason: reason.into(),
         actor: actor.into(),
         held_at: crate::now_millis(),
@@ -388,6 +449,7 @@ pub async fn set_cancel(
         }
     }
     let hold = DeliveryHold {
+        selector: None,
         reason: reason.into(),
         actor: actor.into(),
         held_at: crate::now_millis(),
@@ -506,6 +568,7 @@ pub async fn clear(ctx: &mut Ctx, scope: &HoldScope, actor: &str) -> Result<Deli
         scope,
         "clear",
         &DeliveryHold {
+            selector: None,
             reason: cleared.reason.clone(),
             actor: actor.into(),
             held_at: crate::now_millis(),
@@ -547,6 +610,7 @@ pub async fn clear_if_reason(
         scope,
         "clear",
         &DeliveryHold {
+            selector: None,
             reason: cleared.reason.clone(),
             actor: actor.into(),
             held_at: crate::now_millis(),
@@ -568,6 +632,7 @@ pub async fn get(ctx: &mut Ctx, scope: &HoldScope) -> Result<Option<DeliveryHold
         reason: required(&object, "reason")?.into(),
         actor: required(&object, "actor")?.into(),
         held_at: required(&object, "held_at")?.parse()?,
+        selector: HoldSelector::read(&object),
     }))
 }
 
@@ -697,6 +762,7 @@ pub async fn schedule_freeze(
         &HoldScope::environment(environment),
         "set",
         &DeliveryHold {
+            selector: None,
             reason: format!("{}: {}", freeze.name, freeze.reason),
             actor: freeze.actor.clone(),
             held_at: freeze.scheduled_at,
@@ -727,6 +793,7 @@ pub async fn cancel_freeze(
         &HoldScope::environment(environment),
         "clear",
         &DeliveryHold {
+            selector: None,
             reason: format!("{}: {}", cleared.name, cleared.reason),
             actor: actor.into(),
             held_at: crate::now_millis(),
@@ -986,6 +1053,7 @@ async fn try_set_automatic_hold(
     }
     let reason = automatic_hold_reason(failures);
     let hold = DeliveryHold {
+        selector: None,
         reason,
         actor: AUTOMATIC_HOLD_ACTOR.into(),
         held_at: crate::now_millis(),
@@ -1050,6 +1118,7 @@ async fn try_clear_automatic_hold(ctx: &mut Ctx, scope: &HoldScope) -> Result<()
         scope,
         "clear",
         &DeliveryHold {
+            selector: None,
             reason: existing.reason,
             actor: AUTOMATIC_HOLD_ACTOR.into(),
             held_at: crate::now_millis(),
@@ -1116,6 +1185,7 @@ pub async fn audit(ctx: &mut Ctx, scope: &HoldScope) -> Result<Vec<HoldAuditEven
             reason: required(&object, "reason")?.into(),
             actor: required(&object, "actor")?.into(),
             at: required(&object, "at")?.parse()?,
+            selector: HoldSelector::read(&object),
         });
     }
     events.sort_by_key(|event| event.at);
@@ -1156,6 +1226,9 @@ fn hold_object(scope: &HoldScope, hold: &DeliveryHold, cancel_generation: Option
     if let Some(generation) = cancel_generation {
         properties.insert("cancel_generation".into(), generation.to_string());
     }
+    if let Some(selector) = &hold.selector {
+        selector.write(&mut properties);
+    }
     Object {
         id: scope.hold_id(),
         kind: HOLD_KIND.into(),
@@ -1186,13 +1259,19 @@ async fn append_audit(
             name: format!("{action} {key}"),
             namespace: NS.into(),
             external_id: String::new(),
-            properties: HashMap::from([
-                ("scope".into(), key.clone()),
-                ("action".into(), action.into()),
-                ("reason".into(), event.reason.clone()),
-                ("actor".into(), event.actor.clone()),
-                ("at".into(), event.held_at.to_string()),
-            ]),
+            properties: {
+                let mut properties = HashMap::from([
+                    ("scope".into(), key.clone()),
+                    ("action".into(), action.into()),
+                    ("reason".into(), event.reason.clone()),
+                    ("actor".into(), event.actor.clone()),
+                    ("at".into(), event.held_at.to_string()),
+                ]);
+                if let Some(selector) = &event.selector {
+                    selector.write(&mut properties);
+                }
+                properties
+            },
             created: event.held_at,
             updated: event.held_at,
         };

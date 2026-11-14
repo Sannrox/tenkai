@@ -793,6 +793,13 @@ pub struct DeliveryHoldRequest {
     pub expected_generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Selector this hold is placed by. Hold only: the environment must
+    /// match it when the server resolves it, and the hold records it with
+    /// every environment it matched then. A server that predates the field
+    /// refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub selector: Option<String>,
 }
 
 /// Body of `POST /v1/environments/{environment}/hold/schedule` and
@@ -1391,6 +1398,9 @@ pub fn admit_cancel_apply(
     granted_environment: Option<&str>,
 ) -> Result<AdmittedManagementLifecycle> {
     require_path_environment("cancel", &request.environment, path_environment)?;
+    if request.selector.is_some() {
+        bail!("management operation cancel forbids selector");
+    }
     if let Some(reason) = request.reason.as_deref()
         && reason.trim().is_empty()
     {
@@ -1472,6 +1482,12 @@ pub fn admit_delivery_hold(
     granted_environment: Option<&str>,
 ) -> Result<AdmittedManagementLifecycle> {
     require_path_environment(expected.as_str(), &request.environment, path_environment)?;
+    if expected != ManagementLifecycleOperation::Hold && request.selector.is_some() {
+        bail!(
+            "management operation {} forbids selector",
+            expected.as_str()
+        );
+    }
     if expected == ManagementLifecycleOperation::Hold {
         require_hold_reason(request.reason.as_deref())?;
     } else if request
@@ -2556,6 +2572,7 @@ mod tests {
             environment: "stage".into(),
             expected_generation: 0,
             reason: Some("freeze".into()),
+            selector: None,
         };
         admit_delivery_hold(
             &hold,
