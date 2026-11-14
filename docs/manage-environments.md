@@ -649,6 +649,15 @@ the next promotion. An instance waiting on the pace reports it from
 `tenkaictl explain`; `channel admit` records the reason and lets that
 instance start before its slot. A bare number is seconds.
 
+`GET /v1/products/{product}/channels/{channel}/pace` reports each subscribed
+instance on the current head as `started`, `admitted` (may start now),
+`waiting`, or `paused` while its maintenance window is closed, admitted or not
+(with `next_opens_at_ms` when known).
+A waiting or paused instance carries `eligible_at_ms`: its remaining counted
+time projected through the environment and product windows, omitted when they
+cannot be projected. An early admission shows its actor, reason, and time. A
+channel without a pace answers `404`.
+
 A failed target stays held until an explicit retry. Remote and embedded
 operators plan that retry with `tenkaictl env retry <env> <product> --reason …`.
 

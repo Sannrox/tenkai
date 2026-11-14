@@ -49,6 +49,55 @@ pub struct PaceAdmitAudit {
     pub at: i64,
 }
 
+/// Upgrade pacing on a channel's current head (#1276). Only upgrades wait;
+/// rollbacks, recall removals, installs, and restarts are never paced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaceProgress {
+    /// Release id of the channel head being paced.
+    pub release: String,
+    /// Counted maintenance-window time over which all instances start.
+    pub duration_ms: i64,
+    pub promoted_at_ms: i64,
+    pub instances: Vec<PaceInstanceProgress>,
+}
+
+/// Where one subscribed instance stands in the pace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaceInstanceProgress {
+    pub environment: String,
+    pub instance: String,
+    pub state: PaceInstanceState,
+    /// Server time the instance may start, while `waiting` or `paused`:
+    /// its remaining counted time projected through the maintenance
+    /// windows. Omitted when the windows cannot be projected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub eligible_at_ms: Option<i64>,
+    /// When the closed maintenance window next opens, while `paused` and known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub next_opens_at_ms: Option<i64>,
+    /// The audited early admission of this instance on this head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub early_admission: Option<PaceAdmitAudit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaceInstanceState {
+    /// Already runs the head.
+    Started,
+    /// May upgrade now: its slot came or it was admitted early, and its
+    /// maintenance windows are open.
+    Admitted,
+    /// Waits for its slot; `eligible_at_ms` says when.
+    Waiting,
+    /// Waits while its maintenance window is closed; pace time is not counted.
+    /// An admitted instance whose window is closed reads as paused too.
+    Paused,
+}
+
 /// Copy pace overlay properties so a channel put does not drop them.
 pub fn copy_channel_properties(dst: &mut HashMap<String, String>, src: &Object) {
     for key in [
@@ -390,6 +439,83 @@ pub async fn evaluate_instance(
     }))
 }
 
+/// Pacing progress of every subscribed instance, or an error when the
+/// channel has no pace on its current head.
+pub async fn progress(
+    ctx: &mut Ctx,
+    product: &str,
+    channel: &str,
+    now_ms: i64,
+) -> Result<PaceProgress> {
+    validate_identifier("product", product)?;
+    validate_identifier("channel", channel)?;
+    require_channel(ctx, product, channel).await?;
+    // Every reported field comes from this one head snapshot, so a concurrent
+    // promotion cannot mix the old release with the new head's admissions.
+    let Some(mut decision) = evaluate_channel(ctx, product, channel, now_ms).await? else {
+        bail!("channel {product}/{channel} has no upgrade pace on its current head");
+    };
+    let release = std::mem::take(&mut decision.release);
+    let mut early = std::mem::take(&mut decision.early);
+    let product_windows = crate::maintenance::list_product(ctx, product).await?;
+    let now = chrono::DateTime::from_timestamp_millis(now_ms)
+        .context("pace progress clock is out of range")?;
+    let mut instances = Vec::with_capacity(decision.ranked.len());
+    for (environment, instance) in &decision.ranked {
+        let key = (environment.clone(), instance.clone());
+        let early_admission = early.remove(&key);
+        let (state, eligible_at_ms, next_opens_at_ms) =
+            if instance_started(ctx, environment, instance, &release).await? {
+                (PaceInstanceState::Started, None, None)
+            } else {
+                // An admitted instance still waits for a joint open window,
+                // so it reads as admitted only while it could start now.
+                let admitted = decision.admitted.contains(&key);
+                let remaining_ms = if admitted {
+                    0
+                } else {
+                    decision.remaining_ms(environment, instance)
+                };
+                let env_windows = crate::maintenance::list(ctx, environment).await?;
+                let eligible_at_ms =
+                    project_counted(&env_windows, &product_windows, now_ms, remaining_ms);
+                match crate::maintenance::intersect(
+                    crate::maintenance::evaluate(&env_windows, now),
+                    crate::maintenance::evaluate(&product_windows, now),
+                ) {
+                    crate::maintenance::Eligibility::Open { .. } if admitted => {
+                        (PaceInstanceState::Admitted, None, None)
+                    }
+                    crate::maintenance::Eligibility::Open { .. } => {
+                        (PaceInstanceState::Waiting, eligible_at_ms, None)
+                    }
+                    crate::maintenance::Eligibility::Closed { .. } => (
+                        PaceInstanceState::Paused,
+                        eligible_at_ms,
+                        next_joint_opening(&env_windows, &product_windows, now_ms),
+                    ),
+                    crate::maintenance::Eligibility::Invalid { .. } => {
+                        (PaceInstanceState::Paused, None, None)
+                    }
+                }
+            };
+        instances.push(PaceInstanceProgress {
+            environment: environment.clone(),
+            instance: instance.clone(),
+            state,
+            eligible_at_ms,
+            next_opens_at_ms,
+            early_admission,
+        });
+    }
+    Ok(PaceProgress {
+        release,
+        duration_ms: decision.duration_ms,
+        promoted_at_ms: decision.promoted_at_ms,
+        instances,
+    })
+}
+
 /// Refuse to start a plan that still contains a paced-out upgrade.
 pub async fn require_for_plan(ctx: &mut Ctx, plan: &Plan, now_ms: i64) -> Result<()> {
     for step in &plan.steps {
@@ -419,6 +545,9 @@ pub async fn require_for_plan(ctx: &mut Ctx, plan: &Plan, now_ms: i64) -> Result
 }
 
 struct ChannelDecision {
+    release: String,
+    promoted_at_ms: i64,
+    early: HashMap<(String, String), PaceAdmitAudit>,
     ranked: Vec<(String, String)>,
     admitted: BTreeSet<(String, String)>,
     duration_ms: i64,
@@ -428,19 +557,94 @@ struct ChannelDecision {
 
 impl ChannelDecision {
     fn eligible_at_ms(&self, environment: &str, instance: &str) -> i64 {
+        self.now_ms
+            .saturating_add(self.remaining_ms(environment, instance))
+    }
+
+    /// Counted window time the instance still needs before its slot.
+    fn remaining_ms(&self, environment: &str, instance: &str) -> i64 {
         let key = (environment.to_string(), instance.to_string());
         let Some(index) = self
             .ranked
             .iter()
             .position(|row| row.0 == environment && row.1 == instance)
         else {
-            return self.now_ms.saturating_add(self.duration_ms);
+            return self.duration_ms;
         };
         let slot = slot_elapsed_ms(index, self.ranked.len(), self.duration_ms);
         let elapsed = self.elapsed_by_instance.get(&key).copied().unwrap_or(0);
-        let remaining = slot.saturating_sub(elapsed);
-        self.now_ms.saturating_add(remaining.max(0))
+        slot.saturating_sub(elapsed).max(0)
     }
+}
+
+/// Most window transitions [`project_counted`] walks before giving up.
+const MAX_PROJECTED_WINDOWS: usize = 64;
+
+/// Server time at which `remaining_ms` of counted time (inside both window
+/// sets) has passed after `now_ms`. `None` when the windows are invalid, never
+/// reopen, or need more than [`MAX_PROJECTED_WINDOWS`] transitions.
+fn project_counted(
+    env_windows: &[crate::maintenance::Window],
+    product_windows: &[crate::maintenance::Window],
+    now_ms: i64,
+    remaining_ms: i64,
+) -> Option<i64> {
+    use crate::maintenance::{Eligibility, evaluate, intersect};
+    let mut at = now_ms;
+    let mut remaining = remaining_ms.max(0);
+    for _ in 0..MAX_PROJECTED_WINDOWS {
+        if remaining == 0 {
+            // Windows close exclusively, so a slot earned at a closing edge
+            // starts at the next joint opening.
+            return next_joint_opening(env_windows, product_windows, at);
+        }
+        let instant = chrono::DateTime::from_timestamp_millis(at)?;
+        match intersect(
+            evaluate(env_windows, instant),
+            evaluate(product_windows, instant),
+        ) {
+            Eligibility::Open { closes_at, .. } if closes_at > at => {
+                let open = closes_at - at;
+                if remaining < open {
+                    return Some(at + remaining);
+                }
+                remaining -= open;
+                at = closes_at;
+            }
+            Eligibility::Closed {
+                next_opens_at: Some(next),
+            } if next > at => at = next,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// First server time at or after `from_ms` when both window sets are open.
+/// The operands' own hints may name an opening where the other set is still
+/// closed, so this walks forward until they agree. `None` when the windows are
+/// invalid, never overlap, or need more than [`MAX_PROJECTED_WINDOWS`] steps.
+fn next_joint_opening(
+    env_windows: &[crate::maintenance::Window],
+    product_windows: &[crate::maintenance::Window],
+    from_ms: i64,
+) -> Option<i64> {
+    use crate::maintenance::{Eligibility, evaluate, intersect};
+    let mut at = from_ms;
+    for _ in 0..MAX_PROJECTED_WINDOWS {
+        let instant = chrono::DateTime::from_timestamp_millis(at)?;
+        match intersect(
+            evaluate(env_windows, instant),
+            evaluate(product_windows, instant),
+        ) {
+            Eligibility::Open { .. } => return Some(at),
+            Eligibility::Closed {
+                next_opens_at: Some(next),
+            } if next > at => at = next,
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// How many of `n` instances may start after `elapsed_ms` of a `duration_ms` pace.
@@ -466,7 +670,8 @@ fn slot_elapsed_ms(index: usize, n: usize, duration_ms: i64) -> i64 {
     }
     let n = n as i128;
     let duration = duration_ms as i128;
-    let slot = ((index as i128 + 1) * duration).div_euclid(n);
+    // Ceiling, so the slot is the first elapsed time `allowed_count` admits.
+    let slot = ((index as i128 + 1) * duration + n - 1).div_euclid(n);
     i64::try_from(slot).unwrap_or(i64::MAX)
 }
 
@@ -500,6 +705,9 @@ async fn evaluate_channel(
     let ranked = list_subscribers(ctx, product, channel).await?;
     if ranked.is_empty() {
         return Ok(Some(ChannelDecision {
+            release,
+            promoted_at_ms: promoted_at,
+            early: HashMap::new(),
             ranked,
             admitted: BTreeSet::new(),
             duration_ms,
@@ -522,12 +730,15 @@ async fn evaluate_channel(
         };
         elapsed_by_instance.insert((environment.clone(), instance.clone()), elapsed);
         let started = instance_started(ctx, environment, instance, &release).await?;
-        let is_early = early.contains(&(environment.clone(), instance.clone()));
+        let is_early = early.contains_key(&(environment.clone(), instance.clone()));
         if started || is_early || index < allowed_count(elapsed, duration_ms, ranked.len()) {
             admitted.insert((environment.clone(), instance.clone()));
         }
     }
     Ok(Some(ChannelDecision {
+        release,
+        promoted_at_ms: promoted_at,
+        early,
         ranked,
         admitted,
         duration_ms,
@@ -588,13 +799,14 @@ async fn list_subscribers(
     Ok(rows)
 }
 
+/// Early admissions on `release`, keyed by (environment, instance).
 async fn load_early(
     ctx: &mut Ctx,
     product: &str,
     channel: &str,
     release: &str,
-) -> Result<BTreeSet<(String, String)>> {
-    let mut early = BTreeSet::new();
+) -> Result<HashMap<(String, String), PaceAdmitAudit>> {
+    let mut early = HashMap::new();
     for object in ctx.list_kind(KIND_UPGRADE_PACE_ADMIT).await? {
         if object.properties.get("product").map(String::as_str) != Some(product)
             || object.properties.get("channel").map(String::as_str) != Some(channel)
@@ -608,7 +820,17 @@ async fn load_early(
         let Some(instance) = object.properties.get("instance").cloned() else {
             continue;
         };
-        early.insert((environment, instance));
+        early.insert(
+            (environment, instance),
+            // Pacing decisions read only the key; a damaged audit field
+            // must not stop the reconciler.
+            PaceAdmitAudit {
+                action: "set".into(),
+                reason: object.properties.get("reason").cloned().unwrap_or_default(),
+                actor: object.properties.get("actor").cloned().unwrap_or_default(),
+                at: parse_optional_i64(object.properties.get("at")).unwrap_or(object.created),
+            },
+        );
     }
     Ok(early)
 }
@@ -745,6 +967,63 @@ mod tests {
     use crate::auth_context::AuthenticatedRequestContext;
     use crate::catalog::PublishOptions;
     use crate::ontology::release_id;
+
+    fn daily(start: &str) -> crate::maintenance::Window {
+        crate::maintenance::Window {
+            identity: format!("w{}", start.replace(':', "")),
+            timezone: "UTC".into(),
+            weekdays: (1..=7).collect(),
+            start: start.into(),
+            duration_minutes: 60,
+        }
+    }
+
+    #[test]
+    fn slot_is_the_first_elapsed_time_that_admits_the_instance() {
+        for (n, duration) in [(2, 119_999), (6, 10_800_000), (7, 1_000)] {
+            for index in 0..n {
+                let slot = slot_elapsed_ms(index, n, duration);
+                assert!(allowed_count(slot, duration, n) > index);
+                assert!(allowed_count(slot - 1, duration, n) <= index);
+            }
+        }
+    }
+
+    #[test]
+    fn projection_earned_at_a_closing_edge_waits_for_the_next_opening() {
+        // 2023-11-14 02:00 UTC, inside a daily 02:00-03:00 window.
+        let two = 1_699_927_200_000;
+        let hour = 3_600_000;
+        let window = [daily("02:00")];
+        assert_eq!(
+            project_counted(&window, &[], two, hour - 1),
+            Some(two + hour - 1)
+        );
+        assert_eq!(
+            project_counted(&window, &[], two, hour),
+            Some(two + 24 * hour)
+        );
+    }
+
+    #[test]
+    fn next_joint_opening_needs_both_window_sets_open() {
+        // 2023-11-14 00:00 UTC.
+        let midnight = 1_699_920_000_000;
+        let hour = 3_600_000;
+        assert_eq!(
+            next_joint_opening(&[daily("01:00")], &[daily("01:30")], midnight),
+            Some(midnight + 90 * 60_000)
+        );
+        assert_eq!(
+            next_joint_opening(&[daily("01:00")], &[daily("03:00")], midnight),
+            None,
+            "windows that never overlap have no joint opening"
+        );
+        assert_eq!(
+            next_joint_opening(&[daily("01:00")], &[], midnight + hour + 1),
+            Some(midnight + hour + 1)
+        );
+    }
 
     #[test]
     fn allowed_count_spreads_six_instances_over_three_hours() {
@@ -1006,6 +1285,100 @@ mod tests {
             .unwrap();
         assert_eq!(audit.len(), 1);
         assert_eq!(audit[0].reason, "canary host");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn progress_reports_started_admitted_waiting_and_paused() {
+        let (root, mut ctx, actor) = fixture("progress").await;
+        publish(&mut ctx, &root, "1.0.0").await;
+        publish(&mut ctx, &root, "2.0.0").await;
+        subscribe_fleet(&mut ctx, &actor).await;
+        configure(&mut ctx, "api", "stable", Some(10_800_000))
+            .await
+            .unwrap();
+        crate::catalog::promote(&mut ctx, &actor, "api@2.0.0", "stable")
+            .await
+            .unwrap();
+        // Tuesday 22:13:20 UTC; env-e opens daily at 02:00 UTC for an hour.
+        let promoted_at = 1_700_000_000_000;
+        stamp_promoted_at(&mut ctx, promoted_at).await;
+        mark_deployed(&mut ctx, "env-a", "2.0.0").await;
+        admit_early(
+            &mut ctx,
+            "api",
+            "stable",
+            "env-f",
+            "api",
+            "canary host",
+            "alice",
+        )
+        .await
+        .unwrap();
+        crate::maintenance::set(
+            &mut ctx,
+            "env-e",
+            crate::maintenance::Window::new("nightly", "UTC", (1..=7).collect(), "02:00", 60)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let paced = progress(&mut ctx, "api", "stable", promoted_at + 3_600_000)
+            .await
+            .unwrap();
+        assert_eq!(paced.release, release_id("api", "2.0.0"));
+        assert_eq!(paced.duration_ms, 10_800_000);
+        let state = |env: &str| {
+            paced
+                .instances
+                .iter()
+                .find(|row| row.environment == env)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(state("env-a").state, PaceInstanceState::Started);
+        assert_eq!(state("env-b").state, PaceInstanceState::Admitted);
+        // Third of six slots: half of three counted hours.
+        let waiting = state("env-c");
+        assert_eq!(waiting.state, PaceInstanceState::Waiting);
+        assert_eq!(waiting.eligible_at_ms, Some(promoted_at + 5_400_000));
+        let paused = state("env-e");
+        assert_eq!(paused.state, PaceInstanceState::Paused);
+        // Two and a half counted hours through daily one-hour windows:
+        // Wednesday, Thursday, then half of Friday's.
+        assert_eq!(paused.eligible_at_ms, Some(1_700_188_200_000));
+        assert_eq!(paused.next_opens_at_ms, Some(1_700_013_600_000));
+        let early = state("env-f");
+        assert_eq!(early.state, PaceInstanceState::Admitted);
+        let admission = early.early_admission.unwrap();
+        assert_eq!(
+            (admission.actor.as_str(), admission.reason.as_str()),
+            ("alice", "canary host")
+        );
+
+        // Admission does not open a closed window.
+        admit_early(&mut ctx, "api", "stable", "env-e", "api", "hotfix", "alice")
+            .await
+            .unwrap();
+        let paced = progress(&mut ctx, "api", "stable", promoted_at + 3_600_000)
+            .await
+            .unwrap();
+        let admitted = paced
+            .instances
+            .iter()
+            .find(|row| row.environment == "env-e")
+            .unwrap();
+        assert_eq!(admitted.state, PaceInstanceState::Paused);
+        assert_eq!(admitted.eligible_at_ms, Some(1_700_013_600_000));
+        assert_eq!(admitted.next_opens_at_ms, Some(1_700_013_600_000));
+
+        configure(&mut ctx, "api", "stable", None).await.unwrap();
+        let off = progress(&mut ctx, "api", "stable", promoted_at)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(off.contains("has no upgrade pace"), "{off}");
         let _ = std::fs::remove_dir_all(root);
     }
 

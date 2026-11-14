@@ -60,6 +60,27 @@ async fn remote_channel_pace_and_admit_require_management() {
         .subscribe_environment("stage", "api=stable", generation, None)
         .await
         .unwrap();
+    let waiting = management
+        .channel_pace_progress("api", "stable")
+        .await
+        .unwrap();
+    let stage = &waiting.instances[0];
+    assert_eq!(
+        (stage.environment.as_str(), stage.state),
+        ("stage", tenkai::upgrade_pace::PaceInstanceState::Waiting)
+    );
+    assert!(
+        stage
+            .eligible_at_ms
+            .is_some_and(|at| at > tenkai::now_millis())
+    );
+
+    let refused = runtime
+        .admit_channel_instance("api", "stable", "stage", "api", "canary host")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("403"), "{refused}");
     let admitted = management
         .admit_channel_instance("api", "stable", "stage", "api", "canary host")
         .await
@@ -69,5 +90,17 @@ async fn remote_channel_pace_and_admit_require_management() {
         "{}",
         admitted.message
     );
+    let progress = management
+        .channel_pace_progress("api", "stable")
+        .await
+        .unwrap();
+    let stage = &progress.instances[0];
+    assert_eq!(
+        stage.state,
+        tenkai::upgrade_pace::PaceInstanceState::Admitted
+    );
+    let admission = stage.early_admission.as_ref().expect("audited admission");
+    assert_eq!(admission.reason, "canary host");
+    assert_eq!(admission.actor, "management");
     let _ = std::fs::remove_dir_all(root);
 }

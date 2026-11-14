@@ -2922,6 +2922,25 @@ impl ManagementOperations {
             .map_err(map_catalog_error)
     }
 
+    /// Upgrade pacing progress on the channel head (#1276). Read-only, like
+    /// the promotion policy view.
+    pub async fn channel_pace_progress(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+    ) -> Result<crate::upgrade_pace::PaceProgress, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        self.require_environment_grant(credential, &context, None, "channel upgrade pace")?;
+        Self::require_channel_binding(&context, channel)?;
+        Self::require_product_grant(&context, product)?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        crate::upgrade_pace::progress(&mut ctx, product, channel, crate::now_millis())
+            .await
+            .map_err(map_catalog_error)
+    }
+
     pub async fn pause_channel_policy(
         &self,
         credential: &CredentialMaterial,
@@ -4228,6 +4247,7 @@ fn map_catalog_error(error: anyhow::Error) -> ManagementError {
         || message.contains("does not exist")
         || message.contains("no channel promotion policy")
         || message.contains("is not recalled")
+        || message.contains("has no upgrade pace")
     {
         ManagementError::NotFound(message)
     } else if message.contains("digest")
@@ -5109,6 +5129,23 @@ mod tests {
         assert!(matches!(
             channel_ops.set_exposure_waiver(&credential, own).await,
             Err(ManagementError::Forbidden(_))
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn pace_progress_refuses_products_outside_the_publication_grant() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-pace-grant-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = catalog_ops(&root, grant_auth([DeliveryCapability::Read], [])).await;
+        assert!(matches!(
+            ops.channel_pace_progress(&grant_credential(), "other", "stable")
+                .await,
+            Err(ManagementError::Forbidden(message)) if message.contains("publication grant")
         ));
         let _ = std::fs::remove_dir_all(&root);
     }
