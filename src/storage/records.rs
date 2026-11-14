@@ -177,6 +177,17 @@ pub struct RollbackRecord {
     pub status_detail: String,
 }
 
+/// Position of a provider event in newest-first inspection order:
+/// `observed_at`, then `provider_kind`, then `id` (text bytewise), all
+/// descending. Stores must compare in this order. Unique
+/// across the outbox because `(provider_kind, id)` is its key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ProviderEventPosition {
+    pub observed_at: i64,
+    pub provider_kind: String,
+    pub id: String,
+}
+
 /// Durable delivery record for optional provider side effects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderEventRecord {

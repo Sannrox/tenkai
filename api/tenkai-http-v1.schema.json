@@ -8923,6 +8923,24 @@
       ],
       "type": "object"
     },
+    "WebhookDeliveryPage": {
+      "description": "One page of webhook deliveries, newest recorded first across every kind\nand scope read. Follow `next_cursor` until it is omitted.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/WebhookDelivery"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
     "WebhookEndpoint": {
       "description": "Operator-facing endpoint configuration. The HMAC secret is never stored;\n`secret_env` names a process environment variable.",
       "properties": {
@@ -9188,36 +9206,33 @@
       "auth": "read",
       "method": "GET",
       "path": "/v1/webhooks/deliveries",
-      "request": null,
+      "request": {
+        "$ref": "#/$defs/PageQuery"
+      },
       "response": {
-        "items": {
-          "$ref": "#/$defs/WebhookDelivery"
-        },
-        "type": "array"
+        "$ref": "#/$defs/WebhookDeliveryPage"
       }
     },
     {
       "auth": "read",
       "method": "GET",
       "path": "/v1/environments/{environment}/webhooks/deliveries",
-      "request": null,
+      "request": {
+        "$ref": "#/$defs/PageQuery"
+      },
       "response": {
-        "items": {
-          "$ref": "#/$defs/WebhookDelivery"
-        },
-        "type": "array"
+        "$ref": "#/$defs/WebhookDeliveryPage"
       }
     },
     {
       "auth": "read",
       "method": "GET",
       "path": "/v1/products/{product}/webhooks/deliveries",
-      "request": null,
+      "request": {
+        "$ref": "#/$defs/PageQuery"
+      },
       "response": {
-        "items": {
-          "$ref": "#/$defs/WebhookDelivery"
-        },
-        "type": "array"
+        "$ref": "#/$defs/WebhookDeliveryPage"
       }
     },
     {

@@ -554,20 +554,30 @@ impl ManagementOperations {
         &self,
         credential: &CredentialMaterial,
         environment: Option<&str>,
-    ) -> Result<Vec<crate::operational_events::WebhookDelivery>, ManagementError> {
+        query: &crate::page::PageQuery,
+    ) -> Result<crate::operational_events::WebhookDeliveryPage, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
         self.require_community_catalog_host()?;
         self.require_environment_grant(credential, &context, environment, "webhook deliveries")?;
+        let (limit, after) = delivery_page_query(query)?;
+        let first_page = after.is_none();
         let scope = environment.unwrap_or(crate::operational_events::HOST_SCOPE);
-        let mut deliveries =
-            crate::operational_events::deliveries(&*self.store, scope, 100).map_err(internal)?;
-        if let Some(environment) = environment
+        let mut page = crate::operational_events::delivery_page(
+            &*self.store,
+            &[scope.to_string()],
+            after,
+            limit,
+            |_| true,
+        )
+        .map_err(internal)?;
+        if first_page
+            && let Some(environment) = environment
             && let Ok(mut ctx) = self.application_ctx()
             && let Ok(Some(owner)) = crate::owner::environment_owner(&mut ctx, environment).await
             && owner.endpoints.is_empty()
         {
-            deliveries.insert(
+            page.items.insert(
                 0,
                 crate::operational_events::WebhookDelivery {
                     id: format!("tenkai:owner-unconfigured:{environment}"),
@@ -582,7 +592,7 @@ impl ManagementOperations {
                 },
             );
         }
-        Ok(deliveries)
+        Ok(page)
     }
 
     /// `GET /v1/content/inventory`: release content present and missing here.
@@ -2307,35 +2317,36 @@ impl ManagementOperations {
         &self,
         credential: &CredentialMaterial,
         product: &str,
-    ) -> Result<Vec<crate::operational_events::WebhookDelivery>, ManagementError> {
+        query: &crate::page::PageQuery,
+    ) -> Result<crate::operational_events::WebhookDeliveryPage, ManagementError> {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Read)?;
         Self::require_product_grant(&context, product)?;
         self.require_community_catalog_host()?;
         crate::ontology::validate_identifier("product", product)
             .map_err(|error| ManagementError::BadRequest(error.to_string()))?;
-        Ok(self.product_delivery_reads(credential, product).await?.0)
+        let (limit, after) = delivery_page_query(query)?;
+        let scopes = self.product_delivery_scopes(credential).await?;
+        let source = crate::deploy_webhook::DeliverySource::Product(product.to_string());
+        crate::operational_events::delivery_page(
+            &*self.store,
+            &scopes.into_iter().collect::<Vec<_>>(),
+            after,
+            limit,
+            |delivery| delivery.sources.contains(&source),
+        )
+        .map_err(internal)
     }
 
-    /// Recent and failing deliveries attributed to `product`, read per
-    /// visible environment and the host scope. The failing bound is the
-    /// highest of any scope, so cut-off rows still make reachability unknown.
-    async fn product_delivery_reads(
+    /// Scopes a product delivery read covers, following the grants of
+    /// `webhook_deliveries`: every environment the credential may read, plus
+    /// the host scope for fleet credentials. The environment list has a row
+    /// per subscription, so each name is read once.
+    async fn product_delivery_scopes(
         &self,
         credential: &CredentialMaterial,
-        product: &str,
-    ) -> Result<
-        (
-            Vec<crate::operational_events::WebhookDelivery>,
-            crate::operational_events::FailingDeliveries,
-        ),
-        ManagementError,
-    > {
+    ) -> Result<std::collections::BTreeSet<String>, ManagementError> {
         let context = self.authenticate(credential)?;
-        let source = crate::deploy_webhook::DeliverySource::Product(product.to_string());
-        // The list has a row per environment and subscription; read each once.
-        // Scopes follow the grants of `webhook_deliveries`: an
-        // environment-scoped credential reads its own environment only.
         let mut scopes: std::collections::BTreeSet<String> = self
             .list_environments(credential)
             .await?
@@ -2352,6 +2363,25 @@ impl ManagementOperations {
         {
             scopes.insert(crate::operational_events::HOST_SCOPE.to_string());
         }
+        Ok(scopes)
+    }
+
+    /// Recent and failing deliveries attributed to `product`, read per
+    /// scope of [`Self::product_delivery_scopes`]. The failing bound is the
+    /// highest of any scope, so cut-off rows still make reachability unknown.
+    async fn product_delivery_reads(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+    ) -> Result<
+        (
+            Vec<crate::operational_events::WebhookDelivery>,
+            crate::operational_events::FailingDeliveries,
+        ),
+        ManagementError,
+    > {
+        let source = crate::deploy_webhook::DeliverySource::Product(product.to_string());
+        let scopes = self.product_delivery_scopes(credential).await?;
         let mut recent = Vec::new();
         let mut failing = crate::operational_events::FailingDeliveries::default();
         for scope in &scopes {
@@ -4553,6 +4583,23 @@ fn map_config_error(error: anyhow::Error) -> ManagementError {
     } else {
         ManagementError::ExecutionFailed(message)
     }
+}
+
+/// Page size and start position of a delivery list query; a malformed
+/// limit or cursor is the caller's error.
+fn delivery_page_query(
+    query: &crate::page::PageQuery,
+) -> Result<(usize, Option<crate::storage::ProviderEventPosition>), ManagementError> {
+    let limit = query.limit().map_err(ManagementError::BadRequest)?;
+    let after = query
+        .cursor
+        .as_deref()
+        .map(|cursor| {
+            crate::operational_events::parse_delivery_cursor(cursor)
+                .ok_or_else(|| ManagementError::BadRequest("delivery cursor is invalid".into()))
+        })
+        .transpose()?;
+    Ok((limit, after))
 }
 
 fn internal(error: anyhow::Error) -> ManagementError {

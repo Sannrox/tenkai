@@ -90,7 +90,11 @@ async fn deliveries_name_their_sources_and_list_per_product() {
 
     client.recall_release("api@1.0.0").await.unwrap();
 
-    let deliveries = client.product_webhook_deliveries("api").await.unwrap();
+    let deliveries = client
+        .product_webhook_deliveries("api", &tenkai::page::PageQuery::default())
+        .await
+        .unwrap()
+        .items;
     let shared = deliveries
         .iter()
         .find(|delivery| delivery.url == SHARED)
@@ -117,15 +121,46 @@ async fn deliveries_name_their_sources_and_list_per_product() {
         1
     );
 
+    // One row per page reads the same deliveries through the cursor.
+    let mut paged = Vec::new();
+    let mut query = tenkai::page::PageQuery {
+        limit: Some(1),
+        cursor: None,
+    };
+    loop {
+        let page = client
+            .product_webhook_deliveries("api", &query)
+            .await
+            .unwrap();
+        paged.extend(page.items);
+        match page.next_cursor {
+            Some(cursor) => query.cursor = Some(cursor),
+            None => break,
+        }
+    }
+    assert_eq!(paged, deliveries);
+    assert!(
+        client
+            .product_webhook_deliveries(
+                "api",
+                &tenkai::page::PageQuery {
+                    limit: None,
+                    cursor: Some("not-a-cursor".into()),
+                },
+            )
+            .await
+            .is_err()
+    );
     // The product does not subscribe APPLY_ONLY to recalls, so it is no source.
     assert!(!deliveries.iter().any(|delivery| delivery.url == APPLY_ONLY));
     // Recalls are host-wide; an environment-scoped credential reads none.
     let scoped = RemoteClient::new(format!("http://{addr}"), "stage-secret").unwrap();
     assert!(
         scoped
-            .product_webhook_deliveries("api")
+            .product_webhook_deliveries("api", &tenkai::page::PageQuery::default())
             .await
             .unwrap()
+            .items
             .is_empty()
     );
 

@@ -206,10 +206,15 @@ an operator enables one or the other.
 Delivery status, for apply outcomes, operational events, and feedback
 observations, is at
 `GET /v1/environments/{environment}/webhooks/deliveries` and, for host
-webhooks, at `GET /v1/webhooks/deliveries`: apply outcomes, then operational
-events, then feedback observations, each newest recorded first. Each
-delivery shows its state (`pending`, `retrying`, `delivered`), attempts, next attempt, delivery
-time and the last error.
+webhooks, at `GET /v1/webhooks/deliveries`. Each list returns
+`{"items": [...], "next_cursor": "..."}`, newest recorded first across apply
+outcomes, operational events, and feedback observations. Pass `limit` (1 to
+100, default 50) and the previous page's `next_cursor` as `cursor` to read
+older deliveries; `next_cursor` is omitted on the last page. Cursors are
+opaque, and a malformed one is refused. Each delivery shows its state
+(`pending`, `retrying`, `delivered`), attempts, next attempt, delivery time
+and the last error. The environment list's first page also carries the
+`owner.unconfigured` row described above.
 
 One delivery goes to each URL even when an environment and a product both
 configure it. Its `sources` names every configuration that routed it, for
@@ -218,8 +223,10 @@ example `{"kind":"environment","name":"stage"}` and
 have none.
 
 `GET /v1/products/{product}/webhooks/deliveries` lists the deliveries a
-product's endpoints routed, across the environments the caller can see and
-host-wide recall announcements, bounded like the other delivery lists.
+product's endpoints routed, across the environments the caller may read and,
+for fleet credentials, host-wide recall announcements, paged the same way. A
+page can hold fewer than `limit` deliveries while `next_cursor` is still set,
+when the rows scanned belonged to other configurations.
 
 ## SMTP digests
 

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 
@@ -149,6 +149,7 @@ pub(super) async fn trust_posture(
 pub(super) async fn environment_webhook_deliveries(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,
+    Query(query): Query<tenkai::page::PageQuery>,
     headers: HeaderMap,
 ) -> Response {
     let credential = match require_management(&headers) {
@@ -158,7 +159,7 @@ pub(super) async fn environment_webhook_deliveries(
     manage_result(
         state
             .management
-            .webhook_deliveries(&credential, Some(&environment))
+            .webhook_deliveries(&credential, Some(&environment), &query)
             .await,
     )
 }
@@ -166,6 +167,7 @@ pub(super) async fn environment_webhook_deliveries(
 pub(super) async fn product_webhook_deliveries(
     State(state): State<Arc<AppState>>,
     Path(product): Path<String>,
+    Query(query): Query<tenkai::page::PageQuery>,
     headers: HeaderMap,
 ) -> Response {
     let credential = match require_management(&headers) {
@@ -175,18 +177,24 @@ pub(super) async fn product_webhook_deliveries(
     manage_result(
         state
             .management
-            .product_webhook_deliveries(&credential, &product)
+            .product_webhook_deliveries(&credential, &product, &query)
             .await,
     )
 }
 
 pub(super) async fn host_webhook_deliveries(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<tenkai::page::PageQuery>,
     headers: HeaderMap,
 ) -> Response {
     let credential = match require_management(&headers) {
         Ok(credential) => credential,
         Err(error) => return *error,
     };
-    manage_result(state.management.webhook_deliveries(&credential, None).await)
+    manage_result(
+        state
+            .management
+            .webhook_deliveries(&credential, None, &query)
+            .await,
+    )
 }

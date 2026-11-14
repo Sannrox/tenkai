@@ -47,6 +47,16 @@ pub trait OperationalStore: Send + Sync {
         environment_id: &str,
         limit: usize,
     ) -> Result<Vec<ProviderEventRecord>>;
+    /// Like [`Self::list_provider_events`], newest first, but only events
+    /// strictly after `after` in that order, each with its position, so a
+    /// caller can page past the inspection bound.
+    fn list_provider_events_after(
+        &self,
+        provider_kind: &str,
+        environment_id: &str,
+        after: Option<&ProviderEventPosition>,
+        limit: usize,
+    ) -> Result<Vec<(ProviderEventPosition, ProviderEventRecord)>>;
     /// Undelivered provider events with the most failed attempts first,
     /// bounded. Unlike [`Self::list_provider_events`], newer traffic cannot
     /// push a long-failing delivery out of this view.
