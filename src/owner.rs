@@ -29,7 +29,8 @@ pub struct OwnerView {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<String>,
     /// Whether notifications reach this owner, from recorded deliveries.
-    /// Present where delivery records are readable (environment inspect).
+    /// Present where delivery records are readable: environment inspect and
+    /// product owner reads on a community host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub reachability: Option<OwnerReachability>,
@@ -235,6 +236,7 @@ fn merge_subscriptions(existing: &mut WebhookEndpoint, other: WebhookEndpoint) {
     extend_unique(&mut existing.events, other.events);
     extend_unique(&mut existing.operational, other.operational);
     extend_unique(&mut existing.feedback, other.feedback);
+    extend_unique(&mut existing.sources, other.sources);
     if keep_all_apply {
         if existing.operational.is_empty() && existing.feedback.is_empty() {
             existing.events.clear();
@@ -333,10 +335,14 @@ pub async fn product_owner(ctx: &mut Ctx, product: &str) -> Result<Option<OwnerV
     }
 }
 
+/// The product's endpoints, attributed to the product.
 pub async fn list_product_webhooks(ctx: &mut Ctx, product: &str) -> Result<Vec<WebhookEndpoint>> {
     validate_identifier("product", product)?;
     match ctx.get(&product_id(product)).await? {
-        Some(object) if object.kind == KIND_PRODUCT => parse_endpoints(&object),
+        Some(object) if object.kind == KIND_PRODUCT => Ok(WebhookEndpoint::attributed(
+            parse_endpoints(&object)?,
+            crate::deploy_webhook::DeliverySource::Product(product.to_string()),
+        )),
         Some(_) => bail!("product {product} is not a product"),
         None => Ok(Vec::new()),
     }
@@ -429,7 +435,7 @@ pub async fn environment_notification_endpoints(
     env: &str,
 ) -> Result<Vec<WebhookEndpoint>> {
     let env_obj = crate::environment::environment(ctx, env).await?;
-    let mut endpoints = parse_endpoints(&env_obj).unwrap_or_default();
+    let mut endpoints = crate::deploy_webhook::configured_endpoints(&env_obj);
     let Ok(subscriptions) = crate::environment::list_subscriptions(ctx, &env_obj).await else {
         return Ok(endpoints);
     };
@@ -458,6 +464,7 @@ mod tests {
 
     fn endpoint(url: &str, event: WebhookEvent) -> WebhookEndpoint {
         WebhookEndpoint {
+            sources: Vec::new(),
             url: url.into(),
             secret_env: "HOOK_SECRET".into(),
             events: vec![event],
@@ -476,6 +483,7 @@ mod tests {
             next_attempt_at: 0,
             delivered_at,
             last_error: String::new(),
+            sources: Vec::new(),
         }
     }
 

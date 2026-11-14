@@ -67,6 +67,10 @@ struct Envelope {
     secret_env: String,
     event: String,
     body: OperationalPayload,
+    /// Configuration that caused this delivery, read back by delivery
+    /// status. Never posted; only `body` is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<crate::deploy_webhook::DeliverySource>,
 }
 
 /// One transition to announce.
@@ -118,6 +122,7 @@ fn record(
         secret_env: endpoint.secret_env.clone(),
         event: transition.event.as_str().into(),
         body,
+        sources: endpoint.sources_for(|own| own.notifies(transition.event)),
     };
     let mut identity = Sha256::new();
     for value in [
@@ -668,6 +673,11 @@ pub struct WebhookDelivery {
     /// The last failure, as the worker recorded it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_error: String,
+    /// Configuration that caused this delivery: the environment, the
+    /// product, or both when they share the URL. Omitted for host webhooks
+    /// and for deliveries recorded before sources were kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<crate::deploy_webhook::DeliverySource>,
 }
 
 /// Apply-outcome, operational, and feedback deliveries for `scope` (an
@@ -740,6 +750,8 @@ fn collect_deliveries(
             struct Addressed {
                 url: String,
                 event: String,
+                #[serde(default)]
+                sources: Vec<crate::deploy_webhook::DeliverySource>,
             }
             let addressed = serde_json::from_str::<ProviderEvent>(&record.payload_json)
                 .ok()
@@ -763,6 +775,7 @@ fn collect_deliveries(
                 next_attempt_at: record.next_attempt_at,
                 delivered_at: record.delivered_at,
                 last_error: record.last_error,
+                sources: addressed.sources,
             });
         }
     }
@@ -776,6 +789,7 @@ mod tests {
 
     fn endpoint(operational: Vec<OperationalEvent>) -> WebhookEndpoint {
         WebhookEndpoint {
+            sources: Vec::new(),
             url: "https://hooks.example/ops".into(),
             secret_env: "OPS_HOOK_SECRET".into(),
             events: Vec::new(),
@@ -1097,6 +1111,7 @@ mod tests {
         let url = format!("http://{}/hook", closed.local_addr().unwrap());
         drop(closed);
         let sink = WebhookEndpoint {
+            sources: Vec::new(),
             url,
             secret_env: "OPS_HOOK_SECRET".into(),
             events: Vec::new(),

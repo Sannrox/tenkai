@@ -271,6 +271,13 @@ pub fn http_contract() -> Value {
         },
         Route {
             method: "GET",
+            path: "/v1/products/{product}/webhooks/deliveries",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<Vec<WebhookDelivery>>(&mut g),
+        },
+        Route {
+            method: "GET",
             path: "/v1/content/inventory",
             auth: Auth::Read,
             request: None,

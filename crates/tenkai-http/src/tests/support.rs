@@ -171,6 +171,7 @@ impl ReconcilePort for FixedReconciler {
                     criticality: None,
                     open_exposures: Vec::new(),
                     owner: None,
+                    unrouted: false,
                 }],
                 environment_count: 1,
                 environments_current: 0,

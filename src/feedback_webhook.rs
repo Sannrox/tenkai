@@ -31,6 +31,10 @@ struct Envelope {
     secret_env: String,
     event: String,
     body: FeedbackObservation,
+    /// Configuration that caused this delivery, read back by delivery
+    /// status. Never posted; only `body` is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<crate::deploy_webhook::DeliverySource>,
 }
 
 /// Outbox records announcing `observation` to every endpoint that lists
@@ -62,6 +66,7 @@ fn record(
         secret_env: endpoint.secret_env.clone(),
         event: FeedbackEvent::Observation.as_str().into(),
         body: observation.clone(),
+        sources: endpoint.sources_for(|own| own.notifies_feedback(FeedbackEvent::Observation)),
     };
     let environment_id = if observation.environment.trim().is_empty() {
         observation.id.clone()
@@ -224,6 +229,7 @@ mod tests {
 
     fn endpoint(feedback: Vec<FeedbackEvent>) -> WebhookEndpoint {
         WebhookEndpoint {
+            sources: Vec::new(),
             url: "https://hooks.example/feedback".into(),
             secret_env: "FEEDBACK_HOOK_SECRET".into(),
             events: Vec::new(),
@@ -253,6 +259,7 @@ mod tests {
         assert_eq!(envelope.event, "feedback.observation");
         assert_eq!(envelope.body, captured);
         let apply_only = WebhookEndpoint {
+            sources: Vec::new(),
             url: "https://hooks.example/apply".into(),
             secret_env: "APPLY_HOOK_SECRET".into(),
             events: vec![WebhookEvent::ApplySucceeded],
@@ -387,6 +394,7 @@ mod tests {
             &mut ctx,
             "prod",
             WebhookEndpoint {
+                sources: Vec::new(),
                 url: fixture.url.clone(),
                 secret_env: "FEEDBACK_HOOK_SECRET".into(),
                 events: Vec::new(),
@@ -400,6 +408,7 @@ mod tests {
             &mut ctx,
             "prod",
             WebhookEndpoint {
+                sources: Vec::new(),
                 url: "https://hooks.example/unsubscribed".into(),
                 secret_env: "OTHER_HOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplySucceeded],

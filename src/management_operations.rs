@@ -577,6 +577,7 @@ impl ManagementOperations {
                     attempts: 0,
                     next_attempt_at: 0,
                     delivered_at: None,
+                    sources: Vec::new(),
                     last_error: format!("owner {} has no notification endpoint", owner.contact),
                 },
             );
@@ -2284,9 +2285,94 @@ impl ManagementOperations {
         Self::require_capability(&context, DeliveryCapability::Read)?;
         Self::require_product_grant(&context, product)?;
         let mut ctx = self.catalog_ctx(&context)?;
-        crate::owner::product_owner(&mut ctx, product)
+        let owner = crate::owner::product_owner(&mut ctx, product)
             .await
-            .map_err(internal)
+            .map_err(internal)?;
+        // Delivery records are readable on community hosts only, as for
+        // environment inspect.
+        match owner {
+            Some(owner) if !self.tenant_mode => {
+                let (recent, failing) = self.product_delivery_reads(credential, product).await?;
+                Ok(Some(owner.with_reachability(&recent, &failing)))
+            }
+            owner => Ok(owner),
+        }
+    }
+
+    /// `GET /v1/products/{product}/webhooks/deliveries`: deliveries a product
+    /// endpoint is a source of, in every environment the credential may read
+    /// and, for fleet credentials, the host scope, at most 100 of each kind
+    /// per scope.
+    pub async fn product_webhook_deliveries(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+    ) -> Result<Vec<crate::operational_events::WebhookDelivery>, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        Self::require_product_grant(&context, product)?;
+        self.require_community_catalog_host()?;
+        crate::ontology::validate_identifier("product", product)
+            .map_err(|error| ManagementError::BadRequest(error.to_string()))?;
+        Ok(self.product_delivery_reads(credential, product).await?.0)
+    }
+
+    /// Recent and failing deliveries attributed to `product`, read per
+    /// visible environment and the host scope. The failing bound is the
+    /// highest of any scope, so cut-off rows still make reachability unknown.
+    async fn product_delivery_reads(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+    ) -> Result<
+        (
+            Vec<crate::operational_events::WebhookDelivery>,
+            crate::operational_events::FailingDeliveries,
+        ),
+        ManagementError,
+    > {
+        let context = self.authenticate(credential)?;
+        let source = crate::deploy_webhook::DeliverySource::Product(product.to_string());
+        // The list has a row per environment and subscription; read each once.
+        // Scopes follow the grants of `webhook_deliveries`: an
+        // environment-scoped credential reads its own environment only.
+        let mut scopes: std::collections::BTreeSet<String> = self
+            .list_environments(credential)
+            .await?
+            .into_iter()
+            .map(|entry| entry.name)
+            .filter(|name| {
+                self.require_environment_grant(credential, &context, Some(name), "")
+                    .is_ok()
+            })
+            .collect();
+        if self
+            .require_environment_grant(credential, &context, None, "")
+            .is_ok()
+        {
+            scopes.insert(crate::operational_events::HOST_SCOPE.to_string());
+        }
+        let mut recent = Vec::new();
+        let mut failing = crate::operational_events::FailingDeliveries::default();
+        for scope in &scopes {
+            let attributed = |delivery: &crate::operational_events::WebhookDelivery| {
+                delivery.sources.contains(&source)
+            };
+            recent.extend(
+                crate::operational_events::deliveries(&*self.store, scope, 100)
+                    .map_err(internal)?
+                    .into_iter()
+                    .filter(attributed),
+            );
+            let scoped = crate::operational_events::failing_deliveries(&*self.store, scope, 128)
+                .map_err(internal)?;
+            failing
+                .deliveries
+                .extend(scoped.deliveries.into_iter().filter(attributed));
+            failing.hidden_max_attempts =
+                failing.hidden_max_attempts.max(scoped.hidden_max_attempts);
+        }
+        Ok((recent, failing))
     }
 
     pub async fn set_product_owner(

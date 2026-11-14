@@ -373,6 +373,7 @@ pub fn validate(change: &EnvironmentConfigChange) -> Result<()> {
             operational,
             feedback,
         } => WebhookEndpoint {
+            sources: Vec::new(),
             url: url.clone(),
             secret_env: secret_env.clone(),
             events: events.clone(),
@@ -632,6 +633,7 @@ async fn mutate(
                 ctx,
                 environment,
                 WebhookEndpoint {
+                    sources: Vec::new(),
                     url: url.clone(),
                     secret_env: secret_env.clone(),
                     events: events.clone(),

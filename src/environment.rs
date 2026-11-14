@@ -2322,6 +2322,8 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             .unwrap_or_default();
         let owner =
             crate::owner::view_from_object(&env_obj).map(|view| view.with_reachable(&reachable));
+        // Read for the fleet `unrouted` flag; unreadable webhooks route nothing.
+        let webhooks = crate::deploy_webhook::parse_endpoints(&env_obj).unwrap_or_default();
         reports.push(EnvironmentInspectReport {
             name: env_obj.name,
             id: env_obj.id,
@@ -2338,7 +2340,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             latest_plan: None,
             maintenance: None,
             constraints: Vec::new(),
-            webhooks: Vec::new(),
+            webhooks,
             owner,
             approval_policy: None,
             exposure_grace_ms: None,

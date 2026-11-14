@@ -277,6 +277,7 @@ impl FixtureEnvironmentProjection {
             criticality: None,
             open_exposures: Vec::new(),
             owner: None,
+            unrouted: false,
         }
     }
 }

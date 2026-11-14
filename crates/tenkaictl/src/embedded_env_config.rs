@@ -325,6 +325,7 @@ pub(crate) async fn webhooks(ctx: &mut client::Ctx, command: WebhooksCommand) ->
                     ctx,
                     &env,
                     tenkai::deploy_webhook::WebhookEndpoint {
+                        sources: Vec::new(),
                         url,
                         secret_env,
                         events,

@@ -22,7 +22,8 @@ use super::exports::{create_export, download_export, inspect_export, list_export
 use super::grant_rules::{create_grant_rule, list_grant_rules, remove_grant_rule};
 use super::imports::{
     content_inventory, environment_webhook_deliveries, host_webhook_deliveries, import_bundle,
-    import_job, import_jobs, staged_imports, trust_posture, trust_runway,
+    import_job, import_jobs, product_webhook_deliveries, staged_imports, trust_posture,
+    trust_runway,
 };
 use super::inspect::{
     auth_session, backup_status, change_events, environment_approval_policy,
@@ -210,6 +211,10 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/webhooks/deliveries",
             get(environment_webhook_deliveries),
+        )
+        .route(
+            "/v1/products/{product}/webhooks/deliveries",
+            get(product_webhook_deliveries),
         )
         .route("/v1/events", get(change_events))
         .route(

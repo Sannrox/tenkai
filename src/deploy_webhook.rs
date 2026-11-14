@@ -159,6 +159,17 @@ impl WebhookEvent {
     }
 }
 
+/// Configuration that caused a delivery: an environment's or a product's
+/// endpoint list. A URL on both is one delivery with both sources.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "name")]
+pub enum DeliverySource {
+    Environment(String),
+    Product(String),
+}
+
 /// Operator-facing endpoint configuration. The HMAC secret is never stored;
 /// `secret_env` names a process environment variable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -174,9 +185,40 @@ pub struct WebhookEndpoint {
     /// unless listed (#1102).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feedback: Vec<FeedbackEvent>,
+    /// Each configuration that routes this URL, with that configuration's
+    /// own subscription. Set when endpoints are loaded to notify; a delivery
+    /// records the sources subscribed to its event. Never stored or sent.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub sources: Vec<(DeliverySource, WebhookEndpoint)>,
 }
 
 impl WebhookEndpoint {
+    /// Mark every endpoint as configured on `source`.
+    pub fn attributed(mut endpoints: Vec<Self>, source: DeliverySource) -> Vec<Self> {
+        for endpoint in &mut endpoints {
+            let own = Self {
+                sources: Vec::new(),
+                ..endpoint.clone()
+            };
+            endpoint.sources = vec![(source.clone(), own)];
+        }
+        endpoints
+    }
+
+    /// Sources whose own subscription passes `subscribed`.
+    pub(crate) fn sources_for(&self, subscribed: impl Fn(&Self) -> bool) -> Vec<DeliverySource> {
+        let mut sources: Vec<_> = self
+            .sources
+            .iter()
+            .filter(|(_, own)| subscribed(own))
+            .map(|(source, _)| source.clone())
+            .collect();
+        sources.sort();
+        sources.dedup();
+        sources
+    }
+
     pub fn validate(&self) -> Result<()> {
         validate_webhook_url(&self.url)?;
         validate_secret_env(&self.secret_env)?;
@@ -246,6 +288,10 @@ struct DeployWebhookEnvelope {
     secret_env: String,
     event: String,
     body: DeployWebhookPayload,
+    /// Configuration that caused this delivery, read back by delivery
+    /// status. Never posted; only `body` is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<crate::deploy_webhook::DeliverySource>,
 }
 
 /// Resolves HMAC secrets by environment-variable name.
@@ -295,8 +341,13 @@ pub(crate) fn validate_endpoint_list(endpoints: &[WebhookEndpoint]) -> Result<()
     Ok(())
 }
 
+/// The environment's endpoints, attributed to it; none when the property is
+/// unreadable.
 pub fn configured_endpoints(environment: &Object) -> Vec<WebhookEndpoint> {
-    parse_endpoints(environment).unwrap_or_default()
+    WebhookEndpoint::attributed(
+        parse_endpoints(environment).unwrap_or_default(),
+        DeliverySource::Environment(environment.name.clone()),
+    )
 }
 
 /// Upsert one endpoint on the environment, keyed by URL. Never stores secret bytes.
@@ -501,6 +552,7 @@ fn webhook_record(
         secret_env: endpoint.secret_env.clone(),
         event: event.as_str().into(),
         body,
+        sources: endpoint.sources_for(|own| own.subscribed(event)),
     };
     let payload_json = serde_json::to_string(&envelope)?;
     let configuration_digest = digest_bytes(endpoint.url.as_bytes());
@@ -811,6 +863,7 @@ mod tests {
     #[test]
     fn default_events_subscribe_to_every_apply_outcome() {
         let endpoint = WebhookEndpoint {
+            sources: Vec::new(),
             url: "https://hooks.example.test/tenkai".into(),
             secret_env: "TENKAI_WEBHOOK_SECRET".into(),
             events: Vec::new(),
@@ -822,6 +875,7 @@ mod tests {
         assert!(endpoint.subscribed(WebhookEvent::ApplyFailed));
         assert!(endpoint.subscribed(WebhookEvent::ApplyRolledBack));
         let feedback_only = WebhookEndpoint {
+            sources: Vec::new(),
             url: "https://hooks.example.test/tenkai".into(),
             secret_env: "TENKAI_WEBHOOK_SECRET".into(),
             events: Vec::new(),
@@ -844,6 +898,7 @@ mod tests {
             &mut ctx,
             "local",
             WebhookEndpoint {
+                sources: Vec::new(),
                 url: fixture.url.clone(),
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplySucceeded],
@@ -943,6 +998,7 @@ mod tests {
             &mut ctx,
             "local",
             WebhookEndpoint {
+                sources: Vec::new(),
                 url: "http://127.0.0.1:1/missing".into(),
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplySucceeded],
@@ -1000,6 +1056,7 @@ mod tests {
             &mut ctx,
             "local",
             WebhookEndpoint {
+                sources: Vec::new(),
                 url: fixture.url.clone(),
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplySucceeded, WebhookEvent::ApplyRolledBack],
@@ -1121,6 +1178,7 @@ mod tests {
             &mut ctx,
             "hook-demo",
             WebhookEndpoint {
+                sources: Vec::new(),
                 url: fixture.url.clone(),
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplyRolledBack],
@@ -1177,6 +1235,7 @@ mod tests {
             &mut ctx,
             "local",
             WebhookEndpoint {
+                sources: Vec::new(),
                 url: shared.clone(),
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplyRolledBack],
@@ -1191,6 +1250,7 @@ mod tests {
             &mut ctx,
             "hook-demo",
             WebhookEndpoint {
+                sources: Vec::new(),
                 url: shared.clone(),
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplyRolledBack],
@@ -1204,6 +1264,7 @@ mod tests {
             &mut ctx,
             "hook-demo",
             WebhookEndpoint {
+                sources: Vec::new(),
                 url: distinct.into(),
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplyRolledBack],
@@ -1264,6 +1325,7 @@ mod tests {
             &mut ctx,
             "local",
             WebhookEndpoint {
+                sources: Vec::new(),
                 url: "https://hooks.example.test/tenkai".into(),
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: vec![WebhookEvent::ApplySucceeded],
