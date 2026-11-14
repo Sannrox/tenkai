@@ -2,10 +2,10 @@ use tenkai::change_stream::ChangeEvent;
 use tenkai::runtime_capabilities::ComponentCapabilities;
 use tenkai::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
-    OfflineStepImportRecord, OperationalStore, PlanRecord, PlanStatus, ProviderEventRecord,
-    ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeActivityRecord,
-    RuntimeAttestationRecord, RuntimeClaim, RuntimeCredentialRecord, RuntimeEnrollmentRecord,
-    RuntimeRevocation, RuntimeRunnerRecord, RuntimeSealingKeyRecord,
+    OfflineStepImportRecord, OperationalStore, PlanRecord, PlanStatus, ProviderEventPosition,
+    ProviderEventRecord, ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus,
+    RuntimeActivityRecord, RuntimeAttestationRecord, RuntimeClaim, RuntimeCredentialRecord,
+    RuntimeEnrollmentRecord, RuntimeRevocation, RuntimeRunnerRecord, RuntimeSealingKeyRecord,
 };
 
 use super::PostgresTenantPartition;
@@ -107,6 +107,21 @@ impl OperationalStore for PostgresTenantPartition {
     ) -> Result<Vec<ProviderEventRecord>> {
         self.inner
             .list_provider_events(&self.schema, provider_kind, environment_id, limit)
+    }
+    fn list_provider_events_after(
+        &self,
+        provider_kind: &str,
+        environment_id: &str,
+        after: Option<&ProviderEventPosition>,
+        limit: usize,
+    ) -> Result<Vec<(ProviderEventPosition, ProviderEventRecord)>> {
+        self.inner.list_provider_events_after(
+            &self.schema,
+            provider_kind,
+            environment_id,
+            after,
+            limit,
+        )
     }
     fn list_failing_provider_events(
         &self,

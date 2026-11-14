@@ -33,7 +33,7 @@ use crate::provider_event::{ProviderEventStore, deliver_optional_event, provider
 use crate::providers::{
     DeliveryStatus, EvidenceBinding, PROVIDER_CONTRACT_VERSION, ProviderError, ProviderEvent,
 };
-use crate::storage::{OperationalStore, ProviderEventRecord};
+use crate::storage::{OperationalStore, ProviderEventPosition, ProviderEventRecord};
 
 pub const OPERATIONAL_WEBHOOK_KIND: &str = "operational_webhook";
 pub const OPERATIONAL_EVENT_SCHEMA: &str = "tenkai.operational_event.v1";
@@ -733,7 +733,16 @@ fn collect_deliveries(
     mut list: impl FnMut(&str) -> crate::storage::Result<Vec<crate::storage::ProviderEventRecord>>,
 ) -> Result<Vec<WebhookDelivery>> {
     let mut deliveries = Vec::new();
-    let kinds = [
+    for kind in delivery_kinds() {
+        deliveries.extend(list(&kind)?.into_iter().filter_map(project_delivery));
+    }
+    Ok(deliveries)
+}
+
+/// Outbox kinds a delivery list reads: apply outcomes, operational events,
+/// feedback observations, then each installed SMTP digest sink.
+fn delivery_kinds() -> Vec<String> {
+    [
         crate::deploy_webhook::DEPLOY_WEBHOOK_KIND.to_string(),
         OPERATIONAL_WEBHOOK_KIND.to_string(),
         crate::feedback_webhook::FEEDBACK_WEBHOOK_KIND.to_string(),
@@ -743,43 +752,130 @@ fn collect_deliveries(
         crate::smtp_digest::installed()
             .iter()
             .map(|sink| crate::smtp_digest::digest_kind(&sink.id)),
-    );
-    for kind in kinds {
-        for record in list(&kind)? {
-            #[derive(Deserialize)]
-            struct Addressed {
-                url: String,
-                event: String,
-                #[serde(default)]
-                sources: Vec<crate::deploy_webhook::DeliverySource>,
+    )
+    .collect()
+}
+
+/// The operator view of one outbox row, or `None` when its envelope does not
+/// name a URL and event.
+fn project_delivery(record: ProviderEventRecord) -> Option<WebhookDelivery> {
+    #[derive(Deserialize)]
+    struct Addressed {
+        url: String,
+        event: String,
+        #[serde(default)]
+        sources: Vec<crate::deploy_webhook::DeliverySource>,
+    }
+    let addressed = serde_json::from_str::<ProviderEvent>(&record.payload_json)
+        .ok()
+        .and_then(|event| serde_json::from_str::<Addressed>(&event.payload_json).ok())?;
+    Some(WebhookDelivery {
+        id: record.id,
+        event: addressed.event,
+        url: addressed.url,
+        state: if record.delivered_at.is_some() {
+            "delivered"
+        } else if record.attempts > 0 {
+            "retrying"
+        } else {
+            "pending"
+        }
+        .into(),
+        attempts: record.attempts,
+        next_attempt_at: record.next_attempt_at,
+        delivered_at: record.delivered_at,
+        last_error: record.last_error,
+        sources: addressed.sources,
+    })
+}
+
+/// One page of webhook deliveries, newest recorded first across every kind
+/// and scope read. Follow `next_cursor` until it is omitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WebhookDeliveryPage {
+    pub items: Vec<WebhookDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub next_cursor: Option<String>,
+}
+
+/// Opaque delivery-list cursor: the outbox position of the last row read.
+pub fn encode_delivery_cursor(position: &ProviderEventPosition) -> String {
+    use base64::Engine as _;
+    let json = serde_json::to_vec(position).expect("a position serializes");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+}
+
+/// The position a cursor from [`encode_delivery_cursor`] names, or `None`
+/// when it is malformed.
+pub fn parse_delivery_cursor(cursor: &str) -> Option<ProviderEventPosition> {
+    use base64::Engine as _;
+    let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .ok()?;
+    serde_json::from_slice(&json).ok()
+}
+
+/// Rows a filtered page examines before it returns short with a cursor, so
+/// a filter that matches little cannot turn one request into a full scan.
+const FILTERED_SCAN_BOUND: usize = 1024;
+
+/// Up to `limit` deliveries strictly after `after`, newest first, merged
+/// across every delivery kind in each of `scopes`, keeping those `keep`
+/// accepts. `next_cursor` is set while rows may remain. A page can hold
+/// fewer than `limit` items when `keep` rejected the rows scanned.
+pub fn delivery_page(
+    store: &dyn OperationalStore,
+    scopes: &[String],
+    after: Option<ProviderEventPosition>,
+    limit: usize,
+    keep: impl Fn(&WebhookDelivery) -> bool,
+) -> Result<WebhookDeliveryPage> {
+    let kinds = delivery_kinds();
+    // Each stream returns its newest `batch` rows, so the merged first
+    // `batch` rows are the newest `batch` overall.
+    let batch = limit + 1;
+    let mut after = after;
+    let mut items: Vec<(ProviderEventPosition, WebhookDelivery)> = Vec::new();
+    let mut scanned = 0;
+    loop {
+        let mut merged = Vec::new();
+        let mut any_full = false;
+        for scope in scopes {
+            for kind in &kinds {
+                let rows = store.list_provider_events_after(kind, scope, after.as_ref(), batch)?;
+                any_full |= rows.len() >= batch;
+                merged.extend(rows);
             }
-            let addressed = serde_json::from_str::<ProviderEvent>(&record.payload_json)
-                .ok()
-                .and_then(|event| serde_json::from_str::<Addressed>(&event.payload_json).ok());
-            let Some(addressed) = addressed else {
-                continue;
-            };
-            deliveries.push(WebhookDelivery {
-                id: record.id,
-                event: addressed.event,
-                url: addressed.url,
-                state: if record.delivered_at.is_some() {
-                    "delivered"
-                } else if record.attempts > 0 {
-                    "retrying"
-                } else {
-                    "pending"
+        }
+        merged.sort_by(|left, right| right.0.cmp(&left.0));
+        // Every stream came back short and the merge is consumed whole.
+        let exhausted = !any_full && merged.len() <= batch;
+        merged.truncate(batch);
+        for (position, record) in merged {
+            scanned += 1;
+            after = Some(position.clone());
+            if let Some(delivery) = project_delivery(record).filter(&keep) {
+                items.push((position, delivery));
+                if items.len() > limit {
+                    items.truncate(limit);
+                    let next_cursor = items.last().map(|(position, _)| position);
+                    return Ok(WebhookDeliveryPage {
+                        next_cursor: next_cursor.map(encode_delivery_cursor),
+                        items: items.into_iter().map(|(_, delivery)| delivery).collect(),
+                    });
                 }
-                .into(),
-                attempts: record.attempts,
-                next_attempt_at: record.next_attempt_at,
-                delivered_at: record.delivered_at,
-                last_error: record.last_error,
-                sources: addressed.sources,
+            }
+        }
+        if exhausted || scanned >= FILTERED_SCAN_BOUND {
+            return Ok(WebhookDeliveryPage {
+                next_cursor: (!exhausted)
+                    .then(|| after.as_ref().map(encode_delivery_cursor))
+                    .flatten(),
+                items: items.into_iter().map(|(_, delivery)| delivery).collect(),
             });
         }
     }
-    Ok(deliveries)
 }
 
 #[cfg(test)]
@@ -851,6 +947,68 @@ mod tests {
         // A read that fills its bound reports what the rest may have reached.
         let bounded = failing_deliveries(store, HOST_SCOPE, 1).unwrap();
         assert_eq!(bounded.hidden_max_attempts, 3);
+    }
+
+    /// Following the cursor reads every delivery of every scope once, newest
+    /// first, through equal timestamps, with and without a filter.
+    #[test]
+    fn delivery_pages_follow_the_cursor_without_repeats_or_gaps() {
+        let sqlite = SqliteStore::open_in_memory().unwrap();
+        let store: &dyn OperationalStore = &sqlite;
+        let wanted = endpoint(vec![OperationalEvent::PlanHeld]);
+        let other = WebhookEndpoint {
+            url: "https://hooks.example/other".into(),
+            ..endpoint(vec![OperationalEvent::PlanHeld])
+        };
+        let scopes = ["stage".to_string(), HOST_SCOPE.to_string()];
+        for (index, tick) in [1, 1, 1, 2, 2, 3, 3, 3, 4].into_iter().enumerate() {
+            let key = format!("k{index}");
+            let held = Transition {
+                event: OperationalEvent::PlanHeld,
+                scope: &scopes[index % 2],
+                resource: "plan-1",
+                code: "environment",
+                key: &key,
+            };
+            announce(store, &[wanted.clone(), other.clone()], &held, tick);
+        }
+        let mut expected: Vec<_> = scopes
+            .iter()
+            .flat_map(|scope| {
+                store
+                    .list_provider_events_after(OPERATIONAL_WEBHOOK_KIND, scope, None, 128)
+                    .unwrap()
+            })
+            .collect();
+        expected.sort_by(|left, right| right.0.cmp(&left.0));
+        assert_eq!(expected.len(), 18);
+
+        let read_all = |keep: &dyn Fn(&WebhookDelivery) -> bool| {
+            let mut ids = Vec::new();
+            let mut after = None;
+            loop {
+                let page = delivery_page(store, &scopes, after, 4, keep).unwrap();
+                assert!(page.items.len() <= 4);
+                ids.extend(page.items.into_iter().map(|delivery| delivery.id));
+                match page.next_cursor {
+                    Some(cursor) => after = Some(parse_delivery_cursor(&cursor).unwrap()),
+                    None => return ids,
+                }
+            }
+        };
+        let all: Vec<_> = expected
+            .iter()
+            .map(|(_, record)| record.id.clone())
+            .collect();
+        assert_eq!(read_all(&|_| true), all);
+        let filtered: Vec<_> = expected
+            .iter()
+            .filter(|(_, record)| record.payload_json.contains(&wanted.url))
+            .map(|(_, record)| record.id.clone())
+            .collect();
+        assert_eq!(filtered.len(), 9);
+        assert_eq!(read_all(&|delivery| delivery.url == wanted.url), filtered);
+        assert_eq!(parse_delivery_cursor("not a cursor"), None);
     }
 
     #[test]

@@ -49,7 +49,7 @@ use tenkai::management_lifecycle::{
 use tenkai::observed_runtime::EnvironmentRuntimeReport;
 use tenkai::offline_import::{ImportJob, ImportJobList, ImportRequest, StagedBundle};
 use tenkai::oidc_verifier::OidcClientDiscovery;
-use tenkai::operational_events::WebhookDelivery;
+use tenkai::operational_events::WebhookDeliveryPage;
 use tenkai::owner::{OwnerView, SetOwnerRequest};
 use tenkai::package_migration::{
     MigrationPage, PackageMigrationApplyRequest, PackageMigrationMutateRequest,
@@ -259,22 +259,22 @@ pub fn http_contract() -> Value {
             method: "GET",
             path: "/v1/webhooks/deliveries",
             auth: Auth::Read,
-            request: None,
-            response: schema::<Vec<WebhookDelivery>>(&mut g),
+            request: Some(schema::<PageQuery>(&mut g)),
+            response: schema::<WebhookDeliveryPage>(&mut g),
         },
         Route {
             method: "GET",
             path: "/v1/environments/{environment}/webhooks/deliveries",
             auth: Auth::Read,
-            request: None,
-            response: schema::<Vec<WebhookDelivery>>(&mut g),
+            request: Some(schema::<PageQuery>(&mut g)),
+            response: schema::<WebhookDeliveryPage>(&mut g),
         },
         Route {
             method: "GET",
             path: "/v1/products/{product}/webhooks/deliveries",
             auth: Auth::Read,
-            request: None,
-            response: schema::<Vec<WebhookDelivery>>(&mut g),
+            request: Some(schema::<PageQuery>(&mut g)),
+            response: schema::<WebhookDeliveryPage>(&mut g),
         },
         Route {
             method: "GET",
@@ -1221,6 +1221,7 @@ mod tests {
             ("ReleasePage", "next_cursor"),
             ("ChannelPage", "next_cursor"),
             ("MigrationPage", "next_cursor"),
+            ("WebhookDeliveryPage", "next_cursor"),
             ("ObservedRuntimeComponent", "health"),
             ("ObservedRuntimeComponent", "last_init_job"),
             ("ObservedRuntimeComponent", "model_runtime"),

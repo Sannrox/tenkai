@@ -328,14 +328,23 @@ impl RemoteClient {
         .await
     }
 
-    /// Deliveries a product endpoint is a source of.
+    /// One page of the deliveries a product endpoint is a source of.
     pub async fn product_webhook_deliveries(
         &self,
         product: &str,
-    ) -> anyhow::Result<Vec<tenkai::operational_events::WebhookDelivery>> {
+        query: &tenkai::page::PageQuery,
+    ) -> anyhow::Result<tenkai::operational_events::WebhookDeliveryPage> {
+        let mut pairs = url::form_urlencoded::Serializer::new(String::new());
+        if let Some(limit) = query.limit {
+            pairs.append_pair("limit", &limit.to_string());
+        }
+        if let Some(cursor) = query.cursor.as_deref() {
+            pairs.append_pair("cursor", cursor);
+        }
+        let encoded = pairs.finish();
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/products/{product}/webhooks/deliveries"),
+            &format!("/v1/products/{product}/webhooks/deliveries?{encoded}"),
         )
         .await
     }

@@ -278,6 +278,8 @@ mod live_change_events;
 #[cfg(feature = "postgres")]
 mod live_delivery;
 #[cfg(feature = "postgres")]
+mod live_delivery_pages;
+#[cfg(feature = "postgres")]
 mod live_enrollment;
 #[cfg(feature = "postgres")]
 mod live_failover_drill;

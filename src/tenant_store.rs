@@ -682,6 +682,16 @@ impl OperationalStore for TenantPartition {
         self.store
             .list_provider_events(provider_kind, environment_id, limit)
     }
+    fn list_provider_events_after(
+        &self,
+        provider_kind: &str,
+        environment_id: &str,
+        after: Option<&crate::storage::ProviderEventPosition>,
+        limit: usize,
+    ) -> Result<Vec<(crate::storage::ProviderEventPosition, ProviderEventRecord)>> {
+        self.store
+            .list_provider_events_after(provider_kind, environment_id, after, limit)
+    }
     fn list_failing_provider_events(
         &self,
         provider_kind: &str,
