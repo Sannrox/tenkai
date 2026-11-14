@@ -866,6 +866,22 @@ pub struct ChannelConfigureRequest {
     pub upgrade_pace: String,
 }
 
+/// Body of `PUT /v1/products/{product}/channels/{channel}/policy`: replace the
+/// active promotion policy's recall rule. `expected_generation` is the policy
+/// version the caller read; another version is refused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelRecallRuleRequest {
+    pub version: u32,
+    pub operation: String,
+    pub expected_generation: u64,
+    pub soak_duration_ms: i64,
+    /// Maximum share of soak time with any replica failing (0.0–1.0).
+    pub failing_max_share: f64,
+    /// When true, exceeding `failing_max_share` recalls the soaking release.
+    pub recall_on_failing: bool,
+}
+
 /// Body of `POST /v1/products/{product}/channels/{channel}/policy/pause`
 /// and `.../policy/resume`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1646,6 +1662,28 @@ pub fn admit_channel_configure(
     granted_environment: Option<&str>,
 ) -> Result<AdmittedManagementLifecycle> {
     crate::upgrade_pace::parse_pace(&request.upgrade_pace)?;
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: None,
+            expected_generation: None,
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(
+        admitted.operation,
+        ManagementLifecycleOperation::ChannelConfigure,
+    )?;
+    Ok(admitted)
+}
+
+pub fn admit_channel_recall_rule(
+    request: &ChannelRecallRuleRequest,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
     let admitted = admit_management_lifecycle(
         &ManagementLifecycleEnvelope {
             version: request.version,

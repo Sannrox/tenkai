@@ -728,6 +728,28 @@ pub(super) async fn channel_promotion_policy(
     )
 }
 
+pub(super) async fn set_channel_recall_rule(
+    State(state): State<Arc<AppState>>,
+    Path((product, channel)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .set_channel_recall_rule(&credential, &product, &channel, request)
+            .await,
+    )
+}
+
 pub(super) async fn channel_pace_progress(
     State(state): State<Arc<AppState>>,
     Path((product, channel)): Path<(String, String)>,

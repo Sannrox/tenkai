@@ -65,6 +65,17 @@ pub struct RecallRemovalProgress {
     pub remaining: bool,
 }
 
+/// Removal of a recalled release from one environment: `done` of `total`
+/// instances have moved off it. `total` counts the instances holding it when
+/// it was recalled plus any still holding it now; recalls recorded without
+/// that snapshot count only the current holders.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecallEnvironmentRemoval {
+    pub environment: String,
+    pub done: u32,
+    pub total: u32,
+}
+
 /// Recorded recall of one published release for `GET /v1/releases/{release}/recall`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RecallView {
@@ -95,6 +106,22 @@ pub struct RecallView {
     pub covers_future: bool,
     #[serde(default)]
     pub removal_progress: Vec<RecallRemovalProgress>,
+    /// Per-environment removal counts, sorted by environment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removal_environments: Vec<RecallEnvironmentRemoval>,
+    /// Share of soak time with every replica healthy when a promotion policy
+    /// recalled the release. Omitted for other recalls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub healthy_share: Option<f64>,
+    /// Share of soak time with any replica failing that tripped the recall.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub failing_share: Option<f64>,
+    /// The policy's `failing_max_share` threshold that `failing_share` exceeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub failing_max_share: Option<f64>,
 }
 
 impl From<crate::page::Page<ReleaseListEntry>> for ReleasePage {
@@ -1319,6 +1346,14 @@ pub(crate) async fn persist_recall_claim_with_fence(
     for (key, value) in extra {
         properties.insert(key.clone(), value.clone());
     }
+    // Instances holding the release at recall time: removal progress counts
+    // them as done once they move off it.
+    let holders = recalled_holders(ctx, release_id)
+        .await?
+        .into_iter()
+        .map(|(environment, instance)| format!("{environment}/{instance}"))
+        .collect::<Vec<_>>();
+    properties.insert("holders".into(), holders.join(","));
     let proposed = object(
         claim_id.clone(),
         KIND_RELEASE_RECALL,
@@ -1433,6 +1468,16 @@ pub async fn inspect_recall(ctx: &mut Ctx, spec: &str) -> Result<RecallView> {
         bail!("release {spec} is not recalled");
     }
     let properties = claim.as_ref().map(|object| &object.properties);
+    let claim_share = |key: &str| {
+        properties
+            .and_then(|properties| properties.get(key))
+            .and_then(|value| value.parse::<f64>().ok())
+    };
+    let current = recalled_holders(ctx, &release.id).await?;
+    let deployed = release
+        .id
+        .strip_prefix("tenkai:release:")
+        .unwrap_or(&release.id);
     let failing_instances = properties
         .and_then(|properties| properties.get("failing_instances"))
         .map(|value| {
@@ -1461,18 +1506,63 @@ pub async fn inspect_recall(ctx: &mut Ctx, spec: &str) -> Result<RecallView> {
         failing_instances,
         range: range.as_ref().map(RecallRange::label),
         covers_future: range.as_ref().is_some_and(|range| range.before.is_none()),
-        removal_progress: recall_removal_progress(ctx, &release.id).await?,
+        removal_environments: recall_environment_removal(
+            properties.and_then(|properties| properties.get("holders")),
+            &current,
+        ),
+        removal_progress: current
+            .into_iter()
+            .map(|(environment, instance)| RecallRemovalProgress {
+                environment,
+                instance,
+                deployed: deployed.to_string(),
+                remaining: true,
+            })
+            .collect(),
+        healthy_share: claim_share("healthy_share"),
+        failing_share: claim_share("failing_share"),
+        failing_max_share: claim_share("failing_max_share"),
     })
 }
 
-async fn recall_removal_progress(
-    ctx: &mut Ctx,
-    release_id: &str,
-) -> Result<Vec<RecallRemovalProgress>> {
-    let spec = release_id
-        .strip_prefix("tenkai:release:")
-        .unwrap_or(release_id);
-    let mut progress = Vec::new();
+/// Per-environment done/total from the recall-time `holders` snapshot
+/// (`env/instance,...`) and the instances still holding the release.
+fn recall_environment_removal(
+    holders: Option<&String>,
+    current: &[(String, String)],
+) -> Vec<RecallEnvironmentRemoval> {
+    let mut instances = std::collections::BTreeMap::<&str, HashMap<&str, bool>>::new();
+    for holder in holders.into_iter().flat_map(|value| value.split(',')) {
+        if let Some((environment, instance)) = holder.split_once('/') {
+            instances
+                .entry(environment)
+                .or_default()
+                .insert(instance, false);
+        }
+    }
+    for (environment, instance) in current {
+        instances
+            .entry(environment)
+            .or_default()
+            .insert(instance, true);
+    }
+    instances
+        .into_iter()
+        .map(|(environment, instances)| {
+            let remaining = instances.values().filter(|remaining| **remaining).count();
+            RecallEnvironmentRemoval {
+                environment: environment.to_string(),
+                done: (instances.len() - remaining) as u32,
+                total: instances.len() as u32,
+            }
+        })
+        .collect()
+}
+
+/// `(environment, instance)` pairs whose deployed release is `release_id`,
+/// sorted.
+async fn recalled_holders(ctx: &mut Ctx, release_id: &str) -> Result<Vec<(String, String)>> {
+    let mut holders = Vec::new();
     for environment in ctx.list_kind(KIND_ENVIRONMENT).await? {
         if environment.kind != KIND_ENVIRONMENT {
             continue;
@@ -1481,23 +1571,13 @@ async fn recall_removal_progress(
             let Some(instance) = key.strip_prefix("deployed_release.") else {
                 continue;
             };
-            if value != release_id {
-                continue;
+            if value == release_id {
+                holders.push((environment.name.clone(), instance.to_string()));
             }
-            progress.push(RecallRemovalProgress {
-                environment: environment.name.clone(),
-                instance: instance.to_string(),
-                deployed: spec.to_string(),
-                remaining: true,
-            });
         }
     }
-    progress.sort_by(|left, right| {
-        left.environment
-            .cmp(&right.environment)
-            .then(left.instance.cmp(&right.instance))
-    });
-    Ok(progress)
+    holders.sort();
+    Ok(holders)
 }
 
 async fn announce_recall(ctx: &mut Ctx, release: &Object, spec: &str) {
@@ -1924,6 +2004,17 @@ install = "true"
         assert_eq!(view.removal_progress.len(), 1, "{view:?}");
         assert_eq!(view.removal_progress[0].environment, "lab");
         assert!(view.removal_progress[0].remaining);
+        // A claim recorded without shares or a holder snapshot (as before
+        // typed measures) reads back without shares and counts current holders.
+        assert_eq!(view.failing_share, None, "{view:?}");
+        assert_eq!(
+            view.removal_environments,
+            vec![RecallEnvironmentRemoval {
+                environment: "lab".into(),
+                done: 0,
+                total: 1,
+            }]
+        );
         let ranges = list_recall_ranges(&mut ctx, "api").await.unwrap();
         assert_eq!(ranges.items.len(), 1);
         assert!(ranges.items[0].covers_future);

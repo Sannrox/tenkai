@@ -39,12 +39,12 @@ use tenkai::instance_explain::InstanceExplainReport;
 use tenkai::management_lifecycle::{
     ApplyRequest, ApproveRequest, ChannelAdmitRequest, ChannelConfigureRequest,
     ChannelExposureGraceRequest, ChannelHoldRequest, ChannelPolicyPauseRequest,
-    ChannelRemoveRequest, DeliveryFailureThresholdRequest, DeliveryFreezeRequest,
-    DeliveryHoldRequest, ExposureGraceRequest, ExposureWaiverClearRequest, ExposureWaiverRequest,
-    ManagementLifecycleResult, PlanRequest, PromoteHttpRequest, PublishRequest,
-    RecallRangeCloseRequest, RecallRangeRequest, RecallRequest, ReleaseLabelRequest,
-    RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest, SubscribeRequest,
-    UnsubscribeRequest,
+    ChannelRecallRuleRequest, ChannelRemoveRequest, DeliveryFailureThresholdRequest,
+    DeliveryFreezeRequest, DeliveryHoldRequest, ExposureGraceRequest, ExposureWaiverClearRequest,
+    ExposureWaiverRequest, ManagementLifecycleResult, PlanRequest, PromoteHttpRequest,
+    PublishRequest, RecallRangeCloseRequest, RecallRangeRequest, RecallRequest,
+    ReleaseLabelRequest, RetireEnvironmentRequest, RetryFailedTargetRequest, RollbackRequest,
+    SubscribeRequest, UnsubscribeRequest,
 };
 use tenkai::observed_runtime::EnvironmentRuntimeReport;
 use tenkai::offline_import::{ImportJob, ImportJobList, ImportRequest, StagedBundle};
@@ -915,6 +915,13 @@ pub fn http_contract() -> Value {
             response: schema::<ChannelPromotionPolicyView>(&mut g),
         },
         Route {
+            method: "PUT",
+            path: "/v1/products/{product}/channels/{channel}/policy",
+            auth: Auth::Management,
+            request: Some(schema::<ChannelRecallRuleRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
             method: "POST",
             path: "/v1/products/{product}/channels/{channel}/policy/pause",
             auth: Auth::Management,
@@ -1207,6 +1214,9 @@ mod tests {
             ("RecallView", "policy_id"),
             ("RecallView", "policy_version"),
             ("RecallView", "range"),
+            ("RecallView", "healthy_share"),
+            ("RecallView", "failing_share"),
+            ("RecallView", "failing_max_share"),
             ("RecallRangeView", "before"),
             ("OwnerView", "reachability"),
             ("EndpointReachability", "last_success_at"),

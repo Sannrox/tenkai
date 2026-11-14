@@ -93,6 +93,8 @@ stays a human action. Pause is durable and does not delete soak state.
 pause actor, and soak progress. Pause and resume are
 `POST .../policy/pause` and `POST .../policy/resume`. Remote `tenkaictl
 channel policy --pause/--resume` uses those routes; declaring a policy
-still needs `--target embedded`. A replica that does not
+still needs `--target embedded`. `PUT .../policy` replaces the recall
+rule (`soak_duration_ms`, `failing_max_share`, `recall_on_failing`) of an
+existing policy, fenced by its `policy_version`. A replica that does not
 advertise `channel_promotion_policy` does not evaluate policies; stored
 policies stay inert.

@@ -31,11 +31,11 @@ use crate::instance_explain::InstanceExplainReport;
 use crate::management_lifecycle::{
     self, ApplyRequest, ApproveRequest, ChannelAdmitRequest, ChannelConfigureRequest,
     ChannelExposureGraceRequest, ChannelHoldRequest, ChannelPolicyPauseRequest,
-    ChannelRemoveRequest, DeliveryFailureThresholdRequest, DeliveryFreezeRequest,
-    DeliveryHoldRequest, ExposureGraceRequest, ExposureWaiverClearRequest, ExposureWaiverRequest,
-    ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest, PromoteRequest,
-    PublishRequest, RecallRequest, ReleaseLabelRequest, RetryFailedTargetRequest, RollbackRequest,
-    SubscribeRequest,
+    ChannelRecallRuleRequest, ChannelRemoveRequest, DeliveryFailureThresholdRequest,
+    DeliveryFreezeRequest, DeliveryHoldRequest, ExposureGraceRequest, ExposureWaiverClearRequest,
+    ExposureWaiverRequest, ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest,
+    PromoteRequest, PublishRequest, RecallRequest, ReleaseLabelRequest, RetryFailedTargetRequest,
+    RollbackRequest, SubscribeRequest,
 };
 use crate::observed_runtime::EnvironmentRuntimeReport;
 use crate::package_migration::{
@@ -3116,6 +3116,55 @@ impl ManagementOperations {
         crate::upgrade_pace::progress(&mut ctx, product, channel, crate::now_millis())
             .await
             .map_err(map_catalog_error)
+    }
+
+    /// Replace the recall rule of the channel's active promotion policy,
+    /// fenced by the policy version in `expected_generation`.
+    pub async fn set_channel_recall_rule(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        channel: &str,
+        request: ChannelRecallRuleRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.channel_policy_configure")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        Self::require_channel_binding(&context, channel)?;
+        Self::require_product_grant(&context, product)?;
+        management_lifecycle::admit_channel_recall_rule(
+            &request,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.channel_policy_configure.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let active = crate::channel_promotion::set_recall_rule(
+            &mut ctx,
+            &context,
+            product,
+            channel,
+            request.expected_generation,
+            crate::channel_promotion::ChannelRecallRule {
+                soak_duration_ms: request.soak_duration_ms,
+                failing_max_share: request.failing_max_share,
+                recall_on_failing: request.recall_on_failing,
+            },
+        )
+        .await
+        .map_err(map_catalog_error)?;
+        self.audit(actor, "catalog.channel_policy_configure.completed")?;
+        let resource = format!("{product}/{channel}");
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::ChannelConfigure,
+            format!(
+                "channel promotion policy {} recall rule set for {resource}",
+                active.id()
+            ),
+            Some(resource),
+        ))
     }
 
     pub async fn pause_channel_policy(
