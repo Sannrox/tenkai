@@ -120,6 +120,8 @@ pub enum ManagementLifecycleOperation {
     ChannelRemove,
     ChannelConfigure,
     ChannelAdmit,
+    ChannelPolicyPause,
+    ChannelPolicyResume,
     WaiverSet,
     WaiverClear,
     ExposureGrace,
@@ -156,6 +158,8 @@ impl ManagementLifecycleOperation {
             Self::ChannelRemove => "channel_remove",
             Self::ChannelConfigure => "channel_configure",
             Self::ChannelAdmit => "channel_admit",
+            Self::ChannelPolicyPause => "channel_policy_pause",
+            Self::ChannelPolicyResume => "channel_policy_resume",
             Self::WaiverSet => "waiver_set",
             Self::WaiverClear => "waiver_clear",
             Self::ExposureGrace => "exposure_grace",
@@ -181,6 +185,8 @@ impl ManagementLifecycleOperation {
                 | Self::ChannelRemove
                 | Self::ChannelConfigure
                 | Self::ChannelAdmit
+                | Self::ChannelPolicyPause
+                | Self::ChannelPolicyResume
                 | Self::WaiverSet
                 | Self::WaiverClear
                 | Self::ChannelExposureGrace
@@ -272,6 +278,8 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "channel_remove" => Ok(ManagementLifecycleOperation::ChannelRemove),
         "channel_configure" => Ok(ManagementLifecycleOperation::ChannelConfigure),
         "channel_admit" => Ok(ManagementLifecycleOperation::ChannelAdmit),
+        "channel_policy_pause" => Ok(ManagementLifecycleOperation::ChannelPolicyPause),
+        "channel_policy_resume" => Ok(ManagementLifecycleOperation::ChannelPolicyResume),
         "waiver_set" => Ok(ManagementLifecycleOperation::WaiverSet),
         "waiver_clear" => Ok(ManagementLifecycleOperation::WaiverClear),
         "exposure_grace" => Ok(ManagementLifecycleOperation::ExposureGrace),
@@ -796,6 +804,15 @@ pub struct ChannelConfigureRequest {
     pub operation: String,
     /// Duration (`30`, `250ms`, `2m`, `3h`) or `off`. A bare number is seconds.
     pub upgrade_pace: String,
+}
+
+/// Body of `POST /v1/products/{product}/channels/{channel}/policy/pause`
+/// and `.../policy/resume`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelPolicyPauseRequest {
+    pub version: u32,
+    pub operation: String,
 }
 
 /// Body of `POST /v1/products/{product}/channels/{channel}/admit`.
@@ -1569,6 +1586,26 @@ pub fn admit_channel_configure(
         admitted.operation,
         ManagementLifecycleOperation::ChannelConfigure,
     )?;
+    Ok(admitted)
+}
+
+pub fn admit_channel_policy_pause(
+    request: &ChannelPolicyPauseRequest,
+    expected: ManagementLifecycleOperation,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: None,
+            expected_generation: None,
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(admitted.operation, expected)?;
     Ok(admitted)
 }
 
@@ -2535,6 +2572,47 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(scoped.contains("cannot call catalog-wide"), "{scoped}");
+
+        let pause = ChannelPolicyPauseRequest {
+            version: 1,
+            operation: "channel_policy_pause".into(),
+        };
+        admit_channel_policy_pause(
+            &pause,
+            ManagementLifecycleOperation::ChannelPolicyPause,
+            PrincipalKind::Management,
+            None,
+        )
+        .unwrap();
+        let runtime = admit_channel_policy_pause(
+            &pause,
+            ManagementLifecycleOperation::ChannelPolicyPause,
+            PrincipalKind::Runtime,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(runtime.contains("runtime credentials"), "{runtime}");
+        let scoped = admit_channel_policy_pause(
+            &pause,
+            ManagementLifecycleOperation::ChannelPolicyPause,
+            PrincipalKind::Management,
+            Some("stage"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(scoped.contains("cannot call catalog-wide"), "{scoped}");
+        let resume = ChannelPolicyPauseRequest {
+            version: 1,
+            operation: "channel_policy_resume".into(),
+        };
+        admit_channel_policy_pause(
+            &resume,
+            ManagementLifecycleOperation::ChannelPolicyResume,
+            PrincipalKind::Management,
+            None,
+        )
+        .unwrap();
 
         let admit = ChannelAdmitRequest {
             version: 1,

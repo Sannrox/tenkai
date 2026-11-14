@@ -67,7 +67,7 @@ impl PromotionActorKind {
 }
 
 /// Evidence the soak must keep true.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChannelPromotionEvidence {
     #[serde(default)]
     pub canary: bool,
@@ -160,6 +160,10 @@ pub struct ActiveChannelPromotionPolicy {
     pub policy: ChannelPromotionPolicy,
     pub version: u64,
     pub paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at: Option<i64>,
 }
 
 impl ActiveChannelPromotionPolicy {
@@ -188,6 +192,56 @@ pub struct ChannelPromotionPolicyStatus {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub instances_without_evidence: Vec<String>,
+}
+
+/// Policy rules, pause actor, and soak progress for `GET /v1/products/{product}/channels/{channel}/policy`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ChannelPromotionPolicyView {
+    pub product: String,
+    pub target_channel: String,
+    pub source_channel: String,
+    pub policy_id: String,
+    pub policy_version: u64,
+    pub paused: bool,
+    /// `waiting` | `soaking` | `ready` | `reset` | `refused` | `promoted` | `recalled`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instances_without_evidence: Vec<String>,
+    pub soak_duration_ms: i64,
+    pub evidence: ChannelPromotionEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub paused_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub paused_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub soaking_release: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub elapsed_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub healthy_share: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub failing_share: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub last_reset_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub last_reset_cause: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub promoted_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub promoted_by_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -490,10 +544,20 @@ pub async fn configure(
             .and_then(|pointer| pointer.properties.get("paused"))
             .is_some_and(|value| value == "true");
         for _ in 0..16 {
+            let (paused_by, paused_at) = if paused {
+                existing
+                    .as_ref()
+                    .map(pointer_pause_actor)
+                    .unwrap_or((None, None))
+            } else {
+                (None, None)
+            };
             let active = ActiveChannelPromotionPolicy {
                 policy: policy.clone(),
                 version,
                 paused,
+                paused_by,
+                paused_at,
             };
             if persist_policy_record(ctx, &active).await? {
                 persist_pointer(ctx, &active, existing.as_ref(), std::slice::from_ref(&lock))
@@ -539,6 +603,13 @@ pub async fn set_paused(
                 format!("no channel promotion policy for {product}/{target_channel}")
             })?;
         active.paused = paused;
+        if paused {
+            active.paused_by = Some(actor.principal_id().to_string());
+            active.paused_at = Some(now_ms());
+        } else {
+            active.paused_by = None;
+            active.paused_at = None;
+        }
         let pointer = ctx
             .get(&pointer_id(product, target_channel))
             .await?
@@ -614,19 +685,28 @@ fn pointer_record(
         ),
         namespace: NS.into(),
         external_id: String::new(),
-        properties: HashMap::from([
-            ("product".into(), active.policy.product.clone()),
-            (
-                "target_channel".into(),
-                active.policy.target_channel.clone(),
-            ),
-            ("policy_id".into(), active.id()),
-            ("version".into(), active.version.to_string()),
-            (
-                "paused".into(),
-                if active.paused { "true" } else { "false" }.into(),
-            ),
-        ]),
+        properties: {
+            let mut properties = HashMap::from([
+                ("product".into(), active.policy.product.clone()),
+                (
+                    "target_channel".into(),
+                    active.policy.target_channel.clone(),
+                ),
+                ("policy_id".into(), active.id()),
+                ("version".into(), active.version.to_string()),
+                (
+                    "paused".into(),
+                    if active.paused { "true" } else { "false" }.into(),
+                ),
+            ]);
+            if let Some(paused_by) = &active.paused_by {
+                properties.insert("paused_by".into(), paused_by.clone());
+            }
+            if let Some(paused_at) = active.paused_at {
+                properties.insert("paused_at".into(), paused_at.to_string());
+            }
+            properties
+        },
         created: existing_pointer.map_or(now, |pointer| pointer.created),
         updated: now,
     }
@@ -694,11 +774,112 @@ async fn active_from_pointer(
         .properties
         .get("paused")
         .is_some_and(|value| value == "true");
+    let (paused_by, paused_at) = if paused {
+        pointer_pause_actor(pointer)
+    } else {
+        (None, None)
+    };
     Ok(ActiveChannelPromotionPolicy {
         policy,
         version,
         paused,
+        paused_by,
+        paused_at,
     })
+}
+
+fn pointer_pause_actor(pointer: &Object) -> (Option<String>, Option<i64>) {
+    let paused_by = pointer
+        .properties
+        .get("paused_by")
+        .filter(|value| !value.is_empty())
+        .cloned();
+    let paused_at = pointer
+        .properties
+        .get("paused_at")
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0);
+    (paused_by, paused_at)
+}
+
+/// Policy rules, pause actor, soak progress, and promotion actor for one channel.
+pub async fn view(
+    ctx: &mut Ctx,
+    product: &str,
+    target_channel: &str,
+) -> Result<ChannelPromotionPolicyView> {
+    let active = load_active(ctx, product, target_channel)
+        .await?
+        .with_context(|| format!("no channel promotion policy for {product}/{target_channel}"))?;
+    let status = status_for(ctx, &active).await?;
+    let soak = load_soak(ctx, product, target_channel).await?;
+    let channel = ctx.get(&channel_id(product, target_channel)).await?;
+    Ok(view_from_parts(
+        &active,
+        status,
+        soak.as_ref(),
+        channel.as_ref(),
+    ))
+}
+
+fn view_from_parts(
+    active: &ActiveChannelPromotionPolicy,
+    status: ChannelPromotionPolicyStatus,
+    soak: Option<&SoakState>,
+    channel: Option<&Object>,
+) -> ChannelPromotionPolicyView {
+    let mut soaking_release = None;
+    let mut elapsed_ms = None;
+    let mut healthy_share = None;
+    let mut failing_share = None;
+    let mut last_reset_at = None;
+    let mut last_reset_cause = None;
+    if let Some(soak) = soak {
+        soaking_release = spec_from_release_id(&soak.source_release)
+            .or_else(|| (!soak.source_release.is_empty()).then(|| soak.source_release.clone()));
+        let elapsed = soak
+            .healthy_ms
+            .saturating_add(soak.failing_ms)
+            .saturating_add(soak.other_ms);
+        elapsed_ms = Some(elapsed);
+        if elapsed > 0 {
+            healthy_share = Some(soak.healthy_ms as f64 / elapsed as f64);
+            failing_share = Some(soak.failing_ms as f64 / elapsed as f64);
+        } else {
+            healthy_share = Some(0.0);
+            failing_share = Some(0.0);
+        }
+        if soak.last_reset_at > 0 {
+            last_reset_at = Some(soak.last_reset_at);
+        }
+        if soak.last_reason.starts_with("reset:") {
+            last_reset_cause = Some(soak.last_reason.clone());
+        }
+    }
+    ChannelPromotionPolicyView {
+        product: status.product,
+        target_channel: status.target_channel,
+        source_channel: status.source_channel,
+        policy_id: status.policy_id,
+        policy_version: status.policy_version,
+        paused: status.paused,
+        state: status.state,
+        reason: status.reason,
+        instances_without_evidence: status.instances_without_evidence,
+        soak_duration_ms: active.policy.soak_duration_ms,
+        evidence: active.policy.evidence.clone(),
+        paused_by: active.paused_by.clone(),
+        paused_at: active.paused_at,
+        soaking_release,
+        elapsed_ms,
+        healthy_share,
+        failing_share,
+        last_reset_at,
+        last_reset_cause,
+        promoted_by: channel.and_then(|channel| channel.properties.get("promoted_by").cloned()),
+        promoted_by_kind: channel
+            .and_then(|channel| channel.properties.get("promoted_by_kind").cloned()),
+    }
 }
 
 /// Load every active policy for fleet status and the reconciler.
@@ -901,6 +1082,7 @@ async fn evaluate_ready(
         } => {
             let actor = policy_request_context(&active.id(), active.version)?;
             crate::catalog::promote(ctx, &actor, &spec, target).await?;
+            emit_promoted(ctx, &spec, &active.id())?;
             mark_decision_committed_active(ctx, active, &source_release).await?;
             Ok(TickOutcome::Promoted { spec })
         }
@@ -1281,6 +1463,19 @@ async fn mark_decision_committed_active(
     object.properties.insert("committed".into(), "true".into());
     object.updated = now_ms();
     ctx.put(object).await?;
+    Ok(())
+}
+
+fn emit_promoted(ctx: &mut Ctx, spec: &str, policy_id: &str) -> Result<()> {
+    let Some(store) = ctx.embedded_arc() else {
+        return Ok(());
+    };
+    store.append_change_event(
+        now_ms(),
+        crate::change_stream::ChangeEventKind::ReleasePromoted.as_str(),
+        &format!("{spec} {policy_id}"),
+        "",
+    )?;
     Ok(())
 }
 
@@ -1848,6 +2043,18 @@ mod tests {
                 .is_some_and(|value| value.contains(&active.id())),
             "{channel:?}"
         );
+        let events = ctx
+            .embedded_arc()
+            .unwrap()
+            .list_change_events_after(0, 20)
+            .unwrap();
+        assert!(
+            events.iter().any(|event| {
+                event.kind == crate::change_stream::ChangeEventKind::ReleasePromoted
+                    && event.resource.contains(&active.id())
+            }),
+            "{events:?}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1888,6 +2095,16 @@ mod tests {
             ),
             "{events:?}"
         );
+        let viewed = view(&mut ctx, "promo", "stable").await.unwrap();
+        assert_eq!(viewed.state, "reset", "{viewed:?}");
+        assert!(
+            viewed
+                .last_reset_cause
+                .as_ref()
+                .is_some_and(|cause| cause.starts_with("reset:")),
+            "{viewed:?}"
+        );
+        assert!(viewed.last_reset_at.is_some(), "{viewed:?}");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2195,6 +2412,9 @@ mod tests {
         assert!(paused[0].paused, "{paused:?}");
         assert_eq!(paused[0].state, "waiting", "{paused:?}");
         assert!(head(&mut ctx, "promo", "stable").await.is_none());
+        let viewed = view(&mut ctx, "promo", "stable").await.unwrap();
+        assert_eq!(viewed.paused_by.as_deref(), Some(actor.principal_id()));
+        assert_eq!(viewed.paused_at, Some(80_000));
         let _ = std::fs::remove_dir_all(root);
     }
 
