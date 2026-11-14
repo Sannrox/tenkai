@@ -2054,6 +2054,7 @@ media_type = "{}"
             &mut ctx,
             &plan.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -2098,6 +2099,7 @@ media_type = "{}"
             &mut ctx,
             &plan.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -2241,6 +2243,7 @@ media_type = "{}"
             &mut ctx,
             &plan.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -2412,6 +2415,7 @@ media_type = "{}"
                 ctx,
                 plan_id,
                 crate::apply::ExecutionOptions {
+                    rollback_hold: true,
                     skip_gates: false,
                     emergency_reason: None,
                     authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {

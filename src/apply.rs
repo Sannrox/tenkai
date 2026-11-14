@@ -250,7 +250,8 @@ async fn execute_locked(
         } else {
             StepOutcomeStatus::Blocked
         };
-        if status == StepOutcomeStatus::Succeeded
+        if options.rollback_hold
+            && status == StepOutcomeStatus::Succeeded
             && !stored_plan.steps.is_empty()
             && stored_plan
                 .steps
@@ -362,7 +363,7 @@ async fn execute_locked(
         .iter()
         .all(|step| step.action == Action::Rollback)
         && !stored_plan.steps.is_empty();
-    if rollback_only && completion.all_succeeded() {
+    if options.rollback_hold && rollback_only && completion.all_succeeded() {
         let actor = options.requester.as_deref().unwrap_or("apply");
         cancel::hold_after_rollback(
             ctx,

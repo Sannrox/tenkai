@@ -205,6 +205,7 @@ pub async fn rehearse(
             ctx,
             &rollback.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: ExecutionAuthorization::Signed {

@@ -137,6 +137,7 @@ impl Fixture {
             &mut self.ctx,
             &plan.id,
             ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: true,
                 emergency_reason: None,
                 authorization: ExecutionAuthorization::LocalDevelopment {

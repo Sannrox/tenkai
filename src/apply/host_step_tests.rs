@@ -308,6 +308,7 @@ impl Host {
             &mut self.ctx,
             &plan.id,
             ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: ExecutionAuthorization::Signed {

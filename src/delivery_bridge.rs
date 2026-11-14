@@ -836,6 +836,7 @@ exclude_requester = true
         adapter: Arc<dyn DeliveryAdapter>,
     ) -> crate::apply::ExecutionOptions<'a> {
         crate::apply::ExecutionOptions {
+            rollback_hold: true,
             skip_gates: false,
             emergency_reason: None,
             authorization: crate::apply::ExecutionAuthorization::Signed {

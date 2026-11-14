@@ -520,6 +520,13 @@ impl Outcome {
         Ok(self.classified_status()?.plan_state())
     }
 
+    /// A step a cancel stopped before it ran. Stored as `failed` so older
+    /// releases still read it; only the wire result names it `skipped`.
+    pub(crate) fn is_cancel_skipped(&self) -> bool {
+        self.status == StepOutcomeStatus::Failed.as_str()
+            && self.detail == super::cancel::skip_detail()
+    }
+
     pub(crate) fn is_gate_blocked(&self) -> anyhow::Result<bool> {
         Ok(self.classified_status()? == StepOutcomeStatus::Blocked
             && self.detail.starts_with("gate "))

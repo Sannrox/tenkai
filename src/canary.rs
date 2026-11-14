@@ -826,6 +826,7 @@ max_startup_seconds = 30
             ctx,
             &plan_id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {

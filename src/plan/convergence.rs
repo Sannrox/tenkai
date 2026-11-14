@@ -5271,6 +5271,7 @@ mod tests {
             &mut ctx,
             &plan.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: true,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -5657,6 +5658,7 @@ executor = "kubernetes-inprocess"
             &mut ctx,
             &plan.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: true,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {

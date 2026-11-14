@@ -807,6 +807,7 @@ document = "suite.json"
             &mut ctx,
             &plan_id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::Signed {
@@ -967,6 +968,7 @@ document = "suite.json"
             &mut ctx,
             &plan_id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::Signed {

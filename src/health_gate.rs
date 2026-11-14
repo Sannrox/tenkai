@@ -948,6 +948,7 @@ mod tests {
 
     fn apply_options() -> crate::apply::ExecutionOptions<'static> {
         crate::apply::ExecutionOptions {
+            rollback_hold: true,
             skip_gates: false,
             emergency_reason: None,
             authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {

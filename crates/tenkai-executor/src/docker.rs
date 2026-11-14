@@ -3828,6 +3828,7 @@ inputs = ["docker"]
             &mut ctx,
             &first.id,
             tenkai::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: tenkai::apply::ExecutionAuthorization::LocalDevelopment {
@@ -3866,6 +3867,7 @@ inputs = ["docker"]
             &mut ctx,
             &upgrade.id,
             tenkai::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: tenkai::apply::ExecutionAuthorization::LocalDevelopment {

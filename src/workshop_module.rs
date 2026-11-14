@@ -774,6 +774,7 @@ document = "module.json"
             &mut ctx,
             &plan.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -821,6 +822,7 @@ document = "module.json"
             &mut ctx,
             &restart.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -853,6 +855,7 @@ document = "module.json"
             &mut ctx,
             &upgrade.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -886,6 +889,7 @@ document = "module.json"
             &mut ctx,
             &rollback.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -1069,6 +1073,7 @@ document = "module.json"
             &mut ctx,
             &plan.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -1099,6 +1104,7 @@ document = "module.json"
             &mut ctx,
             &upgrade.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {

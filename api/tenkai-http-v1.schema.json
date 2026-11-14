@@ -40,6 +40,45 @@
       ],
       "type": "object"
     },
+    "ApplyCancelMatch": {
+      "description": "Whether a cancel named the live apply.",
+      "oneOf": [
+        {
+          "const": "matched",
+          "description": "The live apply stops after its current step.",
+          "type": "string"
+        },
+        {
+          "const": "stale",
+          "description": "`expected_generation` was not the live apply; nothing changed.",
+          "type": "string"
+        }
+      ]
+    },
+    "ApplyCancelResult": {
+      "description": "Typed outcome of `POST /v1/environments/{environment}/apply/cancel`.",
+      "properties": {
+        "hold_set": {
+          "description": "True when this cancel set the environment hold.",
+          "type": "boolean"
+        },
+        "live_generation": {
+          "description": "Generation of the live apply lease.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ApplyCancelMatch"
+        }
+      },
+      "required": [
+        "outcome",
+        "live_generation",
+        "hold_set"
+      ],
+      "type": "object"
+    },
     "ApplyRequest": {
       "additionalProperties": false,
       "properties": {
@@ -65,6 +104,13 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "no_hold_reason": {
+          "description": "Skip the hold a rollback-only plan sets when it succeeds (#1274), as\nembedded `rollback --no-hold` does. Refused on other plans.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "operation": {
           "type": "string"
@@ -123,7 +169,7 @@
           "type": "string"
         },
         "status": {
-          "description": "`succeeded`, `blocked`, `failed` or `rolled_back`.",
+          "description": "`succeeded`, `blocked`, `failed`, `rolled_back`, or `skipped` for a\nstep a cancel stopped before it ran (#1274).",
           "type": "string"
         },
         "to_version": {
@@ -5191,6 +5237,10 @@
     "ManagementLifecycleResult": {
       "description": "Versioned result shared by catalog lifecycle routes. A client ignores\nfields it does not know, so a newer server can add one (#1172);\nrequests stay strict.",
       "properties": {
+        "cancel": {
+          "$ref": "#/$defs/ApplyCancelResult",
+          "description": "What a cancel did (#1274). Present only on a cancel result."
+        },
         "digest": {
           "type": "string"
         },

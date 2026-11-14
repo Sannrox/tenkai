@@ -1425,6 +1425,7 @@ max_startup_seconds = 30
             ctx,
             &plan_id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -1534,6 +1535,7 @@ max_startup_seconds = 30
             &mut ctx,
             &rollback.id,
             crate::apply::ExecutionOptions {
+                rollback_hold: true,
                 skip_gates: false,
                 emergency_reason: None,
                 authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
@@ -1593,6 +1595,7 @@ max_startup_seconds = 30
                 &mut ctx,
                 &apply_err.id,
                 crate::apply::ExecutionOptions {
+                    rollback_hold: true,
                     skip_gates: false,
                     emergency_reason: None,
                     authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {

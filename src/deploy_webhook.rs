@@ -1388,6 +1388,7 @@ mod tests {
 
     fn apply_options() -> ExecutionOptions<'static> {
         ExecutionOptions {
+            rollback_hold: true,
             skip_gates: false,
             emergency_reason: None,
             authorization: ExecutionAuthorization::LocalDevelopment {
