@@ -93,31 +93,37 @@ impl HealthObservation {
         }
     }
 
+    /// What status shows of this observation at `now_ms`: a report older
+    /// than `max_age_ms` reads `unknown` and keeps only its observation time.
     pub fn status_at(&self, now_ms: i64, max_age_ms: i64) -> HealthStatus {
         if now_ms.saturating_sub(self.observed_at_ms) > max_age_ms {
             return HealthStatus {
-                health: "unknown".into(),
+                health: Some("unknown".into()),
                 checks: Vec::new(),
+                observed_at_ms: Some(self.observed_at_ms),
             };
         }
         HealthStatus {
-            health: self.serving_label().into(),
+            health: Some(self.serving_label().into()),
             checks: self
                 .checks
                 .iter()
-                .filter(|check| check.state >= HealthCheckState::Warning)
+                .filter(|check| check.state > HealthCheckState::Healthy)
                 .cloned()
                 .collect(),
+            observed_at_ms: Some(self.observed_at_ms),
         }
     }
 }
 
-/// What `status` shows of one instance's continuous observation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+/// What `status` shows of one instance's health: the serving label, its
+/// non-healthy checks, and when the runtime last observed it. Without a
+/// matching observation it is apply-time health and no observation time.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HealthStatus {
-    pub health: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub health: Option<String>,
     pub checks: Vec<HealthCheck>,
+    pub observed_at_ms: Option<i64>,
 }
 
 /// Build an observation from a probe's exit and stdout.
@@ -459,15 +465,17 @@ pub fn overlay(
     deployed_digest: Option<&str>,
     now_ms: i64,
     max_age_ms: i64,
-) -> (Option<String>, Vec<HealthCheck>) {
-    let Some(observation) = observation else {
-        return (apply_health, Vec::new());
-    };
-    if deployed_digest != Some(observation.artifact_digest.as_str()) {
-        return (apply_health, Vec::new());
+) -> HealthStatus {
+    match observation {
+        Some(observation) if deployed_digest == Some(observation.artifact_digest.as_str()) => {
+            observation.status_at(now_ms, max_age_ms)
+        }
+        _ => HealthStatus {
+            health: apply_health,
+            checks: Vec::new(),
+            observed_at_ms: None,
+        },
     }
-    let status = observation.status_at(now_ms, max_age_ms);
-    (Some(status.health), status.checks)
 }
 
 #[cfg(test)]
@@ -588,53 +596,78 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_report_reads_unknown() {
+    fn a_stale_report_reads_unknown_with_its_observation_time() {
         let report = observation(1, HealthCheckState::Healthy);
-        let status = report.status_at(DEFAULT_MAX_AGE_MS + 2, DEFAULT_MAX_AGE_MS);
-        assert_eq!(status.health, "unknown");
-        assert!(status.checks.is_empty());
+        assert_eq!(
+            report.status_at(DEFAULT_MAX_AGE_MS + 2, DEFAULT_MAX_AGE_MS),
+            HealthStatus {
+                health: Some("unknown".into()),
+                checks: Vec::new(),
+                observed_at_ms: Some(1),
+            }
+        );
     }
 
     #[test]
     fn overlay_uses_the_observation_or_keeps_apply_health() {
-        let report = observation(10, HealthCheckState::Failing);
-        let (health, checks) = overlay(
+        let apply_time = HealthStatus {
+            health: Some("healthy".into()),
+            checks: Vec::new(),
+            observed_at_ms: None,
+        };
+        let report = probe(
+            10,
+            true,
+            br#"{"db":{"state":"repairing","message":"resync"},"disk":{"state":"healthy"}}"#,
+        );
+        assert_eq!(
+            overlay(
+                Some("healthy".into()),
+                Some(&report),
+                Some(DIGEST),
+                11,
+                DEFAULT_MAX_AGE_MS
+            ),
+            HealthStatus {
+                health: Some("healthy".into()),
+                checks: vec![HealthCheck {
+                    name: "db".into(),
+                    state: HealthCheckState::Repairing,
+                    message: "resync".into(),
+                }],
+                observed_at_ms: Some(10),
+            }
+        );
+        let failing = observation(10, HealthCheckState::Failing);
+        let status = overlay(
             Some("healthy".into()),
-            Some(&report),
+            Some(&failing),
             Some(DIGEST),
             11,
             DEFAULT_MAX_AGE_MS,
         );
-        assert_eq!(health.as_deref(), Some("unhealthy"));
-        assert_eq!(checks.len(), 1);
-        let (health, checks) = overlay(
-            Some("healthy".into()),
-            None,
-            Some(DIGEST),
-            11,
-            DEFAULT_MAX_AGE_MS,
+        assert_eq!(status.health.as_deref(), Some("unhealthy"));
+        assert_eq!(status.checks.len(), 1);
+        assert_eq!(
+            overlay(
+                Some("healthy".into()),
+                None,
+                Some(DIGEST),
+                11,
+                DEFAULT_MAX_AGE_MS
+            ),
+            apply_time
         );
-        assert_eq!(health.as_deref(), Some("healthy"));
-        assert!(checks.is_empty());
-        let stale = observation(1, HealthCheckState::Healthy);
-        let (health, checks) = overlay(
-            Some("healthy".into()),
-            Some(&stale),
-            Some(DIGEST),
-            DEFAULT_MAX_AGE_MS + 2,
-            DEFAULT_MAX_AGE_MS,
+        assert_eq!(
+            overlay(
+                Some("healthy".into()),
+                Some(&failing),
+                Some("other"),
+                11,
+                DEFAULT_MAX_AGE_MS
+            ),
+            apply_time
         );
-        assert_eq!(health.as_deref(), Some("unknown"));
-        assert!(checks.is_empty());
-        let (health, checks) = overlay(
-            Some("healthy".into()),
-            Some(&report),
-            Some("other"),
-            11,
-            DEFAULT_MAX_AGE_MS,
-        );
-        assert_eq!(health.as_deref(), Some("healthy"));
-        assert!(checks.is_empty());
     }
 
     #[tokio::test]

@@ -1685,13 +1685,14 @@ async fn classify_health(
             .properties
             .get(&format!("deployment_health.{instance_key}"))
             .cloned();
-        let (health, checks) = crate::instance_health::overlay(
-            apply_health,
-            observation,
-            deployed_digest.as_deref(),
-            now,
-            crate::instance_health::max_age_ms(&env),
-        );
+        let crate::instance_health::HealthStatus { health, checks, .. } =
+            crate::instance_health::overlay(
+                apply_health,
+                observation,
+                deployed_digest.as_deref(),
+                now,
+                crate::instance_health::max_age_ms(&env),
+            );
         if live_observation.is_none()
             && stale_after_ms > 0
             && now.saturating_sub(env.updated) > stale_after_ms

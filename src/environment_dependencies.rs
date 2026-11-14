@@ -855,6 +855,7 @@ mod tests {
             spec_drift: None,
             certificate: None,
             health_checks: Vec::new(),
+            health_observed_at_ms: None,
             owner: None,
             dependency_hold: Some(StatusDependencyHold {
                 release_id: "tenkai:release:app@2.0.0".into(),

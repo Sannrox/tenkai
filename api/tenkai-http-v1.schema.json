@@ -7793,11 +7793,16 @@
           ]
         },
         "health_checks": {
-          "description": "Failing and warning checks from the latest health observation (#1057).\nEmpty when none were reported or the observation is stale.",
+          "description": "Repairing, warning, and failing checks from the latest health\nobservation (#1057, #1273), plus secret rotation warnings. Empty when\nnone were reported or the observation is stale.",
           "items": {
             "$ref": "#/$defs/HealthCheck"
           },
           "type": "array"
+        },
+        "health_observed_at_ms": {
+          "description": "Unix milliseconds of the latest health observation for the deployed\nrelease (#1273), also when it is stale and `health` reads `unknown`.\nOmitted when health is the apply-time value.",
+          "format": "int64",
+          "type": "integer"
         },
         "instance": {
           "default": "",
