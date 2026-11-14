@@ -62,14 +62,14 @@ async fn backdate_soak(database: &std::path::Path, ago_ms: i64) {
 }
 
 #[tokio::test]
-async fn health_triggered_recall_is_readable_over_http() {
+async fn remote_recall_rule_triggers_a_recall_with_typed_measures() {
     let root = std::env::temp_dir().join(format!(
         "tenkai-recall-http-{}-{}",
         std::process::id(),
         tenkai::now_millis()
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let (app, _config, _) = lifecycle_router(&root).await;
+    let (app, _config, store) = lifecycle_router(&root).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -101,15 +101,58 @@ async fn health_triggered_recall_is_readable_over_http() {
             source_channel: "candidate".into(),
             soak_duration_ms: 60_000,
             stale_after_ms: 60_000,
-            evidence: ChannelPromotionEvidence {
-                recall_on_failing: true,
-                ..ChannelPromotionEvidence::default()
-            },
+            evidence: ChannelPromotionEvidence::default(),
         },
     )
     .await
     .unwrap();
+    // prod also holds the release, so removal progress spans two environments.
+    let mut prod = ctx.get(&env_id("prod")).await.unwrap().unwrap();
+    prod.properties
+        .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
+    ctx.put(prod).await.unwrap();
     drop(ctx);
+
+    // The recall rule is a catalog-wide channel_configure write.
+    let wrong_operation = reqwest::Client::new()
+        .put(format!("{base}/v1/products/api/channels/stable/policy"))
+        .bearer_auth("management-secret")
+        .json(&serde_json::json!({
+            "version": tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+            "operation": "channel_policy_pause",
+            "expected_generation": 1,
+            "soak_duration_ms": 60_000,
+            "failing_max_share": 0.25,
+            "recall_on_failing": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_operation.status().as_u16(), 400);
+    let scoped = RemoteClient::new(&base, "stage-secret").unwrap();
+    let scoped_err = scoped
+        .set_channel_recall_rule("api", "stable", 1, 60_000, 0.25, true)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(scoped_err.contains("403"), "{scoped_err}");
+    let stale = management
+        .set_channel_recall_rule("api", "stable", 0, 60_000, 0.25, true)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(stale.contains("409"), "{stale}");
+    management
+        .set_channel_recall_rule("api", "stable", 1, 60_000, 0.25, true)
+        .await
+        .unwrap();
+    let events = store.audit_events().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.operation == "catalog.channel_policy_configure.completed"),
+        "{events:?}"
+    );
 
     let unauthenticated = reqwest::Client::new()
         .get(format!("{base}/v1/releases/api@1.0.0/recall"))
@@ -122,8 +165,9 @@ async fn health_triggered_recall_is_readable_over_http() {
         .channel_promotion_policy("api", "stable")
         .await
         .unwrap();
+    assert_eq!(policy.policy_version, 2, "{policy:?}");
     assert!(policy.evidence.recall_on_failing, "{policy:?}");
-    assert_eq!(policy.evidence.failing_max_share, 0.0, "{policy:?}");
+    assert_eq!(policy.evidence.failing_max_share, 0.25, "{policy:?}");
     assert_eq!(policy.soak_duration_ms, 60_000, "{policy:?}");
 
     management.reconcile().await.unwrap();
@@ -141,7 +185,6 @@ async fn health_triggered_recall_is_readable_over_http() {
             .is_some_and(|id| id.contains("channel-promotion-policy")),
         "{view:?}"
     );
-    assert_eq!(view.policy_version.as_deref(), Some("1"), "{view:?}");
     assert!(
         view.policy_id.as_ref().is_some_and(|id| {
             view.recalled_by
@@ -156,11 +199,36 @@ async fn health_triggered_recall_is_readable_over_http() {
             .is_some_and(|reason| reason.contains("failing share")),
         "{view:?}"
     );
+    assert_eq!(view.policy_version.as_deref(), Some("2"), "{view:?}");
+    assert_eq!(view.healthy_share, Some(0.0), "{view:?}");
+    assert_eq!(view.failing_share, Some(1.0), "{view:?}");
+    assert_eq!(view.failing_max_share, Some(0.25), "{view:?}");
     assert!(
         view.removal_progress
             .iter()
             .any(|row| row.environment == "stage" && row.remaining),
         "{view:?}"
+    );
+    let removal = |view: &tenkai::catalog::RecallView| {
+        view.removal_environments
+            .iter()
+            .map(|row| (row.environment.clone(), row.done, row.total))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        removal(&view),
+        [("prod".to_string(), 0, 1), ("stage".to_string(), 0, 1)]
+    );
+
+    let mut ctx = tenkai::client::Ctx::embedded(&database).unwrap();
+    let mut prod = ctx.get(&env_id("prod")).await.unwrap().unwrap();
+    prod.properties.remove("deployed_release.api");
+    ctx.put(prod).await.unwrap();
+    drop(ctx);
+    let view = management.inspect_recall("api@1.0.0").await.unwrap();
+    assert_eq!(
+        removal(&view),
+        [("prod".to_string(), 1, 1), ("stage".to_string(), 0, 1)]
     );
     let _ = std::fs::remove_dir_all(root);
 }

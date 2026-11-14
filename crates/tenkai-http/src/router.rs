@@ -46,7 +46,7 @@ use super::lifecycle::{
     record_model_evaluation_evidence, record_recall_range, record_software_compatibility_evidence,
     release_channel_hold, release_environment_hold, remove_channel_head, resume_channel_policy,
     retire_environment, retry_failed_target, rewrap_identity_issuer, rewrap_sealed_secrets,
-    rollback_environment, schedule_environment_freeze, set_channel_hold,
+    rollback_environment, schedule_environment_freeze, set_channel_hold, set_channel_recall_rule,
     set_environment_failure_threshold, set_environment_hold, set_exposure_waiver,
     set_product_criticality, set_product_owner, set_product_webhook, set_release_label,
     software_compatibility_report, subscribe_environment, unsubscribe_environment,
@@ -475,7 +475,7 @@ pub fn router(
         )
         .route(
             "/v1/products/{product}/channels/{channel}/policy",
-            get(channel_promotion_policy),
+            get(channel_promotion_policy).put(set_channel_recall_rule),
         )
         .route(
             "/v1/products/{product}/channels/{channel}/policy/pause",

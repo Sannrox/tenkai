@@ -1106,6 +1106,47 @@
       ],
       "type": "object"
     },
+    "ChannelRecallRuleRequest": {
+      "additionalProperties": false,
+      "description": "Body of `PUT /v1/products/{product}/channels/{channel}/policy`: replace the\nactive promotion policy's recall rule. `expected_generation` is the policy\nversion the caller read; another version is refused.",
+      "properties": {
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failing_max_share": {
+          "description": "Maximum share of soak time with any replica failing (0.0–1.0).",
+          "format": "double",
+          "type": "number"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "recall_on_failing": {
+          "description": "When true, exceeding `failing_max_share` recalls the soaking release.",
+          "type": "boolean"
+        },
+        "soak_duration_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "expected_generation",
+        "soak_duration_ms",
+        "failing_max_share",
+        "recall_on_failing"
+      ],
+      "type": "object"
+    },
     "ChannelRemoveRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/products/{product}/channels/{channel}/remove`.\n`expected_head` (`<product>@<version>`) refuses the removal when another\nrelease heads the channel.",
@@ -6964,6 +7005,30 @@
         }
       ]
     },
+    "RecallEnvironmentRemoval": {
+      "description": "Removal of a recalled release from one environment: `done` of `total`\ninstances have moved off it. `total` counts the instances holding it when\nit was recalled plus any still holding it now; recalls recorded without\nthat snapshot count only the current holders.",
+      "properties": {
+        "done": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "total": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "environment",
+        "done",
+        "total"
+      ],
+      "type": "object"
+    },
     "RecallRangeCloseRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/products/{product}/recall-range/close`.",
@@ -7135,6 +7200,21 @@
           },
           "type": "array"
         },
+        "failing_max_share": {
+          "description": "The policy's `failing_max_share` threshold that `failing_share` exceeded.",
+          "format": "double",
+          "type": "number"
+        },
+        "failing_share": {
+          "description": "Share of soak time with any replica failing that tripped the recall.",
+          "format": "double",
+          "type": "number"
+        },
+        "healthy_share": {
+          "description": "Share of soak time with every replica healthy when a promotion policy\nrecalled the release. Omitted for other recalls.",
+          "format": "double",
+          "type": "number"
+        },
         "policy_id": {
           "type": "string"
         },
@@ -7159,6 +7239,13 @@
         },
         "release": {
           "type": "string"
+        },
+        "removal_environments": {
+          "description": "Per-environment removal counts, sorted by environment.",
+          "items": {
+            "$ref": "#/$defs/RecallEnvironmentRemoval"
+          },
+          "type": "array"
         },
         "removal_progress": {
           "default": [],
@@ -10198,6 +10285,17 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/ChannelPromotionPolicyView"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/products/{product}/channels/{channel}/policy",
+      "request": {
+        "$ref": "#/$defs/ChannelRecallRuleRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
       }
     },
     {

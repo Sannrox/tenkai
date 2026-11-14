@@ -514,6 +514,48 @@ pub async fn configure(
     actor: &AuthenticatedRequestContext,
     policy: ChannelPromotionPolicy,
 ) -> Result<ActiveChannelPromotionPolicy> {
+    replace_policy(ctx, actor, policy, None).await
+}
+
+/// Recall rule fields an operator may replace on an active policy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChannelRecallRule {
+    pub soak_duration_ms: i64,
+    /// Maximum share of soak time with any replica failing (0.0–1.0).
+    pub failing_max_share: f64,
+    /// When true, exceeding `failing_max_share` recalls the soaking release.
+    pub recall_on_failing: bool,
+}
+
+/// Replace the recall rule of the active policy for `product`/`target_channel`,
+/// keeping its other fields and pause. Allocates the next policy version.
+/// Refused when the active version is not `expected_version`.
+pub async fn set_recall_rule(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    product: &str,
+    target_channel: &str,
+    expected_version: u64,
+    rule: ChannelRecallRule,
+) -> Result<ActiveChannelPromotionPolicy> {
+    let mut policy = load_active(ctx, product, target_channel)
+        .await?
+        .with_context(|| format!("no channel promotion policy for {product}/{target_channel}"))?
+        .policy;
+    policy.soak_duration_ms = rule.soak_duration_ms;
+    policy.evidence.failing_max_share = rule.failing_max_share;
+    policy.evidence.recall_on_failing = rule.recall_on_failing;
+    // The version check under the lock proves `policy` was read from the
+    // version the caller expected: every replace allocates a new version.
+    replace_policy(ctx, actor, policy, Some(expected_version)).await
+}
+
+async fn replace_policy(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    policy: ChannelPromotionPolicy,
+    expected_version: Option<u64>,
+) -> Result<ActiveChannelPromotionPolicy> {
     actor
         .require_delivery_capability(DeliveryCapability::Management)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -530,15 +572,21 @@ pub async fn configure(
     let result = async {
         let pointer_id = pointer_id(&policy.product, &policy.target_channel);
         let existing = ctx.get(&pointer_id).await?;
-        let mut version = match existing.as_ref() {
-            Some(pointer) => pointer
-                .properties
-                .get("version")
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(0)
-                .saturating_add(1),
-            None => 1,
-        };
+        let current = existing
+            .as_ref()
+            .and_then(|pointer| pointer.properties.get("version"))
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        if let Some(expected) = expected_version
+            && expected != current
+        {
+            bail!(
+                "refusing to replace channel promotion policy {}/{} at version {current}: expected generation {expected}",
+                policy.product,
+                policy.target_channel
+            );
+        }
+        let mut version = current.saturating_add(1);
         let paused = existing
             .as_ref()
             .and_then(|pointer| pointer.properties.get("paused"))
@@ -1315,6 +1363,12 @@ async fn evaluate_ready_locked(
                         ("policy_version".into(), active.version.to_string()),
                         ("reason".into(), reason.clone()),
                         ("failing_instances".into(), failing_labels.join(",")),
+                        ("healthy_share".into(), healthy_share.to_string()),
+                        ("failing_share".into(), failing_share.to_string()),
+                        (
+                            "failing_max_share".into(),
+                            active.policy.evidence.failing_max_share.to_string(),
+                        ),
                     ],
                 )
                 .await?;
