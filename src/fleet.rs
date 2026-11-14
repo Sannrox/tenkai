@@ -48,6 +48,10 @@ pub struct FleetEnvironmentRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub owner: Option<String>,
+    /// True when the environment has neither an owner nor a webhook endpoint
+    /// of its own. Product endpoints are not counted. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unrouted: bool,
 }
 
 /// One open deployed exposure, with age, on a fleet row (#900).
@@ -176,6 +180,7 @@ pub fn fleet_row_from_inspect(report: &EnvironmentInspectReport) -> FleetEnviron
             .and_then(|value| value.effective.clone()),
         open_exposures: Vec::new(),
         owner: report.owner.as_ref().map(|owner| owner.contact.clone()),
+        unrouted: report.owner.is_none() && report.webhooks.is_empty(),
     }
 }
 
@@ -897,6 +902,7 @@ mod tests {
                 },
             ],
             owner: None,
+            unrouted: false,
         }];
         let overdue = overdue_exposures(&report);
         assert_eq!(overdue.len(), 1);

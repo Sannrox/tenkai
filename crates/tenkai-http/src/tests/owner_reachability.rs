@@ -7,6 +7,7 @@ use tenkai::owner::ReachabilityVerdict;
 
 fn hook(url: &str) -> WebhookEndpoint {
     WebhookEndpoint {
+        sources: Vec::new(),
         url: url.into(),
         secret_env: "HOOK_SECRET".into(),
         events: vec![WebhookEvent::ApplyFailed],

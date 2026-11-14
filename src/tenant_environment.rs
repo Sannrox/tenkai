@@ -381,6 +381,7 @@ fn partition_local_fleet_row(name: &str) -> crate::plan::FleetEnvironmentRow {
         criticality: None,
         open_exposures: Vec::new(),
         owner: None,
+        unrouted: false,
     }
 }
 

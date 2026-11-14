@@ -1191,6 +1191,7 @@ fn parse_webhook_events_splits_apply_operational_and_feedback() {
 fn webhook_list_shows_feedback_and_does_not_imply_apply_for_feedback_only() {
     use tenkai::deploy_webhook::{FeedbackEvent, OperationalEvent, WebhookEndpoint, WebhookEvent};
     let feedback_only = WebhookEndpoint {
+        sources: Vec::new(),
         url: "https://hooks.example/feedback".into(),
         secret_env: "HOOK".into(),
         events: Vec::new(),
@@ -1202,6 +1203,7 @@ fn webhook_list_shows_feedback_and_does_not_imply_apply_for_feedback_only() {
         "feedback.observation"
     );
     let mixed = WebhookEndpoint {
+        sources: Vec::new(),
         url: "https://hooks.example/mixed".into(),
         secret_env: "HOOK".into(),
         events: vec![WebhookEvent::ApplySucceeded],
@@ -1213,6 +1215,7 @@ fn webhook_list_shows_feedback_and_does_not_imply_apply_for_feedback_only() {
         "apply.succeeded,plan.held,feedback.observation"
     );
     let apply_default = WebhookEndpoint {
+        sources: Vec::new(),
         url: "https://hooks.example/apply".into(),
         secret_env: "HOOK".into(),
         events: Vec::new(),

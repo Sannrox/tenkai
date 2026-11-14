@@ -58,6 +58,11 @@ kind, most failed first. When that bound cuts off deliveries that may have
 failed three times, an endpoint with no known failure is `unknown` rather than
 `reachable`. The owner is `unconfigured` without endpoints, `reachable` when
 any endpoint is, `unreachable` when every endpoint is, and else `unknown`.
+Product owner reads (`GET /v1/products/{product}/owner`) carry the same
+`reachability` for the product's own endpoints.
+
+Fleet status marks an environment `unrouted` when it has neither an owner nor
+a webhook endpoint of its own. Product endpoints are not counted.
 
 `DELETE /v1/products/{product}/webhooks?url=<url>` removes one product
 endpoint and keeps the rest. Without `url` it removes every endpoint.
@@ -205,6 +210,16 @@ webhooks, at `GET /v1/webhooks/deliveries`: apply outcomes, then operational
 events, then feedback observations, each newest recorded first. Each
 delivery shows its state (`pending`, `retrying`, `delivered`), attempts, next attempt, delivery
 time and the last error.
+
+One delivery goes to each URL even when an environment and a product both
+configure it. Its `sources` names every configuration that routed it, for
+example `{"kind":"environment","name":"stage"}` and
+`{"kind":"product","name":"api"}`. Deliveries recorded before sources existed
+have none.
+
+`GET /v1/products/{product}/webhooks/deliveries` lists the deliveries a
+product's endpoints routed, across the environments the caller can see and
+host-wide recall announcements, bounded like the other delivery lists.
 
 ## SMTP digests
 

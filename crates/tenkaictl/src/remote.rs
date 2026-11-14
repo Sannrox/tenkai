@@ -938,6 +938,7 @@ pub(crate) async fn run(
                     .set_product_webhook(
                         &product,
                         &tenkai::deploy_webhook::WebhookEndpoint {
+                            sources: Vec::new(),
                             url,
                             secret_env,
                             events,

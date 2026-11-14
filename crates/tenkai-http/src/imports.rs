@@ -163,6 +163,23 @@ pub(super) async fn environment_webhook_deliveries(
     )
 }
 
+pub(super) async fn product_webhook_deliveries(
+    State(state): State<Arc<AppState>>,
+    Path(product): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .product_webhook_deliveries(&credential, &product)
+            .await,
+    )
+}
+
 pub(super) async fn host_webhook_deliveries(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

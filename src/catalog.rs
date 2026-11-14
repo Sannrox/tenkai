@@ -1524,7 +1524,7 @@ async fn announce_recall(ctx: &mut Ctx, release: &Object, spec: &str) {
             if !subscribed {
                 continue;
             }
-            let env_hooks = crate::deploy_webhook::parse_endpoints(&env).unwrap_or_default();
+            let env_hooks = crate::deploy_webhook::configured_endpoints(&env);
             endpoints = crate::owner::union_endpoints(endpoints, env_hooks);
         }
     }
@@ -1967,6 +1967,7 @@ install = "true"
             &mut ctx,
             "api",
             crate::deploy_webhook::WebhookEndpoint {
+                sources: Vec::new(),
                 url: "https://hooks.example.test/product".into(),
                 secret_env: "TENKAI_WEBHOOK_SECRET".into(),
                 events: Vec::new(),

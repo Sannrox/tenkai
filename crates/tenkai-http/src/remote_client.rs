@@ -328,6 +328,18 @@ impl RemoteClient {
         .await
     }
 
+    /// Deliveries a product endpoint is a source of.
+    pub async fn product_webhook_deliveries(
+        &self,
+        product: &str,
+    ) -> anyhow::Result<Vec<tenkai::operational_events::WebhookDelivery>> {
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/products/{product}/webhooks/deliveries"),
+        )
+        .await
+    }
+
     pub async fn inspect_product_owner(
         &self,
         product: &str,

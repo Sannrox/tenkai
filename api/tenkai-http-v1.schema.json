@@ -2156,6 +2156,43 @@
       ],
       "type": "object"
     },
+    "DeliverySource": {
+      "description": "Configuration that caused a delivery: an environment's or a product's\nendpoint list. A URL on both is one delivery with both sources.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "environment",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "product",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "DependencyHoldView": {
       "description": "One durable unmet-required-contract hold.",
       "properties": {
@@ -4763,6 +4800,10 @@
         "unhealthy": {
           "description": "True when any subscription has health `unknown` or a non-empty error.",
           "type": "boolean"
+        },
+        "unrouted": {
+          "description": "True when the environment has neither an owner nor a webhook endpoint\nof its own. Product endpoints are not counted. Omitted when false.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -6106,7 +6147,7 @@
         },
         "reachability": {
           "$ref": "#/$defs/OwnerReachability",
-          "description": "Whether notifications reach this owner, from recorded deliveries.\nPresent where delivery records are readable (environment inspect)."
+          "description": "Whether notifications reach this owner, from recorded deliveries.\nPresent where delivery records are readable: environment inspect and\nproduct owner reads on a community host."
         }
       },
       "required": [
@@ -8857,6 +8898,13 @@
           "format": "int64",
           "type": "integer"
         },
+        "sources": {
+          "description": "Configuration that caused this delivery: the environment, the\nproduct, or both when they share the URL. Omitted for host webhooks\nand for deliveries recorded before sources were kept.",
+          "items": {
+            "$ref": "#/$defs/DeliverySource"
+          },
+          "type": "array"
+        },
         "state": {
           "description": "`pending`, `retrying` or `delivered`. The environment list also shows\none synthetic `unconfigured` row (event `owner.unconfigured`) while\nthe environment owner has no notification endpoint.",
           "type": "string"
@@ -9152,6 +9200,18 @@
       "auth": "read",
       "method": "GET",
       "path": "/v1/environments/{environment}/webhooks/deliveries",
+      "request": null,
+      "response": {
+        "items": {
+          "$ref": "#/$defs/WebhookDelivery"
+        },
+        "type": "array"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/products/{product}/webhooks/deliveries",
       "request": null,
       "response": {
         "items": {

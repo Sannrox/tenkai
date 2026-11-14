@@ -100,6 +100,7 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: ProductCommand) -> Resul
                         ctx,
                         &product,
                         tenkai::deploy_webhook::WebhookEndpoint {
+                            sources: Vec::new(),
                             url,
                             secret_env,
                             events,

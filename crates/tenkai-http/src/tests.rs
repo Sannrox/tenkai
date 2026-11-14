@@ -37,6 +37,7 @@ mod tenant;
 mod tenant_routes;
 mod trust;
 mod upgrade_pace;
+mod webhook_attribution;
 
 pub(super) use std::collections::HashMap;
 pub(super) use std::sync::Arc;
