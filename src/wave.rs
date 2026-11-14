@@ -595,6 +595,93 @@ document = "suite.json"
         }
     }
 
+    /// #1360: a wave admitted by selector keeps the selector and the names it
+    /// froze; a later label change or a resume by name rewrites neither.
+    #[tokio::test]
+    async fn a_wave_records_the_selector_its_cohort_came_from() {
+        let root = temp_root("cohort-selector");
+        let database = root.join("tenkai.db");
+        let keys = root.join("keys");
+        crate::dev_sign::init_dev_keys(&keys).unwrap();
+        let product = root.join("product");
+        write_software_manifest(&product, "ledger", "1.0.0", "");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_release(&keys, &product.join("tenkai.toml"), &mut ctx).await;
+        let actor = crate::auth_context::test_management_context("wave-selector");
+        crate::catalog::promote(&mut ctx, &actor, "ledger@1.0.0", "stable")
+            .await
+            .unwrap();
+        for env in ["ledger-a", "ledger-b"] {
+            plan::env_add(&mut ctx, env, "replica").await.unwrap();
+            plan::subscribe(&mut ctx, env, "ledger", "stable")
+                .await
+                .unwrap();
+            crate::labels::set_environment(&mut ctx, env, "tier", "canary", "test", "")
+                .await
+                .unwrap();
+        }
+
+        let (environments, selector) =
+            crate::labels::resolve_cohort_recorded(&mut ctx, "tier=canary")
+                .await
+                .unwrap();
+        let spec = ExecutableWaveSpec::new(
+            "ledger-roll",
+            "ledger",
+            "1.0.0",
+            "stable",
+            environments.clone(),
+            true,
+        )
+        .unwrap()
+        .with_selector(selector);
+        start_or_resume(&mut ctx, &spec).await.unwrap();
+        let expected = crate::delivery_hold::HoldSelector {
+            selector: "tier=canary".into(),
+            environments: vec!["ledger-a".into(), "ledger-b".into()],
+        };
+        let record = load_wave(&mut ctx, "ledger-roll").await.unwrap();
+        assert_eq!(record.selector.as_ref(), Some(&expected));
+        assert!(
+            format_wave(&record).contains("cohort selector=tier=canary resolved=ledger-a,ledger-b"),
+            "{}",
+            format_wave(&record)
+        );
+
+        crate::labels::set_environment(&mut ctx, "ledger-b", "tier", "stable", "test", "")
+            .await
+            .unwrap();
+        let by_name = ExecutableWaveSpec::new(
+            "ledger-roll",
+            "ledger",
+            "1.0.0",
+            "stable",
+            environments,
+            true,
+        )
+        .unwrap();
+        let resumed = start_or_resume(&mut ctx, &by_name).await.unwrap();
+        assert_eq!(resumed.selector.as_ref(), Some(&expected));
+        assert_eq!(resumed.environments.len(), 2);
+
+        let named = ExecutableWaveSpec::new(
+            "ledger-named",
+            "ledger",
+            "1.0.0",
+            "stable",
+            ["ledger-a".to_string()],
+            true,
+        )
+        .unwrap();
+        start_or_resume(&mut ctx, &named).await.unwrap();
+        assert_eq!(
+            load_wave(&mut ctx, "ledger-named").await.unwrap().selector,
+            None
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// #690: a wave runs a plan that changes a serving replica of a topology
     /// only while the declared minimum of the others stay healthy and no
     /// other wave is changing a replica of it; it refuses before executing.

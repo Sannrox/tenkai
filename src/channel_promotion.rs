@@ -242,6 +242,10 @@ pub struct ChannelPromotionPolicyView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub promoted_by_kind: Option<String>,
+    /// The canary cohort configured for `soaking_release` into this channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub canary: Option<crate::canary::CanaryCohort>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -862,12 +866,16 @@ pub async fn view(
     let status = status_for(ctx, &active).await?;
     let soak = load_soak(ctx, product, target_channel).await?;
     let channel = ctx.get(&channel_id(product, target_channel)).await?;
-    Ok(view_from_parts(
-        &active,
-        status,
-        soak.as_ref(),
-        channel.as_ref(),
-    ))
+    let mut view = view_from_parts(&active, status, soak.as_ref(), channel.as_ref());
+    if let Some((soak_product, version)) = view
+        .soaking_release
+        .as_deref()
+        .and_then(|release| release.split_once('@'))
+    {
+        view.canary =
+            crate::canary::active_cohort(ctx, soak_product, version, target_channel).await?;
+    }
+    Ok(view)
 }
 
 fn view_from_parts(
@@ -927,6 +935,7 @@ fn view_from_parts(
         promoted_by: channel.and_then(|channel| channel.properties.get("promoted_by").cloned()),
         promoted_by_kind: channel
             .and_then(|channel| channel.properties.get("promoted_by_kind").cloned()),
+        canary: None,
     }
 }
 

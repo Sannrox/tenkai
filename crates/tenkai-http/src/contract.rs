@@ -1269,6 +1269,8 @@ mod tests {
             ("CanaryDesignation", "selector"),
             ("CanaryDesignationRequest", "selector"),
             ("CanaryDesignationResult", "selector"),
+            ("ChannelPromotionPolicyView", "canary"),
+            ("CanaryCohort", "selector"),
             ("LabelView", "set_by"),
             ("LabelView", "set_at"),
             ("LabelChange", "value"),

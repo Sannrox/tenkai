@@ -371,9 +371,9 @@ pub struct PromotionEvaluation {
 mod promotion_lifecycle;
 
 pub use promotion_lifecycle::{
-    CanaryDesignation, CanaryDesignationRequest, CanaryDesignationResult, active_policy,
-    authorize_promotion, configure, confirm_policy_active, designations, set_designated,
-    set_designated_by, unlock_promotion,
+    CanaryCohort, CanaryDesignation, CanaryDesignationRequest, CanaryDesignationResult,
+    active_policy, authorize_promotion, configure, configure_by, confirm_policy_active,
+    designations, set_designated, set_designated_by, unlock_promotion,
 };
 use promotion_lifecycle::{
     POLICY_DISCOVERY_LOCK_CHANNEL, claim_policy_locks, claim_promotion_lock_with_retry,
@@ -383,7 +383,7 @@ pub(crate) use promotion_lifecycle::{
     PromotionLock, claim_promotion_lock, fenced_put, fenced_put_objects, finish_locked,
     release_promotion_lock,
 };
-pub(crate) use promotion_lifecycle::{guarded_promotion, maybe_active_policy};
+pub(crate) use promotion_lifecycle::{active_cohort, guarded_promotion, maybe_active_policy};
 
 mod attempt_lifecycle;
 

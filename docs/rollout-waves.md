@@ -48,7 +48,10 @@ tenkaictl wave rollback rollout-1 \
 
 `--cohort` also accepts a selector (`tier=canary`, `tier in (canary,stage)`).
 Tenkai resolves it at start and stores the concrete environment names on the
-wave. A later label change does not rewrite that list.
+wave, with the selector beside them. `wave status` shows both as
+`cohort selector=<selector> resolved=<names>`. A later label change does not
+rewrite either. The selector is provenance only: it is not part of the wave
+identity, so a resume by the same names matches.
 
 Local-only development bypass is restricted to the built-in `local`
 environment, matching plan apply:

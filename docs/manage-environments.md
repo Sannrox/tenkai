@@ -525,7 +525,11 @@ A selector (`key=value`, `key!=value`, `key in (a,b)`, comma meaning AND) can
 stand in for an environment list on `wave run` / `wave execute --cohort`,
 `canary designate`, `canary policy --selector`, and `env hold`. Tenkai
 resolves it when the command runs. Wave and canary policy store the concrete
-names; a later label change does not rewrite that list. Hold applies to each
+names and the selector they came from; a later label change rewrites
+neither. `wave status` shows the wave's selector. `GET
+/v1/products/{product}/channels/{channel}/policy` returns `canary` (policy
+digest, `environments`, and `selector` when it was set by one) for the
+soaking release. Hold applies to each
 match now. The next start, designation, or hold sees the current match.
 `env list --selector` may be empty; wave, canary, and hold refuse a selector
 that matches nothing. An invalid label or selector names the offending part.
