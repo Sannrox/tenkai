@@ -1202,6 +1202,7 @@ mod tests {
             ("OpenEnvironmentExposure", "grace_ends_at"),
             ("EnvironmentInspectReport", "exposure_grace_ms"),
             ("ChannelListEntry", "exposure_grace_ms"),
+            ("ChannelListEntry", "upgrade_pace_ms"),
             ("ReleasePage", "next_cursor"),
             ("ChannelPage", "next_cursor"),
             ("MigrationPage", "next_cursor"),

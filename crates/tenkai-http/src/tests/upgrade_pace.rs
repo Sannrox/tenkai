@@ -102,5 +102,24 @@ async fn remote_channel_pace_and_admit_require_management() {
     let admission = stage.early_admission.as_ref().expect("audited admission");
     assert_eq!(admission.reason, "canary host");
     assert_eq!(admission.actor, "management");
+
+    let channel_pace = || async {
+        let channels: serde_json::Value = reqwest::Client::new()
+            .get(format!("{base}/v1/channels"))
+            .bearer_auth("management-secret")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        channels["items"][0].get("upgrade_pace_ms").cloned()
+    };
+    assert_eq!(channel_pace().await, Some(serde_json::json!(10_800_000)));
+    management
+        .configure_channel_pace("api", "stable", "off")
+        .await
+        .unwrap();
+    assert_eq!(channel_pace().await, None);
     let _ = std::fs::remove_dir_all(root);
 }

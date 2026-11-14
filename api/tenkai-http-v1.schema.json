@@ -879,6 +879,11 @@
         },
         "product": {
           "type": "string"
+        },
+        "upgrade_pace_ms": {
+          "description": "Configured upgrade pace in milliseconds. Omitted means pacing is off.\nA changed duration applies from the next promotion.",
+          "format": "int64",
+          "type": "integer"
         }
       },
       "required": [
