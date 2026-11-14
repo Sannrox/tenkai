@@ -477,6 +477,10 @@ pub struct ApplyStepResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub attempt_id: Option<String>,
+    /// The live object that moved since planning, when apply refused the step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub stale_target: Option<crate::spec_drift::StaleTarget>,
 }
 
 impl ApplyStepResult {
@@ -508,6 +512,7 @@ impl ApplyStepResult {
             cause: outcome.cause.clone(),
             restored_version,
             attempt_id: outcome.attempt_id.clone(),
+            stale_target: outcome.stale_target.clone(),
         })
     }
 
@@ -2346,6 +2351,42 @@ mod tests {
         assert_eq!(rollback.restored_version.as_deref(), Some("2.0.0"));
         // A step that recorded no attempt in this execution names none.
         assert_eq!(rollback.attempt_id, None);
+    }
+
+    #[test]
+    fn stale_target_apply_refusal_names_the_object() {
+        use crate::apply::{Outcome, StepOutcomeStatus};
+        use crate::plan::Action;
+        use crate::spec_drift::StaleTarget;
+        let mut outcome = Outcome::new(
+            step("api", Action::Upgrade),
+            StepOutcomeStatus::Failed,
+            "step s1 is stale: Service api changed since planning",
+        );
+        outcome = outcome.with_stale_target(StaleTarget {
+            kind: "Service".into(),
+            name: "api".into(),
+        });
+        let result = ApplyStepResult::from_outcome(&outcome).unwrap();
+        let target = result.stale_target.as_ref().expect("stale_target");
+        assert_eq!(target.kind, "Service");
+        assert_eq!(target.name, "api");
+        let body = ApplyFailedBody {
+            error: "apply did not succeed".into(),
+            steps: vec![result],
+        };
+        let wire = serde_json::to_value(&body).unwrap();
+        assert_eq!(wire["steps"][0]["stale_target"]["kind"], "Service");
+        assert_eq!(wire["steps"][0]["stale_target"]["name"], "api");
+
+        let clean = ApplyStepResult::from_outcome(&Outcome::new(
+            step("api", Action::Upgrade),
+            StepOutcomeStatus::Succeeded,
+            "",
+        ))
+        .unwrap();
+        let wire = serde_json::to_value(&clean).unwrap();
+        assert!(wire.get("stale_target").is_none(), "{wire}");
     }
 
     #[test]

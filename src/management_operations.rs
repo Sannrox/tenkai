@@ -926,6 +926,22 @@ impl ManagementOperations {
             .map_err(|_| ManagementError::Unavailable("approval policy is unreadable".into()))
     }
 
+    pub async fn inspect_plan(
+        &self,
+        credential: &CredentialMaterial,
+        plan_id: &str,
+    ) -> Result<crate::environment::EnvironmentPlanSummary, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let stored = crate::plan::load(&mut ctx, plan_id)
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        self.require_environment_visible(&context, &stored.environment)
+            .await?;
+        crate::environment::environment_plan_summary_full(stored).map_err(internal)
+    }
+
     pub async fn plan_approvals(
         &self,
         credential: &CredentialMaterial,

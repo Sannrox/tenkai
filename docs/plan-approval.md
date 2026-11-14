@@ -149,6 +149,8 @@ tenkaictl apply <plan-id> \
 ```
 
 `POST /v1/plans/{plan_id}/approve` accepts one envelope at a time.
+`GET /v1/plans/{plan_id}` returns the stored plan, including each step's
+`target_changes`.
 `GET /v1/plans/{plan_id}/approvals` lists collected envelopes, each with
 when it was signed (`signed_at`) and when it expires, and how many are
 still missing. With `TENKAI_PLAN_APPROVAL_TRUST_ROOTS` set on the server it

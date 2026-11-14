@@ -1930,6 +1930,9 @@ pub struct EnvironmentPlanStepSummary {
     pub from: Option<String>,
     pub to: String,
     pub release_id: String,
+    /// Desired-versus-live changes recorded on the step (#1077, #1272).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_changes: Vec<crate::spec_drift::TargetChange>,
 }
 
 /// Effective overlay config for one product, with secret names only.
@@ -3880,14 +3883,29 @@ async fn latest_plan_for_environment(
 }
 
 pub(crate) fn environment_plan_summary(plan: Plan) -> Result<EnvironmentPlanSummary> {
+    summarize_environment_plan(plan, true)
+}
+
+/// Every stored step and every recorded field change, for `GET /v1/plans/{id}`.
+pub(crate) fn environment_plan_summary_full(plan: Plan) -> Result<EnvironmentPlanSummary> {
+    summarize_environment_plan(plan, false)
+}
+
+fn summarize_environment_plan(plan: Plan, cap_steps: bool) -> Result<EnvironmentPlanSummary> {
     const MAX_PLAN_STEP_SUMMARIES: usize = 256;
     let digest = format!("sha256:{}", plan.executable_digest()?);
     let step_count = plan.steps.len();
     let status_detail = operator_safe_status_detail(&plan);
+    let take = if cap_steps {
+        MAX_PLAN_STEP_SUMMARIES
+    } else {
+        usize::MAX
+    };
+    let include_fields = !cap_steps;
     let steps = plan
         .steps
         .into_iter()
-        .take(MAX_PLAN_STEP_SUMMARIES)
+        .take(take)
         .map(|step| {
             let instance = step.instance_name().to_string();
             EnvironmentPlanStepSummary {
@@ -3899,6 +3917,11 @@ pub(crate) fn environment_plan_summary(plan: Plan) -> Result<EnvironmentPlanSumm
                 from: step.from,
                 to: step.to,
                 release_id: step.release_id,
+                target_changes: step
+                    .target_changes
+                    .into_iter()
+                    .map(|change| change.for_http(include_fields))
+                    .collect(),
             }
         })
         .collect::<Vec<_>>();

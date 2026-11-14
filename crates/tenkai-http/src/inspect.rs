@@ -211,6 +211,18 @@ pub(super) async fn inspect_environment(
     )
 }
 
+pub(super) async fn inspect_plan(
+    State(state): State<Arc<AppState>>,
+    Path(plan_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(state.management.inspect_plan(&credential, &plan_id).await)
+}
+
 pub(super) async fn plan_approvals(
     State(state): State<Arc<AppState>>,
     Path(plan_id): Path<String>,

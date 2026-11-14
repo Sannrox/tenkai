@@ -94,8 +94,41 @@ pub struct TargetChange {
     /// Operator-owned fields that differ. Empty when live already matches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<TargetFieldChange>,
+    /// Count of changed fields. HTTP projections set this so inspect can omit
+    /// `fields` and still return per-object counts. Planning leaves it absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub field_count: Option<usize>,
     /// Digest of the live object as planning saw it. `absent` when none.
     pub live_digest: String,
+}
+
+impl TargetChange {
+    /// HTTP projection: always carry `field_count`. Inspect omits `fields`.
+    pub(crate) fn for_http(mut self, include_fields: bool) -> Self {
+        let count = self.fields.len();
+        self.field_count = (count > 0).then_some(count);
+        if !include_fields {
+            self.fields.clear();
+        }
+        self
+    }
+}
+
+/// Object whose live digest moved since planning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct StaleTarget {
+    pub kind: String,
+    pub name: String,
+}
+
+impl StaleTarget {
+    pub fn from_change(change: &TargetChange) -> Self {
+        Self {
+            kind: change.kind.clone(),
+            name: change.name.clone(),
+        }
+    }
 }
 
 /// One named field of a [`TargetChange`]. Secret values are never stored.
@@ -103,8 +136,10 @@ pub struct TargetChange {
 pub struct TargetFieldChange {
     pub field: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub to: Option<String>,
 }
 
@@ -131,6 +166,7 @@ pub fn compare_desired_live(
         kind: kind.into(),
         name: name.into(),
         fields,
+        field_count: None,
         live_digest,
     }
 }

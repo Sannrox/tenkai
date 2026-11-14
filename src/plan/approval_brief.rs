@@ -579,6 +579,7 @@ mod tests {
                 from: Some(r#"["cache","config"]"#.into()),
                 to: Some("sha256:deadbeef".into()),
             }],
+            field_count: None,
             live_digest: "sha256:live".into(),
         };
         assert!(
@@ -598,6 +599,7 @@ mod tests {
                 from: Some("[*]".into()),
                 to: Some("[get]".into()),
             }],
+            field_count: None,
             live_digest: "sha256:live".into(),
         };
         let ingress = TargetChange {
@@ -608,6 +610,7 @@ mod tests {
                 from: Some("old".into()),
                 to: Some("new".into()),
             }],
+            field_count: None,
             live_digest: "sha256:live".into(),
         };
         assert_eq!(
