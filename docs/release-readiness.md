@@ -6,7 +6,7 @@ version number; the maintainer chooses the target version. Family policy is
 maintainer procedure is [RELEASING.md](../RELEASING.md). Pair with the
 project-local `prepare-release` skill for notes and evidence assembly.
 
-Latest milestone notes: [docs/releases/0.8.0.md](releases/0.8.0.md).
+Latest milestone notes: [docs/releases/0.9.1.md](releases/0.9.1.md).
 
 ## 1. Scope
 
@@ -14,6 +14,9 @@ Latest milestone notes: [docs/releases/0.8.0.md](releases/0.8.0.md).
 - [ ] Cut `vX.Y.Z-rc.N` before the final tag ([RELEASING.md](../RELEASING.md))
 - [ ] Merged PR / closed issue range listed (since the previous final tag)
 - [ ] User-visible changes classified: Added / Changed / Fixed / Security / Migration
+- [ ] Web console: `ui/console.pin` names the console release built for this
+      range's HTTP surfaces, or the notes say why it stays
+- [ ] Operator notes `docs/releases/X.Y.Z.md` written and linked from the docs index
 
 ## 2. Versions and contracts
 
