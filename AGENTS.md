@@ -378,6 +378,11 @@ Rows beyond `## Testing Guidelines`:
 - `docs/release-readiness.md` is the canonical gate list for versions,
   contracts, security, and validation commands;
 - `Cargo.toml` version, lockfile, and the release workflow;
+- the web console pin `ui/console.pin`: a range that adds HTTP surfaces needs
+  a `tenkai-console` release built against them, released first (the pin
+  takes only final `vX.Y.Z` tags), or a stated reason it stays;
+- operator notes `docs/releases/X.Y.Z.md`, linked from `docs/README.md` and
+  `docs/release-readiness.md`;
 - public CLI, vendored protocol, manifest, and `sekai-chisei` compatibility;
 - ontology, graph-record, runtime-state, and configuration migration impact;
 - environment variables, defaults, examples, and operator documentation;
