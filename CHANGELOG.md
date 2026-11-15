@@ -6,6 +6,87 @@ pull request body, which becomes the squash commit; at release,
 
 ## [Unreleased]
 
+## v0.9.0 (2026-11-15)
+
+Gate flags: breaking, migration
+
+Channels promote on their own after a soak with
+evidence, pace upgrades over a time window, and recall a soaking release when
+health fails. Instances report health after apply, and an environment holds
+itself when many instances fail. Environments and releases carry labels, and
+selectors stand in for environment lists on waves, canaries, and holds.
+Exposure gains advisory waivers, grace periods, and an optional scan-age gate.
+Every plan carries an approval brief, command refusals name the gate and the
+next action, and an operator can cancel a running apply. The versioned HTTP
+API now reads and writes these surfaces. Tenkai publishes its own server and
+console as the signed catalog product `tenkai-server`. The release candidate
+`v0.9.0-rc.1` published its signed hosts, SBOM and attestations; this final
+release has the same contents.
+
+### Upgrade
+- Install the 0.9.0 hosts from the GitHub Release after verifying `SHA256SUMS` and the attestation, or with `install.sh`. `tenkaictl --version` reports `tenkaictl 0.9.0`. Hosts on 0.9.0-rc.1 replace the binaries with no other action.
+- No store schema change (embedded `SCHEMA_VERSION` 14, tenant schema 3) and no operator migration. New state lives in new graph kinds and record properties that older hosts ignore. Plan format, runtime protocol (`proto/`), and the auth, federated identity, provider, and model runtime contract versions are unchanged.
+- HTTP wire breaks (upgrade server and clients together):
+  - `GET /v1/environments/{environment}/labels` and `GET /v1/releases/{product}/{version}/labels` return `{key: {value, set_by, set_at}}` instead of `{key: value}` (#1359).
+  - Webhook delivery lists return `{items, next_cursor}`, newest first across kinds, instead of a bare array (#1357).
+  - A 0.8 server refuses a delivery hold that carries a selector (#1317). Every other HTTP change adds routes or omit-when-absent fields; a 0.8 server answers 404 for the new routes.
+- Rust library API: many public structs and exhaustive enums gained fields or variants, and test-only entry points and pass-through wrappers were removed (#1225, #1232, #1241, #1245, #1247). Callers building these types with struct literals or exhaustive matches must update.
+- New optional properties, all off or unchanged by default: `exposure.grace_ms`, `exposure.max_inventory_age_ms`, `pre_pull.timeout_ms` (default 300000). Channels without a promotion policy or pace keep immediate, manual promotion.
+- In-process apply refuses the `tenkai-server` product on the coordinating host. Deliver it through an environment runtime or `tenkaictl self-upgrade`.
+- Rollback to 0.8.1: the previous binary plus the existing store. 0.8.1 ignores the new graph kinds and properties, so promotion policies, paces, labels, waivers, freezes, recall ranges, and owner routing stop taking effect until the upgrade is repeated. A channel promotion already committed is not undone.
+
+### Added
+- feat(catalog)!: channel promotion policy with soak and evidence, executed by the reconciler (#1193)
+- feat(catalog)!: pace upgrades to a promoted release over a time window (#1231)
+- feat!(catalog): recall a soaking release when health fails (#1209)
+- feat(ops)!: product recall ranges (#1196)
+- feat!(executor): observe instance health after apply (#1207)
+- feat!(ops): hold an environment when many instances fail (#1210)
+- feat(ops)!: dated change freezes that start and end on their own (#1195)
+- feat(ops)!: add environment and release labels with selectors (#1237)
+- feat(ops)!: route failure notifications to product and environment owners (#1238)
+- feat(ops)!: surface sealed-secret rotation age (#1261)
+- feat(ops): upgrade the host applier on a self-upgrade host (#1222)
+- feat(ops): deliver tenkai-server as a signed catalog product (#1262)
+- feat(exposure)!: re-assess deployed releases on advisory feed admission (#1197)
+- feat(exposure)!: add advisory waivers with scope, expiry, and grace (#1236)
+- feat(exposure): require a recent scan before install (#1269)
+- feat(executor)!: pre-pull images before the maintenance window (#1266)
+- feat(planner)!: show rendered target changes in the plan (#1194)
+- feat(planner)!: put an approval brief on every plan (#1253)
+- feat!(cli): explain what blocks an instance's next change (#1212)
+- feat!(cli): cancel a running apply and hold the environment (#1220)
+- feat(cli): render and validate a release manifest before signing (#1192)
+- feat(cli): first governed deploy in 15 minutes, checked in CI (#1265)
+- feat(http)!: promotion policy detail, soak progress, and pause/resume over the versioned API (#1281)
+- feat(http)!: health observation time and repairing checks on instance status (#1282)
+- feat(http)!: typed apply cancel outcome, skipped steps, and rollback hold opt-out (#1283)
+- feat(http)!: expose plan step target changes over the versioned API (#1284)
+- feat(http): expose recall details and removal progress over the versioned API (#1285)
+- feat(http): read upgrade pacing progress over the versioned API (#1286)
+- feat(http)!: list waivers and read grace periods over the versioned API (#1288)
+- feat(http)!: typed owner reachability and product webhook delete by url (#1289)
+- feat(http)!: read a channel's upgrade pace over the versioned API (#1290)
+- feat(http)!: declare environment selector query and record hold-by-selector (#1317)
+- feat(http)!: attribute webhook deliveries and list a product's deliveries (#1355)
+- feat(http)!: set a channel's recall rule and read typed recall measures (#1356)
+- feat(http): designate canary environments by selector over the versioned API (#1358)
+
+### Changed
+- feat(catalog)!: promote returns the channel head it replaced (#1240)
+- feat(cli)!: name the gate and next action on command refusals (#1258)
+- feat(http)!: page webhook delivery lists (#1357)
+- feat(http)!: label reads carry who set each label and when (#1359)
+- feat(planner)!: waves and canary policies record the selector their cohort came from (#1361)
+- refactor: depend on fencing-lease v0.1.0 from its own repository (#1268)
+- refactor!: remove test-only seams, copies, and pass-through wrappers from the library API (#1225, #1232, #1241, #1243, #1245, #1247)
+
+### Security
+- fix(tenant)!: guard every HTTP route against the tenant registry (#1228)
+
+### Fixed
+- Shipped earlier in 0.8.1 as backports, now on the 0.9 line: in-process Kubernetes cleanup and removal delete only owned objects (#1206), and `PodDisruptionBudget` applies in-process with unsupported kinds refused before mutating (#1208).
+
 ## v0.9.0-rc.1 (2026-11-15)
 
 Gate flags: breaking, migration
