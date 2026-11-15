@@ -472,17 +472,25 @@ pub(crate) async fn run(
                 reactivate,
             } => {
                 let actor = embedded_management_actor()?;
-                let cohort = if let Some(selector) = selector {
-                    tenkai::labels::require_matching_environments(
-                        ctx,
-                        &tenkai::labels::parse_selector(&selector)?,
-                    )
-                    .await?
-                } else {
-                    cohort
+                let (cohort, selector) = match selector {
+                    Some(selector) => {
+                        let selector = tenkai::labels::parse_selector(&selector)?;
+                        let cohort =
+                            tenkai::labels::require_matching_environments(ctx, &selector).await?;
+                        (cohort, Some(selector.source().to_string()))
+                    }
+                    None => (cohort, None),
                 };
-                let active =
-                    canary::configure(ctx, &actor, &spec, &channel, cohort, reactivate).await?;
+                let active = canary::configure_by(
+                    ctx,
+                    &actor,
+                    &spec,
+                    &channel,
+                    cohort,
+                    selector.as_deref(),
+                    reactivate,
+                )
+                .await?;
                 println!(
                     "canary policy {} active for {} -> {} with cohort {}",
                     active.digest(),

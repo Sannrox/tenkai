@@ -126,11 +126,26 @@ pub fn parse_selector(input: &str) -> std::result::Result<Selector, SelectorErro
 
 /// Comma-separated names, or a selector that stands in for that list.
 pub async fn resolve_cohort(ctx: &mut Ctx, input: &str) -> Result<Vec<String>> {
+    Ok(resolve_cohort_recorded(ctx, input).await?.0)
+}
+
+/// [`resolve_cohort`], plus the selector and its matches when `input` was a
+/// selector, for a record that keeps where its cohort came from.
+pub async fn resolve_cohort_recorded(
+    ctx: &mut Ctx,
+    input: &str,
+) -> Result<(Vec<String>, Option<crate::delivery_hold::HoldSelector>)> {
     let input = input.trim();
     if looks_like_selector(input) {
-        require_matching_environments(ctx, &parse_selector(input)?).await
+        let selector = parse_selector(input)?;
+        let environments = require_matching_environments(ctx, &selector).await?;
+        let recorded = crate::delivery_hold::HoldSelector {
+            selector: selector.source().to_string(),
+            environments: environments.clone(),
+        };
+        Ok((environments, Some(recorded)))
     } else {
-        parse_name_list(input)
+        Ok((parse_name_list(input)?, None))
     }
 }
 

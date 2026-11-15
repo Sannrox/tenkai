@@ -17,6 +17,7 @@ use crate::apply::{
     inspect_environment_lease,
 };
 use crate::client::Ctx;
+use crate::delivery_hold::HoldSelector;
 use crate::ontology::{
     KIND_CHANNEL, KIND_WAVE, NS, channel_id, release_id, require_wave_schema, validate_identifier,
     wave_id,
@@ -37,6 +38,10 @@ pub struct ExecutableWaveSpec {
     pub channel: String,
     pub environments: Vec<String>,
     pub fail_policy: WaveFailPolicy,
+    /// The selector `environments` was resolved from, when it was. Provenance
+    /// only: it is not part of the wave identity and never re-resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<HoldSelector>,
 }
 
 impl ExecutableWaveSpec {
@@ -59,9 +64,16 @@ impl ExecutableWaveSpec {
             } else {
                 WaveFailPolicy::Continue
             },
+            selector: None,
         };
         spec.validate()?;
         Ok(spec)
+    }
+
+    /// Record the selector the cohort was resolved from.
+    pub fn with_selector(mut self, selector: Option<HoldSelector>) -> Self {
+        self.selector = selector;
+        self
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -188,6 +200,10 @@ pub struct WaveRecord {
     pub operator_decision: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// The selector the cohort was resolved from at admission, with the
+    /// environments it matched then. Omitted for a cohort given by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<HoldSelector>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -834,6 +850,7 @@ async fn admit_locked(ctx: &mut Ctx, spec: &ExecutableWaveSpec) -> Result<WaveRe
                 operator_decision: None,
                 created_at: 0,
                 updated_at: 0,
+                selector: None,
             },
             environment,
         )
@@ -874,6 +891,7 @@ async fn admit_locked(ctx: &mut Ctx, spec: &ExecutableWaveSpec) -> Result<WaveRe
         operator_decision: None,
         created_at: now,
         updated_at: now,
+        selector: spec.selector.clone(),
     };
     match ctx.create_once(wave_object(&record)?).await {
         Ok(_) => Ok(record),
@@ -1471,6 +1489,13 @@ pub fn format_wave(record: &WaveRecord) -> String {
         record.fail_policy,
         record.current_order
     )];
+    if let Some(selector) = &record.selector {
+        lines.push(format!(
+            "cohort selector={} resolved={}",
+            selector.selector,
+            selector.environments.join(",")
+        ));
+    }
     lines.push(format!(
         "{:<6} {:<16} {:<16} plan detail",
         "order", "environment", "status"

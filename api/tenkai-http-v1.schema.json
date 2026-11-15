@@ -620,6 +620,29 @@
       ],
       "type": "object"
     },
+    "CanaryCohort": {
+      "description": "The cohort of the active canary policy for one release and target\nchannel, and the selector it was configured by.",
+      "properties": {
+        "environments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "policy_digest": {
+          "type": "string"
+        },
+        "selector": {
+          "$ref": "#/$defs/HoldSelector",
+          "description": "Omitted for a cohort configured by environment name."
+        }
+      },
+      "required": [
+        "policy_digest",
+        "environments"
+      ],
+      "type": "object"
+    },
     "CanaryDesignation": {
       "description": "One designated canary environment: who designated it, when, and the\nselector that chose it, when one did. Designations written before this\nprovenance existed read back with only the environment.",
       "properties": {
@@ -1084,6 +1107,10 @@
     "ChannelPromotionPolicyView": {
       "description": "Policy rules, pause actor, and soak progress for `GET /v1/products/{product}/channels/{channel}/policy`.",
       "properties": {
+        "canary": {
+          "$ref": "#/$defs/CanaryCohort",
+          "description": "The canary cohort configured for `soaking_release` into this channel."
+        },
         "elapsed_ms": {
           "format": "int64",
           "type": "integer"

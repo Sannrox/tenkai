@@ -207,7 +207,6 @@ async fn soak_reset_and_policy_promotion_are_visible_over_http() {
         .unwrap();
     assert_eq!(soaking.state, "soaking", "{soaking:?}");
     assert_eq!(soaking.soaking_release.as_deref(), Some("api@1.0.0"));
-
     backdate_soak(&database, 5_000).await;
     let mut ctx = tenkai::client::Ctx::embedded(&database).unwrap();
     observe(&mut ctx, "stage", "api", "1.0.0", false).await;
@@ -273,5 +272,83 @@ async fn soak_reset_and_policy_promotion_are_visible_over_http() {
         }),
         "{events:?}"
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn policy_view_shows_the_canary_cohort_and_its_selector() {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-channel-policy-http-canary-{}-{}",
+        std::process::id(),
+        tenkai::now_millis()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (app, _config, _) = lifecycle_router(&root).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let management = RemoteClient::new(&base, "management-secret").unwrap();
+    let first = signed_catalog_fixture(&root, "1.0.0");
+    management.publish_release(&first).await.unwrap();
+    management
+        .promote_release("api@1.0.0", "candidate")
+        .await
+        .unwrap();
+    let generation = current_generation(&management, "stage").await;
+    management
+        .subscribe_environment("stage", "api=candidate", generation, None)
+        .await
+        .unwrap();
+    let database = root.join("tenkai.db");
+    let mut ctx = tenkai::client::Ctx::embedded(&database).unwrap();
+    observe(&mut ctx, "stage", "api", "1.0.0", true).await;
+    drop(ctx);
+    configure_policy(&database, 60_000).await;
+    management.reconcile().await.unwrap();
+    let soaking = management
+        .channel_promotion_policy("api", "stable")
+        .await
+        .unwrap();
+    assert_eq!(soaking.soaking_release.as_deref(), Some("api@1.0.0"));
+    assert_eq!(soaking.canary, None, "{soaking:?}");
+
+    // A canary cohort configured by selector reads back on the policy view
+    // with the selector and the environments it froze.
+    let mut ctx = tenkai::client::Ctx::embedded(&database).unwrap();
+    let actor = management_actor();
+    tenkai::canary::set_designated(&mut ctx, &actor, "stage", true)
+        .await
+        .unwrap();
+    let active = tenkai::canary::configure_by(
+        &mut ctx,
+        &actor,
+        "api@1.0.0",
+        "stable",
+        vec!["stage".into()],
+        Some("tier=canary"),
+        false,
+    )
+    .await
+    .unwrap();
+    drop(ctx);
+    let with_canary = management
+        .channel_promotion_policy("api", "stable")
+        .await
+        .unwrap();
+    assert_eq!(
+        with_canary.canary,
+        Some(tenkai::canary::CanaryCohort {
+            policy_digest: active.digest().to_string(),
+            environments: vec!["stage".into()],
+            selector: Some(tenkai::delivery_hold::HoldSelector {
+                selector: "tier=canary".into(),
+                environments: vec!["stage".into()],
+            }),
+        })
+    );
+
     let _ = std::fs::remove_dir_all(root);
 }

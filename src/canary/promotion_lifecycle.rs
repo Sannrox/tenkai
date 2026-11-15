@@ -802,6 +802,21 @@ pub async fn configure(
     cohort: Vec<String>,
     reactivate: bool,
 ) -> Result<ActiveCanaryPolicy> {
+    configure_by(ctx, actor, spec, target_channel, cohort, None, reactivate).await
+}
+
+/// [`configure`], recording the selector `cohort` was resolved from beside
+/// the policy. The selector is provenance: it is outside the policy digest
+/// and is kept only when this call activates a new policy.
+pub async fn configure_by(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    spec: &str,
+    target_channel: &str,
+    cohort: Vec<String>,
+    selector: Option<&str>,
+    reactivate: bool,
+) -> Result<ActiveCanaryPolicy> {
     require_management(actor)?;
     let product = spec
         .split_once('@')
@@ -829,7 +844,16 @@ pub async fn configure(
         }
     };
     let locks = [target, discovery];
-    let result = configure_locked(ctx, spec, target_channel, cohort, reactivate, &locks).await;
+    let result = configure_locked(
+        ctx,
+        spec,
+        target_channel,
+        cohort,
+        selector,
+        reactivate,
+        &locks,
+    )
+    .await;
     let mut unlock_error = None;
     for lock in &locks {
         if let Err(error) = release_promotion_lock(ctx, lock).await {
@@ -851,6 +875,7 @@ async fn configure_locked(
     spec: &str,
     target_channel: &str,
     cohort: Vec<String>,
+    selector: Option<&str>,
     reactivate: bool,
     locks: &[PromotionLock],
 ) -> Result<ActiveCanaryPolicy> {
@@ -897,7 +922,7 @@ async fn configure_locked(
         .map_or(now, |pointer| now.max(pointer.updated.saturating_add(1)));
     let active = ActiveCanaryPolicy::new(policy, activated_at)?;
     let record_id = policy_record_id(&active);
-    let object = Object {
+    let mut object = Object {
         id: record_id.clone(),
         kind: KIND_CANARY_POLICY.into(),
         name: format!("{spec} promotion to {target_channel}"),
@@ -921,6 +946,13 @@ async fn configure_locked(
         created: activated_at,
         updated: activated_at,
     };
+    if let Some(selector) = selector {
+        crate::delivery_hold::HoldSelector {
+            selector: selector.to_string(),
+            environments: active.policy.cohort.clone(),
+        }
+        .write(&mut object.properties);
+    }
     if fenced_create(ctx, locks, object).await?.is_none() {
         bail!("canary policy {record_id} already exists");
     }
@@ -972,6 +1004,47 @@ pub(super) async fn policies_for_release(
         policies.push(active_from_pointer(ctx, pointer).await?);
     }
     Ok(policies)
+}
+
+/// The cohort of the active canary policy for one release and target
+/// channel, and the selector it was configured by.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct CanaryCohort {
+    pub policy_digest: String,
+    pub environments: Vec<String>,
+    /// Omitted for a cohort configured by environment name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub selector: Option<crate::delivery_hold::HoldSelector>,
+}
+
+/// The active canary cohort for `product@version` into `target_channel`, if
+/// a policy is configured.
+pub(crate) async fn active_cohort(
+    ctx: &mut Ctx,
+    product: &str,
+    version: &str,
+    target_channel: &str,
+) -> Result<Option<CanaryCohort>> {
+    let Some(pointer) = ctx
+        .get(&policy_id(product, version, target_channel))
+        .await?
+    else {
+        return Ok(None);
+    };
+    let active = active_from_pointer(ctx, &pointer).await?;
+    let record_id = object_property(&pointer, "policy_id")?;
+    let selector = ctx
+        .get(record_id)
+        .await?
+        .and_then(|record| crate::delivery_hold::HoldSelector::read(&record));
+    Ok(Some(CanaryCohort {
+        policy_digest: active.digest,
+        environments: active.policy.cohort,
+        selector,
+    }))
 }
 
 pub(crate) async fn maybe_active_policy(

@@ -27,7 +27,8 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: WaveCommand) -> Result<(
             continue_on_failure,
             approval,
         } => {
-            let environments = tenkai::labels::resolve_cohort(ctx, &cohort).await?;
+            let (environments, selector) =
+                tenkai::labels::resolve_cohort_recorded(ctx, &cohort).await?;
             let spec = wave::ExecutableWaveSpec::new(
                 name,
                 product,
@@ -35,7 +36,8 @@ pub(crate) async fn run(ctx: &mut client::Ctx, command: WaveCommand) -> Result<(
                 channel,
                 environments,
                 !continue_on_failure,
-            )?;
+            )?
+            .with_selector(selector);
             let authorization = wave_authorization(
                 approval.approval_dir.as_deref(),
                 approval.approval_trust_roots.as_deref(),
