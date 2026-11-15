@@ -95,6 +95,7 @@ pub(crate) async fn run(command: SelfUpgradeCommand) -> Result<()> {
             let _held = home.lock()?;
             let (id, check) = candidate(&home, &source)?;
             println!("candidate {id} {}", describe(&check));
+            print_host_identity_note();
             Ok(())
         }
         SelfUpgradeCommand::Apply { source, settle } => {
@@ -102,6 +103,7 @@ pub(crate) async fn run(command: SelfUpgradeCommand) -> Result<()> {
             let _held = home.lock()?;
             let (id, check) = candidate(&home, &source)?;
             println!("candidate {id} {}", describe(&check));
+            print_host_identity_note();
             let record = home.switch(&id, &source.database, tenkai::now_millis())?;
             println!("{}", serde_json::to_string_pretty(&record)?);
             if settle.restart.is_empty() {
@@ -167,6 +169,37 @@ fn candidate(home: &Home, source: &Source) -> Result<(String, StoreCheck)> {
         Duration::from_secs(source.check_timeout_secs),
     )?;
     Ok((id, check))
+}
+
+/// On Linux, say when host identity (ADR 0047) is not set up at the default
+/// paths. Self-upgrade swaps binaries only; a host first installed before
+/// 0.8.0 otherwise keeps serving TCP only with no sign of why.
+fn print_host_identity_note() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let socket = std::path::Path::new(tenkai::host_identity::DEFAULT_UNIX_SOCKET);
+    if let Some(note) = host_identity_note(
+        std::path::Path::new(tenkai::host_identity::DEFAULT_HOST_GRANTS),
+        socket.parent().unwrap_or(socket),
+    ) {
+        println!("{note}");
+    }
+}
+
+/// The note for a missing grants file or socket directory, if any.
+fn host_identity_note(grants: &std::path::Path, socket_dir: &std::path::Path) -> Option<String> {
+    let missing: Vec<String> = [grants, socket_dir]
+        .into_iter()
+        .filter(|path| !path.exists())
+        .map(|path| path.display().to_string())
+        .collect();
+    (!missing.is_empty()).then(|| {
+        format!(
+            "note: host identity is not set up ({} missing), so the server serves TCP only; self-upgrade does not add it. See configure-server-authentication.md#enable-host-identity-on-an-upgraded-host",
+            missing.join(", ")
+        )
+    })
 }
 
 fn describe(check: &StoreCheck) -> String {
@@ -312,6 +345,31 @@ async fn wait_ready(url: &str, timeout: Duration) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The note names each missing host-identity path, and is absent once both exist.
+    #[test]
+    fn host_identity_note_names_what_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkaictl-host-identity-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let grants = root.join("host-grants.toml");
+        let socket_dir = root.join("run");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let note = host_identity_note(&grants, &socket_dir).unwrap();
+        assert!(note.contains(&grants.display().to_string()), "{note}");
+        assert!(note.contains(&socket_dir.display().to_string()), "{note}");
+
+        std::fs::write(&grants, "").unwrap();
+        let note = host_identity_note(&grants, &socket_dir).unwrap();
+        assert!(!note.contains(&grants.display().to_string()), "{note}");
+
+        std::fs::create_dir(&socket_dir).unwrap();
+        assert_eq!(host_identity_note(&grants, &socket_dir), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     fn home_with_switch(root: &std::path::Path) -> (Home, String, String) {
         tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap();

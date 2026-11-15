@@ -25,6 +25,9 @@ fn server_with(
     let mut command = Command::new(env!("CARGO_BIN_EXE_tenkai-server"));
     command
         .args(["--listen", "127.0.0.1:0"])
+        // The first stderr line is the warning under test; keep the host's
+        // unix socket setup out of it.
+        .arg("--no-unix-socket")
         .args(extra)
         .arg("--database")
         .arg(state.join("tenkai.db"))
