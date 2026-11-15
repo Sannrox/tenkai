@@ -331,10 +331,15 @@ Feature: a new observable operator or integration outcome.
 
 - Issue bodies use `## Tenant or operator problem`, `## Observable outcome`,
   `## Acceptance evidence`, `## Primary area`, `## Boundaries and
-  dependencies`, and `## Compatibility and risk`; older Issues use
-  `## Dependencies` or `## GitHub dependencies`. Read whichever of these the
-  Issue has as its dependency section. An explicit statement that a
-  prerequisite is complete counts as delivered; `None` means no dependency.
+  dependencies`, `## GitHub dependencies`, and `## Compatibility and risk`.
+- `## GitHub dependencies` is exactly `none` or one reference per line
+  (`- #12`, `- Sannrox/<repo>#34`). The frontier script evaluates only this
+  section. Gates, related work, and boundaries stay as prose in
+  `## Boundaries and dependencies`.
+- An Issue without `## GitHub dependencies` predates it: read
+  `## Boundaries and dependencies` or `## Dependencies` as its dependency
+  section. An explicit statement that a prerequisite is complete counts as
+  delivered; `None` means no dependency.
 - Labels: one `type:*`, one `status:*` (`status:triage`, `status:ready`,
   `status:blocked`), plus relevant `area:*` and `risk:*`. The frontier uses
   `status:ready` and `status:blocked`; do not invent new labels.
