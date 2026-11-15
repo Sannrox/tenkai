@@ -53,7 +53,8 @@ struct Cli {
     #[arg(long, env = "TENKAI_LISTEN", default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
     /// Unix socket for host identity (ADR 0047). Linux default
-    /// `/run/tenkai/tenkai.sock`. Unset or missing parent directory skips it.
+    /// `/run/tenkai/tenkai.sock`. A missing parent directory or host grants
+    /// file skips it, and the server logs which.
     #[arg(long, env = "TENKAI_UNIX_SOCKET")]
     unix_socket: Option<PathBuf>,
     /// Do not listen on a Unix socket.
@@ -659,6 +660,15 @@ async fn main() -> Result<()> {
     } else {
         if cli.unix_socket.is_some() {
             anyhow::bail!("--unix-socket requires a host grants file");
+        }
+        // Only the default grants path reaches here (an explicit one that is
+        // missing fails above). Say so, or host sign-in fails with no trace.
+        if let Some(path) = unix_socket_listen_path(&cli) {
+            eprintln!(
+                "tenkai-server unix socket skipped path={} detail=host grants file {} is missing",
+                path.display(),
+                tenkai::host_identity::DEFAULT_HOST_GRANTS
+            );
         }
         None
     };

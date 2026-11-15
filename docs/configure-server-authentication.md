@@ -67,6 +67,49 @@ The console is reached with `ssh -L 8080:/run/tenkai/tenkai.sock <host>` and
 requests require a loopback `Host`; an `Origin` or `Referer`, if present, must
 be a loopback console origin. Plans are still approved by offline keys.
 
+Without the grants file or `/run/tenkai`, the server serves TCP only and logs
+`tenkai-server unix socket skipped` with the reason. Host sign-in then fails,
+and the console shows "This connection is not a host account with Tenkai
+access."
+
+### Enable host identity on an upgraded host
+
+`tenkaictl self-upgrade` and a manual binary swap replace binaries only. A
+host first installed before 0.8.0 has no grants file, groups, or socket
+directory. Rerunning `install.sh --role server` adds them, but also installs
+binaries into its prefix and writes `client.toml` and `management.token` where
+they are missing, which a self-upgrade home does not use. To add only host
+identity, as root:
+
+```bash
+for group in tenkai-viewer tenkai-operator tenkai-admin; do
+  groupadd -r "$group" 2>/dev/null || true
+done
+install -o root -g root -m 0644 /dev/stdin /etc/tenkai/host-grants.toml <<'EOF'
+[[grants.rules]]
+value = "tenkai-viewer"
+capabilities = ["read"]
+
+[[grants.rules]]
+value = "tenkai-operator"
+capabilities = ["management"]
+
+[[grants.rules]]
+value = "tenkai-admin"
+capabilities = ["management"]
+EOF
+usermod -aG tenkai-viewer tenkai
+printf 'd /run/tenkai 0750 tenkai tenkai-viewer -\n' >/usr/lib/tmpfiles.d/tenkai.conf
+systemd-tmpfiles --create /usr/lib/tmpfiles.d/tenkai.conf
+usermod -aG tenkai-operator <your-ssh-user>
+systemctl restart tenkai-server
+```
+
+The journal then shows `tenkai-server listening on unix /run/tenkai/tenkai.sock`.
+Group membership applies to new SSH sessions, so reconnect before forwarding
+the socket. Rollback is removing `host-grants.toml` and restarting; TCP and
+the management token are unaffected.
+
 ## Enterprise JWT assertions
 
 The shipped server enables the reference extension only when

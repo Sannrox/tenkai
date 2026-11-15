@@ -379,6 +379,10 @@ with the server, run `--role host-applier` for the previous release after
 the server is named on `/readyz` and refuses to plan host steps until it is
 upgraded; fencing and recovery still use the host executor.
 
+`self-upgrade` also does not set up host identity. A host first installed
+before 0.8.0 serves TCP only until the grants file, groups and `/run/tenkai`
+exist ([enable host identity on an upgraded host](configure-server-authentication.md#enable-host-identity-on-an-upgraded-host)).
+
 Converting an existing install whose unit runs a packaged `tenkai-server` to
 the `<home>/current` layout is a first install: run `self-upgrade apply`
 without a restart command, point the unit at `<home>/current/tenkai-server`,
