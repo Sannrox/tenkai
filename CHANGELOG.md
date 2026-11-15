@@ -6,6 +6,24 @@ pull request body, which becomes the squash commit; at release,
 
 ## [Unreleased]
 
+## v0.9.1-rc.1 (2026-11-15)
+
+Gate flags: none
+
+Release candidate for 0.9.1. The server serves web console
+[v0.4.0](https://github.com/Sannrox/tenkai-console/releases/tag/v0.4.0) at
+`/ui/`, which shows and edits the 0.9.0 features. v0.9.0 shipped console
+v0.3.1. Operator notes:
+[docs/releases/0.9.1.md](https://github.com/Sannrox/tenkai/blob/v0.9.1-rc.1/docs/releases/0.9.1.md).
+
+### Changed
+- chore(ui): serve web console v0.4.0 (#1366)
+
+### Upgrade
+- Install the 0.9.1-rc.1 hosts from the GitHub pre-release after verifying `SHA256SUMS` and the attestation. `tenkaictl --version` reports `tenkaictl 0.9.1-rc.1`. No store schema change and no migration; HTTP, runtime, plan and contract versions are unchanged from 0.9.0.
+- Source builds with feature `ui` download `tenkai-console-v0.4.0.zip` and check its SHA-256 against `ui/console.pin`. `TENKAI_UI_BUNDLE` must point at the v0.4.0 zip.
+- Rollback to 0.9.0: the previous binary plus the existing store. It serves console v0.3.1 again.
+
 ## v0.9.0 (2026-11-15)
 
 Gate flags: breaking, migration
