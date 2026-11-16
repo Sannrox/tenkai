@@ -134,7 +134,7 @@ pub(crate) async fn run(
             }
         }
         EnvCommand::Retire { env, reason } => {
-            let actor = local_actor();
+            let actor = crate::authorization::embedded_management_actor()?.audit_principal();
             let retirement =
                 tenkai::environment::retire_environment(ctx, &env, &reason, &actor).await?;
             println!(
@@ -148,6 +148,7 @@ pub(crate) async fn run(
             instance,
             ..
         } => {
+            crate::authorization::embedded_management_actor()?;
             let Some((product, channel)) = spec.split_once('=') else {
                 bail!("expected <product>=<channel>, got {spec:?}");
             };
@@ -166,6 +167,7 @@ pub(crate) async fn run(
             version,
             ..
         } => {
+            crate::authorization::embedded_management_actor()?;
             println!(
                 "{}",
                 tenkai::environment::unsubscribe_instance(
@@ -308,10 +310,4 @@ pub(crate) fn parse_preview_expiry(value: &str) -> Result<i64> {
     let parsed = chrono::DateTime::parse_from_rfc3339(value)
         .with_context(|| format!("preview expiry {value:?} is not RFC 3339"))?;
     Ok(parsed.timestamp_millis())
-}
-
-/// Principal recorded for embedded changes: `TENKAI_PRINCIPAL`, or
-/// `local-operator`.
-pub(crate) fn local_actor() -> String {
-    std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "local-operator".into())
 }
