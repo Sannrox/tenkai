@@ -45,8 +45,11 @@ tenkaictl env observe local \
 ```
 
 A mismatched or missing observation blocks planning and apply before the
-module changes. Module-only apply leaves those observed digests unchanged
-and writes one activation receipt. `tenkaictl env inspect` shows the tuple.
+module changes. Planning and apply also reload the module document from the
+stored release and refuse it when the accepted pin no longer binds its module,
+type, or runtime digests, so an edited document is never staged. Module-only
+apply leaves those observed digests unchanged and writes one activation
+receipt. `tenkaictl env inspect` shows the tuple.
 
 Restart and duplicate apply reuse the accepted receipt and do not activate
 the module a second time.

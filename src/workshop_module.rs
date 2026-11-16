@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::change_set_pin::{AdmittedChangeSetPin, ChangeSetPin};
+use crate::change_set_pin::{AdmittedChangeSetPin, ChangeSetMember};
 use crate::client::Ctx;
 use crate::manifest::Manifest;
 use crate::pb::sekai::Object;
@@ -163,24 +163,35 @@ pub fn admit_publication(
             "workshop_module release requires an accepted change-set closure pin and publication evidence"
         );
     };
-    require_pin_binds_profile(&admitted.pin, &doc)?;
+    require_pin_binds_profile(&admitted.pin.members, &doc)?;
     Ok(doc)
 }
 
-pub fn require_pin_binds_profile(pin: &ChangeSetPin, doc: &WorkshopModuleDocument) -> Result<()> {
-    require_member(pin, MEMBER_KIND_MODULE, &doc.module_id, &doc.module_digest)?;
+/// Refuses a module document the accepted change-set pin does not bind: the
+/// module digest and every declared type and runtime digest must be members.
+/// Publication, plan admission and activation all run it, because the
+/// document is reloaded from the stored workdir each time.
+pub fn require_pin_binds_profile(
+    members: &[ChangeSetMember],
+    doc: &WorkshopModuleDocument,
+) -> Result<()> {
+    require_member(
+        members,
+        MEMBER_KIND_MODULE,
+        &doc.module_id,
+        &doc.module_digest,
+    )?;
     for digest in &doc.type_compatibility.digests {
-        require_kind_digest(pin, MEMBER_KIND_TYPE, digest)?;
+        require_kind_digest(members, MEMBER_KIND_TYPE, digest)?;
     }
     for digest in &doc.runtime_compatibility.digests {
-        require_kind_digest(pin, MEMBER_KIND_RUNTIME, digest)?;
+        require_kind_digest(members, MEMBER_KIND_RUNTIME, digest)?;
     }
     Ok(())
 }
 
-fn require_member(pin: &ChangeSetPin, kind: &str, id: &str, digest: &str) -> Result<()> {
-    let Some(member) = pin
-        .members
+fn require_member(members: &[ChangeSetMember], kind: &str, id: &str, digest: &str) -> Result<()> {
+    let Some(member) = members
         .iter()
         .find(|member| member.kind == kind && member.id == id)
     else {
@@ -195,9 +206,8 @@ fn require_member(pin: &ChangeSetPin, kind: &str, id: &str, digest: &str) -> Res
     Ok(())
 }
 
-fn require_kind_digest(pin: &ChangeSetPin, kind: &str, digest: &str) -> Result<()> {
-    if pin
-        .members
+fn require_kind_digest(members: &[ChangeSetMember], kind: &str, digest: &str) -> Result<()> {
+    if members
         .iter()
         .any(|member| member.kind == kind && member.digest == digest)
     {
@@ -400,8 +410,8 @@ pub async fn admit_plan(
             "environment {env} has no observed type and runtime digests; set them before planning a workshop_module"
         );
     };
+    require_pin_binds_profile(&pin.members, &doc)?;
     admit_compatibility(&doc, &observed)?;
-    let _ = pin;
     Ok(())
 }
 
@@ -431,6 +441,7 @@ pub async fn activate(
         .with_context(|| format!("release {release} is not published"))?;
     let pin = crate::change_set_pin::stored_projection(&release_object)?
         .with_context(|| format!("release {release} is missing accepted closure pin evidence"))?;
+    require_pin_binds_profile(&pin.members, &doc)?;
     let mut receipt = ModuleActivationReceipt {
         schema: ACTIVATION_SCHEMA.into(),
         environment: env.into(),
@@ -1024,6 +1035,92 @@ document = "module.json"
         .unwrap_err()
         .to_string();
         assert!(err.contains("unauthorized"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // Regression for #1329: a module.json edited in the stored workdir after
+    // publication must not be planned or activated against the accepted pin.
+    #[tokio::test]
+    async fn edited_module_document_after_publication_is_refused() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-workshop-edited-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let database = root.join("tenkai.db");
+        let v1 = root.join("v1");
+        let doc = sample_document();
+        write_module_release(&v1, "hello-workshop", "1.0.0", &doc);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        catalog::publish(&mut ctx, &v1.join("tenkai.toml"), &publish_options(&doc))
+            .await
+            .unwrap();
+        let actor = crate::auth_context::test_management_context("workshop-edited");
+        catalog::promote(&mut ctx, &actor, "hello-workshop@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::plan::env_add(&mut ctx, "local", "fixture")
+            .await
+            .unwrap();
+        set_observed_compatibility(
+            &mut ctx,
+            "local",
+            &doc.type_compatibility.digests[0],
+            &doc.runtime_compatibility.digests[0],
+        )
+        .await
+        .unwrap();
+        crate::plan::subscribe(&mut ctx, "local", "hello-workshop", "stable")
+            .await
+            .unwrap();
+
+        let release = ctx
+            .get(&crate::ontology::release_id("hello-workshop", "1.0.0"))
+            .await
+            .unwrap()
+            .unwrap();
+        let workdir = std::path::PathBuf::from(&release.properties["workdir"]);
+        let manifest = crate::manifest::parse_raw(&release.properties["manifest"]).unwrap();
+        let mut edited = doc.clone();
+        edited.module_digest = format!("sha256:{}", "4".repeat(64));
+        std::fs::write(
+            workdir.join("module.json"),
+            serde_json::to_vec_pretty(&edited).unwrap(),
+        )
+        .unwrap();
+
+        let err = crate::plan::create(&mut ctx, "local")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not match"), "{err}");
+
+        let state_root = root.join(".tenkai-state/runtime/local");
+        let err = activate(
+            &mut ctx,
+            "local",
+            "hello-workshop",
+            &manifest,
+            &workdir,
+            &state_root,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("does not match"), "{err}");
+        let env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        assert!(activations_from_object(&env).unwrap().is_empty());
+        assert!(
+            !crate::staged_artifact::state_path_for(
+                crate::manifest::ProductKind::WorkshopModule,
+                &state_root.join("routing"),
+                "hello-workshop",
+            )
+            .exists()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
