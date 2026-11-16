@@ -1,10 +1,20 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::catalog::{self, PublishOptions};
 use crate::client::Ctx;
 
 use super::super::admit::catalog_digest;
 use super::super::*;
+
+/// A fresh state root for one test: unique per call, so tests on other
+/// threads or in other processes never share its database or snapshots.
+pub(super) fn temp_root(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "tenkai-migration-{name}-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ))
+}
 
 pub(super) fn digest(nibble: char) -> String {
     format!("sha256:{}", nibble.to_string().repeat(64))

@@ -1,15 +1,11 @@
 use base64::Engine as _;
 
 use super::super::*;
-use super::helpers::{deploy_source, digest, publish_pins};
+use super::helpers::{deploy_source, digest, publish_pins, temp_root};
 
 #[tokio::test]
 async fn denial_stale_fence_conflict_and_irreversible_recovery() {
-    let root = std::env::temp_dir().join(format!(
-        "tenkai-migration-deny-{}-{}",
-        std::process::id(),
-        crate::now_millis()
-    ));
+    let root = temp_root("deny");
     let mut ctx = crate::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
     crate::ontology::register(&mut ctx).await.unwrap();
     crate::plan::env_add(&mut ctx, "local", "fixture")
