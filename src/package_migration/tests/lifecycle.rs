@@ -1,14 +1,10 @@
 use super::super::types::MIGRATION_EXEC_NAMESPACE;
 use super::super::*;
-use super::helpers::{deploy_source, publish_pins};
+use super::helpers::{deploy_source, publish_pins, temp_root};
 
 #[tokio::test]
 async fn compatible_migration_approves_executes_resumes_and_rolls_back() {
-    let root = std::env::temp_dir().join(format!(
-        "tenkai-migration-{}-{}",
-        std::process::id(),
-        crate::now_millis()
-    ));
+    let root = temp_root("lifecycle");
     let mut ctx = crate::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
     crate::ontology::register(&mut ctx).await.unwrap();
     crate::plan::env_add(&mut ctx, "local", "fixture")

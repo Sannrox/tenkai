@@ -3,16 +3,12 @@ use std::collections::BTreeMap;
 use super::super::approval_files::validate_plan_approval_filename;
 use super::super::types::record_catalog_id;
 use super::super::*;
-use super::helpers::{digest, publish_pins};
+use super::helpers::{digest, publish_pins, temp_root};
 use crate::signature_verification::{TrustRoots, TrustedSigner};
 
 #[tokio::test]
 async fn partitions_keep_separate_records_for_the_same_migration_name() {
-    let root = std::env::temp_dir().join(format!(
-        "tenkai-migration-partition-{}-{}",
-        std::process::id(),
-        crate::now_millis()
-    ));
+    let root = temp_root("partition");
     let mut ctx = crate::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
     crate::ontology::register(&mut ctx).await.unwrap();
     crate::plan::env_add(&mut ctx, "prod", "fixture")
