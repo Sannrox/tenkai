@@ -528,47 +528,25 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         lease_released,
         "apply lease did not expire after executor loss"
     );
-    let _ = drill.run(&["env", "unlock", ENV]);
-    let _ = drill.run(&["reconcile", "--once"]);
+    // Recovery must be automatic: unlock and one reconcile tick succeed, and
+    // a fresh plan finishes the upgrade through the target ledger. The
+    // operator override `env reconcile --deployed` is never used here.
+    let unlocked = drill.ok(&["env", "unlock", ENV]);
+    assert!(unlocked.contains("removed apply lease"), "{unlocked}");
+    drill.ok(&["reconcile", "--once"]);
     let resume_stdout = drill.ok(&["plan", "--env", ENV]);
+    assert!(
+        !resume_stdout.contains("up to date"),
+        "recorded state still needs the upgrade after the crash: {resume_stdout}"
+    );
     let resume_plan = common::plan_id_from(&resume_stdout);
-    if resume_plan == crash_plan {
-        let retry = drill.fail(&[
-            "apply",
-            &crash_plan,
-            "--approval",
-            crash_approval.to_str().unwrap(),
-            "--approval-trust-roots",
-            drill.cli.approval_trust.to_str().unwrap(),
-        ]);
-        assert!(
-            retry.contains("only computed or blocked")
-                || retry.contains("running")
-                || retry.contains("stale"),
-            "{retry}"
-        );
-        drill.ok(&[
-            "env",
-            "reconcile",
-            ENV,
-            PRODUCT,
-            "--deployed",
-            TARGET_VERSION,
-        ]);
-    } else if resume_stdout.contains("up to date") {
-        drill.ok(&[
-            "env",
-            "reconcile",
-            ENV,
-            PRODUCT,
-            "--deployed",
-            TARGET_VERSION,
-        ]);
-    } else {
-        let approval = drill.cli.approvals.join(format!("{resume_plan}.json"));
-        drill.sign_plan(&resume_plan, &approval);
-        drill.apply_signed(&resume_plan, &approval);
-    }
+    assert_ne!(
+        resume_plan, crash_plan,
+        "the interrupted plan is not reused"
+    );
+    let approval = drill.cli.approvals.join(format!("{resume_plan}.json"));
+    drill.sign_plan(&resume_plan, &approval);
+    drill.apply_signed(&resume_plan, &approval);
     assert_eq!(drill.mutation_count(), mutations_after_accept);
     assert_eq!(drill.current_version().as_deref(), Some(TARGET_VERSION));
     assert_eq!(drill.seed().as_deref(), Some(SEED));
