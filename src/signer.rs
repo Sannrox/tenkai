@@ -429,16 +429,12 @@ fn percent_decode(value: &str) -> Result<String> {
 /// keys rather than an operator's: `dev_sign`, `offline_fleet_drill`, and the
 /// HA qualification drill (`hub_ha_qualification`).
 pub(crate) fn read_seed_file(path: &Path) -> Result<[u8; 32]> {
-    let meta = std::fs::symlink_metadata(path).with_context(|| {
-        if path.exists() {
-            format!("inspecting signer key {}", path.display())
-        } else {
-            format!("signer key {} is missing", path.display())
-        }
-    })?;
-    if meta.file_type().is_symlink() {
-        bail!("signer key {} must not be a symlink", path.display());
-    }
+    // Check and read one open handle, so a rename or symlink swap after the
+    // checks cannot substitute an unchecked file.
+    let file = open_seed_file(path)?;
+    let meta = file
+        .metadata()
+        .with_context(|| format!("inspecting signer key {}", path.display()))?;
     if !meta.file_type().is_file() {
         bail!("signer key {} must be a regular file", path.display());
     }
@@ -461,11 +457,60 @@ pub(crate) fn read_seed_file(path: &Path) -> Result<[u8; 32]> {
             meta.len()
         );
     }
-    let bytes =
-        std::fs::read(path).with_context(|| format!("reading signer key {}", path.display()))?;
-    let mut seed = [0_u8; 32];
-    seed.copy_from_slice(&bytes);
-    Ok(seed)
+    seed_from_reader(file, path)
+}
+
+/// Open a seed file without following a final symlink. `O_NONBLOCK` keeps a
+/// FIFO planted at the path from blocking the open; the type check refuses it.
+#[cfg(unix)]
+fn open_seed_file(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => Ok(file),
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            bail!("signer key {} must not be a symlink", path.display())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!("signer key {} is missing", path.display())
+        }
+        Err(error) => Err(error).with_context(|| format!("opening signer key {}", path.display())),
+    }
+}
+
+#[cfg(not(unix))]
+fn open_seed_file(path: &Path) -> Result<std::fs::File> {
+    let meta = std::fs::symlink_metadata(path).with_context(|| {
+        if path.exists() {
+            format!("inspecting signer key {}", path.display())
+        } else {
+            format!("signer key {} is missing", path.display())
+        }
+    })?;
+    if meta.file_type().is_symlink() {
+        bail!("signer key {} must not be a symlink", path.display());
+    }
+    std::fs::File::open(path).with_context(|| format!("opening signer key {}", path.display()))
+}
+
+/// Read exactly 32 bytes. The file may have changed since its metadata was
+/// checked, so any other length is an error rather than a panic.
+fn seed_from_reader(reader: impl std::io::Read, path: &Path) -> Result<[u8; 32]> {
+    use std::io::Read as _;
+    let mut bytes = Vec::with_capacity(33);
+    reader
+        .take(33)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading signer key {}", path.display()))?;
+    bytes.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "signer key {} changed while reading: expected 32 bytes",
+            path.display()
+        )
+    })
 }
 
 /// Seed-file signer. Production profiles refuse it.
@@ -1105,7 +1150,31 @@ mod tests {
         assert!(refused(&link).contains("symlink"));
         assert!(refused(&dir.join("missing")).contains("missing"));
         assert!(refused(&dir).contains("regular file"));
+        // A FIFO must be refused without blocking the open.
+        let fifo = dir.join("fifo");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `c_path` is a valid C string; mkfifo only reads it.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        assert!(refused(&fifo).contains("regular file"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The file can change after its metadata was checked; a seed of the
+    /// wrong length is then an error, never a panic.
+    #[test]
+    fn a_seed_that_changes_length_after_the_checks_is_refused() {
+        let path = Path::new("signer.seed");
+        assert_eq!(
+            seed_from_reader(std::io::Cursor::new([9_u8; 32]), path).unwrap(),
+            [9; 32]
+        );
+        for len in [0, 31, 33, 64] {
+            let error = seed_from_reader(std::io::Cursor::new(vec![9_u8; len]), path).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("changed while reading"),
+                "{len}: {error:#}"
+            );
+        }
     }
     use super::*;
     use crate::key_provider::{KeyProviderKind, KeyProviderSection, SignerSection};
