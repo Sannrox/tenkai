@@ -354,7 +354,12 @@ fn seed(unfenced: bool) -> Drill {
     }
 }
 
-fn assert_applied_once(drill: &Drill, plan: &str, environment: &str) {
+/// Each step of `plan` was applied exactly once: the killed writer `hub-a`
+/// applied a prefix of the steps (in `ENV_A`, exactly the steps before the
+/// stall), the new leader `hub-b` the rest under a later environment lease,
+/// and the partition holds `total` receipts, so no step was applied again
+/// under another id.
+fn assert_applied_once(drill: &Drill, plan: &str, environment: &str, total: usize) {
     let store = PostgresTenantConfig::new(drill.scratch.url.clone())
         .expect("config")
         .open()
@@ -370,12 +375,41 @@ fn assert_applied_once(drill: &Drill, plan: &str, environment: &str) {
                 .unwrap_or_else(|| panic!("{plan} step {step} has a receipt"))
         })
         .collect();
-    assert_eq!(receipts.len(), STEPS, "{plan} {receipts:?}");
     assert!(
         receipts
             .iter()
             .all(|r| r.environment_id == environment && r.plan_id == plan),
         "{plan} {receipts:?}"
+    );
+    let split = receipts
+        .iter()
+        .position(|r| !r.payload_json.contains("hub-a"))
+        .unwrap_or(STEPS);
+    if environment == ENV_A {
+        assert_eq!(
+            split, STALL_STEP,
+            "{plan}: the killed writer stalled {receipts:?}"
+        );
+    }
+    let (old, new) = receipts.split_at(split);
+    assert!(
+        !new.is_empty(),
+        "{plan}: the new leader applied the steps after the kill {receipts:?}"
+    );
+    let old_generation = old.iter().map(|r| r.lease_generation).max().unwrap_or(0);
+    assert!(
+        new.iter()
+            .all(|r| r.payload_json.contains("hub-b") && r.lease_generation > old_generation),
+        "{plan}: after the killed writer, only the new leader under a later lease {receipts:?}"
+    );
+    assert_eq!(
+        partition
+            .inner
+            .delivery_effect_counts_for_test(partition.schema())
+            .unwrap()
+            .2,
+        total as i64,
+        "one receipt per applied step and no more"
     );
     assert_eq!(
         partition.get_plan(plan).unwrap().unwrap().status,
@@ -417,8 +451,8 @@ fn kill_and_takeover(drill: &Drill) -> Duration {
 fn live_ha_qualification_drill() {
     let mut drill = seed(false);
     let first = kill_and_takeover(&drill);
-    assert_applied_once(&drill, "plan-a", ENV_A);
-    assert_applied_once(&drill, "plan-b", ENV_B);
+    assert_applied_once(&drill, "plan-a", ENV_A, 2 * STEPS);
+    assert_applied_once(&drill, "plan-b", ENV_B, 2 * STEPS);
 
     let store = PostgresTenantConfig::new(drill.scratch.url.clone())
         .expect("config")
@@ -431,8 +465,8 @@ fn live_ha_qualification_drill() {
     seed_plan(&partition, ENV_B, "plan-b-r2");
     drill.set_work(&format!("{ENV_A}:plan-a-r2,{ENV_B}:plan-b-r2"));
     let second = kill_and_takeover(&drill);
-    assert_applied_once(&drill, "plan-a-r2", ENV_A);
-    assert_applied_once(&drill, "plan-b-r2", ENV_B);
+    assert_applied_once(&drill, "plan-a-r2", ENV_A, 4 * STEPS);
+    assert_applied_once(&drill, "plan-b-r2", ENV_B, 4 * STEPS);
 
     assert_fenced_stale_commit_refused();
     assert_unfenced_stale_commit();
