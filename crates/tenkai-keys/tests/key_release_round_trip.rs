@@ -29,6 +29,8 @@ fn unwrap_all(json: &str, access: ProviderAccess<'_>, expected: &Dek) {
     }
 }
 
+/// The consumer's configured module opens the token even when the release
+/// names another library (#1316).
 #[test]
 fn pkcs11_ceremony_release_unwraps_through_the_named_token() {
     let Some((module, label)) = next_software_token() else {
@@ -39,7 +41,7 @@ fn pkcs11_ceremony_release_unwraps_through_the_named_token() {
     let endpoint = ProviderEndpoint {
         kind: "pkcs11".into(),
         token_label: label.clone(),
-        module: Some(module.clone()),
+        module: Some("/nonexistent/release-chosen-pkcs11.so".into()),
     };
     let (deploy, rotate) = {
         let producer =
@@ -55,7 +57,10 @@ fn pkcs11_ceremony_release_unwraps_through_the_named_token() {
             CustomerKeyRelease::rotate(endpoint.clone(), &rotated).expect("rotate"),
         )
     };
-    let access = ProviderAccess::Pkcs11 { pin: TEST_USER_PIN };
+    let access = ProviderAccess::Pkcs11 {
+        module: &module,
+        pin: TEST_USER_PIN,
+    };
     for document in [&deploy, &rotate] {
         unwrap_all(&document.to_json().expect("json"), access, &dek);
     }

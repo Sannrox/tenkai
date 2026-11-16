@@ -164,3 +164,38 @@ fn run_sequence(drill: &BindDrill) {
 fn tenkaictl_env_bind_selects_one_of_several_providers() {
     run_sequence(&BindDrill::new());
 }
+
+/// #1316: embedded environment mutations take the same management actor as
+/// the server, so with no management credential they are refused and change
+/// nothing.
+#[test]
+fn embedded_environment_mutations_require_a_management_actor() {
+    let admin = common::CliDrill::new("tenkai-embedded-actor", "embedded-actor-token", &[]);
+    admin.ok(&["init"]);
+    admin.ok(&["env", "add", "local"]);
+    for args in [
+        &["env", "retire", "local", "--reason", "gone"][..],
+        &["env", "subscribe", "local", "app=stable"],
+        &["env", "unsubscribe", "local", "app"],
+        &["env", "labels", "set", "local", "tier=canary"],
+        &["env", "labels", "clear", "local", "tier"],
+    ] {
+        let output = admin
+            .command(args)
+            .env_remove("TENKAI_MANAGEMENT_TOKEN")
+            .output()
+            .unwrap();
+        let refusal = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success()
+                && refusal.contains("TENKAI_MANAGEMENT_TOKEN or TENKAI_JWT_ASSERTION is required"),
+            "{args:?}: {refusal}"
+        );
+    }
+    assert!(
+        admin
+            .ok(&["env", "labels", "list", "local"])
+            .contains("no labels")
+    );
+    admin.ok(&["env", "retire", "local", "--reason", "gone"]);
+}

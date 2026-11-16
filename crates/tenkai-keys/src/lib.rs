@@ -7,7 +7,7 @@
 //!
 //! ```ignore
 //! let release = CustomerKeyRelease::from_json(&raw)?;
-//! let provider = open_provider(&release, ProviderAccess::Pkcs11 { pin })?;
+//! let provider = open_provider(&release, ProviderAccess::Pkcs11 { module, pin })?;
 //! for key in &release.data_keys {
 //!     let wrapped = key.wrapped_dek()?;
 //!     // provider.unwrap(&wrapped, &grant, engine, now)

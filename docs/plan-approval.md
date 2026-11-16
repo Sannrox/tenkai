@@ -67,7 +67,7 @@ Risky-change codes are a fixed list, not heuristics:
 - `deleted_volume` — a `volumes` field drops a live volume
 - `changed_ports` — a `ports` field differs
 - `widened_grant` — Role/ClusterRole `rules` differ, or an identity grant
-  names more peers than its restore grant
+  names a server provider or client its restore grant does not
 
 Plans stored before this field omit the brief and keep their original digest.
 

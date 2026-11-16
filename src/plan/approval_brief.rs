@@ -343,6 +343,8 @@ async fn step_has_slo_gates(ctx: &mut Ctx, environment: &str, step: &Step) -> bo
         .is_ok_and(|spec| !spec.is_empty())
 }
 
+/// A grant widens when it names any server provider or client its restore
+/// grant does not; a swap at the same count still widens (#1316).
 fn grant_widened(step: &Step) -> bool {
     let Some(identity) = &step.identity else {
         return false;
@@ -350,19 +352,15 @@ fn grant_widened(step: &Step) -> bool {
     let Some(restore) = &step.restore_identity else {
         return !identity.peers.is_empty();
     };
-    identity.peers.servers.len() > restore.peers.servers.len()
-        || identity
-            .peers
-            .clients
-            .values()
-            .map(BTreeSet::len)
-            .sum::<usize>()
-            > restore
-                .peers
-                .clients
-                .values()
-                .map(BTreeSet::len)
-                .sum::<usize>()
+    let (new, old) = (&identity.peers, &restore.peers);
+    new.servers
+        .iter()
+        .any(|(contract, provider)| old.servers.get(contract) != Some(provider))
+        || new.clients.iter().any(|(contract, clients)| {
+            old.clients
+                .get(contract)
+                .is_none_or(|known| !clients.is_subset(known))
+        })
 }
 
 /// Human lines for the brief, printed before step detail.
@@ -426,6 +424,7 @@ mod tests {
     use super::*;
     use crate::plan::Action;
     use crate::spec_drift::TargetFieldChange;
+    use crate::workload_identity::{CertificateRole, IdentityGrant, Peers, Reload};
 
     fn step_with_changes(target_changes: Vec<TargetChange>) -> Step {
         Step {
@@ -597,6 +596,56 @@ mod tests {
                 .risky
                 .is_empty()
         );
+    }
+
+    fn grant(servers: &[(&str, &str)], clients: &[(&str, &str)]) -> IdentityGrant {
+        let mut peers = Peers::default();
+        for (contract, provider) in servers {
+            peers.servers.insert((*contract).into(), (*provider).into());
+        }
+        for (contract, client) in clients {
+            peers
+                .clients
+                .entry((*contract).into())
+                .or_default()
+                .insert((*client).into());
+        }
+        IdentityGrant {
+            uri: "tenkai://prod/api".into(),
+            dns_names: Vec::new(),
+            certificate: CertificateRole::Both,
+            reload: Reload::Runtime,
+            issuer_generation: 1,
+            issuer_fingerprint: "f".into(),
+            peers,
+        }
+    }
+
+    /// #1316: a grant widens when it names any peer or provider its restore
+    /// grant does not, even at the same count.
+    #[test]
+    fn identity_grants_widen_on_any_new_peer_or_provider() {
+        let widened = |identity: IdentityGrant, restore: IdentityGrant| {
+            let mut step = step_with_changes(Vec::new());
+            step.identity = Some(identity);
+            step.restore_identity = Some(restore);
+            grant_widened(&step)
+        };
+        let base = || grant(&[("db", "postgres")], &[("api", "web")]);
+        assert!(!widened(base(), base()));
+        assert!(!widened(grant(&[], &[]), base()), "narrowed");
+        assert!(widened(
+            grant(&[("db", "postgres")], &[("api", "batch")]),
+            base()
+        ));
+        assert!(widened(
+            grant(&[("db", "rogue")], &[("api", "web")]),
+            base()
+        ));
+        assert!(widened(
+            grant(&[("cache", "postgres")], &[("api", "web")]),
+            base()
+        ));
     }
 
     #[test]
