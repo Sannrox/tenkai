@@ -160,6 +160,31 @@ fn looks_like_credential_key(name: &str) -> bool {
     compact.starts_with("tenkai") && compact.ends_with("url")
 }
 
+/// True when `chars[..i]` ends with a run of `-` that starts the line or
+/// follows whitespace.
+fn after_flag_dashes(chars: &[char], i: usize) -> bool {
+    let mut start = i;
+    while start > 0 && chars[start - 1] == '-' {
+        start -= 1;
+    }
+    start < i && (start == 0 || chars[start - 1].is_whitespace())
+}
+
+/// A flag's space-separated value (`--token <value>`): the next word.
+fn skip_flag_value(chars: &[char], after_key: usize) -> Option<usize> {
+    let mut j = after_key;
+    while j < chars.len() && matches!(chars[j], ' ' | '\t') {
+        j += 1;
+    }
+    if j == after_key || j >= chars.len() || matches!(chars[j], '-' | '\n') {
+        return None;
+    }
+    while j < chars.len() && !chars[j].is_whitespace() {
+        j += 1;
+    }
+    Some(j)
+}
+
 /// Read a bare or JSON-quoted identifier starting at `i`.
 /// Returns `(key_without_quotes, index_after_key)`.
 fn read_identifier_key(chars: &[char], i: usize) -> Option<(String, usize)> {
@@ -181,10 +206,14 @@ fn read_identifier_key(chars: &[char], i: usize) -> Option<(String, usize)> {
     if !chars[i].is_ascii_alphabetic() && chars[i] != '_' {
         return None;
     }
-    // Bare key: left boundary must not continue an identifier.
+    // Bare key: left boundary must not continue an identifier. A run of `-`
+    // that starts a word is a CLI flag prefix (`--password=`), not a name.
     if i > 0 {
         let prev = chars[i - 1];
-        if prev.is_ascii_alphanumeric() || prev == '_' || prev == '-' {
+        if prev.is_ascii_alphanumeric()
+            || prev == '_'
+            || (prev == '-' && !after_flag_dashes(chars, i))
+        {
             return None;
         }
     }
@@ -421,11 +450,15 @@ pub fn sanitize_diagnostic_text(raw: &str) -> String {
             } else {
                 CredentialValueStyle::RestOfLine
             };
-            // `system:serviceaccount:...` is a Kubernetes username, not a YAML assignment.
-            // Rest-of-line redaction here drops the required Forbidden reason.
-            if matches!(style, CredentialValueStyle::RestOfLine) && i > 0 && chars[i - 1] == ':' {
-                out.push(chars[i]);
-                i += 1;
+            // `serviceaccount:<namespace>:<name>` is a Kubernetes username, not a
+            // YAML assignment. Rest-of-line redaction here drops the required
+            // Forbidden reason. Only that literal token is exempt.
+            if matches!(style, CredentialValueStyle::RestOfLine)
+                && key.eq_ignore_ascii_case("serviceaccount")
+                && chars.get(after_key) == Some(&':')
+            {
+                out.extend(&chars[i..after_key]);
+                i = after_key;
                 continue;
             }
             // Re-sanitizing `run_captured_command` output sees
@@ -437,7 +470,10 @@ pub fn sanitize_diagnostic_text(raw: &str) -> String {
                 i += 1;
                 continue;
             }
-            if let Some(end) = skip_credential_value(&chars, after_key, style) {
+            let flag = i > 0 && chars[i - 1] == '-';
+            if let Some(end) = skip_credential_value(&chars, after_key, style)
+                .or_else(|| flag.then(|| skip_flag_value(&chars, after_key)).flatten())
+            {
                 out.push_str("[redacted]");
                 i = end;
                 continue;
@@ -655,6 +691,30 @@ users:
             "dropped subject -> {cleaned}"
         );
         assert!(cleaned.contains("Forbidden"), "{cleaned}");
+    }
+
+    #[test]
+    fn redacts_flag_keys_and_keys_after_any_colon() {
+        for (sample, kept) in [
+            ("--password=s3cret", "--"),
+            (
+                "helm push --docker-password=s3cret --username deploy",
+                "--username deploy",
+            ),
+            ("--token s3cret", "--"),
+            ("Error:password=s3cret", "Error:"),
+            (
+                "https://deploy:s3cret@registry.example/v2/",
+                "registry.example",
+            ),
+        ] {
+            let cleaned = assert_no_leak(sample, &["s3cret"]);
+            assert!(cleaned.contains("[redacted]"), "{sample:?} -> {cleaned}");
+            assert!(cleaned.contains(kept), "{sample:?} -> {cleaned}");
+        }
+        for unchanged in ["-p=s3cret", "serviceaccount:name"] {
+            assert_eq!(sanitize_diagnostic_text(unchanged), unchanged);
+        }
     }
 
     #[test]
