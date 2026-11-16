@@ -503,14 +503,26 @@ pub fn resolve_auto_envelope(
     }
 }
 
+/// A configured `plan_approval_policy` whose file is gone (#1300). Unsetting
+/// the property is the recorded "no policy" state; a missing file is not.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "plan approval policy {} is configured but missing; restore it or clear the environment's plan_approval_policy",
+    .0.display()
+)]
+pub struct MissingPolicyFile(pub PathBuf);
+
+/// The environment's live policy, `None` only when none is configured. A
+/// configured path whose file is missing fails closed with
+/// [`MissingPolicyFile`] instead of dropping quorum and preflight.
 pub(crate) fn load_live_policy(
     properties: &HashMap<String, String>,
 ) -> Result<Option<ApprovalPolicy>> {
     let Some(path) = policy_path_from_properties(properties)? else {
         return Ok(None);
     };
-    if !path.is_file() {
-        return Ok(None);
+    if !path.exists() {
+        return Err(MissingPolicyFile(path).into());
     }
     Ok(Some(ApprovalPolicy::load(&path)?))
 }
@@ -568,7 +580,7 @@ const BUILTIN_HUMAN_RULES: &[&str] = &[
     "changes_identity_config",
 ];
 
-/// Effective policy for `properties`, omitting missing files as unconfigured.
+/// Effective policy for `properties`; a configured but missing file is an error.
 pub fn effective_policy(properties: &HashMap<String, String>) -> Result<EffectiveApprovalPolicy> {
     let Some(policy) = load_live_policy(properties)? else {
         return Ok(EffectiveApprovalPolicy {
@@ -1870,6 +1882,23 @@ n = 2
         .unwrap();
         assert_eq!(partial.missing, 1, "{partial:?}");
         assert_eq!(partial.collected.len(), 1);
+        // #1300: a configured policy whose file is gone refuses, rather than
+        // falling back to a one-approval quorum.
+        fs::remove_file(&policy_path).unwrap();
+        let error = crate::plan_approval::approvals_view(
+            &mut ctx,
+            &plan,
+            Some(&loaded_bob),
+            now,
+            false,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("is configured but missing"),
+            "{error:#}"
+        );
         drop(ctx);
         let _ = fs::remove_dir_all(dir);
     }

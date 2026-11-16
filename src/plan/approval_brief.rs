@@ -146,6 +146,16 @@ pub(crate) async fn compute(
                 "require_human".to_string(),
                 Some("no plan approval policy".into()),
             ),
+            Err(error)
+                if error
+                    .downcast_ref::<crate::approval_policy::MissingPolicyFile>()
+                    .is_some() =>
+            {
+                (
+                    "require_human".to_string(),
+                    Some("missing plan approval policy".into()),
+                )
+            }
             Err(_) => (
                 "require_human".to_string(),
                 Some("malformed plan approval policy".into()),

@@ -57,7 +57,8 @@ done without a human (`auto` or `require_human`) plus the agent budget
 (`inside`, `over`, or `not_configured`). Overlay, digest, or parse errors
 omit `gates` so planning still succeeds; apply still evaluates gates unless
 `--skip-gates`. A malformed policy file is named as
-`malformed plan approval policy`, distinct from a missing file. If
+`malformed plan approval policy`, and a configured path whose file is gone as
+`missing plan approval policy`. If
 criticality or delivery-signal lookup fails, the brief records
 `require_human` with reason `approval signals unavailable`.
 
@@ -270,6 +271,9 @@ must match the current policy digest and configured signer at execution time,
 including direct apply and rollout waves. Reconciliation replaces an outdated
 automatic envelope only when the current policy still permits automatic approval. Production
 environments should keep `mode = "manual"` or leave the property unset.
+A configured policy path whose file is missing is not "no policy": approval,
+quorum, preflight, and continue-after-failure checks refuse until the file is
+restored or the path is cleared.
 
 For local development only, an operator may use:
 

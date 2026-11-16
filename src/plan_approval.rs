@@ -501,16 +501,6 @@ pub async fn verify_for_execution_named(
     }
     let environment = crate::environment::environment(ctx, &plan.environment).await?;
     let policy = crate::approval_policy::load_live_policy(&environment.properties)?;
-    if policy.is_none()
-        && let Some(path) =
-            crate::approval_policy::policy_path_from_properties(&environment.properties)?
-    {
-        // The missing file may have required a preflight; fail closed.
-        bail!(
-            "approval policy {} is configured but unavailable; cannot check its preflight requirement",
-            path.display()
-        );
-    }
     if let Some(required) = policy.and_then(|policy| policy.require_preflight) {
         crate::host_preflight::require_passing(
             &environment.properties,
