@@ -282,7 +282,8 @@ pub struct FederationConfig {
     pub required_enterprise_issuer: Option<String>,
     pub expected_audience: String,
     pub max_clock_skew_ms: i64,
-    /// Maximum retained assertion ids for replay protection in the default store.
+    /// Maximum live assertion ids retained for replay protection, per process.
+    /// When every slot holds an unexpired id, new assertions are refused.
     pub replay_cache_capacity: usize,
 }
 
@@ -456,13 +457,12 @@ impl IdentityDirectory {
             return Err(FederationError::Replay);
         }
         if replayed.len() >= config.replay_cache_capacity {
-            // Drop oldest by expiry-ish: remove the smallest expires timestamp entry.
-            if let Some(oldest) = replayed
-                .iter()
-                .min_by_key(|(_, expires)| *expires)
-                .map(|(id, _)| id.clone())
-            {
-                replayed.remove(&oldest);
+            // Forget only ids that `validate` would now reject as expired; a
+            // cache full of live ids refuses new assertions rather than
+            // evicting one that could then be replayed.
+            replayed.retain(|_, expires_at| now - config.max_clock_skew_ms < *expires_at);
+            if replayed.len() >= config.replay_cache_capacity {
+                return Err(FederationError::ReplayCacheFull);
             }
         }
         replayed.insert(context.assertion_id.clone(), context.expires_at);
@@ -490,6 +490,8 @@ pub enum FederationError {
     NotFound,
     #[error("replayed assertion id")]
     Replay,
+    #[error("replay cache is full of unexpired assertion ids; retry after some expire")]
+    ReplayCacheFull,
     #[error("mapping authority rejected the write")]
     UnauthorizedMapping,
     #[error("mapping generation {found} is stale; current is {current}")]
@@ -598,7 +600,9 @@ fn federation_to_auth_error(error: FederationError) -> crate::auth_context::Auth
         FederationError::Replay => {
             crate::auth_context::AuthError::Unauthorized("replayed assertion id".into())
         }
-        FederationError::Expired | FederationError::NotYetValid => {
+        FederationError::Expired
+        | FederationError::NotYetValid
+        | FederationError::ReplayCacheFull => {
             crate::auth_context::AuthError::Unauthorized(error.to_string())
         }
         FederationError::IssuerMismatch { .. }
@@ -698,6 +702,38 @@ mod tests {
             dir.accept_signed_context(&config, &context, 2_000),
             Err(FederationError::Replay)
         ));
+    }
+
+    #[test]
+    fn full_replay_cache_never_evicts_a_live_assertion_id() {
+        let config = FederationConfig {
+            replay_cache_capacity: 2,
+            ..enterprise_config()
+        };
+        let dir = IdentityDirectory::new();
+        dir.accept_signed_context(&config, &signed_context("live-1"), 2_000)
+            .unwrap();
+        dir.accept_signed_context(&config, &signed_context("live-2"), 2_000)
+            .unwrap();
+
+        assert_eq!(
+            dir.accept_signed_context(&config, &signed_context("live-3"), 2_000),
+            Err(FederationError::ReplayCacheFull)
+        );
+        for id in ["live-1", "live-2"] {
+            assert_eq!(
+                dir.accept_signed_context(&config, &signed_context(id), 2_000),
+                Err(FederationError::Replay),
+                "{id} became replayable"
+            );
+        }
+
+        // Once an id can no longer pass expiry validation, its slot is reusable.
+        let mut later = signed_context("live-4");
+        later.expires_at = 200_000;
+        let past_expiry_and_skew = 10_000 + config.max_clock_skew_ms;
+        dir.accept_signed_context(&config, &later, past_expiry_and_skew)
+            .unwrap();
     }
 
     #[test]

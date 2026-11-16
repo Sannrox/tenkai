@@ -75,6 +75,14 @@ the enterprise auth extension with `FederatingAuthExtension`:
 4. Optional mapping resolve/put uses `MappingAuthority` only.
 5. Audit uses `audit_correlation_token` (hash of assertion id) — no secrets.
 
+The replay cache lives in each server process's memory. It holds an assertion
+id until the assertion expires (`expires_at` plus `max_clock_skew_ms`), and
+holds at most `replay_cache_capacity` ids (default 4096). When every slot holds
+a live id, new assertions are refused as unauthorized until some expire; live
+ids are never evicted to make room. Replicas do not share the cache, so an
+assertion accepted by one replica can still be presented once to each other
+replica. Keep assertion lifetimes short when you run more than one replica.
+
 Community servers keep `FederationConfig::community()` and the management bearer
 path unchanged. Caller headers such as `x-tenkai-tenant` are rejected and never
 select authority.
