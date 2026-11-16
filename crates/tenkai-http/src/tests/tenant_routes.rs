@@ -3,6 +3,8 @@
 //! Walks [`crate::contract::http_contract`] against a tenant-mode hub where
 //! tenant A owns an environment, a release, and a channel. Tenant B calls
 //! every route twice: once with its own identifiers and once with tenant A's.
+//! Registered routes that name a tenant resource get a third call with
+//! identifiers no tenant owns.
 //!
 //! - No response may carry tenant A's identifiers to tenant B, other than
 //!   one tenant B itself put in the request path.
@@ -10,11 +12,15 @@
 //!   must be registered in
 //!   [`tenkai::tenant_isolation::tenant_visible_rpcs`] or listed in
 //!   [`TENANT_FREE_ROUTES`].
+//! - A registered route that names a tenant A resource must answer tenant B
+//!   exactly as it answers for a resource that exists nowhere ([`ABSENT_IDS`]),
+//!   so tenant A's records are indistinguishable from missing ones. Registered
+//!   mutating routes get a valid body from [`SAMPLE_BODIES`] in both passes, so
+//!   the tenant check, not body validation, decides the answer.
+//! - Tenant A reads the same state before and after the walk.
 //!
 //! A new route that serves tenant mode therefore fails here until someone
-//! registers it and gives it isolation tests. Mutating routes are sent an
-//! empty JSON object, so one that rejects the body before its tenant check
-//! passes; the leak check still applies to its error text.
+//! registers it and gives it isolation tests.
 
 use super::auth_support::TenantAssertionExtension;
 use super::support::FixedReconciler;
@@ -33,8 +39,26 @@ const TENANT_FREE_ROUTES: &[&str] = &[
 /// Tenant A identifiers that must never appear in a response to tenant B.
 const TENANT_A_MARKERS: &[&str] = &["env-a", "api-a", "api-a@1.0.0", "stable-a"];
 
+const TENANT_A: &str =
+    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#;
+
 const TENANT_B: &str =
     r#"{"tenant":"tenant-b","principal":"user-b","capabilities":["read","management","publish"]}"#;
+
+/// Valid request bodies for registered mutating routes that name a tenant
+/// resource. Every such route needs an entry; the walk fails without one.
+const SAMPLE_BODIES: &[(&str, &str)] = &[(
+    "POST /v1/environments/{environment}/retire",
+    r#"{"version":1,"operation":"retire","reason":"tenant route guard"}"#,
+)];
+
+/// Tenant A's own view, compared before and after the walk.
+const TENANT_A_READS: &[&str] = &[
+    "/v1/environments",
+    "/v1/environments/env-a",
+    "/v1/releases",
+    "/v1/channels",
+];
 
 #[tokio::test]
 async fn tenant_mode_routes_are_registered_and_do_not_leak_across_tenants() {
@@ -46,31 +70,93 @@ async fn tenant_mode_routes_are_registered_and_do_not_leak_across_tenants() {
     let contract = crate::contract::http_contract();
     let routes = contract["routes"].as_array().expect("contract routes");
 
+    let tenant_a_before = tenant_a_view(&app).await;
     let mut violations = Vec::new();
     for route in routes {
         let method = route["method"].as_str().unwrap();
         let template = route["path"].as_str().unwrap();
         let key = format!("{method} {template}");
-        for (owner, ids) in [("own", OWN_IDS), ("cross", CROSS_IDS)] {
+        let is_registered = registered.contains(&key.as_str());
+        let names_tenant_a = CROSS_IDS
+            .iter()
+            .any(|(param, _)| template.contains(&format!("{{{param}}}")));
+        let must_hide =
+            is_registered && names_tenant_a && !TENANT_FREE_ROUTES.contains(&key.as_str());
+        let mut responses = Vec::new();
+        for (owner, ids) in [
+            ("own", OWN_IDS),
+            ("cross", CROSS_IDS),
+            ("absent", ABSENT_IDS),
+        ] {
+            if owner == "absent" && !must_hide {
+                continue;
+            }
             let path = fill(template, ids);
-            let (status, body) = call(&app, method, &path).await;
+            // The own pass keeps the empty body: a valid one would change
+            // tenant B's state under the routes walked after it.
+            let body = match (method, owner) {
+                ("GET", _) => None,
+                (_, "cross" | "absent") if must_hide => {
+                    let Some((_, sample)) = SAMPLE_BODIES.iter().find(|(route, _)| *route == key)
+                    else {
+                        violations.push(format!("{key} has no valid body in SAMPLE_BODIES"));
+                        continue;
+                    };
+                    Some(*sample)
+                }
+                _ => Some("{}"),
+            };
+            let (status, body) = call(&app, TENANT_B, method, &path, body).await;
             let leaked = TENANT_A_MARKERS
                 .iter()
                 .find(|marker| body.contains(*marker) && !path.contains(*marker));
             if let Some(marker) = leaked {
                 violations.push(format!("{key} ({owner}) leaks {marker}: {status} {body}"));
             }
-            if status.is_success()
-                && !registered.contains(&key.as_str())
-                && !TENANT_FREE_ROUTES.contains(&key.as_str())
+            if status.is_success() && !is_registered && !TENANT_FREE_ROUTES.contains(&key.as_str())
             {
                 violations.push(format!(
                     "{key} ({owner}) serves tenant mode ({status}) but is not in tenant_visible_rpcs"
                 ));
             }
+            responses.push((status, body));
+        }
+        // A path echo is not a leak, so compare the cross answer with the
+        // absent one after swapping tenant A's identifiers for absent ones.
+        if let [_, (cross_status, cross_body), absent] = responses.as_slice() {
+            let cross_body = CROSS_IDS
+                .iter()
+                .zip(ABSENT_IDS)
+                .fold(cross_body.clone(), |body, ((_, cross), (_, absent))| {
+                    body.replace(cross, absent)
+                });
+            if (*cross_status, cross_body.clone()) != *absent {
+                violations.push(format!(
+                    "{key} tells tenant A's resource from a missing one: \
+                     {cross_status} {cross_body} vs {} {}",
+                    absent.0, absent.1
+                ));
+            }
         }
     }
+    if tenant_a_view(&app).await != tenant_a_before {
+        violations.push("tenant A state changed during the walk".into());
+    }
     assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+/// What tenant A reads on [`TENANT_A_READS`], each entry as status and body.
+async fn tenant_a_view(app: &Router) -> Vec<(StatusCode, String)> {
+    let mut view = Vec::new();
+    for path in TENANT_A_READS {
+        let response = call(app, TENANT_A, "GET", path, None).await;
+        assert!(
+            response.0.is_success(),
+            "tenant A read {path}: {response:?}"
+        );
+        view.push(response);
+    }
+    view
 }
 
 /// Every registered HTTP template names a live route, so the registry cannot
@@ -128,6 +214,14 @@ const CROSS_IDS: &[(&str, &str)] = &[
     ("channel", "stable-a"),
 ];
 
+/// Path parameters naming resources no tenant owns.
+const ABSENT_IDS: &[(&str, &str)] = &[
+    ("environment", "env-z"),
+    ("product", "api-z"),
+    ("release", "api-z@1.0.0"),
+    ("channel", "stable-z"),
+];
+
 /// Replace `{param}` segments; parameters without a tenant owner get a
 /// placeholder that names no resource.
 fn fill(template: &str, ids: &[(&str, &str)]) -> String {
@@ -145,16 +239,24 @@ fn fill(template: &str, ids: &[(&str, &str)]) -> String {
         .join("/")
 }
 
-async fn call(app: &Router, method: &str, path: &str) -> (StatusCode, String) {
+/// Call `path` as `assertion`, with `body` as JSON when one is given.
+async fn call(
+    app: &Router,
+    assertion: &str,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (StatusCode, String) {
     let mut request = Request::builder()
         .method(method)
         .uri(path)
-        .header("x-tenkai-assertion", TENANT_B);
-    let body = if method == "GET" {
-        Body::empty()
-    } else {
-        request = request.header("content-type", "application/json");
-        Body::from("{}")
+        .header("x-tenkai-assertion", assertion);
+    let body = match body {
+        None => Body::empty(),
+        Some(json) => {
+            request = request.header("content-type", "application/json");
+            Body::from(json.to_owned())
+        }
     };
     let response = app
         .clone()
