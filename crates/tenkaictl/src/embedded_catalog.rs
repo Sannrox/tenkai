@@ -126,7 +126,8 @@ pub(crate) async fn run(
                 }
                 ReleaseLabelsCommand::Set { spec, pair, reason } => {
                     let (key, value) = tenkai::labels::parse_label_pair(&pair)?;
-                    let actor = crate::embedded_env::local_actor();
+                    let actor =
+                        crate::authorization::embedded_management_actor()?.audit_principal();
                     let reason = reason.unwrap_or_default();
                     println!(
                         "{}",
@@ -135,7 +136,8 @@ pub(crate) async fn run(
                     );
                 }
                 ReleaseLabelsCommand::Clear { spec, key, reason } => {
-                    let actor = crate::embedded_env::local_actor();
+                    let actor =
+                        crate::authorization::embedded_management_actor()?.audit_principal();
                     let reason = reason.unwrap_or_default();
                     println!(
                         "{}",

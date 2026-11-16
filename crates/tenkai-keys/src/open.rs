@@ -1,6 +1,7 @@
 //! Open the key provider a customer-key release names.
 
 use std::net::SocketAddr;
+use std::path::Path;
 
 #[cfg(feature = "kmip")]
 use crate::kmip;
@@ -12,9 +13,11 @@ use crate::{CustomerKeyRelease, KeyProviderKind, KeyReleaseIntent, ReleaseError}
 /// release carries no secrets and, in v1, no KMIP address.
 #[derive(Clone, Copy)]
 pub enum ProviderAccess<'a> {
-    /// User PIN for the token named by `provider.token_label` in
-    /// `provider.module`.
-    Pkcs11 { pin: &'a str },
+    /// PKCS#11 module from the consumer's own configuration and the user PIN
+    /// for the token named by `provider.token_label`. A module the release
+    /// names is never loaded: the release producer must not choose the library
+    /// that receives the consumer's PIN (#1316).
+    Pkcs11 { module: &'a Path, pin: &'a str },
     /// KMIP endpoint from the consumer's own configuration.
     Kmip { endpoint: SocketAddr },
 }
@@ -22,8 +25,9 @@ pub enum ProviderAccess<'a> {
 impl std::fmt::Debug for ProviderAccess<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Pkcs11 { .. } => formatter
+            Self::Pkcs11 { module, .. } => formatter
                 .debug_struct("Pkcs11")
+                .field("module", module)
                 .field("pin", &"<redacted>")
                 .finish(),
             Self::Kmip { endpoint } => formatter
@@ -61,8 +65,6 @@ pub enum OpenError {
         named: KeyProviderKind,
         given: KeyProviderKind,
     },
-    #[error("customer-key release names no PKCS#11 module")]
-    MissingModule,
     #[error("key provider {kind} refused to open: {source}")]
     Provider {
         kind: KeyProviderKind,
@@ -113,12 +115,7 @@ pub fn open_provider(
     };
     match access {
         #[cfg(feature = "pkcs11")]
-        ProviderAccess::Pkcs11 { pin } => {
-            let module = release
-                .provider
-                .module
-                .as_deref()
-                .ok_or(OpenError::MissingModule)?;
+        ProviderAccess::Pkcs11 { module, pin } => {
             pkcs11::Pkcs11KeyProvider::open(module, &release.provider.token_label, pin, profile)
                 .map(ReleaseProvider::Pkcs11)
                 .map_err(provider_error)

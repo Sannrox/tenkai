@@ -516,8 +516,9 @@ value, and `GET /v1/environments/{environment}/labels` and
 set_at}}`. A label written before this was recorded carries only `value`.
 Each set and clear also appends a change record (`id`, `sequence`,
 `action`, `value`, `actor`, `reason`, `at`). `labels history` and the `.../labels/history` routes list
-them oldest first. Embedded commands record `TENKAI_PRINCIPAL`, or
-`local-operator` when it is unset. The label and its last change are written
+them oldest first. Embedded commands record the
+authenticated management principal and are refused without a management
+credential. The label and its last change are written
 together before the change record. After a crash between the two, history
 still shows that change, and the next change to the label records it.
 

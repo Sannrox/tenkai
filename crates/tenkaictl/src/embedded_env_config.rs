@@ -68,7 +68,7 @@ pub(crate) async fn labels(ctx: &mut client::Ctx, command: LabelsCommand) -> Res
         }
         LabelsCommand::Set { env, spec, remote } => {
             let (key, value) = tenkai::labels::parse_label_pair(&spec)?;
-            let actor = crate::embedded_env::local_actor();
+            let actor = crate::authorization::embedded_management_actor()?.audit_principal();
             let reason = remote.reason.unwrap_or_default();
             println!(
                 "{}",
@@ -76,7 +76,7 @@ pub(crate) async fn labels(ctx: &mut client::Ctx, command: LabelsCommand) -> Res
             );
         }
         LabelsCommand::Clear { env, key, remote } => {
-            let actor = crate::embedded_env::local_actor();
+            let actor = crate::authorization::embedded_management_actor()?.audit_principal();
             let reason = remote.reason.unwrap_or_default();
             println!(
                 "{}",

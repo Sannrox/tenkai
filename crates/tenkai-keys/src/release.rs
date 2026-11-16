@@ -52,6 +52,8 @@ pub enum KeyReleaseIntent {
 pub struct ProviderEndpoint {
     pub kind: String,
     pub token_label: String,
+    /// The producer's PKCS#11 module, kept for the record. Consumers open the
+    /// module from their own configuration and never load this path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<PathBuf>,
 }
