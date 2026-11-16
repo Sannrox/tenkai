@@ -479,6 +479,17 @@ mod tests {
         let mut failed = crate::plan::create_from_steps(&mut ctx, "local", vec![fixture_step()])
             .await
             .unwrap();
+        plan_completion::transition(
+            &mut ctx,
+            &lease,
+            &mut failed,
+            crate::plan::PlanState::Running,
+            false,
+            "",
+            &[],
+        )
+        .await
+        .unwrap();
         plan_completion::fail(
             &mut ctx,
             &lease,

@@ -130,13 +130,14 @@ pub(crate) async fn transition(
                 plan.status_detail.clone(),
                 plan.maintenance_blocked,
             );
+            let plan_object = validated_plan_object(ctx, plan).await?;
             let written = if observations.is_empty() || !ctx.is_embedded() {
-                ctx.guarded_update(plan.to_object()?, namespace, key, fencing_token)
+                ctx.guarded_update(plan_object, namespace, key, fencing_token)
                     .await
                     .map(|_| ())
             } else {
                 ctx.guarded_update_objects_with_provider_events(
-                    &[plan.to_object()?],
+                    &[plan_object],
                     namespace,
                     key,
                     fencing_token,
@@ -1084,6 +1085,116 @@ mod tests {
         assert_eq!(stored.state, PlanState::Succeeded);
         assert_eq!(stored.status_detail, NO_OP_STATUS_DETAIL);
         assert!(stored.steps.is_empty());
+        let _ = std::fs::remove_file(database);
+    }
+
+    /// Store `plan` and hold its environment lease, for `Persistence::Guarded`.
+    async fn guarded_fixture(ctx: &mut Ctx, plan: &Plan) -> crate::apply::EnvironmentLease {
+        crate::ontology::register(ctx).await.unwrap();
+        crate::plan::env_add(ctx, &plan.environment, "guarded fixture")
+            .await
+            .unwrap();
+        store(ctx, plan).await.unwrap();
+        crate::apply::claim_environment(ctx, &plan.environment, "lifecycle-test")
+            .await
+            .unwrap()
+    }
+
+    fn guarded<'a>(lease: &'a crate::apply::EnvironmentLease) -> Persistence<'a> {
+        Persistence::Guarded {
+            namespace: crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+            key: &lease.environment,
+            fencing_token: &lease.fencing_token,
+            confirm_ambiguous: false,
+            observations: &[],
+        }
+    }
+
+    // #1301: a lease-guarded completion keeps the emergency override audit.
+    #[tokio::test]
+    async fn guarded_transition_keeps_emergency_override_fields() {
+        let (mut ctx, database) = context("guarded-override");
+        let mut plan = plan(40);
+        let lease = guarded_fixture(&mut ctx, &plan).await;
+        let mut stamped = ctx.get(&plan.id).await.unwrap().unwrap();
+        for (property, value) in [
+            ("last_emergency_override_reason", "incident 9"),
+            ("last_emergency_override_correlation", "correlation-9"),
+        ] {
+            stamped.properties.insert(property.into(), value.into());
+        }
+        ctx.put(stamped).await.unwrap();
+
+        for (state, detail) in [
+            (PlanState::Running, "admitted"),
+            (PlanState::Succeeded, "complete"),
+        ] {
+            transition(
+                &mut ctx,
+                &mut plan,
+                Transition::execution(state, false, detail),
+                guarded(&lease),
+            )
+            .await
+            .unwrap();
+        }
+
+        let stored = ctx.get(&plan.id).await.unwrap().unwrap();
+        assert_eq!(
+            load(&mut ctx, &plan.id).await.unwrap().state,
+            PlanState::Succeeded
+        );
+        assert_eq!(
+            stored
+                .properties
+                .get("last_emergency_override_reason")
+                .map(String::as_str),
+            Some("incident 9")
+        );
+        assert_eq!(
+            stored
+                .properties
+                .get("last_emergency_override_correlation")
+                .map(String::as_str),
+            Some("correlation-9")
+        );
+        let _ = std::fs::remove_file(database);
+    }
+
+    // #1301: lease-guarded writes obey the same transition matrix.
+    #[tokio::test]
+    async fn guarded_transition_rejects_terminal_reentry() {
+        let (mut ctx, database) = context("guarded-invalid");
+        let mut plan = plan(50);
+        let lease = guarded_fixture(&mut ctx, &plan).await;
+        for state in [PlanState::Running, PlanState::Failed] {
+            transition(
+                &mut ctx,
+                &mut plan,
+                Transition::execution(state, false, "step"),
+                guarded(&lease),
+            )
+            .await
+            .unwrap();
+        }
+
+        let error = transition(
+            &mut ctx,
+            &mut plan,
+            Transition::execution(PlanState::Running, false, "retry"),
+            guarded(&lease),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("cannot transition from failed to running"),
+            "{error}"
+        );
+        assert_eq!(
+            load(&mut ctx, &plan.id).await.unwrap().state,
+            PlanState::Failed
+        );
         let _ = std::fs::remove_file(database);
     }
 
