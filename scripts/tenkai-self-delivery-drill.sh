@@ -10,8 +10,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-cargo test --locked -p tenkai --lib \
+# libtest exits 0 when a filter matches nothing, so a renamed or removed test
+# would pass the drill vacuously. Require at least one passed test per step.
+run_tests() {
+  local output passed
+  output="$(cargo test --locked "$@" 2>&1 | tee -a /dev/stderr)"
+  passed="$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' <<<"$output" |
+    awk '{ total += $1 } END { print total + 0 }')"
+  if [[ "$passed" -lt 1 ]]; then
+    printf 'tenkai-server self-delivery drill: no test ran for: cargo test %s\n' "$*" >&2
+    exit 1
+  fi
+}
+
+run_tests -p tenkai --lib \
   apply::release_executor_tests::the_coordinating_server_refuses_tenkai_server_and_releases_the_fence \
   -- --exact --nocapture
-cargo test --locked -p tenkai-runtime --test self_delivery -- --nocapture
+run_tests -p tenkai-runtime --test self_delivery -- --nocapture
 printf 'tenkai-server self-delivery drill: coordinating refuse and plan-path restore recorded\n'
