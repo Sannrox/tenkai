@@ -117,6 +117,23 @@ Existing hard drift that was already in the baseline does not fail by default.
 `fleet watch` also exits non-zero when an open exposure's age exceeds the
 environment's `exposure.max_age_ms.<severity>` property.
 
+**Terminal program status:** when stdout is a terminal and output is text (not
+`--json`), `fleet watch` also writes an OSC 7501 program status report (OSC
+7501 program status specification, revision 0.4) after each sample, so a
+terminal that understands it can show the watch's state on its tab or pane:
+
+- `ESC ] 7501 ; state=idle:app=tenkaictl ESC \` when no environment is
+  `behind` or `unhealthy`;
+- `ESC ] 7501 ; state=error:app=tenkaictl ESC \` otherwise, and once more
+  before every non-zero exit (new hard drift, an overdue exposure, a failed
+  sample, or an unreadable baseline).
+
+These are the only two reports. They carry no environment, release, or
+advisory names. Terminals that do not understand the sequence ignore it.
+Piped output and `--json` output are unchanged, and text, exit codes, and
+baseline files are the same with or without a terminal. Embedded and remote
+targets behave the same.
+
 **Baseline file:** optional JSON schema `tenkai.fleet-posture.v1` mapping
 environment names to postures only. No SQLite persistence of samples; no
 management or runtime tokens in output.
