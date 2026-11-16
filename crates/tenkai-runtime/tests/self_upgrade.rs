@@ -306,9 +306,9 @@ async fn tenkai_upgrades_rolls_back_and_reverts_its_runtime_agent() {
     let staged_before = std::fs::read_dir(home.join("versions")).unwrap().count();
     assert!(poll(&home, &url).success());
     let tampered = finished(&mut ctx, &tampered.id).await;
-    assert_ne!(
+    assert_eq!(
         tampered.state,
-        PlanState::Succeeded,
+        PlanState::Failed,
         "{}",
         tampered.status_detail
     );

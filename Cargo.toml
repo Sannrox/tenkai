@@ -81,3 +81,9 @@ base64 = "0.22"
 # stay a fraction of the size.
 [profile.dev.package."*"]
 debug = false
+
+# Tests hash hundreds of MiB (offline chunk store and bundle size-limit tests).
+# SHA-256 at opt-level 0 runs about 15x slower, which made two tests take
+# ~55s each; optimized, they take 5-10s. Dev and test builds only.
+[profile.dev.package.sha2]
+opt-level = 3
