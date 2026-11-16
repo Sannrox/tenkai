@@ -724,25 +724,25 @@ install = "true"
         let projected = stored_projection(&stored).unwrap().unwrap();
         assert_eq!(projected.pin_digest, pin.pin_digest);
 
-        let mut changed = evidence.clone();
-        changed.members[0].digest = format!("sha256:{}", "e".repeat(64));
-        let conflict = catalog::publish(
-            &mut ctx,
-            &root.join("1.1.0/tenkai.toml"),
-            &PublishOptions {
-                allow_unsigned_development: true,
-                change_set_evidence: Some(ChangeSetEvidenceInput::Document(Box::new(changed))),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap_err()
-        .to_string();
+        // Valid evidence for the same manifest always admits the same pin, so
+        // the immutable-pin check only fires when the stored record drifted.
+        let mut drifted = stored.clone();
+        let mut stored_evidence = evidence.clone();
+        stored_evidence.members[0].digest = format!("sha256:{}", "e".repeat(64));
+        drifted.properties.insert(
+            "change_set_evidence".into(),
+            serde_json::to_string(&stored_evidence).unwrap(),
+        );
+        ctx.put(drifted).await.unwrap();
+        let conflict = catalog::publish(&mut ctx, &root.join("1.1.0/tenkai.toml"), &options)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(
-            conflict.contains("members do not match")
-                || conflict.contains("different immutable change-set pin"),
+            conflict.contains("different immutable change-set pin evidence"),
             "{conflict}"
         );
+        ctx.put(stored).await.unwrap();
 
         write_pinned_manifest(&root.join("1.2.0"), "1.2.0", &section);
         let outage = catalog::publish(

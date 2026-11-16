@@ -136,6 +136,28 @@ impl Drill {
         ])
     }
 
+    /// Change one member digest in the stored release's pin evidence, as a
+    /// drifted or tampered record would, and return the original object.
+    fn drift_stored_pin_evidence(&self, version: &str) -> tenkai::pb::sekai::Object {
+        let store = tenkai::storage::SqliteStore::open(&self.cli.db).unwrap();
+        let id = tenkai::ontology::release_id(PRODUCT, version);
+        let original = store.get(&id).unwrap().expect("stored release");
+        let mut evidence: serde_json::Value =
+            serde_json::from_str(&original.properties["change_set_evidence"]).unwrap();
+        evidence["members"][0]["digest"] = format!("sha256:{}", "e".repeat(64)).into();
+        let mut drifted = original.clone();
+        drifted
+            .properties
+            .insert("change_set_evidence".into(), evidence.to_string());
+        store.put(drifted).unwrap();
+        original
+    }
+
+    fn restore_release(&self, original: tenkai::pb::sekai::Object) {
+        let store = tenkai::storage::SqliteStore::open(&self.cli.db).unwrap();
+        store.put(original).unwrap();
+    }
+
     fn promote(&self, version: &str) {
         self.ok(&["promote", &format!("{PRODUCT}@{version}"), "stable"]);
     }
@@ -250,12 +272,15 @@ fn signed_closure_reaches_two_environments_without_rebuilding_members() {
     );
     assert_eq!(pin_members(&replay), members);
 
-    let conflict = drill.fail_publish(&target, &target_sig, &tampered_path);
+    // Valid evidence for the same manifest always admits the same pin, so the
+    // immutable-pin check only fires when the stored release drifted.
+    let restore = drill.drift_stored_pin_evidence(TARGET);
+    let conflict = drill.fail_publish(&target, &target_sig, &evidence);
     assert!(
-        conflict.contains("members do not match")
-            || conflict.contains("different immutable change-set pin"),
+        conflict.contains("different immutable change-set pin evidence"),
         "{conflict}"
     );
+    drill.restore_release(restore);
 
     drill.promote(SOURCE);
     for env in ENVS {
