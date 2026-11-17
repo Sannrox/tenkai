@@ -99,11 +99,16 @@ impl CatalogGraph for PostgresTenantOperationalStore {
     }
 
     fn list_kind_ids(&self, tenant: Option<&str>, kind: &str) -> anyhow::Result<Vec<String>> {
-        Ok(self
-            .list_kind(tenant, kind)?
-            .into_iter()
-            .map(|object| object.id)
-            .collect())
+        let schema = self.catalog_schema(tenant)?;
+        #[cfg(feature = "postgres")]
+        {
+            Ok(self.inner.catalog_list_kind_ids(&schema, kind)?)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (schema, kind);
+            Err(postgres_disabled().into())
+        }
     }
 
     fn find_by_property(

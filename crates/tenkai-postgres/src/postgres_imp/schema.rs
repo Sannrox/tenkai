@@ -28,6 +28,8 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
             format_version INTEGER NOT NULL, content_digest TEXT NOT NULL,
             plan_json TEXT NOT NULL, status TEXT NOT NULL, status_detail TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS plans_environment ON plans(environment_id, id);
+        CREATE INDEX IF NOT EXISTS plans_status ON plans(status, id);
         CREATE TABLE IF NOT EXISTS leases (
             environment_id TEXT PRIMARY KEY REFERENCES environments(id),
             owner TEXT NOT NULL, generation BIGINT NOT NULL, expires_at BIGINT NOT NULL

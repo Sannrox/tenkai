@@ -6,7 +6,7 @@ use tenkai::plan::{Action, PLAN_FORMAT_VERSION, Plan, PlanState, Step};
 use tenkai::storage::CatalogGraph;
 
 /// A plan whose JSON is far over the btree row limit (about 2.7 KB).
-fn plan_with_steps(id: &str, environment: &str, steps: u32) -> Plan {
+pub(super) fn plan_with_steps(id: &str, environment: &str, steps: u32) -> Plan {
     let digest = |n: u32| format!("sha256:{:0>64}", format!("{n:x}"));
     Plan {
         format_version: PLAN_FORMAT_VERSION,
@@ -49,7 +49,7 @@ fn plan_with_steps(id: &str, environment: &str, steps: u32) -> Plan {
     }
 }
 
-fn plan_object(plan: &Plan) -> Object {
+pub(super) fn plan_object(plan: &Plan) -> Object {
     Object {
         id: plan.id.clone(),
         kind: KIND_PLAN.into(),

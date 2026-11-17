@@ -290,6 +290,8 @@ fn invalidate_tenant_schema_stamp(
 #[cfg(feature = "postgres")]
 mod live_catalog;
 #[cfg(feature = "postgres")]
+mod live_catalog_listing;
+#[cfg(feature = "postgres")]
 mod live_change_events;
 #[cfg(feature = "postgres")]
 mod live_delivery;
