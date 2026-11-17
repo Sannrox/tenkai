@@ -106,7 +106,8 @@ pub struct SoftwareApplyRequest {
     pub workdir: PathBuf,
     /// Release id for audit (never a secret).
     pub release_id: String,
-    /// Non-secret environment overlays. Helm passes them as `--set tenkai.config.*`;
+    /// Non-secret environment overlays. Helm receives them as `tenkai.config.*` in a
+    /// generated values file;
     /// native and in-process Kubernetes stamp `tenkai.config-digest` only.
     #[serde(default)]
     pub overlays: BTreeMap<String, String>,

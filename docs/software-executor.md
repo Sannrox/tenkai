@@ -156,11 +156,17 @@ tenkaictl reconcile --once
 ```text
 helm upgrade --install <instance> <workdir> \
   --namespace <environment> --create-namespace --wait --timeout 5m \
-  --set tenkai.version=<version> --set tenkai.releaseId=<release_id> \
-  --set tenkai.instance=<instance> \
-  [--set tenkai.configDigest=<digest> --set tenkai.config.<key>=<value> ...] \
+  -f <generated-values.json> \
   [--set-file tenkai.dependencies=<path-to-canonical-json>]
 ```
+
+The generated values file holds `tenkai.version`, `tenkai.releaseId`,
+`tenkai.instance` and `tenkai.configDigest` as strings, and each overlay under
+`tenkai.config.<key>` (a dotted key nests). Helm reads the file as data, so
+an overlay value never sets anything outside its own key, whatever characters
+it holds. Overlay values are typed as `--set` typed them: `true` / `false`
+become booleans, integers without a leading zero become numbers, and anything
+else stays a string. Overlay keys whose paths collide are refused.
 
 Remove runs `helm uninstall <instance> --namespace <environment> --wait
 --ignore-not-found`, so a retried removal finds nothing to do. That flag
