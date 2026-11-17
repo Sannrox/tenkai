@@ -597,7 +597,9 @@ their transfer process. The server never accepts bundle bytes over HTTP.
   file, upgrade and environment, so retrying a failed or interrupted import
   continues it: layer import is a no-op for matching bytes, and chunked
   weights resume from the last verified chunk. One import runs at a time
-  per host; a second request while one runs gets `409`.
+  per host; a second request while one runs gets `409`. An
+  environment-scoped credential reads only its environment's jobs: another
+  environment's id gets the same `404` as an id that does not exist.
 - `GET /v1/imports` lists the host's jobs, newest first, with their state,
   bundle, upgrade, environment, start and finish times and refusal. A dry
   run and an import of the same bundle are separate jobs (`dry_run`, and an
