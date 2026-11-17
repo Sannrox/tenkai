@@ -4,9 +4,11 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use tenkai::host_apply::HostAction;
+use tenkai::host_apply::os_image::{AwaitingBoot, confirm_verdict};
 use tenkai::host_apply::state::{HostApplyOutcome, HostApplyResult};
 
-use crate::store::{self, Admission};
+use crate::store::{self, Admission, Ended};
 use crate::{ApplierConfig, ApplierPaths, config, discard_work, intake, run, secrets};
 
 /// How one run ended.
@@ -17,15 +19,29 @@ pub enum Applied {
     /// Refused before anything started; the server may start the instance
     /// again once the reason is fixed, for example with more approvals.
     Refused(String),
+    /// A `reboot` asked the updater to reboot; a `verify` settles it after
+    /// the host comes back (ADR 0051).
+    AwaitingBoot(AwaitingBoot),
 }
 
 impl Applied {
-    /// The unit's exit code: 0 succeeded, 1 the step failed, 2 refused.
+    /// The unit's exit code: 0 succeeded, 1 the step failed, 2 refused, 3
+    /// awaiting the boot.
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Result(result) if result.outcome.succeeded() => 0,
             Self::Result(_) => 1,
             Self::Refused(_) => 2,
+            Self::AwaitingBoot(_) => 3,
+        }
+    }
+}
+
+impl From<Ended> for Applied {
+    fn from(ended: Ended) -> Self {
+        match ended {
+            Ended::Result(result) => Self::Result(result),
+            Ended::AwaitingBoot(awaiting) => Self::AwaitingBoot(awaiting),
         }
     }
 }
@@ -44,8 +60,8 @@ pub async fn apply<F: Future<Output = ()>>(
     stop: impl FnOnce() -> Result<F>,
 ) -> Result<Applied> {
     tenkai::host_apply::validate_instance_name(instance)?;
-    if let Some(result) = store::recover(paths, instance)? {
-        return Ok(Applied::Result(result));
+    if let Some(ended) = store::recover(paths, instance)? {
+        return Ok(ended.into());
     }
     let admitted = (|| {
         let config = ApplierConfig::load(paths)?;
@@ -68,6 +84,10 @@ pub async fn apply<F: Future<Output = ()>>(
             discard_work(&paths.work_dir(instance))?;
             return Ok(Applied::Result(result));
         }
+        Admission::AwaitingBoot(awaiting) => {
+            discard_work(&paths.work_dir(instance))?;
+            return Ok(Applied::AwaitingBoot(awaiting));
+        }
         Admission::Run(running) => running,
     };
     // The sealed values and the workload certificate are written before the
@@ -84,7 +104,7 @@ pub async fn apply<F: Future<Output = ()>>(
         };
         let identity_dir = match &intake.identity {
             // A health step checks the certificate its install wrote.
-            None if intake.verified.action == tenkai::host_apply::HostAction::Health => {
+            None if intake.verified.action == HostAction::Health => {
                 secrets::installed_identity(paths, &intake.verified)?
             }
             None => None,
@@ -116,20 +136,26 @@ pub async fn apply<F: Future<Output = ()>>(
     // leaves nothing to renew once it succeeds. Until then the workload may
     // still run with its certificate, so the record stays.
     let forgets_identity = intake.identity.is_none()
-        && intake.verified.action != tenkai::host_apply::HostAction::Health;
+        && matches!(
+            intake.verified.action,
+            HostAction::Install | HostAction::Uninstall
+        );
     drop(intake.secrets);
     drop(intake.identity);
-    let end = match written {
-        Ok(written) => match run::adopt_descendants().and_then(|()| stop()) {
+    let action = intake.verified.action;
+    // A reboot runs the updater's command from root-owned configuration;
+    // every other step its signed release command.
+    let command = match written {
+        Ok(_) if action == HostAction::Reboot => config
+            .os_image()
+            .and_then(|os_image| crate::os_image::updater_command(&os_image.reboot)),
+        Ok(written) => run::step_command(&intake.verified, &intake.workdir, &written),
+        Err(error) => Err(error),
+    };
+    let end = match command {
+        Ok(command) => match run::adopt_descendants().and_then(|()| stop()) {
             Ok(stop) => {
-                run::run_command(
-                    &intake.verified,
-                    &intake.workdir,
-                    &written,
-                    Duration::from_secs(config.timeout_seconds),
-                    stop,
-                )
-                .await
+                run::run_command(command, Duration::from_secs(config.timeout_seconds), stop).await
             }
             Err(error) => Err(error),
         },
@@ -138,6 +164,29 @@ pub async fn apply<F: Future<Output = ()>>(
     let (outcome, exit_status, detail) = match end {
         Ok(end) => (end.outcome, end.exit_status, end.detail),
         Err(error) => (HostApplyOutcome::Failed, None, format!("{error:#}")),
+    };
+    // The record already awaits the boot. Only a reboot command that failed
+    // ends the step: the shutdown it starts may stop the applier, or outlast
+    // its timeout, while the host goes down into the armed image, so those
+    // leave the start for `verify` (or the deadline) to settle.
+    if action == HostAction::Reboot && outcome != HostApplyOutcome::Failed {
+        let awaiting = running.await_boot()?;
+        discard_work(&paths.work_dir(instance))?;
+        return Ok(Applied::AwaitingBoot(awaiting));
+    }
+    // A confirm succeeds only when the updater then reports the expected
+    // image booted and confirmed.
+    let (outcome, detail) = match (&intake.verified.os_image, action) {
+        (Some(os_image), HostAction::Confirm) if outcome.succeeded() => {
+            match crate::os_image::read_booted(paths) {
+                Ok(booted) => confirm_verdict(&os_image.digest, &booted),
+                Err(error) => (
+                    HostApplyOutcome::Failed,
+                    format!("reading the booted image after confirm: {error:#}"),
+                ),
+            }
+        }
+        _ => (outcome, detail),
     };
     // Still under the product lock, before the result is recorded.
     if forgets_identity && outcome.succeeded() {

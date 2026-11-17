@@ -53,8 +53,12 @@ pub struct VerifiedHostStep {
     pub artifact_digest: String,
     /// The manifest's immutable inputs, relative to the release workdir.
     pub inputs: Vec<String>,
-    /// The signed manifest's command for `action`.
-    pub command: String,
+    /// The signed manifest's command for `action`; `None` for `reboot` and
+    /// `verify`, which run the host's own updater commands.
+    pub command: Option<String>,
+    /// The image an OS image release boots (`[os_image]`, ADR 0051). Every
+    /// step of such a release acts on the host-wide OS image record.
+    pub os_image: Option<crate::manifest::OsImageSection>,
     pub signer_identity: String,
     pub approvals: HostApprovals,
     /// The purposes every host step of this plan needs, from the plan alone.
@@ -137,15 +141,22 @@ pub fn verify_request(
     if !manifest.artifacts.is_empty() {
         bail!("host releases cannot declare OCI artifacts; ship them as deploy inputs");
     }
-    // ADR 0051: an image update runs as stage, reboot, verify and confirm, and
-    // only `confirm` may record it applied. Until the applier has those
-    // actions, an ordinary install must not settle an image release.
-    if manifest.os_image.is_some() {
-        bail!(
-            "release {} {} declares [os_image], and this applier has no OS image actions",
+    // ADR 0051: an image release updates through stage, reboot, verify and
+    // confirm, and only `confirm` may record it applied; an ordinary install
+    // or uninstall must never settle one. Those actions take nothing else.
+    match (&manifest.os_image, host.action) {
+        (Some(_), HostAction::Install | HostAction::Uninstall) => bail!(
+            "release {} {} declares [os_image]; it updates through stage, reboot, verify and confirm, not {}",
+            manifest.product.name,
+            manifest.product.version,
+            host.action
+        ),
+        (None, action) if action.updates_os_image() => bail!(
+            "a host {action} step needs a release that declares [os_image]; {} {} does not",
             manifest.product.name,
             manifest.product.version
-        );
+        ),
+        _ => {}
     }
     let name = &manifest.product.name;
     let version = &manifest.product.version;
@@ -170,18 +181,27 @@ pub fn verify_request(
             step.from
         );
     }
-    let command = match host.action {
-        HostAction::Install => Some(manifest.deploy.install.clone()),
-        HostAction::Uninstall => manifest.deploy.uninstall.clone(),
-        HostAction::Health => manifest.deploy.health.clone(),
-    }
-    .filter(|command| !command.trim().is_empty())
-    .with_context(|| {
-        format!(
-            "the signed manifest declares no deploy.{} command",
-            host.action
-        )
-    })?;
+    // `reboot` and `verify` run no release command: the host's root-owned
+    // configuration names the updater's reboot and booted-image reader.
+    let declared = match host.action {
+        HostAction::Install | HostAction::Stage => Some(Some(manifest.deploy.install.clone())),
+        HostAction::Uninstall => Some(manifest.deploy.uninstall.clone()),
+        HostAction::Health => Some(manifest.deploy.health.clone()),
+        HostAction::Confirm => Some(manifest.deploy.confirm.clone()),
+        HostAction::Reboot | HostAction::Verify => None,
+    };
+    let command = declared
+        .map(|command| {
+            let field = if host.action == HostAction::Stage {
+                "install"
+            } else {
+                host.action.as_str()
+            };
+            command
+                .filter(|command| !command.trim().is_empty())
+                .with_context(|| format!("the signed manifest declares no deploy.{field} command"))
+        })
+        .transpose()?;
 
     let signer = request
         .signature
@@ -218,6 +238,7 @@ pub fn verify_request(
         artifact_digest: step.artifact_digest.clone(),
         inputs: manifest.immutable_inputs(),
         command,
+        os_image: manifest.os_image.clone(),
         signer_identity: signer.identity,
         approvals,
         purposes,

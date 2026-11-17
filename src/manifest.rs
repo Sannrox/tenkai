@@ -374,6 +374,10 @@ pub struct DeploySection {
     /// Optional health probe; exit 0 means healthy. Failure triggers rollback.
     #[serde(default)]
     pub health: Option<String>,
+    /// Command that asks the on-host updater to make the booted image
+    /// permanent (ADR 0051 §2). Required with `[os_image]`, refused without.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
     /// Executor this release declares (ADR 0041). Absent means the process
     /// default. The manifest digest hashes the raw text, so the value as
     /// written (alias or canonical) is what the release signature covers.
@@ -397,6 +401,7 @@ impl Default for DeploySection {
             inputs: Vec::new(),
             uninstall: None,
             health: None,
+            confirm: None,
             executor: None,
             instances: DeployInstances::One,
             identity: None,
@@ -929,6 +934,18 @@ fn validate_deploy_executor(manifest: &Manifest) -> Result<()> {
             bail!("[os_image] is only supported on releases with deploy.executor = \"host\"");
         }
         os_image.validate()?;
+        if manifest
+            .deploy
+            .confirm
+            .as_deref()
+            .is_none_or(|confirm| confirm.trim().is_empty())
+        {
+            bail!(
+                "[os_image] needs a deploy.confirm command that makes the booted image permanent"
+            );
+        }
+    } else if manifest.deploy.confirm.is_some() {
+        bail!("deploy.confirm is only supported on releases with [os_image]");
     }
     Ok(())
 }
@@ -1828,7 +1845,11 @@ max_startup_seconds = 30
         let manifest = |executor: &str, section: &str| {
             format!(
                 "{}\n[os_image]\n{section}\n",
-                with_executor(HELLO_LOCAL, executor)
+                with_executor(HELLO_LOCAL, executor).replacen(
+                    "[deploy]\n",
+                    "[deploy]\nconfirm = \"./confirm.sh\"\n",
+                    1
+                )
             )
         };
         let valid = format!("digest = \"{digest}\"\nboot_deadline_seconds = 900");
@@ -1895,6 +1916,26 @@ max_startup_seconds = 30
             };
             assert!(error.contains(refusal), "{executor} {section:?}: {error}");
         }
+        // An image release needs its confirm command, and only it may have one.
+        let error = parse_raw(&format!(
+            "{}\n[os_image]\n{valid}\n",
+            with_executor(HELLO_LOCAL, "host")
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("needs a deploy.confirm"),
+            "{error:#}"
+        );
+        let error = parse_raw(&with_executor(HELLO_LOCAL, "host").replacen(
+            "[deploy]\n",
+            "[deploy]\nconfirm = \"./confirm.sh\"\n",
+            1,
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("only supported on releases with [os_image]"),
+            "{error:#}"
+        );
         // Without an executor the release is a shell release: still refused.
         let error = parse_raw(&format!("{HELLO_LOCAL}\n[os_image]\n{valid}\n")).unwrap_err();
         assert!(

@@ -143,6 +143,11 @@ on-host updater to boot
 ([ADR 0051](decisions/0051-host-os-image-updates.md) §2):
 
 ```toml
+[deploy]
+executor = "host"
+install = "./stage.sh"       # write the image and arm a one-shot boot; no reboot
+confirm = "./confirm.sh"     # make the booted image permanent
+
 [os_image]
 digest = "sha256:..."        # the image the updater must boot
 boot_deadline_seconds = 900  # how long the host may take to come back
@@ -152,12 +157,15 @@ boot_deadline_seconds = 900  # how long the host may take to come back
   it on any other executor, including the default `shell`.
 - `digest` is `sha256:` followed by 64 lowercase hexadecimal characters.
 - `boot_deadline_seconds` is between 1 and 86400.
+- `deploy.confirm` is required with `[os_image]` and refused without it.
 
 The section is part of the signed manifest, so the signature covers the
-image and the deadline. The host applier refuses every step of such a
-release until it gains the image actions (stage, reboot, verify and
-confirm), so an image release is never recorded as an ordinary install.
-Older binaries refuse a manifest that declares the table.
+image and the deadline. The host applier runs such a release only as the
+image steps (stage, reboot, verify and confirm) and refuses an ordinary
+install or uninstall of it, so an image release is never recorded applied
+before the host booted it; see
+[OS image updates](host-releases.md#os-image-updates). Older binaries refuse
+a manifest that declares the table.
 
 ## Config schema
 

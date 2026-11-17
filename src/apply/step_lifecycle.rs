@@ -564,6 +564,21 @@ async fn execute_host(
                         version: step.to.clone(),
                     }
                 }
+                // ADR 0051: only `confirm` records an OS image applied. A
+                // staged image does not run yet; between `reboot` and
+                // `confirm` neither image is settled.
+                crate::plan::HostAction::Confirm => {
+                    crate::environment::DeploymentTransition::Deployed {
+                        version: step.to.clone(),
+                        previous: step.from.clone(),
+                    }
+                }
+                crate::plan::HostAction::Stage => {
+                    crate::environment::DeploymentTransition::Unchanged
+                }
+                crate::plan::HostAction::Reboot | crate::plan::HostAction::Verify => {
+                    crate::environment::DeploymentTransition::Unknown
+                }
             }),
         ),
         HostStepEnd::Recorded(result) => host_step_failed(

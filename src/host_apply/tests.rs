@@ -102,7 +102,7 @@ fn verified_step_comes_from_signed_and_approved_content() {
     assert_eq!(verified.product, "k3s");
     assert_eq!(verified.environment, "edge");
     assert_eq!(verified.action, HostAction::Install);
-    assert_eq!(verified.command, "./install.sh");
+    assert_eq!(verified.command.as_deref(), Some("./install.sh"));
     assert_eq!(verified.release.version, "1.2.0");
     assert_eq!(verified.expected_generation, 0);
     assert_eq!(verified.instance, request.instance().unwrap());
@@ -116,25 +116,53 @@ fn tampered_artifact_is_refused() {
     assert!(refusal(case.verify(&request)).contains("do not match their signed digest"));
 }
 
-/// A signed `[os_image]` release must not run as an ordinary install, which
-/// would record `applied(new)` before the host ever booted the image.
+/// An `[os_image]` release updates only through stage, reboot, verify and
+/// confirm: an ordinary install would record `applied(new)` before the host
+/// ever booted the image. And only such a release takes those actions.
 #[test]
-fn os_image_release_is_refused_until_the_image_actions_exist() {
+fn os_image_releases_update_only_through_the_image_actions() {
     let mut case = Case::new(Vec::new());
-    case.release.manifest.push_str(&format!(
-        "\n[os_image]\ndigest = \"sha256:{}\"\nboot_deadline_seconds = 900\n",
+    let request = |case: &Case, action: HostAction| {
+        let now = crate::now_millis();
+        let plan = case
+            .fixture
+            .plan("edge", now, &[case.spec(action, Action::Install, None)]);
+        let approvals = vec![case.fixture.approve(&plan, 0, now)];
+        case.fixture.request(&plan, 0, &case.release, approvals)
+    };
+    assert!(
+        refusal(case.verify(&request(&case, HostAction::Stage)))
+            .contains("needs a release that declares [os_image]")
+    );
+    case.release.manifest = format!(
+        "{}\n[os_image]\ndigest = \"sha256:{}\"\nboot_deadline_seconds = 900\n",
+        case.release
+            .manifest
+            .replacen("[deploy]\n", "[deploy]\nconfirm = \"./confirm.sh\"\n", 1),
         "c".repeat(64)
-    ));
+    );
     case.release.signature = case.fixture.sign_release(
         &crate::manifest::digest(&case.release.manifest),
         &case.release.signature.statement.artifact_digest,
         crate::now_millis(),
     );
-    let request = case.install_request(&[0]);
     assert!(
-        refusal(case.verify(&request))
-            .contains("declares [os_image], and this applier has no OS image actions")
+        refusal(case.verify(&request(&case, HostAction::Install)))
+            .contains("updates through stage, reboot, verify and confirm, not install")
     );
+    for (action, command) in [
+        (HostAction::Stage, Some("./install.sh")),
+        (HostAction::Reboot, None),
+        (HostAction::Verify, None),
+        (HostAction::Confirm, Some("./confirm.sh")),
+    ] {
+        let verified = case.verify(&request(&case, action)).unwrap();
+        assert_eq!(verified.command.as_deref(), command, "{action}");
+        assert_eq!(
+            verified.os_image.map(|os_image| os_image.digest),
+            Some(format!("sha256:{}", "c".repeat(64)))
+        );
+    }
 }
 
 #[test]
@@ -426,7 +454,7 @@ fn uninstall_and_health_act_on_the_installed_release() {
             vec![case.fixture.approve(&right, 0, now)],
         );
         let verified = case.verify(&request).unwrap();
-        assert_eq!(verified.command, format!("./{action}.sh"));
+        assert_eq!(verified.command, Some(format!("./{action}.sh")));
     }
 }
 

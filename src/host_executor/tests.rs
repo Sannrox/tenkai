@@ -470,5 +470,6 @@ fn sample_started(instance: &str) -> crate::host_apply::state::HostApplyStarted 
         generation: 1,
         started_at: 1,
         cgroup: None,
+        image_digest: None,
     }
 }

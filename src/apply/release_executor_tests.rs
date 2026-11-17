@@ -719,7 +719,7 @@ async fn publication_binds_os_image_to_host_releases_only() {
         let dir = fixture.root.join(format!("os-{version}"));
         std::fs::create_dir_all(&dir).unwrap();
         let raw = format!(
-            "[product]\nname = \"os\"\nversion = \"{version}\"\n\n[deploy]\nexecutor = \"{executor}\"\ninstall = \"true\"\n{os_image}"
+            "[product]\nname = \"os\"\nversion = \"{version}\"\n\n[deploy]\nexecutor = \"{executor}\"\ninstall = \"true\"\nconfirm = \"true\"\n{os_image}"
         );
         std::fs::write(dir.join("tenkai.toml"), &raw).unwrap();
         (dir.join("tenkai.toml"), raw)

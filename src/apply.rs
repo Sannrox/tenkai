@@ -413,6 +413,7 @@ mod tests {
                     inputs: Vec::new(),
                     uninstall: None,
                     health: None,
+                    confirm: None,
                     executor: None,
                     instances: crate::manifest::DeployInstances::One,
                     identity: None,
