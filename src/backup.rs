@@ -693,6 +693,26 @@ fn empty_status() -> BackupStatus {
     }
 }
 
+/// The newest successful backup's file name and the key that signed its
+/// manifest (`None` when it is unsigned), for the trust runway (#920).
+/// `None` when no backup has succeeded yet.
+pub fn latest_signer(dir: &Path) -> Result<Option<(String, Option<String>)>> {
+    let Some(manifest) = read_status(dir)?.last_success else {
+        return Ok(None);
+    };
+    let path = signature_path(&dir.join(&manifest.file));
+    let key_id = match std::fs::read(&path) {
+        Ok(raw) => Some(
+            serde_json::from_slice::<BackupSignature>(&raw)
+                .with_context(|| format!("parsing {}", path.display()))?
+                .key_id,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    Ok(Some((manifest.file, key_id)))
+}
+
 /// `status.json` of the backup directory `dir`, without drill evidence.
 pub fn read_status(dir: &Path) -> Result<BackupStatus> {
     let path = dir.join(STATUS_FILE);

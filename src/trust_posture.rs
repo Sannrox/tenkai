@@ -64,6 +64,10 @@ pub struct TrustSources {
     /// Trust roots a verifier loaded once at start rather than reading its
     /// file per use (#811), shown as `source: "loaded"` beside the file.
     pub loaded_signing: Vec<LoadedSigning>,
+    /// `TENKAI_BACKUP_DIR`: the runway grades the newest backup's signer (#920).
+    pub backup_dir: Option<PathBuf>,
+    /// `TENKAI_AUDIT_EXPORT_DIR`: the runway grades the newest export's signer.
+    pub audit_export_dir: Option<PathBuf>,
 }
 
 /// Signers a verifier holds in memory.
@@ -453,6 +457,137 @@ pub struct PlanRunway {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PlanRunways {
     pub plans: Vec<PlanRunway>,
+    /// Stored signed artifacts graded by their signer's window (#920).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactRunway>,
+}
+
+/// Which stored signed artifact an [`ArtifactRunway`] grades.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    RevocationList,
+    BackupManifest,
+    AuditExport,
+}
+
+/// A stored signed artifact and how close its signer's window is to
+/// lapsing, graded with the certificate thresholds (#920). None of these
+/// artifacts carries an expiry of its own, so the signer's `not_after` is
+/// the only clock. A signer without a recorded window grades `ok`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ArtifactRunway {
+    pub artifact: ArtifactKind,
+    /// The artifact's file name, never its host path.
+    pub file: String,
+    /// Absent for an unsigned backup or an unreadable artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub signer_key_id: Option<String>,
+    /// Unix milliseconds: the earliest `not_after` any configured trust
+    /// root records for the signer. Absent when none records one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub signer_not_after: Option<i64>,
+    pub status: TrustStatus,
+    /// Why the artifact could not be read; it then grades `critical`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub error: Option<String>,
+}
+
+/// The installed revocation list, the newest backup, and the newest audit
+/// export in `sources`, each graded by its signer's window at `now_ms`.
+/// An artifact that is configured but not written yet is left out.
+pub fn artifact_runways(sources: &TrustSources, now_ms: i64) -> Vec<ArtifactRunway> {
+    let now_secs = now_ms.div_euclid(1_000);
+    let shown = posture(sources, now_secs);
+    let signer_not_after = |key_id: &str| {
+        shown
+            .signing
+            .iter()
+            .flat_map(|root| &root.signers)
+            .filter(|signer| signer.key_id == key_id)
+            .filter_map(|signer| signer.not_after)
+            .min()
+    };
+    let graded = |artifact, file: String, key_id: Option<String>| {
+        let not_after = key_id.as_deref().and_then(signer_not_after);
+        ArtifactRunway {
+            artifact,
+            file,
+            signer_key_id: key_id,
+            signer_not_after: not_after,
+            status: not_after.map_or(TrustStatus::Ok, |not_after| {
+                grade(not_after.div_euclid(1_000), now_secs, sources)
+            }),
+            error: None,
+        }
+    };
+    let unreadable = |artifact, file: String, error: String| ArtifactRunway {
+        artifact,
+        file,
+        signer_key_id: None,
+        signer_not_after: None,
+        status: TrustStatus::Critical,
+        error: Some(error),
+    };
+    let mut artifacts = Vec::new();
+    if let Some(installed) = &shown.revocation_list {
+        artifacts.push(match &installed.error {
+            None => graded(
+                ArtifactKind::RevocationList,
+                installed.file.clone(),
+                installed.signer_key_id.clone(),
+            ),
+            Some(error) => unreadable(
+                ArtifactKind::RevocationList,
+                installed.file.clone(),
+                error.clone(),
+            ),
+        });
+    }
+    if let Some(dir) = &sources.backup_dir {
+        match crate::backup::latest_signer(dir) {
+            Ok(Some((file, key_id))) => {
+                artifacts.push(graded(ArtifactKind::BackupManifest, file, key_id));
+            }
+            Ok(None) => {}
+            Err(error) => artifacts.push(unreadable(
+                ArtifactKind::BackupManifest,
+                file_name(dir),
+                redacted(&error, dir),
+            )),
+        }
+    }
+    if let Some(dir) = &sources.audit_export_dir {
+        match crate::audit_export::latest_export(dir) {
+            Ok(Some((file, key_id))) => {
+                artifacts.push(graded(ArtifactKind::AuditExport, file, Some(key_id)));
+            }
+            Ok(None) => {}
+            Err(error) => artifacts.push(unreadable(
+                ArtifactKind::AuditExport,
+                file_name(dir),
+                redacted(&error, dir),
+            )),
+        }
+    }
+    artifacts
+}
+
+/// The grade of something that lapses at `not_after` (Unix seconds).
+fn grade(not_after: i64, now_secs: i64, sources: &TrustSources) -> TrustStatus {
+    let days_left = (not_after - now_secs).div_euclid(86_400);
+    if not_after <= now_secs {
+        TrustStatus::Expired
+    } else if days_left < i64::from(sources.critical_days) {
+        TrustStatus::Critical
+    } else if days_left < i64::from(sources.warning_days) {
+        TrustStatus::Warning
+    } else {
+        TrustStatus::Ok
+    }
 }
 
 /// The runway of each environment's latest plan that has yet to apply,
@@ -478,7 +613,11 @@ pub async fn plan_runways(ctx: &mut crate::client::Ctx) -> anyhow::Result<PlanRu
             blocked_by: environment_runway(ctx, maintenance),
         });
     }
-    Ok(PlanRunways { plans })
+    let artifacts = ctx
+        .trust_sources()
+        .map(|sources| artifact_runways(sources, crate::now_millis()))
+        .unwrap_or_default();
+    Ok(PlanRunways { plans, artifacts })
 }
 
 /// The posture of `sources` at `now_secs`.
@@ -656,15 +795,7 @@ fn certificates(
         match parsed {
             Ok(Some((subject, not_after, sha256_fingerprint))) => {
                 let days_left = (not_after - now_secs).div_euclid(86_400);
-                let status = if not_after <= now_secs {
-                    TrustStatus::Expired
-                } else if days_left < i64::from(sources.critical_days) {
-                    TrustStatus::Critical
-                } else if days_left < i64::from(sources.warning_days) {
-                    TrustStatus::Warning
-                } else {
-                    TrustStatus::Ok
-                };
+                let status = grade(not_after, now_secs, sources);
                 entries.push(CertificateEntry {
                     purpose: purpose.into(),
                     file: label.clone(),
@@ -881,24 +1012,36 @@ mod tests {
         crate::key_revocation::install(&list, &authorities, &installed).unwrap();
         let after = crate::now_millis();
 
-        let shown = posture(
-            &TrustSources {
-                signing: vec![("key_revocation".into(), roots_path)],
-                revocations: Some((installed, dir.join("authorities.toml"))),
-                loaded_signing: vec![LoadedSigning {
-                    purpose: "package_migration_approval".into(),
-                    name: "package migration trust roots in use".into(),
-                    signers: vec![LoadedSigner {
-                        key_id: "ed25519:loaded".into(),
-                        identity: "approver".into(),
-                        not_before: None,
-                        not_after: None,
-                    }],
+        let trust_sources = TrustSources {
+            signing: vec![("key_revocation".into(), roots_path)],
+            revocations: Some((installed, dir.join("authorities.toml"))),
+            loaded_signing: vec![LoadedSigning {
+                purpose: "package_migration_approval".into(),
+                name: "package migration trust roots in use".into(),
+                signers: vec![LoadedSigner {
+                    key_id: "ed25519:loaded".into(),
+                    identity: "approver".into(),
+                    not_before: None,
+                    not_after: None,
                 }],
-                ..TrustSources::default()
-            },
+            }],
+            ..TrustSources::default()
+        };
+        let shown = posture(
+            &trust_sources,
             time::OffsetDateTime::now_utc().unix_timestamp(),
         );
+        // Its authority records no window, so the list itself grades ok (#920).
+        let artifacts = artifact_runways(&trust_sources, crate::now_millis());
+        assert_eq!(artifacts.len(), 1, "{artifacts:?}");
+        assert_eq!(artifacts[0].artifact, ArtifactKind::RevocationList);
+        assert_eq!(artifacts[0].file, "revocations.json");
+        assert_eq!(
+            artifacts[0].signer_key_id.as_deref(),
+            Some(&*crate::release_signing::key_id(&public))
+        );
+        assert_eq!(artifacts[0].signer_not_after, None);
+        assert_eq!(artifacts[0].status, TrustStatus::Ok);
         let revocations = shown.revocation_list.unwrap();
         assert_eq!(revocations.error, None);
         assert_eq!(revocations.sequence, Some(3));
@@ -1062,6 +1205,120 @@ IQDZq+YO1/tDxcu5xN5Lo9z7V6C39Ey9tLwLOK4Lqlybog==
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A seed file for `byte` and its trusted signer with `not_after`.
+    fn seeded_signer(
+        dir: &Path,
+        byte: u8,
+        not_after: i64,
+    ) -> (PathBuf, crate::release_signing::TrustedSigner) {
+        use base64::Engine as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let seed = dir.join(format!("signer-{byte}.seed"));
+        std::fs::write(&seed, [byte; 32]).unwrap();
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let public = ed25519_dalek::SigningKey::from_bytes(&[byte; 32])
+            .verifying_key()
+            .to_bytes();
+        let signer = crate::release_signing::TrustedSigner {
+            key_id: crate::signature_verification::key_id(&public),
+            identity: format!("signer-{byte}"),
+            public_key: base64::engine::general_purpose::STANDARD.encode(public),
+            not_after: Some(not_after),
+            ..Default::default()
+        };
+        (seed, signer)
+    }
+
+    /// The newest backup and the newest audit export are graded by the
+    /// window their signer's trust root records, with the certificate
+    /// thresholds (#920).
+    #[test]
+    fn runway_grades_stored_artifacts_by_their_signer_window() {
+        let dir = std::env::temp_dir().join(format!("tenkai-artifacts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let now_ms = 1_800_000_000_000;
+        let day_ms = 86_400_000;
+        let (backup_seed, backup_signer) = seeded_signer(&dir, 21, now_ms + 20 * day_ms);
+        let (audit_seed, audit_signer) = seeded_signer(&dir, 22, now_ms + 3 * day_ms);
+        let roots = dir.join("audit-trust.toml");
+        let trust = crate::release_signing::TrustRoots {
+            version: crate::release_signing::TRUST_ROOT_VERSION,
+            signers: vec![backup_signer.clone(), audit_signer.clone()],
+        };
+        std::fs::write(&roots, toml::to_string(&trust).unwrap()).unwrap();
+
+        let store =
+            std::sync::Arc::new(crate::storage::SqliteStore::open(dir.join("tenkai.db")).unwrap());
+        let backup_dir = dir.join("backups");
+        crate::backup::Backups::new(
+            store.clone(),
+            crate::backup::BackupPolicy {
+                dir: backup_dir.clone(),
+                retain: 2,
+                max_age_ms: 60_000,
+                signing_key: Some(backup_seed),
+            },
+        )
+        .unwrap()
+        .take(now_ms)
+        .unwrap();
+        let audit_dir = dir.join("audit");
+        for end in [now_ms - 1_000, now_ms] {
+            crate::audit_export::export_next(&*store, &audit_dir, end, &audit_seed, None).unwrap();
+        }
+
+        let sources = TrustSources {
+            signing: vec![("audit_export".into(), roots)],
+            warning_days: 30,
+            critical_days: 7,
+            backup_dir: Some(backup_dir),
+            audit_export_dir: Some(audit_dir),
+            ..TrustSources::default()
+        };
+        let artifacts = artifact_runways(&sources, now_ms);
+        assert_eq!(artifacts.len(), 2, "{artifacts:?}");
+        let backup = &artifacts[0];
+        assert_eq!(backup.artifact, ArtifactKind::BackupManifest);
+        assert_eq!(
+            backup.signer_key_id.as_deref(),
+            Some(&*backup_signer.key_id)
+        );
+        assert_eq!(backup.signer_not_after, backup_signer.not_after);
+        assert_eq!(backup.status, TrustStatus::Warning);
+        let audit = &artifacts[1];
+        assert_eq!(audit.artifact, ArtifactKind::AuditExport);
+        assert_eq!(audit.file, "audit-00000002.json");
+        assert_eq!(audit.signer_key_id.as_deref(), Some(&*audit_signer.key_id));
+        assert_eq!(audit.status, TrustStatus::Critical);
+
+        // Past the backup signer's window the backup grades expired.
+        let later = artifact_runways(&sources, now_ms + 21 * day_ms);
+        assert_eq!(later[0].status, TrustStatus::Expired);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A configured artifact that cannot be read grades critical with an
+    /// error naming no host path; one not written yet is left out.
+    #[test]
+    fn runway_reports_an_unreadable_artifact_without_its_host_path() {
+        let dir = std::env::temp_dir().join(format!("tenkai-artifacts-{}", uuid::Uuid::new_v4()));
+        let backup_dir = dir.join("backups");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        std::fs::write(backup_dir.join("status.json"), "not json").unwrap();
+        let sources = TrustSources {
+            backup_dir: Some(backup_dir),
+            audit_export_dir: Some(dir.join("audit-not-yet")),
+            ..TrustSources::default()
+        };
+        let artifacts = artifact_runways(&sources, 1_800_000_000_000);
+        assert_eq!(artifacts.len(), 1, "{artifacts:?}");
+        assert_eq!(artifacts[0].artifact, ArtifactKind::BackupManifest);
+        assert_eq!(artifacts[0].status, TrustStatus::Critical);
+        let error = artifacts[0].error.as_deref().unwrap();
+        assert!(!error.contains(&*dir.to_string_lossy()), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Certificates are graded against the thresholds, the worst wins, and
     /// signing roots list their signers; no key material is read or shown.
     #[test]
@@ -1112,6 +1369,8 @@ IQDZq+YO1/tDxcu5xN5Lo9z7V6C39Ey9tLwLOK4Lqlybog==
             critical_days: 7,
             runtime_client_cert_required: false,
             loaded_signing: Vec::new(),
+            backup_dir: None,
+            audit_export_dir: None,
         };
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let shown = posture(&sources, now);
