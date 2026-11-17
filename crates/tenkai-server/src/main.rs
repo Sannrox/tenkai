@@ -14,7 +14,8 @@ use tenkai::auth_context::{
 };
 use tenkai::deploy_webhook::{ProcessWebhookSecrets, deliver_webhook_batch};
 use tenkai::feedback_export::{
-    ChiseiFeedbackProvider, FEEDBACK_PROVIDER_REGISTRATION_ENV, deliver_feedback_batch,
+    ChiseiFeedbackProvider, FEEDBACK_PROVIDER_KIND, FEEDBACK_PROVIDER_REGISTRATION_ENV,
+    deliver_feedback_batch,
 };
 use tenkai::issuer_auth::{ISSUER_AUTH_EXTENSION_ID, IssuerAuthExtension};
 use tenkai::oidc_verifier::{
@@ -22,7 +23,8 @@ use tenkai::oidc_verifier::{
     key_source, spawn_refresher,
 };
 use tenkai::providers::{
-    ChiseiOutcomeProvider, OUTCOME_PROVIDER_REGISTRATION_ENV, deliver_outcome_batch,
+    ChiseiOutcomeProvider, OUTCOME_PROVIDER_KIND, OUTCOME_PROVIDER_REGISTRATION_ENV,
+    deliver_outcome_batch,
 };
 use tenkai::reconciler::{Config as ReconcilerConfig, Reconciler};
 use tenkai::runtime_capabilities::{
@@ -1046,8 +1048,7 @@ async fn main() -> Result<()> {
     // Shared with the host watch, which announces trust.expiring (#775).
     let trust_status: Arc<std::sync::RwLock<Option<tenkai::trust_posture::TrustSnapshot>>> =
         Default::default();
-    let tenant_store_for_outcomes = tenant_store.clone();
-    let tenant_store_for_feedback = tenant_store.clone();
+    let tenant_store_for_outbox = tenant_store.clone();
     let import_staging = imports.as_ref().map(|settings| settings.staging.clone());
     let clock_every = clock_settings()?;
     let audit_export = audit_export_settings(cli.tenant_mode)?;
@@ -1134,146 +1135,24 @@ async fn main() -> Result<()> {
         !interval.is_zero(),
         "reconcile interval must be greater than zero"
     );
-    let outcome_task = outcome_provider.map(|provider| {
-        let outcome_store = store.clone();
-        let tenant_store = tenant_store_for_outcomes;
-        let mut outcome_shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            let mut timer = tokio::time::interval(Duration::from_secs(5));
-            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    changed = outcome_shutdown_rx.changed() => {
-                        if changed.is_err() || *outcome_shutdown_rx.borrow() {
-                            break;
-                        }
-                    }
-                    _ = timer.tick() => {
-                        let partitions = match &tenant_store {
-                            Some(tenant) => {
-                                let tenant = Arc::clone(tenant);
-                                // Only partitions with an outcome due: an idle
-                                // tick is one query, not a claim per tenant (#872).
-                                let now = tenkai::now_millis();
-                                match tokio::task::spawn_blocking(move || {
-                                    tenant.provider_event_partitions_due(
-                                        tenkai::providers::OUTCOME_PROVIDER_KIND,
-                                        now,
-                                    )
-                                })
-                                .await
-                                {
-                                    Ok(Ok(partitions)) => partitions,
-                                    Ok(Err(error)) => {
-                                        eprintln!(
-                                            "tenkai.outcome_export outcome=degraded detail={error}"
-                                        );
-                                        continue;
-                                    }
-                                    Err(error) => {
-                                        eprintln!(
-                                            "tenkai.outcome_export outcome=degraded detail={error}"
-                                        );
-                                        continue;
-                                    }
-                                }
-                            }
-                            None => vec![Arc::clone(&outcome_store)],
-                        };
-                        for partition in partitions {
-                            match deliver_outcome_batch(
-                                partition.as_ref(),
-                                &provider,
-                                Duration::from_secs(5),
-                                tenkai::now_millis(),
-                                10,
-                            ).await {
-                                Ok((delivered, deferred)) if delivered > 0 || deferred > 0 => {
-                                    eprintln!(
-                                        "tenkai.outcome_export delivered={} deferred={}",
-                                        delivered, deferred
-                                    );
-                                }
-                                Ok(_) => {}
-                                Err(error) => {
-                                    eprintln!(
-                                        "tenkai.outcome_export outcome=degraded detail={}",
-                                        error
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        })
-    });
-    let feedback_task = feedback_provider.map(|provider| {
-        let feedback_store = store.clone();
-        let tenant_store = tenant_store_for_feedback;
-        let mut feedback_shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            let mut timer = tokio::time::interval(Duration::from_secs(5));
-            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    changed = feedback_shutdown_rx.changed() => {
-                        if changed.is_err() || *feedback_shutdown_rx.borrow() {
-                            break;
-                        }
-                    }
-                    _ = timer.tick() => {
-                        let partitions = match &tenant_store {
-                            Some(tenant) => {
-                                let tenant = Arc::clone(tenant);
-                                match tokio::task::spawn_blocking(move || {
-                                    tenant.provider_event_partitions()
-                                })
-                                .await
-                                {
-                                    Ok(Ok(partitions)) => partitions,
-                                    Ok(Err(error)) => {
-                                        eprintln!(
-                                            "tenkai.feedback_export outcome=degraded detail={error}"
-                                        );
-                                        continue;
-                                    }
-                                    Err(error) => {
-                                        eprintln!(
-                                            "tenkai.feedback_export outcome=degraded detail={error}"
-                                        );
-                                        continue;
-                                    }
-                                }
-                            }
-                            None => vec![Arc::clone(&feedback_store)],
-                        };
-                        for partition in partitions {
-                            match deliver_feedback_batch(
-                                partition.as_ref(),
-                                &provider,
-                                Duration::from_secs(5),
-                                tenkai::now_millis(),
-                                10,
-                            ).await {
-                                Ok((delivered, deferred)) if delivered > 0 || deferred > 0 => {
-                                    eprintln!(
-                                        "tenkai.feedback_export delivered={} deferred={}",
-                                        delivered, deferred
-                                    );
-                                }
-                                Ok(_) => {}
-                                Err(error) => {
-                                    eprintln!(
-                                        "tenkai.feedback_export outcome=degraded detail={}",
-                                        error
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    // One outbox worker for every enabled export kind (#877), on its own
+    // blocking thread: the delivery path makes synchronous store calls, so it
+    // must not hold a shared Tokio worker.
+    let outbox_task = (outcome_provider.is_some() || feedback_provider.is_some()).then(|| {
+        let outbox = ProviderOutbox {
+            store: store.clone(),
+            tenant_store: tenant_store_for_outbox,
+            outcome: outcome_provider,
+            feedback: feedback_provider,
+        };
+        let shutdown_rx = shutdown_tx.subscribe();
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("building the provider outbox runtime")?
+                .block_on(outbox.run(shutdown_rx));
+            anyhow::Ok(())
         })
     });
     let host_backups = backups.as_ref().map(|(backups, _)| backups.clone());
@@ -1773,15 +1652,10 @@ async fn main() -> Result<()> {
     reconcile_task
         .await
         .context("joining reconciliation task during shutdown")?;
-    if let Some(outcome_task) = outcome_task {
-        outcome_task
+    if let Some(outbox_task) = outbox_task {
+        outbox_task
             .await
-            .context("joining outcome delivery task during shutdown")?;
-    }
-    if let Some(feedback_task) = feedback_task {
-        feedback_task
-            .await
-            .context("joining feedback delivery task during shutdown")?;
+            .context("joining provider outbox task during shutdown")??;
     }
     webhook_task
         .await
@@ -2205,6 +2079,85 @@ fn runner_ca_from_env() -> Result<Option<Arc<tenkai::runner_ca::RunnerCa>>> {
             std::path::Path::new(&key),
         )?))),
         _ => anyhow::bail!("TENKAI_RUNNER_CA_CERT and TENKAI_RUNNER_CA_KEY must be set together"),
+    }
+}
+
+/// The provider export outbox: terminal outcomes and feedback, whichever
+/// are enabled. Runs on a dedicated thread (see `run`), never a shared
+/// Tokio worker.
+struct ProviderOutbox {
+    store: Arc<dyn OperationalStore>,
+    tenant_store: Option<Arc<dyn TenantOperationalStore>>,
+    outcome: Option<ChiseiOutcomeProvider>,
+    feedback: Option<ChiseiFeedbackProvider>,
+}
+
+impl ProviderOutbox {
+    /// Drains the outbox every 5 s until shutdown. Each tick runs one due
+    /// query across all enabled kinds, so an idle hub costs one query rather
+    /// than a claim per tenant per kind (#872, #877). A partition due for one
+    /// kind costs the other kind an empty claim.
+    async fn run(self, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
+        let kinds: Vec<&str> = [
+            self.outcome.as_ref().map(|_| OUTCOME_PROVIDER_KIND),
+            self.feedback.as_ref().map(|_| FEEDBACK_PROVIDER_KIND),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let timeout = Duration::from_secs(5);
+        let mut timer = tokio::time::interval(timeout);
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = timer.tick() => {
+                    let partitions = match &self.tenant_store {
+                        // This thread is ours, so the store call may block.
+                        Some(tenant) => match tenant.provider_event_partitions_due(&kinds, tenkai::now_millis()) {
+                            Ok(partitions) => partitions,
+                            Err(error) => {
+                                eprintln!("tenkai.provider_export outcome=degraded detail={error}");
+                                continue;
+                            }
+                        },
+                        None => vec![Arc::clone(&self.store)],
+                    };
+                    for partition in partitions {
+                        if let Some(provider) = &self.outcome {
+                            report_export(
+                                "tenkai.outcome_export",
+                                deliver_outcome_batch(partition.as_ref(), provider, timeout, tenkai::now_millis(), 10).await,
+                            );
+                        }
+                        if let Some(provider) = &self.feedback {
+                            report_export(
+                                "tenkai.feedback_export",
+                                deliver_feedback_batch(partition.as_ref(), provider, timeout, tenkai::now_millis(), 10).await,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Logs one export batch: counts when it did work, the error when it failed.
+fn report_export<E: std::fmt::Display>(
+    prefix: &str,
+    result: std::result::Result<(usize, usize), E>,
+) {
+    match result {
+        Ok((delivered, deferred)) if delivered > 0 || deferred > 0 => {
+            eprintln!("{prefix} delivered={delivered} deferred={deferred}");
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!("{prefix} outcome=degraded detail={error}"),
     }
 }
 
