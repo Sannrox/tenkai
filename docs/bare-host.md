@@ -165,6 +165,12 @@ up as its own systemd unit and the kubeconfig appears. The approved `health`
 step checks the node, and that the kubeconfig works with exactly the scope it
 should have. Then the in-cluster release is applied as that identity.
 
+`health` waits up to 120 seconds for the API server, also when it drops out
+mid-check, for example while `k3s.service` restarts. A read the live API
+server answers is judged at once and never retried. When the API server stays
+down, `health` fails with a message that names it and the state of
+`k3s.service`, instead of a check further down that only saw no answer.
+
 There is no step after this. Until the kubeconfig exists, every attempt to
 apply an in-cluster release in the environment fails closed, names the
 missing file, and leaves the deployment as it was; reconcile retries with
