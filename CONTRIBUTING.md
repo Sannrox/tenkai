@@ -13,7 +13,8 @@ make update
 runs one Cargo filter without shell evaluation. The default suite is
 `cargo test --locked --workspace`. Live Kubernetes, Llama, and PostgreSQL checks stay
 opt-in for `make test` and are documented; CI additionally runs the kind
-in-process Kubernetes test on pull requests, pushes to `main`, and weekly.
+in-process Kubernetes test on pushes to `main`, weekly, and on pull requests
+that touch the in-process executor or dependencies.
 
 ## Issues and pull requests
 

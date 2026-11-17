@@ -47,8 +47,9 @@ glibc 2.28 image (`scripts/build-linux-release-hosts.sh`) rather than on the
 CI runner, and stay dynamically linked so `TENKAI_SIGNER_MODULE` and
 `TENKAI_RUNTIME_PKCS11_MODULE` can load the system's PKCS#11 module.
 
-Every pull request builds the Linux hosts that way, refuses any that needs a
-newer glibc (`scripts/package-release-binaries.sh check-glibc`), and runs
+Every push to `main`, and every pull request that touches dependencies, the
+toolchain, build scripts, release packaging, or a direct native call, builds
+the Linux hosts that way, refuses any that needs a newer glibc (`scripts/package-release-binaries.sh check-glibc`), and runs
 each one on RHEL 8, RHEL 9, Debian 12, and Ubuntu 22.04. The release
 workflow checks the floor again before it writes `SHA256SUMS`. v0.6.0 and
 earlier Linux hosts need glibc 2.39; build those from source on older
@@ -238,7 +239,7 @@ section, attaches the assets, and publishes it: marked latest for a `vX.Y.Z` tag
 not marked latest for a tag that contains `-`, and never marked latest for a
 tag on a `release-*` maintenance line. A rerun
 resumes a draft. An already published Release is refused, not edited. A tag
-mismatch fails closed before assets are uploaded. Pull requests build
+mismatch fails closed before assets are uploaded. CI's release dry run builds
 the Linux hosts the same way, run them on older distributions, and run
 `scripts/release-dry-run.sh --linux-hosts` instead, which writes the same
 notes, SBOM, and manifest (macOS hosts are stubs) and never attests or

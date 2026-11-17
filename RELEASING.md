@@ -108,8 +108,8 @@ uploads, attests, or publishes refuses a release that is already published,
 so neither a new run nor "Re-run failed jobs" on an old one can change it;
 cut a new version instead. One run per tag executes at a time.
 
-Pull requests run `scripts/release-dry-run.sh`, which never attests or
-publishes. `workflow_dispatch` without a tag dry-runs the same packaging
+CI runs `scripts/release-dry-run.sh` on pushes to `main` and on pull
+requests that touch release packaging; it never attests or publishes. `workflow_dispatch` without a tag dry-runs the same packaging
 path on that ref.
 
 Attestations record the workflow that built the artifacts, which is main's

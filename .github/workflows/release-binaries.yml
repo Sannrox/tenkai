@@ -1,8 +1,8 @@
 name: Release binaries
 
 # Runs from main for a signed tag. release-dispatch.yml starts it on a v* tag
-# push; a failed run is fixed on main and re-run for the same tag. Pull
-# requests run scripts/release-dry-run.sh from CI. workflow_dispatch without a
+# push; a failed run is fixed on main and re-run for the same tag. CI runs
+# scripts/release-dry-run.sh (see its Release dry run job). workflow_dispatch without a
 # tag dry-runs the packaging path and never attests or publishes.
 on:
   workflow_dispatch:
