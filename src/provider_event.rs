@@ -284,6 +284,17 @@ where
             )?;
             Ok(DeliveryStatus::Delivered)
         }
+        Ok(Err(error @ ProviderError::Denied(_))) => {
+            defer(
+                store,
+                record,
+                claim_token,
+                now,
+                DENIED_RETRY_MS,
+                &error.to_string(),
+            )?;
+            Ok(DeliveryStatus::Deferred)
+        }
         Ok(Err(error)) => {
             defer_after_delivery_failure(store, record, claim_token, now, &error.to_string())?;
             Ok(DeliveryStatus::Deferred)
@@ -378,6 +389,11 @@ fn bind_first_delivery_metadata(
     )?;
     Ok(())
 }
+
+/// How long a durably denied event waits before the outbox asks again (#989).
+/// A denial can clear (a budget refills), so the event stays undelivered and
+/// retryable, but out of the due set for hours rather than minutes.
+pub const DENIED_RETRY_MS: i64 = 6 * 60 * 60 * 1_000;
 
 fn defer_after_delivery_failure(
     store: &(impl ProviderEventStore + ?Sized),

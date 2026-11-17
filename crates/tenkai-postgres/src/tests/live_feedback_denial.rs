@@ -33,7 +33,8 @@ fn reply(status: &str, replay: bool) -> SubmitActionInstanceResponse {
 }
 
 /// A denied feedback observation, and its same-key replay, stay undelivered
-/// and visible in a tenant partition's outbox until the plane admits it (#880).
+/// and visible in a tenant partition's outbox until the plane admits it
+/// (#880), retried only after the denial quarantine (#989).
 #[tokio::test]
 #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
 async fn live_postgres_denied_feedback_replay_stays_retryable() {
@@ -78,7 +79,8 @@ async fn live_postgres_denied_feedback_replay_stays_retryable() {
             .unwrap()
             .remove(0)
     };
-    for now in [3_000, 60_000] {
+    let quarantine = tenkai::provider_event::DENIED_RETRY_MS;
+    for now in [3_000, 3_000 + quarantine] {
         assert_eq!(
             deliver_feedback_batch(&partition, &plane, Duration::from_secs(1), now, 10)
                 .await
@@ -87,13 +89,15 @@ async fn live_postgres_denied_feedback_replay_stays_retryable() {
         );
         let pending = pending();
         assert_eq!(pending.delivered_at, None);
+        assert_eq!(pending.next_attempt_at, now + quarantine);
         assert!(pending.last_error.contains("budget exhausted"));
     }
+    let admitted_at = 3_000 + 2 * quarantine;
     assert_eq!(
-        deliver_feedback_batch(&partition, &plane, Duration::from_secs(1), 120_000, 10)
+        deliver_feedback_batch(&partition, &plane, Duration::from_secs(1), admitted_at, 10)
             .await
             .unwrap(),
         (1, 0)
     );
-    assert_eq!(pending().delivered_at, Some(120_000));
+    assert_eq!(pending().delivered_at, Some(admitted_at));
 }
