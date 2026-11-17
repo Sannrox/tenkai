@@ -98,8 +98,32 @@ tenkaictl spoke-standby drill \
 The drill kills the writer, promotes the standby through the signed action,
 checks that the restored apply is not executed twice, and checks that the old
 generation is refused when that spoke returns. The evidence is
-`tenkai.spoke-standby-drill.v1`, signed the same way as other operator drills
-([#691](https://github.com/Sannrox/tenkai/issues/691)).
+`tenkai.spoke-standby-drill.v2`, signed the same way as other operator drills
+([#691](https://github.com/Sannrox/tenkai/issues/691)); see
+[Evidence format](#evidence-format).
+
+## Evidence format
+
+Promotion evidence (`tenkai.spoke-standby-promotion.v2`, stored with the
+lease takeover and copied to `<store>.promotion.json`) and drill evidence
+(`tenkai.spoke-standby-drill.v2`) share one envelope. Every field is a string:
+
+| Field | Value |
+| --- | --- |
+| `schema` | `tenkai.spoke-standby-promotion.v2` or `tenkai.spoke-standby-drill.v2` |
+| `key_id` | `sha256:` and the lowercase hex SHA-256 of the signer's Ed25519 public key |
+| `statement` | Standard padded base64 of the statement JSON bytes that were signed |
+| `signature` | Standard padded base64 Ed25519 signature over the domain, one NUL byte, and the statement bytes |
+
+The domain is `TENKAI-SPOKE-STANDBY-PROMOTION-V2` or
+`TENKAI-SPOKE-STANDBY-DRILL-V2`. A verifier checks the signature over the
+decoded bytes before it parses them, so a field added by a newer release is
+ignored by an older one and still covered by the signature
+([#953](https://github.com/Sannrox/tenkai/issues/953)).
+
+The `.v1` schemas signed Tenkai's re-encoding of the parsed statement. They
+are deprecated: still verified, with their unknown fields refused, and never
+produced.
 
 ## Profile
 

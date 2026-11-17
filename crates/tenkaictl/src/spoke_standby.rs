@@ -49,7 +49,7 @@ pub(crate) fn run(command: &SpokeStandbyCommand) -> Result<()> {
             let profile = spoke_standby::SpokeStandbyProfile::load(profile)?;
             let evidence = spoke_standby::drill(&profile, signing_key)?;
             if let Some(path) = out {
-                spoke_standby::write_evidence(path, &evidence)?;
+                spoke_standby::write_evidence(path, &evidence.evidence)?;
             }
             let s = &evidence.statement;
             println!(
