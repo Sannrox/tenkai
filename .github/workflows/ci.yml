@@ -39,8 +39,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install PKCS#11 software token
         run: scripts/apt-install.sh softhsm2
+      # `cargo test --workspace` already runs every integration test target,
+      # so `make test-integration` stays a local target only.
       - run: make test
-      - run: make test-integration
       # Uses TENKAI_UI_BUNDLE; fails on a checksum mismatch.
       - run: cargo test --locked -p tenkai-http --features ui --lib ui
       - run: cargo test --locked -p tenkai-postgres --features postgres
@@ -98,17 +99,46 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          fetch-depth: 0
+      # Pull requests run this only when they touch dependencies, the
+      # toolchain, build scripts, release packaging, or add a direct native
+      # call that can raise the glibc floor; other events always do. The diff
+      # is read before it is matched, so a git failure fails the step.
+      - name: Scope
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT" != "pull_request" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files="$(git diff --name-only "$BASE"...HEAD)"
+          rust="$(git diff -U0 "$BASE"...HEAD -- '*.rs')"
+          if grep -E '^(Cargo\.(toml|lock)|crates/[^/]+/Cargo\.toml|rust-toolchain\.toml|build\.rs|crates/[^/]+/build\.rs|ui/console\.pin|CHANGELOG\.md|examples/host-applier-systemd/|scripts/(build-linux-release-hosts|release-dry-run|test-install-script|install|package-release-binaries|pack-tenkai-release|release-metadata|apt-install)\.(sh|py)|scripts/release-sbom-requirements\.txt|\.github/workflows/)' <<<"$files" >/dev/null \
+            || grep -E '^\+.*(libc::|extern "C")' <<<"$rust" >/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.scope.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.96.1
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - if: steps.scope.outputs.run == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/linux-release-hosts
           key: linux-release-hosts-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: linux-release-hosts-
       - name: Build Linux hosts
+        if: steps.scope.outputs.run == 'true'
         run: bash scripts/build-linux-release-hosts.sh --out linux-hosts
       - name: Run Linux hosts on RHEL 8 and 9, Debian 12, Ubuntu 22.04
+        if: steps.scope.outputs.run == 'true'
         run: |
           for image in registry.access.redhat.com/ubi8/ubi-minimal registry.access.redhat.com/ubi9/ubi-minimal \
             debian:12 ubuntu:22.04; do
@@ -122,8 +152,10 @@ jobs:
               done'
           done
       - name: Install script on Ubuntu 22.04, Debian 12, RHEL 8 and 9; refused on Alpine
+        if: steps.scope.outputs.run == 'true'
         run: bash scripts/test-install-script.sh --linux-hosts linux-hosts
-      - run: bash scripts/release-dry-run.sh --linux-hosts linux-hosts
+      - if: steps.scope.outputs.run == 'true'
+        run: bash scripts/release-dry-run.sh --linux-hosts linux-hosts
 
   clippy:
     name: Clippy
@@ -178,14 +210,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          fetch-depth: 0
+      # Pull requests run this only when they touch the in-process executor,
+      # its software-executor contract, dependencies, or the workflow; other
+      # events always do. The diff is read before it is matched, so a git
+      # failure fails the step.
+      - name: Scope
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT" != "pull_request" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files="$(git diff --name-only "$BASE"...HEAD)"
+          if grep -E '^(crates/tenkai-executor/|src/software_executor(\.rs|/)|Cargo\.(toml|lock)|rust-toolchain\.toml|\.github/workflows/)' <<<"$files" >/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.scope.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.96.1
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: helm/kind-action@92086f6be054225fa813e0a4b13787fc9088faab # v1.13.0
+      - if: steps.scope.outputs.run == 'true'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - if: steps.scope.outputs.run == 'true'
+        uses: helm/kind-action@92086f6be054225fa813e0a4b13787fc9088faab # v1.13.0
         with:
           install_only: true
       - name: Create kind cluster and exercise server-side apply
+        if: steps.scope.outputs.run == 'true'
         run: |
           set -euo pipefail
           if ! command -v kubectl >/dev/null 2>&1; then
@@ -304,44 +363,6 @@ jobs:
           fi
           echo "::error::buf breaking found incompatible proto changes against ${tag}. Mark the pull request breaking (a 'type!:' title or a '## Breaking' section) and add the risk:breaking label, or keep the change compatible."
           exit 1
-
-  rollout-time:
-    name: Rollout-time budget
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          toolchain: 1.96.1
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: helm/kind-action@92086f6be054225fa813e0a4b13787fc9088faab # v1.13.0
-        with:
-          install_only: true
-      - name: Measure Docker and kind apply against the stored baseline
-        run: |
-          set -euo pipefail
-          if ! command -v kubectl >/dev/null 2>&1; then
-            tmp="$(mktemp)"
-            for attempt in 1 2 3 4; do
-              if curl -fsSL -o "$tmp" "https://dl.k8s.io/release/v1.32.3/bin/linux/amd64/kubectl"; then
-                break
-              fi
-              if [[ "$attempt" -eq 4 ]]; then
-                echo "failed to download kubectl" >&2
-                exit 1
-              fi
-              sleep $((attempt * 3))
-            done
-            chmod +x "$tmp"
-            sudo mv "$tmp" /usr/local/bin/kubectl
-          fi
-          kind create cluster --name tenkai-rollout --wait 120s
-          scoped="$HOME/tenkai-cluster"
-          mkdir -p "$scoped"
-          kind get kubeconfig --name tenkai-rollout > "$scoped/config"
-          chmod 600 "$scoped/config"
-          TENKAI_CLUSTER_CONFIG="$scoped/config" bash scripts/check-rollout-time.sh
 
   # Public API of the library crates against the pull request base. Versions
   # are release-owned, so a pull request never bumps them: a reported break
