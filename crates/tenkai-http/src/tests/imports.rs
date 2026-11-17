@@ -103,6 +103,16 @@ async fn import_routes_take_staged_names_and_record_refusals() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fetched, job);
+    // Another environment's token cannot tell this job from an unknown id.
+    let job_path = format!("/v1/imports/{}", job["id"].as_str().unwrap());
+    let unknown_path = format!("/v1/imports/imp-{}", "0".repeat(32));
+    let elsewhere = call("GET", &job_path, Some("other-secret"), None).await;
+    let unknown = call("GET", &unknown_path, Some("other-secret"), None).await;
+    assert_eq!(elsewhere.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        elsewhere.1.to_string().replace(&job_path[12..], "ID"),
+        unknown.1.to_string().replace(&unknown_path[12..], "ID")
+    );
     // #821: the job list shows the job; another environment's token sees none.
     let (status, listed) = call("GET", "/v1/imports", Some("management-secret"), None).await;
     assert_eq!(status, StatusCode::OK);

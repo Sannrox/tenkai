@@ -503,10 +503,17 @@ impl ManagementOperations {
         let context = self.authenticate(credential)?;
         Self::require_capability(&context, DeliveryCapability::Management)?;
         self.require_community_catalog_host()?;
-        let job = crate::offline_import::job(&settings.staging, id)
-            .map_err(|error| ManagementError::NotFound(format!("{error:#}")))?;
-        self.require_environment_grant(credential, &context, Some(&job.environment), "import")?;
-        Ok(job)
+        let job = crate::offline_import::job(&settings.staging, id);
+        // An environment-scoped credential learns nothing about imports
+        // outside its environment: another environment's id answers exactly
+        // like an id that does not exist.
+        if let Some(granted) = self.granted_environment(credential, &context) {
+            return match job {
+                Ok(job) if job.environment == granted => Ok(job),
+                _ => Err(ManagementError::NotFound(format!("unknown import {id}"))),
+            };
+        }
+        job.map_err(|error| ManagementError::NotFound(format!("{error:#}")))
     }
 
     /// `GET /v1/environments/{environment}/webhooks/deliveries`, or for the
