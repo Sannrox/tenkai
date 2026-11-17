@@ -269,22 +269,6 @@ impl Reconciler {
         }
     }
 
-    pub(crate) async fn inspect_environment_without_outcome_export(
-        &self,
-        environment: String,
-    ) -> Result<crate::plan::EnvironmentInspectReport> {
-        let mut ctx = self.ctx.without_outcome_export();
-        crate::plan::inspect_environment_for_policy(&mut ctx, &environment, self.execution_policy())
-            .await
-    }
-
-    pub(crate) async fn fleet_status_without_outcome_export(
-        &self,
-    ) -> Result<crate::plan::FleetStatusReport> {
-        let mut ctx = self.ctx.without_outcome_export();
-        crate::plan::fleet_status(&mut ctx).await
-    }
-
     /// Reconcile every registered environment once. Environments run concurrently.
     pub async fn run_once(&self) -> Result<TickReport> {
         self.run_once_bounded(None).await

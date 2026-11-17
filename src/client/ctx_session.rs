@@ -247,14 +247,6 @@ impl Ctx {
         self.feedback_export_enabled
     }
 
-    pub(crate) fn without_outcome_export(&self) -> Self {
-        let mut context = self.clone();
-        context.outcome_export_enabled = false;
-        context.feedback_export_enabled = false;
-        context.outcome_inspection_enabled = false;
-        context
-    }
-
     /// Read the bounded Tenkai-owned terminal-outcome projection for one
     /// environment. Remote provider mode has no local outbox to inspect; its
     /// authenticated server host supplies the same projection from its local

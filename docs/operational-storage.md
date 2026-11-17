@@ -145,8 +145,7 @@ then drops `embedded_*`. Empty kind/key or environment arguments fail closed
 Environment rows carry an indexed `retired_at` column (schema 12, SQLite and
 tenant PostgreSQL) written in the same statement as `configuration_json` from
 the retirement evidence it contains, and backfilled once from older rows.
-Active environment listings (embedded catalog ids, tenant list/fleet/reconcile
-admission) filter `retired_at IS NULL` in one query and never decode
+Active environment listings (embedded catalog ids, tenant list and fleet) filter `retired_at IS NULL` in one query and never decode
 configuration blobs. The blob stays the retirement evidence record.
 
 Status filters, `created_at` order, and `LIMIT` for newest/oldest reads are

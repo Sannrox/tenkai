@@ -68,11 +68,6 @@ pub struct RuntimeCompletion {
 /// Shared application view used by embedded and remote hosts.
 pub trait ReconcilePort: Send + Sync {
     fn reconcile(&self) -> ReconcileFuture<'_>;
-    fn reconcile_environments(&self, _environments: Vec<String>) -> ReconcileFuture<'_> {
-        Box::pin(async {
-            anyhow::bail!("tenant-bounded reconciliation is not supported by this host")
-        })
-    }
     fn pending_work(&self, environment: String) -> WorkFuture<'_>;
     fn check_health(&self) -> HealthFuture<'_>;
     fn complete_work(
@@ -87,17 +82,6 @@ pub trait ReconcilePort: Send + Sync {
     ) -> CompletionFuture<'_>;
     fn list_environments(&self) -> ListEnvFuture<'_>;
     fn inspect_environment(&self, environment: String) -> InspectEnvFuture<'_>;
-    fn inspect_environment_without_outcome_export(
-        &self,
-        environment: String,
-    ) -> InspectEnvFuture<'_> {
-        let inspection = self.inspect_environment(environment);
-        Box::pin(async move {
-            let mut report = inspection.await?;
-            report.terminal_outcomes.clear();
-            Ok(report)
-        })
-    }
     fn environment_status(&self, environment: String) -> StatusEnvFuture<'_>;
     fn explain_instance(&self, environment: String, instance: String) -> ExplainEnvFuture<'_> {
         let _ = (environment, instance);
@@ -107,11 +91,6 @@ pub trait ReconcilePort: Send + Sync {
         Box::pin(async move { Ok(EnvironmentDependencies::empty(environment)) })
     }
     fn fleet_status(&self) -> FleetStatusFuture<'_>;
-    fn fleet_status_without_outcome_export(&self) -> FleetStatusFuture<'_> {
-        Box::pin(async {
-            anyhow::bail!("tenant-bounded fleet inspection is not supported by this host")
-        })
-    }
     fn apply_inventory_facts(
         &self,
         environment: String,
@@ -126,10 +105,6 @@ pub trait ReconcilePort: Send + Sync {
 impl ReconcilePort for Reconciler {
     fn reconcile(&self) -> ReconcileFuture<'_> {
         Box::pin(self.run_once())
-    }
-
-    fn reconcile_environments(&self, environments: Vec<String>) -> ReconcileFuture<'_> {
-        Box::pin(async move { self.run_once_for(&environments).await })
     }
 
     fn pending_work(&self, environment: String) -> WorkFuture<'_> {
@@ -181,13 +156,6 @@ impl ReconcilePort for Reconciler {
         })
     }
 
-    fn inspect_environment_without_outcome_export(
-        &self,
-        environment: String,
-    ) -> InspectEnvFuture<'_> {
-        Box::pin(self.inspect_environment_without_outcome_export(environment))
-    }
-
     fn environment_status(&self, environment: String) -> StatusEnvFuture<'_> {
         Box::pin(async move {
             let mut ctx = self.ctx_clone();
@@ -220,10 +188,6 @@ impl ReconcilePort for Reconciler {
             let mut ctx = self.ctx_clone();
             crate::plan::fleet_status(&mut ctx).await
         })
-    }
-
-    fn fleet_status_without_outcome_export(&self) -> FleetStatusFuture<'_> {
-        Box::pin(self.fleet_status_without_outcome_export())
     }
 
     fn apply_inventory_facts(

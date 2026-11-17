@@ -93,7 +93,7 @@ and are not registered.
 
 | RPC id | Route | Tenant-mode enforcement |
 | --- | --- | --- |
-| `management.reconcile` | `POST /v1/reconcile` | Require tenant context; resolve tenant envs before bounded work selection |
+| `management.reconcile` | `POST /v1/reconcile` | Require tenant context; partition-local, never reaches the process-global reconciler, reports no environments |
 | `management.fleet_status` | `GET /v1/fleet/status` | Filter rows to tenant envs |
 | `management.package_migration_preview` | `POST /v1/migrations/{name}/preview` | Require tenant context; non-disclosing deny on cross-tenant env |
 | `management.package_migration_apply` | `POST /v1/migrations/{name}/apply` | Same as preview; mutating verb |

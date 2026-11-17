@@ -373,6 +373,17 @@ async fn tenant_mode_management_apis_isolate_environments() {
     assert!(!events_body.contains("env-b"));
     assert!(!events_body.contains("tenant-b"));
 
+    // Tenant A also names an environment like the host's `prod`.
+    tenant_store
+        .put_environment_for(
+            &ctx_a,
+            &EnvironmentRecord {
+                id: "prod".into(),
+                revision: 0,
+                configuration_json: "{}".into(),
+            },
+        )
+        .unwrap();
     let reconcile_a = tenant_app
         .clone()
         .oneshot(
@@ -394,15 +405,13 @@ async fn tenant_mode_management_apis_isolate_environments() {
             .to_vec(),
     )
     .unwrap();
-    // The fake global reconcile path returns `prod`; seeing only the
-    // tenant-store identity proves selection used the bounded application
-    // operation before any reconciler work, rather than filtering a global
-    // report afterward.
-    assert!(reconcile_body.contains("env-a"));
-    assert!(!reconcile_body.contains("prod"));
-    assert!(!reconcile_body.contains("env-b"));
-    assert!(!reconcile_body.contains("tenant-b"));
-    assert!(!reconcile_body.contains("management-secret"));
+    // The fake process-global reconciler reports `prod`. A tenant reconcile
+    // never reaches it, so the tenant sees no environment it does not own,
+    // whatever names its partition holds.
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&reconcile_body).unwrap(),
+        serde_json::json!({"environments": []})
+    );
 
     let retirement = tenant_app
         .clone()
