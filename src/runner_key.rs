@@ -311,21 +311,20 @@ impl RunnerKey {
         }
     }
 
-    /// Host evidence signed as `schema` with this key for `csr`.
+    /// Host evidence signed as `tenkai.runner-attestation.v2` with this key for `csr`.
     pub fn sign_attestation(
         &self,
-        schema: crate::runner_attestation::AttestationSchema,
         evidence: crate::runner_attestation::HostEvidence,
         csr: &str,
     ) -> Result<crate::runner_attestation::RunnerAttestation> {
         match self {
             Self::File { pem } => {
-                crate::runner_attestation::sign_with(schema, evidence, csr, false, |message| {
+                crate::runner_attestation::sign_with(evidence, csr, false, |message| {
                     sign_pem(pem, message)
                 })
             }
             Self::Hardware(key) => {
-                crate::runner_attestation::sign_with(schema, evidence, csr, true, |message| {
+                crate::runner_attestation::sign_with(evidence, csr, true, |message| {
                     key.sign_ecdsa(message)
                 })
             }
@@ -968,7 +967,6 @@ mod tests {
         assert!(csr.contains("CERTIFICATE REQUEST") && !csr.contains("PRIVATE KEY"));
         let attestation = key
             .sign_attestation(
-                crate::runner_attestation::AttestationSchema::V2,
                 crate::runner_attestation::HostEvidence {
                     environment: "prod".into(),
                     checks: Vec::new(),
