@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, HashMap};
+
 use postgres::Transaction;
 use prost::Message;
 use tenkai::feedback_observation::FeedbackObservation;
@@ -93,6 +95,11 @@ impl Inner {
         self.with_schema(schema, move |tx| catalog_list_kind_in(tx, &kind))
     }
 
+    pub fn catalog_list_kind_ids(&self, schema: &str, kind: &str) -> Result<Vec<String>> {
+        let kind = kind.to_owned();
+        self.with_schema(schema, move |tx| catalog_list_kind_ids_in(tx, &kind))
+    }
+
     pub fn catalog_find_by_property(
         &self,
         schema: &str,
@@ -129,21 +136,33 @@ impl Inner {
             // tenant recovery and plan selection survive upgrade. Other kinds
             // stay sidecar-indexed; HTTP lists use list_kind.
             if kind == KIND_PLAN {
-                for object in &mut objects {
-                    if let Some(record) = load_plan(tx, &object.id)? {
-                        overlay_plan_lifecycle(object, &record)?;
+                // One read for every sidecar's typed row; a sidecar without one
+                // is not a plan.
+                let ids: Vec<&str> = objects.iter().map(|object| object.id.as_str()).collect();
+                let mut records = tx
+                    .query(
+                        "SELECT id,environment_id,format_version,content_digest,plan_json,status,status_detail
+                         FROM plans WHERE id = ANY($1)",
+                        &[&ids],
+                    )
+                    .map_err(pg)?
+                    .iter()
+                    .map(|row| plan_record(row).map(|record| (record.id.clone(), record)))
+                    .collect::<Result<HashMap<_, _>>>()?;
+                let mut by_id = BTreeMap::new();
+                for mut object in objects {
+                    let Some(record) = records.remove(&object.id) else {
+                        continue;
+                    };
+                    overlay_plan_lifecycle(&mut object, &record)?;
+                    if object_matches_property(&object, &key, &value) {
+                        by_id.insert(object.id.clone(), object);
                     }
                 }
-                objects.retain(|object| {
-                    load_plan(tx, &object.id).ok().flatten().is_some()
-                        && object_matches_property(object, &key, &value)
-                });
                 for object in typed_plan_objects_matching(tx, &key, &value)? {
-                    if !objects.iter().any(|existing| existing.id == object.id) {
-                        objects.push(object);
-                    }
+                    by_id.entry(object.id.clone()).or_insert(object);
                 }
-                objects.sort_by(|left, right| left.id.cmp(&right.id));
+                objects = by_id.into_values().collect();
             }
             Ok(objects)
         })
@@ -859,33 +878,14 @@ impl Inner {
 
 fn catalog_get_in(tx: &mut Transaction<'_>, id: &str) -> Result<Option<Object>> {
     if let Some(record) = load_plan(tx, id)? {
-        if let Some(mut stored) = load_catalog_object(tx, id)? {
-            overlay_plan_lifecycle(&mut stored, &record)?;
-            return Ok(Some(stored));
-        }
-        return plan_record_to_object(&record)
-            .map(Some)
-            .map_err(|error| StoreError::InvalidData {
-                kind: "plan",
-                detail: error.to_string(),
-            });
+        let stored = load_catalog_object(tx, id)?;
+        return plan_object(&record, stored).map(Some);
     }
     if let Some(record) = load_environment(tx, id)? {
-        let mut object =
-            environment_record_to_object(&record).map_err(|error| StoreError::InvalidData {
-                kind: "environment",
-                detail: error.to_string(),
-            })?;
-        object.id = env_id(&object.name);
-        return Ok(Some(object));
+        return environment_object(&record).map(Some);
     }
     if let Some(record) = load_release(tx, id)? {
-        return release_record_to_object(&record)
-            .map(Some)
-            .map_err(|error| StoreError::InvalidData {
-                kind: "release",
-                detail: error.to_string(),
-            });
+        return release_object(&record).map(Some);
     }
     if let Some(record) = load_channel(tx, id)? {
         let mut object = load_catalog_object(tx, id)?
@@ -897,64 +897,148 @@ fn catalog_get_in(tx: &mut Transaction<'_>, id: &str) -> Result<Option<Object>> 
         .filter(|object| !STRICT_AUTHORITY_KINDS.contains(&object.kind.as_str())))
 }
 
+/// A typed plan row as its catalog object: the sidecar payload with the
+/// authoritative lifecycle overlaid, or the row alone when no sidecar exists.
+fn plan_object(record: &tenkai::storage::PlanRecord, stored: Option<Object>) -> Result<Object> {
+    match stored {
+        Some(mut stored) => {
+            overlay_plan_lifecycle(&mut stored, record)?;
+            Ok(stored)
+        }
+        None => plan_record_to_object(record).map_err(|error| StoreError::InvalidData {
+            kind: "plan",
+            detail: error.to_string(),
+        }),
+    }
+}
+
+fn environment_object(record: &tenkai::storage::EnvironmentRecord) -> Result<Object> {
+    let mut object =
+        environment_record_to_object(record).map_err(|error| StoreError::InvalidData {
+            kind: "environment",
+            detail: error.to_string(),
+        })?;
+    object.id = env_id(&object.name);
+    Ok(object)
+}
+
+fn release_object(record: &tenkai::storage::ReleaseRecord) -> Result<Object> {
+    release_record_to_object(record).map_err(|error| StoreError::InvalidData {
+        kind: "release",
+        detail: error.to_string(),
+    })
+}
+
+/// List every object of `kind` in set-based reads: one query per typed table,
+/// joined to its sidecar payload, so the cost does not grow with a query per
+/// row (#869). Each branch yields what `catalog_get_in` returns for that id.
 fn catalog_list_kind_in(tx: &mut Transaction<'_>, kind: &str) -> Result<Vec<Object>> {
-    let ids: Vec<String> = match kind {
+    match kind {
         KIND_ENVIRONMENT => tx
             .query(
-                "SELECT id FROM environments WHERE retired_at IS NULL ORDER BY id ASC",
+                "SELECT id, revision, configuration_json FROM environments
+                 WHERE retired_at IS NULL ORDER BY id ASC",
                 &[],
             )
             .map_err(pg)?
-            .into_iter()
-            .map(|row| row.get(0))
+            .iter()
+            .map(|row| environment_object(&environment_record(row)))
             .collect(),
         KIND_RELEASE => tx
-            .query("SELECT id FROM releases ORDER BY id", &[])
+            .query(
+                "SELECT id,product,version,content_digest,descriptor_json FROM releases ORDER BY id",
+                &[],
+            )
             .map_err(pg)?
-            .into_iter()
-            .map(|row| row.get(0))
+            .iter()
+            .map(|row| release_object(&release_record(row)))
             .collect(),
         KIND_PLAN => tx
-            .query("SELECT id FROM plans ORDER BY id", &[])
+            .query(
+                "SELECT p.id,p.environment_id,p.format_version,p.content_digest,p.plan_json,
+                        p.status,p.status_detail,o.payload
+                 FROM plans p LEFT JOIN catalog_objects o ON o.id = p.id
+                 ORDER BY p.id",
+                &[],
+            )
             .map_err(pg)?
-            .into_iter()
-            .map(|row| row.get(0))
+            .iter()
+            .map(|row| {
+                let stored = row
+                    .get::<_, Option<Vec<u8>>>(7)
+                    .map(|payload| decode_object(&payload))
+                    .transpose()?;
+                plan_object(&plan_record(row)?, stored)
+            })
             .collect(),
         KIND_CHANNEL => {
-            let mut ids: Vec<String> = tx
-                .query("SELECT id FROM channels ORDER BY id", &[])
-                .map_err(pg)?
-                .into_iter()
-                .map(|row| row.get(0))
-                .collect();
-            let catalog = tx
+            let mut objects = tx
                 .query(
-                    "SELECT id FROM catalog_objects WHERE kind=$1 ORDER BY id",
-                    &[&kind],
+                    "SELECT c.id,c.product,c.name,c.release_id,c.revision,o.payload,r.version
+                     FROM channels c
+                     LEFT JOIN catalog_objects o ON o.id = c.id
+                     LEFT JOIN releases r ON r.id = c.release_id",
+                    &[],
                 )
-                .map_err(pg)?;
-            for row in catalog {
-                let id: String = row.get(0);
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-            ids.sort();
-            ids
-        }
-        _ => {
-            return decode_objects(
+                .map_err(pg)?
+                .iter()
+                .map(|row| {
+                    let record = channel_record(row);
+                    let mut object = match row.get::<_, Option<Vec<u8>>>(5) {
+                        Some(payload) => decode_object(&payload)?,
+                        None => tenkai::storage::channel_record_to_object(&record),
+                    };
+                    apply_channel_head(&mut object, &record, row.get(6));
+                    Ok(object)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            objects.extend(decode_objects(
                 tx.query(
-                    "SELECT payload FROM catalog_objects WHERE kind=$1 ORDER BY id",
+                    "SELECT o.payload FROM catalog_objects o
+                     WHERE o.kind=$1 AND NOT EXISTS (SELECT 1 FROM channels c WHERE c.id = o.id)",
                     &[&kind],
                 )
                 .map_err(pg)?,
-            );
+            )?);
+            objects.sort_by(|left, right| left.id.cmp(&right.id));
+            Ok(objects)
         }
-    };
-    ids.into_iter()
-        .map(|id| catalog_get_in(tx, &id)?.ok_or(StoreError::NotFound { kind: "object", id }))
-        .collect()
+        _ => decode_objects(
+            tx.query(
+                "SELECT payload FROM catalog_objects WHERE kind=$1 ORDER BY id",
+                &[&kind],
+            )
+            .map_err(pg)?,
+        ),
+    }
+}
+
+/// The ids `catalog_list_kind_in` would return, without reading payloads.
+/// An environment's object id comes from the name in its configuration, not
+/// its row id, so environments (one small row each) reuse the listing.
+fn catalog_list_kind_ids_in(tx: &mut Transaction<'_>, kind: &str) -> Result<Vec<String>> {
+    let rows = match kind {
+        KIND_ENVIRONMENT => {
+            return Ok(catalog_list_kind_in(tx, kind)?
+                .into_iter()
+                .map(|object| object.id)
+                .collect());
+        }
+        KIND_RELEASE => tx.query("SELECT id FROM releases ORDER BY id", &[]),
+        KIND_PLAN => tx.query("SELECT id FROM plans ORDER BY id", &[]),
+        KIND_CHANNEL => tx.query(
+            "SELECT id FROM channels
+             UNION SELECT id FROM catalog_objects WHERE kind=$1
+             ORDER BY id",
+            &[&kind],
+        ),
+        _ => tx.query(
+            "SELECT id FROM catalog_objects WHERE kind=$1 ORDER BY id",
+            &[&kind],
+        ),
+    }
+    .map_err(pg)?;
+    Ok(rows.iter().map(|row| row.get(0)).collect())
 }
 
 fn catalog_put_objects_with_provider_events_in(
@@ -1361,13 +1445,7 @@ fn upsert_plan(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {
 fn load_catalog_object(tx: &mut Transaction<'_>, id: &str) -> Result<Option<Object>> {
     tx.query_opt("SELECT payload FROM catalog_objects WHERE id=$1", &[&id])
         .map_err(pg)?
-        .map(|row| {
-            let payload: Vec<u8> = row.get(0);
-            Object::decode(payload.as_slice()).map_err(|error| StoreError::InvalidData {
-                kind: "object",
-                detail: error.to_string(),
-            })
-        })
+        .map(|row| decode_object(&row.get::<_, Vec<u8>>(0)))
         .transpose()
 }
 
@@ -1381,11 +1459,16 @@ fn load_environment_exact(
             &[&id],
         )
         .map_err(pg)?
-        .map(|row| tenkai::storage::EnvironmentRecord {
-            id: row.get(0),
-            revision: row.get::<_, i64>(1) as u64,
-            configuration_json: row.get(2),
-        }))
+        .map(|row| environment_record(&row)))
+}
+
+/// Columns `id, revision, configuration_json`.
+fn environment_record(row: &postgres::Row) -> tenkai::storage::EnvironmentRecord {
+    tenkai::storage::EnvironmentRecord {
+        id: row.get(0),
+        revision: row.get::<_, i64>(1) as u64,
+        configuration_json: row.get(2),
+    }
 }
 
 fn load_environment(
@@ -1566,13 +1649,18 @@ fn load_release(
             &[&id],
         )
         .map_err(pg)?
-        .map(|row| tenkai::storage::ReleaseRecord {
-            id: row.get(0),
-            product: row.get(1),
-            version: row.get(2),
-            content_digest: row.get(3),
-            descriptor_json: row.get(4),
-        }))
+        .map(|row| release_record(&row)))
+}
+
+/// Columns `id, product, version, content_digest, descriptor_json`.
+fn release_record(row: &postgres::Row) -> tenkai::storage::ReleaseRecord {
+    tenkai::storage::ReleaseRecord {
+        id: row.get(0),
+        product: row.get(1),
+        version: row.get(2),
+        content_digest: row.get(3),
+        descriptor_json: row.get(4),
+    }
 }
 
 fn load_channel(tx: &mut Transaction<'_>, id: &str) -> Result<Option<ChannelRecord>> {
@@ -1582,13 +1670,18 @@ fn load_channel(tx: &mut Transaction<'_>, id: &str) -> Result<Option<ChannelReco
             &[&id],
         )
         .map_err(pg)?
-        .map(|row| ChannelRecord {
-            id: row.get(0),
-            product: row.get(1),
-            name: row.get(2),
-            release_id: row.get(3),
-            revision: row.get::<_, i64>(4) as u64,
-        }))
+        .map(|row| channel_record(&row)))
+}
+
+/// Columns `id, product, name, release_id, revision`.
+fn channel_record(row: &postgres::Row) -> ChannelRecord {
+    ChannelRecord {
+        id: row.get(0),
+        product: row.get(1),
+        name: row.get(2),
+        release_id: row.get(3),
+        revision: row.get::<_, i64>(4) as u64,
+    }
 }
 
 // Typed channels.current_release is the head. Planning and apply admission
@@ -1599,6 +1692,13 @@ fn overlay_channel_head(
     object: &mut Object,
     record: &ChannelRecord,
 ) -> Result<()> {
+    let version = load_release(tx, &record.release_id)?.map(|release| release.version);
+    apply_channel_head(object, record, version);
+    Ok(())
+}
+
+/// Overlay the typed head; `current_version` is the head release's version.
+fn apply_channel_head(object: &mut Object, record: &ChannelRecord, version: Option<String>) {
     object
         .properties
         .insert("product".into(), record.product.clone());
@@ -1609,12 +1709,9 @@ fn overlay_channel_head(
     object
         .properties
         .insert("current_release".into(), record.release_id.clone());
-    if let Some(release) = load_release(tx, &record.release_id)? {
-        object
-            .properties
-            .insert("current_version".into(), release.version);
+    if let Some(version) = version {
+        object.properties.insert("current_version".into(), version);
     }
-    Ok(())
 }
 
 fn overlay_plan_lifecycle(object: &mut Object, record: &tenkai::storage::PlanRecord) -> Result<()> {
@@ -1663,16 +1760,7 @@ fn typed_plan_objects_matching(
     };
     let mut objects = Vec::new();
     for row in rows {
-        let status: String = row.get(5);
-        let record = tenkai::storage::PlanRecord {
-            id: row.get(0),
-            environment_id: row.get(1),
-            format_version: row.get::<_, i32>(2) as u32,
-            content_digest: row.get(3),
-            plan_json: row.get(4),
-            status: PlanStatus::parse(&status)?,
-            status_detail: row.get(6),
-        };
+        let record = plan_record(&row)?;
         let object = plan_record_to_object(&record).map_err(|error| StoreError::InvalidData {
             kind: "plan",
             detail: error.to_string(),
@@ -1697,19 +1785,23 @@ fn load_plan(tx: &mut Transaction<'_>, id: &str) -> Result<Option<tenkai::storag
         &[&id],
     )
     .map_err(pg)?
-    .map(|row| {
-        let status: String = row.get(5);
-        Ok(tenkai::storage::PlanRecord {
-            id: row.get(0),
-            environment_id: row.get(1),
-            format_version: row.get::<_, i32>(2) as u32,
-            content_digest: row.get(3),
-            plan_json: row.get(4),
-            status: PlanStatus::parse(&status)?,
-            status_detail: row.get(6),
-        })
-    })
+    .map(|row| plan_record(&row))
     .transpose()
+}
+
+/// Columns `id, environment_id, format_version, content_digest, plan_json,
+/// status, status_detail`.
+fn plan_record(row: &postgres::Row) -> Result<tenkai::storage::PlanRecord> {
+    let status: String = row.get(5);
+    Ok(tenkai::storage::PlanRecord {
+        id: row.get(0),
+        environment_id: row.get(1),
+        format_version: row.get::<_, i32>(2) as u32,
+        content_digest: row.get(3),
+        plan_json: row.get(4),
+        status: PlanStatus::parse(&status)?,
+        status_detail: row.get(6),
+    })
 }
 
 fn load_lease_in(tx: &mut Transaction<'_>, namespace: &str, key: &str) -> Result<Option<Lease>> {
@@ -1924,13 +2016,14 @@ fn record_changes_in(tx: &mut Transaction<'_>, previous: &Object, next: &Object)
 }
 
 fn decode_objects(rows: Vec<postgres::Row>) -> Result<Vec<Object>> {
-    rows.into_iter()
-        .map(|row| {
-            let payload: Vec<u8> = row.get(0);
-            Object::decode(payload.as_slice()).map_err(|error| StoreError::InvalidData {
-                kind: "object",
-                detail: error.to_string(),
-            })
-        })
+    rows.iter()
+        .map(|row| decode_object(&row.get::<_, Vec<u8>>(0)))
         .collect()
+}
+
+fn decode_object(payload: &[u8]) -> Result<Object> {
+    Object::decode(payload).map_err(|error| StoreError::InvalidData {
+        kind: "object",
+        detail: error.to_string(),
+    })
 }
