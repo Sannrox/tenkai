@@ -231,7 +231,9 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
                     }
                     // Leaf blobs are not fetched during discovery; a carried
                     // one still has to be here, and the refusal names the image.
-                    if request.registry.stored(blob)? != Some(true) {
+                    // Presence only: the layer pass streams and verifies
+                    // every carried blob, so hashing it here too is waste (#851).
+                    if request.registry.open(blob)?.is_none() {
                         bail!("missing image {}", artifact.digest);
                     }
                 }
@@ -642,29 +644,36 @@ async fn assemble_release(
             images.push(artifact.digest.clone());
             continue;
         }
-        match registry.fetch(artifact) {
-            Ok(bytes) => {
-                let actual = sha256_digest(&bytes);
-                if actual != artifact.digest {
-                    bail!(
-                        "artifact digest {} does not match fetched bytes {actual}",
-                        artifact.digest
-                    );
-                }
-                let path = if bytes.len() as u64 > crate::offline_bundle::MAX_ENTRY_BYTES {
-                    // Chunked: one blob of the index, not the index itself.
-                    format!(
-                        "{}#{}",
-                        crate::offline_bundle::IMAGE_CHUNKS_PATH,
-                        artifact.digest
-                    )
-                } else {
-                    artifact.layer_entry_path()?
-                };
-                files.push(sbom_file(&path, &artifact.media_type, &bytes));
-            }
-            Err(_) => bail!("missing image {}", artifact.digest),
+        // Streamed, not fetched (#851): one read and one hash, never the
+        // whole blob in memory.
+        let Some((size, mut reader)) = registry.open(artifact)? else {
+            bail!("missing image {}", artifact.digest);
+        };
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut reader, &mut hasher)?;
+        let actual = format!("sha256:{:x}", hasher.finalize());
+        if actual != artifact.digest {
+            bail!(
+                "artifact digest {} does not match fetched bytes {actual}",
+                artifact.digest
+            );
         }
+        let path = if size > crate::offline_bundle::MAX_ENTRY_BYTES {
+            // Chunked: one blob of the index, not the index itself.
+            format!(
+                "{}#{}",
+                crate::offline_bundle::IMAGE_CHUNKS_PATH,
+                artifact.digest
+            )
+        } else {
+            artifact.layer_entry_path()?
+        };
+        files.push(SbomFile {
+            path,
+            digest: actual,
+            size,
+            media_type: artifact.media_type.clone(),
+        });
         declared.push(carry_declared_sbom(registry, artifact, payloads)?);
         images.push(artifact.digest.clone());
     }

@@ -584,31 +584,45 @@ fn insert_layers(
         }
         let path = artifact.layer_entry_path()?;
         if seen_paths.insert(path.clone()) {
-            let bytes = registry.fetch(artifact).map_err(|error| {
-                anyhow::anyhow!(
-                    "artifact digest {} is unresolvable for offline export: {error}",
-                    artifact.digest
-                )
-            })?;
-            let actual = format!("sha256:{:x}", Sha256::digest(&bytes));
-            if actual != artifact.digest {
-                bail!(
-                    "artifact digest {} does not match fetched bytes {actual}",
-                    artifact.digest
-                );
-            }
+            // One streamed read per blob (#851): a layer over the entry
+            // limit goes straight into the chunk store, hashed on the way,
+            // and only entries the archive holds are buffered.
+            let unresolvable = format!(
+                "artifact digest {} is unresolvable for offline export at {}/{}",
+                artifact.digest, artifact.registry, artifact.repository
+            );
+            let (size, mut reader) = registry
+                .open(artifact)
+                .context(unresolvable.clone())?
+                .ok_or_else(|| anyhow::anyhow!(unresolvable))?;
             match chunks {
-                Some((dir, chunk_size)) if bytes.len() as u64 > MAX_ENTRY_BYTES => {
+                Some((dir, chunk_size)) if size > MAX_ENTRY_BYTES => {
                     let exported = crate::offline_chunk_store::export_chunks(
-                        &mut bytes.as_slice(),
-                        bytes.len() as u64,
+                        &mut reader,
+                        size,
                         &artifact.media_type,
                         dir,
                         chunk_size,
                     )?;
+                    if exported.digest != artifact.digest {
+                        bail!(
+                            "artifact digest {} does not match fetched bytes {}",
+                            artifact.digest,
+                            exported.digest
+                        );
+                    }
                     chunked.push(exported);
                 }
                 _ => {
+                    let mut bytes = Vec::new();
+                    reader.read_to_end(&mut bytes)?;
+                    let actual = format!("sha256:{:x}", Sha256::digest(&bytes));
+                    if actual != artifact.digest {
+                        bail!(
+                            "artifact digest {} does not match fetched bytes {actual}",
+                            artifact.digest
+                        );
+                    }
                     payloads.insert(path.clone(), (artifact.media_type.clone(), bytes));
                 }
             }
@@ -1998,6 +2012,51 @@ mod tests {
             key,
         )
         .unwrap()
+    }
+
+    /// A layer over the entry limit streams from the store into the chunk
+    /// store without being buffered (#851), so its digest is checked on the
+    /// way: a stored blob whose bytes changed is refused, never chunked.
+    #[test]
+    fn a_streamed_layer_whose_stored_bytes_changed_is_refused() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-streamed-layer-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let mut bytes: Vec<u8> = (0..MAX_ENTRY_BYTES + 1)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let artifact = sample_artifact(&bytes);
+        let store = crate::oci_artifact::FilesystemArtifactRegistry::new(dir.join("store"));
+        store.put(&artifact, bytes.clone()).unwrap();
+        let chunk_dir = dir.join("chunks");
+        let layers = |payloads: &mut BTreeMap<String, (String, Vec<u8>)>| {
+            insert_artifact_layers_chunked(
+                payloads,
+                std::slice::from_ref(&artifact),
+                &store,
+                Some((&chunk_dir, 16 * 1024 * 1024)),
+            )
+        };
+
+        let mut payloads = BTreeMap::new();
+        layers(&mut payloads).unwrap();
+        assert!(payloads.contains_key(IMAGE_CHUNKS_PATH));
+        assert!(!payloads.contains_key(&artifact.layer_entry_path().unwrap()));
+
+        bytes[0] ^= 0xff;
+        let blob = std::fs::read_dir(dir.join("store/ghcr.io/edge/app"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(&blob, &bytes).unwrap();
+        let error = format!("{:#}", layers(&mut BTreeMap::new()).unwrap_err());
+        assert!(error.contains("does not match fetched bytes"), "{error}");
+        assert!(error.contains(&artifact.digest), "{error}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
