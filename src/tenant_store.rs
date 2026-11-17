@@ -115,6 +115,18 @@ pub trait TenantOperationalStore: Send + Sync {
 
     /// Host-scoped outbox partitions the outcome worker drains.
     fn provider_event_partitions(&self) -> Result<Vec<Arc<dyn OperationalStore>>>;
+
+    /// The partitions that may hold a `provider_kind` event due at `now`, so
+    /// an export tick skips partitions with nothing to claim (#872). It may
+    /// return more than are due, never fewer. Default: every partition.
+    fn provider_event_partitions_due(
+        &self,
+        provider_kind: &str,
+        now: i64,
+    ) -> Result<Vec<Arc<dyn OperationalStore>>> {
+        let _ = (provider_kind, now);
+        self.provider_event_partitions()
+    }
 }
 
 /// Capability advertisement for the in-memory tenant-isolating store adapter.

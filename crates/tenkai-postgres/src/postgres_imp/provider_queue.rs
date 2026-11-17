@@ -94,6 +94,51 @@ impl Inner {
         })
     }
 
+    /// The hub and tenant schemas holding a `provider_kind` event that a
+    /// claim at `now` would take (#872): one catalog read and one query for
+    /// the whole hub, so an idle export tick does not visit every tenant.
+    /// Writer-gated like the claim it precedes.
+    pub fn due_provider_event_schemas(&self, provider_kind: &str, now: i64) -> Result<Vec<String>> {
+        let provider_kind = provider_kind.to_owned();
+        self.with_writer_schema("public", move |tx| {
+            let schemas: Vec<String> = tx
+                .query(
+                    "SELECT n.nspname FROM pg_namespace n
+                     JOIN pg_class c ON c.relnamespace = n.oid
+                     WHERE c.relname = 'provider_events' AND c.relkind IN ('r','p')
+                       AND (n.nspname LIKE 'tenkai_t_%' OR n.nspname = $1)
+                     ORDER BY n.nspname",
+                    &[&crate::HUB_SCHEMA],
+                )
+                .map_err(pg)?
+                .into_iter()
+                .map(|row| row.get(0))
+                .collect();
+            if schemas.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Same due rule as the claim: undelivered, attempt time reached,
+            // and no live claim. Names come from the catalog, so quote them.
+            let sql = schemas
+                .iter()
+                .map(|schema| {
+                    format!(
+                        "SELECT {literal}::text WHERE EXISTS (
+                           SELECT 1 FROM {ident}.provider_events
+                           WHERE provider_kind = $1 AND delivered_at IS NULL
+                             AND next_attempt_at <= $2
+                             AND (claim_until IS NULL OR claim_until <= $2))",
+                        literal = format_args!("'{}'", schema.replace('\'', "''")),
+                        ident = format_args!("\"{}\"", schema.replace('"', "\"\"")),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" UNION ALL ");
+            let rows = tx.query(&sql, &[&provider_kind, &now]).map_err(pg)?;
+            Ok(rows.into_iter().map(|row| row.get(0)).collect())
+        })
+    }
+
     pub fn list_provider_events(
         &self,
         schema: &str,

@@ -158,6 +158,36 @@ impl TenantOperationalStore for PostgresTenantOperationalStore {
             ))
         }
     }
+
+    fn provider_event_partitions_due(
+        &self,
+        provider_kind: &str,
+        now: i64,
+    ) -> StoreResult<Vec<Arc<dyn OperationalStore>>> {
+        #[cfg(feature = "postgres")]
+        {
+            let mut partitions: Vec<Arc<dyn OperationalStore>> = Vec::new();
+            for schema in self.inner.due_provider_event_schemas(provider_kind, now)? {
+                if schema == crate::HUB_SCHEMA {
+                    partitions.push(Arc::new(self.hub_partition()?));
+                } else {
+                    partitions.push(Arc::new(super::PostgresTenantPartition {
+                        tenant_id: schema.clone(),
+                        schema,
+                        inner: self.inner.clone(),
+                    }));
+                }
+            }
+            Ok(partitions)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (provider_kind, now);
+            Err(tenkai::storage::StoreError::AdapterUnavailable(
+                "postgres feature is disabled".into(),
+            ))
+        }
+    }
 }
 
 impl PostgresTenantOperationalStore {
