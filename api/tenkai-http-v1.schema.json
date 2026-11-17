@@ -421,6 +421,49 @@
       ],
       "type": "object"
     },
+    "ArtifactKind": {
+      "description": "Which stored signed artifact an [`ArtifactRunway`] grades.",
+      "enum": [
+        "revocation_list",
+        "backup_manifest",
+        "audit_export"
+      ],
+      "type": "string"
+    },
+    "ArtifactRunway": {
+      "description": "A stored signed artifact and how close its signer's window is to\nlapsing, graded with the certificate thresholds (#920). None of these\nartifacts carries an expiry of its own, so the signer's `not_after` is\nthe only clock. A signer without a recorded window grades `ok`.",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "error": {
+          "description": "Why the artifact could not be read; it then grades `critical`.",
+          "type": "string"
+        },
+        "file": {
+          "description": "The artifact's file name, never its host path.",
+          "type": "string"
+        },
+        "signer_key_id": {
+          "description": "Absent for an unsigned backup or an unreadable artifact.",
+          "type": "string"
+        },
+        "signer_not_after": {
+          "description": "Unix milliseconds: the earliest `not_after` any configured trust\nroot records for the signer. Absent when none records one.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/TrustStatus"
+        }
+      },
+      "required": [
+        "artifact",
+        "file",
+        "status"
+      ],
+      "type": "object"
+    },
     "AuditSequences": {
       "description": "Inclusive chain sequences.",
       "properties": {
@@ -6815,6 +6858,13 @@
     },
     "PlanRunways": {
       "properties": {
+        "artifacts": {
+          "description": "Stored signed artifacts graded by their signer's window (#920).",
+          "items": {
+            "$ref": "#/$defs/ArtifactRunway"
+          },
+          "type": "array"
+        },
         "plans": {
           "items": {
             "$ref": "#/$defs/PlanRunway"

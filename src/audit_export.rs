@@ -502,6 +502,29 @@ pub fn export_next(
     Ok(next)
 }
 
+/// The newest chain export in `dir` by sequence, as its file name and the
+/// key that signed it, for the trust runway (#920). `None` when the
+/// directory holds no export yet.
+pub fn latest_export(dir: &Path) -> Result<Option<(String, String)>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", dir.display())),
+    };
+    let mut newest: Option<(u64, String)> = None;
+    for entry in entries {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if let Some(sequence) = chain_sequence(&name)
+            && newest.as_ref().is_none_or(|(seen, _)| sequence > *seen)
+        {
+            newest = Some((sequence, name));
+        }
+    }
+    newest
+        .map(|(_, name)| Ok((name.clone(), AuditExport::load(&dir.join(&name))?.key_id)))
+        .transpose()
+}
+
 /// The sequence of a chain entry file, `audit-<digits>.json`. Anything
 /// else, such as an `audit-range-<from>-<to>.json` beside the chain, is not
 /// part of it.

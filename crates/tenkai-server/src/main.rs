@@ -2113,6 +2113,8 @@ fn trust_sources(
             "key_revocation",
             path(tenkai::key_revocation::REVOCATION_TRUST_ROOTS_ENV),
         ),
+        // Rotated audit export keys, so their windows show on the runway (#920).
+        ("audit_export", path("TENKAI_AUDIT_TRUST_ROOTS")),
     ];
     // The listener, client CA and runner CA as the server loaded them, so a
     // renewal that failed to load cannot clear a warning.
@@ -2174,6 +2176,8 @@ fn trust_sources(
         runtime_client_cert_required,
         // Filled by the router with the roots it loads at start.
         loaded_signing: Vec::new(),
+        backup_dir: path("TENKAI_BACKUP_DIR"),
+        audit_export_dir: path("TENKAI_AUDIT_EXPORT_DIR"),
     };
     anyhow::ensure!(
         sources.critical_days <= sources.warning_days,

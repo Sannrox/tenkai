@@ -633,6 +633,15 @@ signer that lapses at or before that window. It is computed on each request
 with the same check plan creation uses
 ([maintenance windows](manage-environments.md#maintenance-windows)).
 A signer without a recorded `not_after` is not checked.
+`artifacts` (#920) lists the stored signed artifacts this host keeps: the
+installed revocation list, the newest backup in `TENKAI_BACKUP_DIR`, and the
+newest audit export in `TENKAI_AUDIT_EXPORT_DIR`. Each shows its file name,
+`signer_key_id`, the earliest `signer_not_after` any configured trust root
+records for that key, and a `status` graded with the certificate thresholds.
+None of them carries an expiry of its own. Rotated audit keys are read from
+`TENKAI_AUDIT_TRUST_ROOTS`, which the posture now lists as `audit_export`. An
+artifact that cannot be read grades `critical` with an `error`; one not
+written yet is left out.
 **Announcements (#775).** When the worst certificate status turns
 `warning`, `critical` or `expired`, host webhooks that list `trust.expiring`
 are notified once per turn, as for `backup.stale` and `clock.drift`.
