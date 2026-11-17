@@ -3904,6 +3904,16 @@ impl ManagementOperations {
             Some(runway) => format!("{message}; {}", runway.summary()),
             None => message,
         };
+        let unverifiable = stored
+            .artifact_availability
+            .iter()
+            .filter(|result| result.state == crate::plan::ArtifactState::Unverifiable)
+            .count();
+        let message = if unverifiable == 0 {
+            message
+        } else {
+            format!("{message}; {unverifiable} artifact digest(s) unverifiable at planning")
+        };
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Plan,
             message,
@@ -4896,6 +4906,7 @@ mod tests {
                     prior_warnings: Vec::new(),
                     recalled_recovery_reason: None,
                     credential_runway: None,
+                    artifact_availability: Vec::new(),
                     approval_brief: None,
                 }))
             })

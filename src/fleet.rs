@@ -515,6 +515,7 @@ mod tests {
                 step_count: 1,
                 digest: None,
                 approval_brief: None,
+                artifact_availability: Vec::new(),
                 status_detail: String::new(),
                 steps: Vec::new(),
                 steps_truncated: false,
