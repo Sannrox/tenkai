@@ -17,6 +17,7 @@ impl Inner {
             )?,
             fence: std::sync::OnceLock::new(),
             ensured_tenant_schemas: crate::tenant_schema::EnsuredTenantSchemas::new(),
+            tenant_schema_owners: crate::tenant_schema::TenantSchemaOwners::new(),
         })
     }
 }
@@ -196,6 +197,17 @@ fn connect_client(config: &Config, tls: MakeRustlsConnect) -> Result<Client> {
                  );",
         )
         .map_err(pg)?;
+    // The exact tenant id that owns each tenant schema. Distinct ids can map
+    // to one schema name, so the first id to open a schema owns it and any
+    // other is refused. Additive; older binaries ignore it.
+    client
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS public.tenkai_tenant_schema_owners (
+                    schema_name TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL
+                 );",
+        )
+        .map_err(pg)?;
     client
         .query_one(
             "SELECT pg_advisory_unlock(hashtextextended('tenkai_global_schema_migration', 0))",
@@ -284,6 +296,54 @@ impl Inner {
         )?;
         self.ensured_tenant_schemas.insert(schema);
         Ok(())
+    }
+
+    /// The schema of `tenant_id`, migrated and bound to that exact id.
+    ///
+    /// The first tenant id to open a schema owns it, including a schema
+    /// created before owners were recorded. Any other id that maps to the
+    /// same schema name is refused before any DDL, so two tenant ids never
+    /// share a partition.
+    pub fn open_tenant_schema(&self, tenant_id: &str) -> Result<String> {
+        let schema = crate::tenant_schema_name(tenant_id)?;
+        let owner = match self.tenant_schema_owners.owner(&schema) {
+            Some(owner) => owner,
+            None => {
+                let (worker_schema, claimant) = (schema.clone(), tenant_id.to_owned());
+                let owner: String = self.worker.run(
+                    move |client| {
+                        client
+                            .execute(
+                                "INSERT INTO public.tenkai_tenant_schema_owners(schema_name, tenant_id)
+                                 VALUES ($1, $2)
+                                 ON CONFLICT (schema_name) DO NOTHING",
+                                &[&worker_schema, &claimant],
+                            )
+                            .map_err(pg)?;
+                        let row = client
+                            .query_one(
+                                "SELECT tenant_id FROM public.tenkai_tenant_schema_owners
+                                 WHERE schema_name = $1",
+                                &[&worker_schema],
+                            )
+                            .map_err(pg)?;
+                        Ok(row.get(0))
+                    },
+                    StoreError::Postgres("postgres worker thread panicked".into()),
+                )?;
+                self.tenant_schema_owners
+                    .record(schema.clone(), owner.clone());
+                owner
+            }
+        };
+        if owner != tenant_id {
+            return Err(StoreError::InvalidData {
+                kind: "tenant",
+                detail: "tenant id maps to a schema that another tenant id owns".into(),
+            });
+        }
+        self.ensure_tenant_schema(&schema)?;
+        Ok(schema)
     }
 
     /// Drop the process memo so the next ensure consults the stamp row.

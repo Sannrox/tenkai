@@ -5,7 +5,6 @@ use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType}
 use tenkai::storage::{CatalogGraph, LeaseRefresh, ProviderEventRecord, Result, StoreError};
 
 use super::PostgresTenantOperationalStore;
-use super::tenant_schema_name;
 
 fn missing_tenant() -> StoreError {
     StoreError::AdapterUnavailable("missing tenant on hub catalog write".into())
@@ -21,15 +20,13 @@ fn postgres_disabled() -> StoreError {
 impl PostgresTenantOperationalStore {
     fn catalog_schema(&self, tenant: Option<&str>) -> Result<String> {
         let tenant = tenant.ok_or_else(missing_tenant)?;
-        let schema = tenant_schema_name(tenant)?;
         #[cfg(feature = "postgres")]
         {
-            self.inner.ensure_tenant_schema(&schema)?;
-            Ok(schema)
+            self.inner.open_tenant_schema(tenant)
         }
         #[cfg(not(feature = "postgres"))]
         {
-            let _ = schema;
+            crate::tenant_schema_name(tenant)?;
             Err(postgres_disabled())
         }
     }
