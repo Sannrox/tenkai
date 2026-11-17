@@ -24,13 +24,13 @@ and a body that names the statement schemas it verifies, preferred first:
 
 ```json
 {"error": "runner attestation required: attestation_missing",
- "accepted_schemas": ["tenkai.runner-attestation.v2", "tenkai.runner-attestation.v1"]}
+ "accepted_schemas": ["tenkai.runner-attestation.v2"]}
 ```
 
 The agent then repeats the request with an
 [attestation](#runner-attestation-statement) in the first listed schema it
 signs. A server of a release before 0.7.0 sends no `accepted_schemas`; an
-agent then sends v1. An attestation in a schema the server does not verify,
+agent then stops with an error asking for the server to be upgraded. An attestation in a schema the server does not verify,
 in any JSON shape, is `403` `attestation_schema_unsupported` with the same
 body. Other attestation refusals are `403` with a named reason
 (`hardware_key_required` when the environment requires a hardware-backed
@@ -105,11 +105,10 @@ extension `2.25.15797326480183637975`: a DER `SEQUENCE` of two 32-byte
 `OCTET STRING`s, the evidence digest and the key fingerprint, followed by
 `BOOLEAN TRUE` when the key is hardware-backed.
 
-`tenkai.runner-attestation.v1` is deprecated. Its `statement` is a JSON
-object signed over the server's own re-encoding of it, it allows no added
-field, and its evidence digest hashes the server's re-encoding of the whole
-attestation. Servers of this release still verify it from agents of earlier
-releases; a later release removes it.
+`tenkai.runner-attestation.v1`, signed over the server's own re-encoding
+of its statement, is no longer verified (#940): servers refuse it with `403`
+`attestation_schema_unsupported`, and agents no longer sign it. Upgrade every
+agent to a release that sends v2 (0.7.0 or later) before upgrading the server.
 
 The other endpoints take either a configured runtime token or an enrolled
 credential as the bearer

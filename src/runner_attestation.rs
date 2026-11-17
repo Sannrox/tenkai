@@ -42,15 +42,12 @@ use crate::host_preflight::CheckResult;
 
 /// The statement agents of this release sign: over the bytes sent (#849).
 pub const ATTESTATION_SCHEMA: &str = "tenkai.runner-attestation.v2";
-/// Deprecated (#675): signed over a re-encoding, accepted from agents of
-/// earlier releases until a later release removes it.
-pub const LEGACY_ATTESTATION_SCHEMA: &str = "tenkai.runner-attestation.v1";
-/// The schemas this server verifies, preferred first.
-pub const ACCEPTED_SCHEMAS: &[&str] = &[ATTESTATION_SCHEMA, LEGACY_ATTESTATION_SCHEMA];
+/// The schemas this server verifies, preferred first. The deprecated
+/// `tenkai.runner-attestation.v1` is refused by name since #940.
+pub const ACCEPTED_SCHEMAS: &[&str] = &[ATTESTATION_SCHEMA];
 /// The only algorithm: runner keys are ECDSA P-256 (#674).
 pub const ATTESTATION_ALGORITHM: &str = "ecdsa-p256-sha256";
 const SIGNING_DOMAIN: &[u8] = b"TENKAI-RUNNER-ATTESTATION-V2\0";
-const LEGACY_SIGNING_DOMAIN: &[u8] = b"TENKAI-RUNNER-ATTESTATION-V1\0";
 /// Environment property holding the policy as JSON.
 pub const POLICY_PROPERTY: &str = "runner_attestation_policy";
 /// Longest accepted `max_age_ms`: seven days.
@@ -98,43 +95,24 @@ impl RunnerAttestationPolicy {
     }
 }
 
-/// Which statement an agent signs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttestationSchema {
-    /// [`ATTESTATION_SCHEMA`], signed over the bytes sent.
-    V2,
-    /// [`LEGACY_ATTESTATION_SCHEMA`], for a server that names no schemas.
-    V1,
-}
-
-impl AttestationSchema {
-    pub fn id(self) -> &'static str {
-        match self {
-            Self::V2 => ATTESTATION_SCHEMA,
-            Self::V1 => LEGACY_ATTESTATION_SCHEMA,
-        }
+/// Check, after a 428 whose body is `body`, that the server accepts the
+/// [`ATTESTATION_SCHEMA`] this agent signs. A server that names no schemas
+/// predates it and verifies only the removed v1 (#940).
+pub fn check_challenge(body: &str) -> Result<()> {
+    let accepted = serde_json::from_str::<AttestationChallenge>(body)
+        .map(|challenge| challenge.accepted_schemas)
+        .unwrap_or_default();
+    if accepted.is_empty() {
+        bail!(
+            "the server names no runner attestation schemas, so it predates {ATTESTATION_SCHEMA}; upgrade the server"
+        );
     }
-
-    /// The schema to attest with after a 428 whose body is `body`: v2 when
-    /// the server accepts it, v1 from a server that names no schemas (an
-    /// earlier release), and an error naming what the server accepts when
-    /// this agent signs none of them.
-    pub fn for_challenge(body: &str) -> Result<Self> {
-        let accepted = serde_json::from_str::<AttestationChallenge>(body)
-            .map(|challenge| challenge.accepted_schemas)
-            .unwrap_or_default();
-        if accepted.is_empty() {
-            return Ok(Self::V1);
-        }
-        [Self::V2, Self::V1]
-            .into_iter()
-            .find(|schema| accepted.iter().any(|id| id == schema.id()))
-            .with_context(|| {
-                format!(
-                    "the server accepts runner attestation schemas {accepted:?}, none of which this agent signs"
-                )
-            })
+    if !accepted.iter().any(|id| id == ATTESTATION_SCHEMA) {
+        bail!(
+            "the server accepts runner attestation schemas {accepted:?}, none of which this agent signs"
+        );
     }
+    Ok(())
 }
 
 /// The body of a `428` `attestation_missing` and a `403`
@@ -237,64 +215,6 @@ pub struct SignedAttestation {
     pub signature: String,
 }
 
-/// The deprecated [`LEGACY_ATTESTATION_SCHEMA`] statement (#675), kept so
-/// agents of earlier releases attest during an upgrade. Its signature
-/// covers this struct's serde_json encoding, so the shape is frozen.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LegacyStatement {
-    pub environment: String,
-    pub checked_at: i64,
-    pub passed: bool,
-    pub checks: Vec<LegacyCheck>,
-    pub facts: BTreeMap<String, String>,
-    pub key_fingerprint: String,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub hardware_backed: bool,
-}
-
-/// One check of a [`LegacyStatement`], frozen with it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LegacyCheck {
-    pub check: String,
-    pub passed: bool,
-    pub reason: String,
-}
-
-impl From<LegacyStatement> for RunnerAttestationStatement {
-    fn from(legacy: LegacyStatement) -> Self {
-        Self {
-            environment: legacy.environment,
-            checked_at: legacy.checked_at,
-            passed: legacy.passed,
-            checks: legacy
-                .checks
-                .into_iter()
-                .map(|check| AttestedCheck {
-                    check: check.check,
-                    passed: check.passed,
-                    reason: check.reason,
-                })
-                .collect(),
-            facts: legacy.facts,
-            key_fingerprint: legacy.key_fingerprint,
-            hardware_backed: legacy.hardware_backed,
-        }
-    }
-}
-
-/// A [`LEGACY_ATTESTATION_SCHEMA`] attestation as sent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LegacyAttestation {
-    pub schema: String,
-    pub algorithm: String,
-    pub statement: LegacyStatement,
-    /// Base64 ASN.1 DER ECDSA signature over the domain-separated statement.
-    pub signature: String,
-}
-
 /// Signed runner attestation, as sent with an enrollment or a renewal.
 /// Any JSON value parses, so an unknown schema is refused by name
 /// (`attestation_schema_unsupported`) rather than by the JSON extractor.
@@ -302,7 +222,6 @@ pub struct LegacyAttestation {
 #[serde(untagged)]
 pub enum RunnerAttestation {
     Signed(SignedAttestation),
-    Legacy(LegacyAttestation),
     Unrecognized(serde_json::Value),
 }
 
@@ -387,19 +306,12 @@ impl AttestationRefusal {
 /// What a verified attestation binds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
-    /// `sha256:<hex>` of the statement bytes as sent (v2), or of the
-    /// re-encoded attestation (v1).
+    /// `sha256:<hex>` of the statement bytes as sent.
     pub evidence_digest: String,
     /// `sha256:<hex>` of the runner key's SubjectPublicKeyInfo.
     pub key_fingerprint: String,
     pub checked_at: i64,
     pub hardware_backed: bool,
-}
-
-fn legacy_message(statement: &LegacyStatement) -> Result<Vec<u8>> {
-    let mut bytes = LEGACY_SIGNING_DOMAIN.to_vec();
-    serde_json::to_writer(&mut bytes, statement)?;
-    Ok(bytes)
 }
 
 fn sha256_label(bytes: &[u8]) -> String {
@@ -431,16 +343,11 @@ pub fn certificate_fingerprint(certificate_der: &[u8]) -> Result<String> {
     Ok(sha256_label(certificate.public_key().raw))
 }
 
-/// Sign `evidence` as `schema` with the runner key `key_pem` (PKCS#8
+/// Sign `evidence` as [`ATTESTATION_SCHEMA`] with the runner key `key_pem` (PKCS#8
 /// P-256, as the agent stores a file key), for the key of `csr_pem`. File
 /// keys are not hardware-backed.
-pub fn sign(
-    schema: AttestationSchema,
-    evidence: HostEvidence,
-    key_pem: &str,
-    csr_pem: &str,
-) -> Result<RunnerAttestation> {
-    sign_with(schema, evidence, csr_pem, false, |message| {
+pub fn sign(evidence: HostEvidence, key_pem: &str, csr_pem: &str) -> Result<RunnerAttestation> {
+    sign_with(evidence, csr_pem, false, |message| {
         use ring::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair};
         let key = rcgen::KeyPair::from_pem(key_pem).context("reading the runner key")?;
         let rng = ring::rand::SystemRandom::new();
@@ -457,7 +364,6 @@ pub fn sign(
 /// [`sign`] with a caller-supplied signature (ASN.1 DER over the message
 /// it is given) and hardware-backed flag (#785).
 pub fn sign_with(
-    schema: AttestationSchema,
     evidence: HostEvidence,
     csr_pem: &str,
     hardware_backed: bool,
@@ -472,51 +378,22 @@ pub fn sign_with(
     crate::ontology::validate_identifier("environment", &environment)?;
     let passed = checks.iter().all(|check| check.passed);
     let key_fingerprint = csr_fingerprint(csr_pem)?;
-    Ok(match schema {
-        AttestationSchema::V2 => {
-            let statement = RunnerAttestationStatement {
-                environment,
-                checked_at,
-                passed,
-                checks: checks.into_iter().map(Into::into).collect(),
-                facts,
-                key_fingerprint,
-                hardware_backed,
-            };
-            let signed = crate::signed_bytes::sign(SIGNING_DOMAIN, &statement, sign)?;
-            RunnerAttestation::Signed(SignedAttestation {
-                schema: ATTESTATION_SCHEMA.into(),
-                algorithm: ATTESTATION_ALGORITHM.into(),
-                statement: signed.statement,
-                signature: STANDARD.encode(signed.signature),
-            })
-        }
-        AttestationSchema::V1 => {
-            let statement = LegacyStatement {
-                environment,
-                checked_at,
-                passed,
-                checks: checks
-                    .into_iter()
-                    .map(|check| LegacyCheck {
-                        check: check.check,
-                        passed: check.passed,
-                        reason: check.reason,
-                    })
-                    .collect(),
-                facts,
-                key_fingerprint,
-                hardware_backed,
-            };
-            let signature = sign(&legacy_message(&statement)?)?;
-            RunnerAttestation::Legacy(LegacyAttestation {
-                schema: LEGACY_ATTESTATION_SCHEMA.into(),
-                algorithm: ATTESTATION_ALGORITHM.into(),
-                statement,
-                signature: STANDARD.encode(signature),
-            })
-        }
-    })
+    let statement = RunnerAttestationStatement {
+        environment,
+        checked_at,
+        passed,
+        checks: checks.into_iter().map(Into::into).collect(),
+        facts,
+        key_fingerprint,
+        hardware_backed,
+    };
+    let signed = crate::signed_bytes::sign(SIGNING_DOMAIN, &statement, sign)?;
+    Ok(RunnerAttestation::Signed(SignedAttestation {
+        schema: ATTESTATION_SCHEMA.into(),
+        algorithm: ATTESTATION_ALGORITHM.into(),
+        statement: signed.statement,
+        signature: STANDARD.encode(signed.signature),
+    }))
 }
 
 /// The statement of `evidence` once its signature verified with the key
@@ -557,21 +434,9 @@ fn verified_statement(
                 })?;
             Ok((verified.statement, verified.digest))
         }
-        RunnerAttestation::Legacy(legacy) if legacy.schema == LEGACY_ATTESTATION_SCHEMA => {
-            algorithm(&legacy.algorithm, LEGACY_ATTESTATION_SCHEMA)?;
-            let message = legacy_message(&legacy.statement)
-                .map_err(|error| AttestationRefusal::Malformed(error.to_string()))?;
-            if !signed_by(&message, &legacy.signature) {
-                return Err(AttestationRefusal::SignatureInvalid);
-            }
-            let encoded = serde_json::to_vec(legacy)
-                .map_err(|error| AttestationRefusal::Malformed(error.to_string()))?;
-            Ok((legacy.statement.clone().into(), sha256_label(&encoded)))
-        }
         other => {
             let schema = match other {
                 RunnerAttestation::Signed(signed) => Some(signed.schema.as_str()),
-                RunnerAttestation::Legacy(legacy) => Some(legacy.schema.as_str()),
                 RunnerAttestation::Unrecognized(value) => {
                     value.get("schema").and_then(serde_json::Value::as_str)
                 }
@@ -859,18 +724,7 @@ pub(crate) mod tests {
         key: &(String, String),
         now_ms: i64,
     ) -> RunnerAttestation {
-        attest_as(AttestationSchema::V2, environment, facts, key, now_ms)
-    }
-
-    pub(crate) fn attest_as(
-        schema: AttestationSchema,
-        environment: &str,
-        facts: &[(&str, &str)],
-        key: &(String, String),
-        now_ms: i64,
-    ) -> RunnerAttestation {
         sign(
-            schema,
             HostEvidence {
                 environment: environment.into(),
                 checks: vec![CheckResult {
@@ -987,7 +841,6 @@ pub(crate) mod tests {
             "evidence_stale"
         );
         let failed = sign(
-            AttestationSchema::V2,
             HostEvidence {
                 environment: "prod".into(),
                 checks: vec![CheckResult {
@@ -1119,44 +972,12 @@ pub(crate) mod tests {
         assert_eq!(refusal.code(), "attestation_malformed", "{refusal}");
     }
 
-    /// v1 statements of earlier agents still verify, over the encoding
-    /// those agents signed; an unknown schema, in any shape, is refused by
-    /// name, and a known schema in the wrong shape is malformed.
+    /// A v1 statement, as agents before #849 sent it, an unknown schema
+    /// in any shape, are refused by name (#940); a known schema in the
+    /// wrong shape is malformed.
     #[test]
-    fn v1_still_verifies_and_unknown_schemas_are_named() {
+    fn v1_and_unknown_schemas_are_refused_by_name() {
         let key = runner_key();
-        let legacy = attest_as(
-            AttestationSchema::V1,
-            "prod",
-            &[("architecture", "arm64")],
-            &key,
-            NOW,
-        );
-        let RunnerAttestation::Legacy(sent) = &legacy else {
-            panic!("v1 is sent as an object");
-        };
-        // The bytes an agent before #849 signed for this statement.
-        let expected = format!(
-            r#"{{"environment":"prod","checked_at":{NOW},"passed":true,"checks":[{{"check":"port 8443","passed":true,"reason":"free"}}],"facts":{{"architecture":"arm64"}},"key_fingerprint":"{}"}}"#,
-            csr_fingerprint(&key.1).unwrap()
-        );
-        assert_eq!(
-            legacy_message(&sent.statement).unwrap(),
-            [LEGACY_SIGNING_DOMAIN, expected.as_bytes()].concat()
-        );
-        let wire = serde_json::to_value(&legacy).unwrap();
-        let received: RunnerAttestation = serde_json::from_value(wire).unwrap();
-        assert!(matches!(received, RunnerAttestation::Legacy(_)));
-        verify(
-            Some(&received),
-            &key.1,
-            "prod",
-            &BTreeMap::new(),
-            &POLICY,
-            NOW,
-        )
-        .unwrap();
-
         let refuse = |wire: serde_json::Value| {
             let received: RunnerAttestation = serde_json::from_value(wire).unwrap();
             verify(
@@ -1170,6 +991,20 @@ pub(crate) mod tests {
             .unwrap_err()
             .code()
         };
+        let v1 = serde_json::json!({
+            "schema": "tenkai.runner-attestation.v1",
+            "algorithm": ATTESTATION_ALGORITHM,
+            "statement": {
+                "environment": "prod",
+                "checked_at": NOW,
+                "passed": true,
+                "checks": [],
+                "facts": {},
+                "key_fingerprint": csr_fingerprint(&key.1).unwrap(),
+            },
+            "signature": "MEUCIQ==",
+        });
+        assert_eq!(refuse(v1), "attestation_schema_unsupported");
         let mut future = serde_json::to_value(attest("prod", &[], &key, NOW)).unwrap();
         future["schema"] = "tenkai.runner-attestation.v9".into();
         assert_eq!(refuse(future), "attestation_schema_unsupported");
@@ -1187,29 +1022,21 @@ pub(crate) mod tests {
         );
     }
 
-    /// After a 428 an agent signs v2 when the server names it, v1 when the
-    /// server names nothing (an earlier release), and stops when it signs
-    /// none of the named schemas.
+    /// After a 428 an agent signs v2 when the server names it, and stops
+    /// with a reason when the server names nothing (before v2) or only
+    /// schemas this agent does not sign.
     #[test]
-    fn the_agent_picks_a_schema_from_the_challenge() {
+    fn the_agent_checks_the_challenge_names_v2() {
         let challenge =
             serde_json::to_string(&AttestationChallenge::new(&AttestationRefusal::Missing))
                 .unwrap();
-        assert_eq!(
-            AttestationSchema::for_challenge(&challenge).unwrap(),
-            AttestationSchema::V2
-        );
+        check_challenge(&challenge).unwrap();
         let earlier = r#"{"error":"runner attestation required: attestation_missing"}"#;
-        assert_eq!(
-            AttestationSchema::for_challenge(earlier).unwrap(),
-            AttestationSchema::V1
-        );
-        assert_eq!(
-            AttestationSchema::for_challenge("").unwrap(),
-            AttestationSchema::V1
-        );
+        let error = check_challenge(earlier).unwrap_err();
+        assert!(format!("{error}").contains("upgrade the server"), "{error}");
+        assert!(check_challenge("").is_err());
         let later = r#"{"error":"x","accepted_schemas":["tenkai.runner-attestation.v9"]}"#;
-        let error = AttestationSchema::for_challenge(later).unwrap_err();
+        let error = check_challenge(later).unwrap_err();
         assert!(format!("{error}").contains("v9"), "{error}");
     }
 

@@ -127,10 +127,8 @@ pub async fn enrolled_credential(
             let (Some(dir), Some(csr)) = (certificate_dir, &request.csr) else {
                 bail!("the server requires runner attestation, which needs --certificate-dir");
             };
-            let schema = crate::runner_attestation::AttestationSchema::for_challenge(
-                &response.text().await.unwrap_or_default(),
-            )?;
-            request.attestation = Some(host_attestation(dir, environment, csr, preflight, schema)?);
+            crate::runner_attestation::check_challenge(&response.text().await.unwrap_or_default())?;
+            request.attestation = Some(host_attestation(dir, environment, csr, preflight)?);
             continue;
         }
         if status.is_success() {
@@ -184,11 +182,10 @@ fn host_attestation(
     environment: &str,
     csr: &str,
     preflight: Option<&std::path::Path>,
-    schema: crate::runner_attestation::AttestationSchema,
 ) -> Result<crate::runner_attestation::RunnerAttestation> {
     let key = crate::runner_key::RunnerKey::open(dir)?
         .with_context(|| format!("reading the runner key in {}", dir.display()))?;
-    key.sign_attestation(schema, host_evidence(environment, preflight)?, csr)
+    key.sign_attestation(host_evidence(environment, preflight)?, csr)
 }
 
 /// This host's evidence for `environment` now: the checks of the preflight
@@ -545,11 +542,11 @@ impl RuntimeClient {
                     let detail = response.text().await.unwrap_or_default();
                     bail!("renewing the runner certificate returned {status}: {detail}");
                 }
-                let schema = crate::runner_attestation::AttestationSchema::for_challenge(
+                crate::runner_attestation::check_challenge(
                     &response.text().await.unwrap_or_default(),
                 )?;
                 let evidence = host_evidence(&self.environment, self.preflight.as_deref())?;
-                attestation = Some(key.sign_attestation(schema, evidence, &csr)?);
+                attestation = Some(key.sign_attestation(evidence, &csr)?);
                 continue;
             }
             if status.is_success() {
@@ -2042,10 +2039,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Renewal sends evidence only after a 428 on that request (#675), in
-    /// the schema the 428 names, or v1 when it names none (#849): an agent
-    /// that attested to one server still renews against a server of an
-    /// earlier release, with or without attestation.
+    /// Renewal sends evidence only after a 428 on that request (#675), as
+    /// v2 when the 428 names it. A 428 that names no schemas comes from a
+    /// server that verifies only the removed v1, so renewal stops with a
+    /// reason (#940); a server without attestation still renews.
     #[tokio::test]
     async fn an_agent_that_attested_renews_against_a_server_without_attestation() {
         use std::sync::Arc;
@@ -2132,21 +2129,22 @@ mod tests {
         .unwrap();
         client.renew_certificate_if_due().await.unwrap();
         // Rolled back to a server that requires attestation but names no
-        // schemas, then to one without attestation: renew each time.
+        // schemas: refused with a reason. Then to one without attestation.
         *challenge.lock().unwrap() =
             r#"{"error":"runner attestation required: attestation_missing"}"#.into();
         *client.certified.write().unwrap() = None;
-        client.renew_certificate_if_due().await.unwrap();
+        let error = client.renew_certificate_if_due().await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("upgrade the server"),
+            "{error:#}"
+        );
         requires.store(false, Ordering::SeqCst);
         *client.certified.write().unwrap() = None;
         client.renew_certificate_if_due().await.unwrap();
         assert_eq!(
             *attested.lock().unwrap(),
-            [
-                crate::runner_attestation::ATTESTATION_SCHEMA,
-                crate::runner_attestation::LEGACY_ATTESTATION_SCHEMA
-            ],
-            "attested after each 428, in the schema it named"
+            [crate::runner_attestation::ATTESTATION_SCHEMA],
+            "attested after the 428 that named v2"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

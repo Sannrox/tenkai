@@ -3975,7 +3975,6 @@ health = "curl -f http://127.0.0.1:9/health"
             "evidence_stale"
         );
         let failed = crate::runner_attestation::sign(
-            crate::runner_attestation::AttestationSchema::V2,
             crate::runner_attestation::HostEvidence {
                 environment: "prod".into(),
                 checks: vec![crate::host_preflight::CheckResult {

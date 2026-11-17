@@ -184,7 +184,6 @@ async fn an_environment_requiring_attestation_enrolls_only_attested_runners() {
     );
     assert_eq!(body["accepted_schemas"], accepted, "{body}");
     let attestation = tenkai::runner_attestation::sign(
-        tenkai::runner_attestation::AttestationSchema::V2,
         tenkai::runner_attestation::HostEvidence {
             environment: "stage".into(),
             checks: Vec::new(),
@@ -319,7 +318,6 @@ async fn hardware_key_policy_refuses_a_file_runner_key() {
     .await;
     assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "{body}");
     let attestation = tenkai::runner_attestation::sign(
-        tenkai::runner_attestation::AttestationSchema::V2,
         tenkai::runner_attestation::HostEvidence {
             environment: "stage".into(),
             checks: Vec::new(),
