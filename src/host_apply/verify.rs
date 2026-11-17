@@ -137,6 +137,16 @@ pub fn verify_request(
     if !manifest.artifacts.is_empty() {
         bail!("host releases cannot declare OCI artifacts; ship them as deploy inputs");
     }
+    // ADR 0051: an image update runs as stage, reboot, verify and confirm, and
+    // only `confirm` may record it applied. Until the applier has those
+    // actions, an ordinary install must not settle an image release.
+    if manifest.os_image.is_some() {
+        bail!(
+            "release {} {} declares [os_image], and this applier has no OS image actions",
+            manifest.product.name,
+            manifest.product.version
+        );
+    }
     let name = &manifest.product.name;
     let version = &manifest.product.version;
     crate::ontology::validate_identifier("product", name)?;

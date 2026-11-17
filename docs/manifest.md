@@ -136,6 +136,29 @@ generated on the runtime and never reaches the server, so an environment
 without a separate runtime cannot apply the release. Older binaries refuse
 a manifest that declares the table.
 
+## OS image
+
+`[os_image]` names the operating system image a host release asks the
+on-host updater to boot
+([ADR 0051](decisions/0051-host-os-image-updates.md) §2):
+
+```toml
+[os_image]
+digest = "sha256:..."        # the image the updater must boot
+boot_deadline_seconds = 900  # how long the host may take to come back
+```
+
+- Only releases with `deploy.executor = "host"` take it; publication refuses
+  it on any other executor, including the default `shell`.
+- `digest` is `sha256:` followed by 64 lowercase hexadecimal characters.
+- `boot_deadline_seconds` is between 1 and 86400.
+
+The section is part of the signed manifest, so the signature covers the
+image and the deadline. The host applier refuses every step of such a
+release until it gains the image actions (stage, reboot, verify and
+confirm), so an image release is never recorded as an ordinary install.
+Older binaries refuse a manifest that declares the table.
+
 ## Config schema
 
 Optional `[config]` is signed with the release. It names the overlay keys an
