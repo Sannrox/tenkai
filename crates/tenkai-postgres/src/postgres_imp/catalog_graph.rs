@@ -1157,27 +1157,40 @@ fn catalog_put_in(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {
     upsert_catalog_sidecar(tx, object)
 }
 
+/// Write the sidecar payload and its property rows in three statements,
+/// whatever the property count. Only removed keys are deleted and only
+/// changed rows are rewritten, so a status change leaves the plan body's
+/// property row and its index entries alone (#873).
 fn upsert_catalog_sidecar(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {
     let payload = object.encode_to_vec();
     tx.execute(
         "INSERT INTO catalog_objects(id,kind,payload) VALUES($1,$2,$3)
-         ON CONFLICT(id) DO UPDATE SET kind=EXCLUDED.kind, payload=EXCLUDED.payload",
+         ON CONFLICT(id) DO UPDATE SET kind=EXCLUDED.kind, payload=EXCLUDED.payload
+         WHERE (catalog_objects.kind, catalog_objects.payload)
+               IS DISTINCT FROM (EXCLUDED.kind, EXCLUDED.payload)",
         &[&object.id, &object.kind, &payload],
     )
     .map_err(pg)?;
+    let (keys, values): (Vec<&str>, Vec<&str>) = object
+        .properties
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .unzip();
     tx.execute(
-        "DELETE FROM catalog_object_properties WHERE object_id=$1",
-        &[&object.id],
+        "DELETE FROM catalog_object_properties
+         WHERE object_id=$1 AND NOT (key = ANY($2))",
+        &[&object.id, &keys],
     )
     .map_err(pg)?;
-    for (key, value) in &object.properties {
-        tx.execute(
-            "INSERT INTO catalog_object_properties(object_id,kind,key,value)
-             VALUES($1,$2,$3,$4)",
-            &[&object.id, &object.kind, key, value],
-        )
-        .map_err(pg)?;
-    }
+    tx.execute(
+        "INSERT INTO catalog_object_properties(object_id,kind,key,value)
+         SELECT $1, $2, key, value FROM unnest($3::text[], $4::text[]) AS p(key, value)
+         ON CONFLICT(object_id,key) DO UPDATE SET kind=EXCLUDED.kind, value=EXCLUDED.value
+         WHERE (catalog_object_properties.kind, catalog_object_properties.value)
+               IS DISTINCT FROM (EXCLUDED.kind, EXCLUDED.value)",
+        &[&object.id, &object.kind, &keys, &values],
+    )
+    .map_err(pg)?;
     Ok(())
 }
 
@@ -1427,7 +1440,12 @@ fn upsert_plan(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {
          ON CONFLICT(id) DO UPDATE SET
             status=EXCLUDED.status,
             status_detail=EXCLUDED.status_detail,
-            plan_json=EXCLUDED.plan_json",
+            -- Keep the stored body when it is equal, so a status change
+            -- does not write a new TOAST copy of the plan.
+            plan_json=CASE WHEN plans.plan_json = EXCLUDED.plan_json
+                           THEN plans.plan_json ELSE EXCLUDED.plan_json END
+         WHERE (plans.status, plans.status_detail, plans.plan_json)
+               IS DISTINCT FROM (EXCLUDED.status, EXCLUDED.status_detail, EXCLUDED.plan_json)",
         &[
             &object.id,
             &environment_id,
