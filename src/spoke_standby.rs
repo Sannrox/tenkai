@@ -31,12 +31,23 @@ use crate::storage::{
 use crate::writer_fence::{WriterFence, WriterRole};
 
 pub const PROFILE_VERSION: u32 = 1;
-pub const DRILL_SCHEMA: &str = "tenkai.spoke-standby-drill.v1";
-pub const PROMOTION_SCHEMA: &str = "tenkai.spoke-standby-promotion.v1";
+/// Signed drill evidence. Its signature covers the statement bytes as
+/// signed (#953); see `docs/spoke-standby.md#evidence-format`.
+pub const DRILL_SCHEMA: &str = "tenkai.spoke-standby-drill.v2";
+/// Signed promotion evidence, signed like [`DRILL_SCHEMA`].
+pub const PROMOTION_SCHEMA: &str = "tenkai.spoke-standby-promotion.v2";
+/// Deprecated (#953): signed over Tenkai's re-encoding of the parsed
+/// statement. Verified for evidence written by earlier releases, never
+/// produced.
+pub const LEGACY_DRILL_SCHEMA: &str = "tenkai.spoke-standby-drill.v1";
+/// Deprecated like [`LEGACY_DRILL_SCHEMA`].
+pub const LEGACY_PROMOTION_SCHEMA: &str = "tenkai.spoke-standby-promotion.v1";
 /// Default writer-lease lifetime. Matches the hub writer lease.
 pub const LEASE_TTL: Duration = Duration::from_secs(15);
-const DRILL_DOMAIN: &[u8] = b"TENKAI-SPOKE-STANDBY-DRILL-V1\0";
-const PROMOTION_DOMAIN: &[u8] = b"TENKAI-SPOKE-STANDBY-PROMOTION-V1\0";
+const DRILL_DOMAIN: &[u8] = b"TENKAI-SPOKE-STANDBY-DRILL-V2\0";
+const PROMOTION_DOMAIN: &[u8] = b"TENKAI-SPOKE-STANDBY-PROMOTION-V2\0";
+const LEGACY_DRILL_DOMAIN: &[u8] = b"TENKAI-SPOKE-STANDBY-DRILL-V1\0";
+const LEGACY_PROMOTION_DOMAIN: &[u8] = b"TENKAI-SPOKE-STANDBY-PROMOTION-V1\0";
 
 /// How a standby becomes the writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,7 +239,7 @@ impl SpokeNode {
 
     /// Signed operator promotion on a restored store: sign, then take over
     /// its expired lease at a generation of at least `min_generation`.
-    pub fn promote(&mut self, seed_path: &Path, min_generation: u64) -> Result<PromotionEvidence> {
+    pub fn promote(&mut self, seed_path: &Path, min_generation: u64) -> Result<SignedPromotion> {
         let evidence = self.prepare_promotion(seed_path, min_generation)?;
         self.commit_promotion(&evidence)?;
         Ok(evidence)
@@ -240,10 +251,10 @@ impl SpokeNode {
         &self,
         seed_path: &Path,
         min_generation: u64,
-    ) -> Result<PromotionEvidence> {
+    ) -> Result<SignedPromotion> {
         let signer = crate::signer::open_key("the spoke promotion key", seed_path)?;
         let fenced = self.lapsed_generation()?;
-        sign_promotion(
+        sign(
             PromotionStatement {
                 holder: self.holder.clone(),
                 fenced_generation: fenced,
@@ -273,14 +284,14 @@ impl SpokeNode {
 
     /// Take over the lease at exactly the signed generation, storing the
     /// signed statement in the same transaction, and lead.
-    pub fn commit_promotion(&mut self, evidence: &PromotionEvidence) -> Result<()> {
+    pub fn commit_promotion(&mut self, evidence: &SignedPromotion) -> Result<()> {
         let requested = Instant::now();
         let lease = self.store.takeover_expired_lease(
             &self.environment,
             &self.holder,
             evidence.statement.generation,
             self.expires_at(),
-            &serde_json::to_string(evidence)?,
+            &serde_json::to_string(&evidence.evidence)?,
         )?;
         self.lead(&lease, requested)?;
         Ok(())
@@ -349,8 +360,9 @@ impl SpokeNode {
     }
 }
 
+/// What a promotion signs ([`PROMOTION_SCHEMA`]). A verifier ignores fields
+/// it does not know; the signature still covers them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PromotionStatement {
     pub holder: String,
     pub fenced_generation: u64,
@@ -358,17 +370,9 @@ pub struct PromotionStatement {
     pub at_ms: i64,
 }
 
+/// What a drill signs ([`DRILL_SCHEMA`]). A verifier ignores fields it does
+/// not know; the signature still covers them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PromotionEvidence {
-    pub schema: String,
-    pub key_id: String,
-    pub statement: PromotionStatement,
-    pub signature: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DrillStatement {
     pub members: u32,
     pub promotion: PromotionMode,
@@ -387,83 +391,216 @@ pub struct DrillStatement {
     pub workloads_held: bool,
 }
 
+/// Signed spoke-standby evidence as stored with the lease takeover and
+/// written to disk (#953). Every field is a string, so the stored JSON keeps
+/// the signed statement bytes exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DrillEvidence {
+pub struct Evidence {
+    /// [`PROMOTION_SCHEMA`] or [`DRILL_SCHEMA`].
     pub schema: String,
+    /// `sha256:` and the lowercase hex SHA-256 of the signer's Ed25519 public key.
     pub key_id: String,
-    pub statement: DrillStatement,
+    /// Standard padded base64 of the statement JSON bytes that were signed.
+    pub statement: String,
+    /// Standard padded base64 Ed25519 signature over the schema's signing
+    /// domain, one NUL byte, and the statement bytes.
     pub signature: String,
 }
 
-fn canonical(domain: &[u8], value: &impl Serialize) -> Result<Vec<u8>> {
-    let mut bytes = domain.to_vec();
-    serde_json::to_writer(&mut bytes, value)?;
-    Ok(bytes)
+/// Evidence this process signed, and the statement it signed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signed<T> {
+    pub evidence: Evidence,
+    pub statement: T,
 }
 
-fn sign_promotion(
-    statement: PromotionStatement,
-    signer: &crate::signer::KeySigner,
-) -> Result<PromotionEvidence> {
-    let signature =
-        crate::signer::ContentSigner::sign(signer, &canonical(PROMOTION_DOMAIN, &statement)?)?;
-    Ok(PromotionEvidence {
-        schema: PROMOTION_SCHEMA.into(),
-        key_id: crate::signer::ContentSigner::key_id(signer).to_string(),
+pub type SignedPromotion = Signed<PromotionStatement>;
+pub type SignedDrill = Signed<DrillStatement>;
+
+/// One kind of spoke-standby evidence: its schema and signing domain, and
+/// the deprecated v1 it still verifies.
+pub trait EvidenceKind: Serialize + serde::de::DeserializeOwned {
+    const SCHEMA: &'static str;
+    const DOMAIN: &'static [u8];
+    const LEGACY_SCHEMA: &'static str;
+    const LEGACY_DOMAIN: &'static [u8];
+    /// Names the evidence in errors.
+    const NAME: &'static str;
+    /// The frozen v1 statement, whose re-encoding the v1 signature covers.
+    type Legacy: Serialize + serde::de::DeserializeOwned + Into<Self>;
+}
+
+impl EvidenceKind for PromotionStatement {
+    const SCHEMA: &'static str = PROMOTION_SCHEMA;
+    const DOMAIN: &'static [u8] = PROMOTION_DOMAIN;
+    const LEGACY_SCHEMA: &'static str = LEGACY_PROMOTION_SCHEMA;
+    const LEGACY_DOMAIN: &'static [u8] = LEGACY_PROMOTION_DOMAIN;
+    const NAME: &'static str = "spoke-standby promotion";
+    type Legacy = legacy::PromotionStatement;
+}
+
+impl EvidenceKind for DrillStatement {
+    const SCHEMA: &'static str = DRILL_SCHEMA;
+    const DOMAIN: &'static [u8] = DRILL_DOMAIN;
+    const LEGACY_SCHEMA: &'static str = LEGACY_DRILL_SCHEMA;
+    const LEGACY_DOMAIN: &'static [u8] = LEGACY_DRILL_DOMAIN;
+    const NAME: &'static str = "spoke-standby drill";
+    type Legacy = legacy::DrillStatement;
+}
+
+/// Frozen v1 types (#953). The v1 signature covers the serde_json encoding
+/// of these statements, so none of them change.
+pub mod legacy {
+    use serde::{Deserialize, Serialize};
+
+    use super::PromotionMode;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Evidence<S> {
+        pub schema: String,
+        pub key_id: String,
+        pub statement: S,
+        pub signature: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct PromotionStatement {
+        pub holder: String,
+        pub fenced_generation: u64,
+        pub generation: u64,
+        pub at_ms: i64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct DrillStatement {
+        pub members: u32,
+        pub promotion: PromotionMode,
+        pub exclusive_lock: bool,
+        pub witness: bool,
+        pub passed: bool,
+        pub killed: String,
+        pub promoted: String,
+        pub fenced_generation: u64,
+        pub generation: u64,
+        pub interruption_window_ms: u64,
+        pub acknowledged_loss_bound_ms: u64,
+        pub remaining_spofs: Vec<String>,
+        pub duplicate_apply: bool,
+        pub old_spoke_refused: bool,
+        pub workloads_held: bool,
+    }
+}
+
+impl From<legacy::PromotionStatement> for PromotionStatement {
+    fn from(legacy: legacy::PromotionStatement) -> Self {
+        Self {
+            holder: legacy.holder,
+            fenced_generation: legacy.fenced_generation,
+            generation: legacy.generation,
+            at_ms: legacy.at_ms,
+        }
+    }
+}
+
+impl From<legacy::DrillStatement> for DrillStatement {
+    fn from(legacy: legacy::DrillStatement) -> Self {
+        Self {
+            members: legacy.members,
+            promotion: legacy.promotion,
+            exclusive_lock: legacy.exclusive_lock,
+            witness: legacy.witness,
+            passed: legacy.passed,
+            killed: legacy.killed,
+            promoted: legacy.promoted,
+            fenced_generation: legacy.fenced_generation,
+            generation: legacy.generation,
+            interruption_window_ms: legacy.interruption_window_ms,
+            acknowledged_loss_bound_ms: legacy.acknowledged_loss_bound_ms,
+            remaining_spofs: legacy.remaining_spofs,
+            duplicate_apply: legacy.duplicate_apply,
+            old_spoke_refused: legacy.old_spoke_refused,
+            workloads_held: legacy.workloads_held,
+        }
+    }
+}
+
+/// Serialize `statement` once and sign those bytes.
+fn sign<T: EvidenceKind>(statement: T, signer: &crate::signer::KeySigner) -> Result<Signed<T>> {
+    let signed = crate::signed_bytes::sign(T::DOMAIN, &statement, |message| {
+        Ok(crate::signer::ContentSigner::sign(signer, message)?.to_vec())
+    })?;
+    Ok(Signed {
+        evidence: Evidence {
+            schema: T::SCHEMA.into(),
+            key_id: crate::signer::ContentSigner::key_id(signer).to_string(),
+            statement: signed.statement,
+            signature: STANDARD.encode(signed.signature),
+        },
         statement,
-        signature: STANDARD.encode(signature),
     })
 }
 
-impl PromotionEvidence {
-    pub fn verify(&self, public_key: &[u8; 32]) -> Result<()> {
-        if self.schema != PROMOTION_SCHEMA {
-            bail!("spoke-standby promotion schema is not {PROMOTION_SCHEMA}");
-        }
-        if self.key_id != crate::signature_verification::key_id(public_key) {
-            bail!("spoke-standby promotion key_id does not match the signer");
-        }
-        let key = VerifyingKey::from_bytes(public_key)
-            .map_err(|_| anyhow::anyhow!("spoke-standby promotion public key is invalid"))?;
-        crate::signature_verification::verify_strict(
-            &key,
-            "spoke-standby promotion signature",
-            &self.signature,
-            &canonical(PROMOTION_DOMAIN, &self.statement)?,
+/// Verify stored or written evidence of kind `T` against the signer's
+/// public key and return its statement. The evidence is read by `schema`:
+/// v2 is parsed only from the bytes its signature covers, the deprecated v1
+/// by its frozen re-encoding, and any other schema is refused by name.
+pub fn verify_evidence<T: EvidenceKind>(bytes: &[u8], public_key: &[u8; 32]) -> Result<T> {
+    #[derive(Deserialize)]
+    struct Schema {
+        schema: String,
+    }
+    let name = T::NAME;
+    let Schema { schema } = serde_json::from_slice(bytes)
+        .with_context(|| format!("{name} evidence is not a JSON object with a schema"))?;
+    let key = VerifyingKey::from_bytes(public_key)
+        .map_err(|_| anyhow::anyhow!("{name} public key is invalid"))?;
+    let key_id = crate::signature_verification::key_id(public_key);
+    let label = format!("{name} signature");
+    if schema == T::SCHEMA {
+        let evidence: Evidence = serde_json::from_slice(bytes)
+            .with_context(|| format!("{name} evidence is not valid"))?;
+        anyhow::ensure!(
+            evidence.key_id == key_id,
+            "{name} key_id does not match the signer"
+        );
+        let signature =
+            crate::signature_verification::decode_exact::<64>(&label, &evidence.signature)?;
+        let verified =
+            crate::signed_bytes::verify::<T>(T::DOMAIN, &evidence.statement, |message| {
+                crate::signature_verification::verify_strict_bytes(
+                    &key, &label, &signature, message,
+                )
+                .is_ok()
+            })
+            .map_err(|refusal| anyhow::anyhow!("{name} refused: {refusal}"))?;
+        Ok(verified.statement)
+    } else if schema == T::LEGACY_SCHEMA {
+        let evidence: legacy::Evidence<T::Legacy> = serde_json::from_slice(bytes)
+            .with_context(|| format!("{name} evidence is not valid"))?;
+        anyhow::ensure!(
+            evidence.key_id == key_id,
+            "{name} key_id does not match the signer"
+        );
+        let mut message = T::LEGACY_DOMAIN.to_vec();
+        serde_json::to_writer(&mut message, &evidence.statement)?;
+        crate::signature_verification::verify_strict(&key, &label, &evidence.signature, &message)?;
+        Ok(evidence.statement.into())
+    } else {
+        bail!(
+            "unsupported {name} schema {schema:?}; this release verifies {} and the deprecated {}",
+            T::SCHEMA,
+            T::LEGACY_SCHEMA
         )
     }
 }
 
-impl DrillEvidence {
-    pub fn verify(&self, public_key: &[u8; 32]) -> Result<()> {
-        if self.schema != DRILL_SCHEMA {
-            bail!("spoke-standby drill schema is not {DRILL_SCHEMA}");
-        }
-        if self.key_id != crate::signature_verification::key_id(public_key) {
-            bail!("spoke-standby drill key_id does not match the signer");
-        }
-        let key = VerifyingKey::from_bytes(public_key)
-            .map_err(|_| anyhow::anyhow!("spoke-standby drill public key is invalid"))?;
-        crate::signature_verification::verify_strict(
-            &key,
-            "spoke-standby drill signature",
-            &self.signature,
-            &canonical(DRILL_DOMAIN, &self.statement)?,
-        )
-    }
-}
-
-fn sign_drill(statement: DrillStatement, seed_path: &Path) -> Result<DrillEvidence> {
+fn sign_drill(statement: DrillStatement, seed_path: &Path) -> Result<SignedDrill> {
     let signer = crate::signer::open_key("the spoke drill key", seed_path)?;
-    let signature =
-        crate::signer::ContentSigner::sign(&signer, &canonical(DRILL_DOMAIN, &statement)?)?;
-    Ok(DrillEvidence {
-        schema: DRILL_SCHEMA.into(),
-        key_id: crate::signer::ContentSigner::key_id(&signer).to_string(),
-        statement,
-        signature: STANDARD.encode(signature),
-    })
+    sign(statement, &signer)
 }
 
 /// Lease lifetime of the drill's writer, so the takeover happens quickly.
@@ -527,7 +664,7 @@ impl Drop for DrillDir {
 /// Two-node drill with egress blocked: kill the writer, restore its shipped
 /// backup on the standby, promote it, prove no duplicate apply, and refuse
 /// the old generation when it returns.
-pub fn drill(profile: &SpokeStandbyProfile, seed_path: &Path) -> Result<DrillEvidence> {
+pub fn drill(profile: &SpokeStandbyProfile, seed_path: &Path) -> Result<SignedDrill> {
     profile.validate()?;
     if profile.members != 2 {
         bail!("the spoke-standby drill is the two-node procedure");
@@ -731,7 +868,7 @@ pub fn promote_on_disk(
     store_path: &Path,
     lock_dir: &Path,
     seed_path: &Path,
-) -> Result<PromotionEvidence> {
+) -> Result<SignedPromotion> {
     profile.validate()?;
     anyhow::ensure!(
         store_path.is_file(),
@@ -758,21 +895,17 @@ pub fn promote_on_disk(
     claim.release();
     // The store holds the signed statement with the takeover; this file is
     // a convenience copy.
-    write_evidence_verified(&promotion_path(store_path), &evidence)?;
+    write_evidence_verified(&promotion_path(store_path), &evidence.evidence)?;
     Ok(evidence)
 }
 
-fn write_evidence_verified(path: &Path, evidence: &PromotionEvidence) -> Result<()> {
-    crate::atomic_state::write_json_verified::<_, PromotionEvidence, _>(
-        path,
-        evidence,
-        |observed| {
-            if observed != evidence {
-                bail!("spoke-standby promotion post-mutation verification failed");
-            }
-            Ok(())
-        },
-    )
+fn write_evidence_verified(path: &Path, evidence: &Evidence) -> Result<()> {
+    crate::atomic_state::write_json_verified::<_, Evidence, _>(path, evidence, |observed| {
+        if observed != evidence {
+            bail!("spoke-standby promotion post-mutation verification failed");
+        }
+        Ok(())
+    })
 }
 
 /// Write a profile next to the example.
@@ -787,7 +920,7 @@ pub fn example_profile() -> SpokeStandbyProfile {
     }
 }
 
-pub fn write_evidence(path: &Path, evidence: &DrillEvidence) -> Result<()> {
+pub fn write_evidence(path: &Path, evidence: &Evidence) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -876,7 +1009,14 @@ mod tests {
         let root = tmp_root("drill");
         let seed = write_seed(&root);
         let evidence = drill(&profile(), &seed).unwrap();
-        evidence.verify(&public_key()).unwrap();
+        assert_eq!(
+            verify_evidence::<DrillStatement>(
+                &serde_json::to_vec(&evidence.evidence).unwrap(),
+                &public_key()
+            )
+            .unwrap(),
+            evidence.statement
+        );
         let s = &evidence.statement;
         assert!(s.passed);
         assert_eq!(s.killed, "spoke-a");
@@ -1057,8 +1197,8 @@ promotion = "manual"
             .unwrap();
         assert_eq!(owner, "spoke-b");
         assert_eq!(
-            serde_json::from_str::<PromotionEvidence>(&stored).unwrap(),
-            evidence
+            serde_json::from_str::<Evidence>(&stored).unwrap(),
+            evidence.evidence
         );
         let locks = root.join("locks");
         for holder in ["spoke-b", "spoke-c"] {
@@ -1171,7 +1311,12 @@ promotion = "manual"
             &seed,
         )
         .unwrap();
-        evidence.verify(&public_key()).unwrap();
+        // The convenience copy verifies to the statement that was signed.
+        let written = std::fs::read(promotion_path(&restored)).unwrap();
+        assert_eq!(
+            verify_evidence::<PromotionStatement>(&written, &public_key()).unwrap(),
+            evidence.statement
+        );
         assert_eq!(evidence.statement.fenced_generation, 1);
         assert_eq!(evidence.statement.generation, 1 << EPOCH_SHIFT);
         let store = SqliteStore::open(&restored).unwrap();
@@ -1221,5 +1366,83 @@ promotion = "manual"
         );
         assert!(live_err.is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    const PROMOTION_JSON: &str =
+        r#"{"holder":"spoke-b","fenced_generation":1,"generation":2,"at_ms":5}"#;
+
+    fn signed(domain: &[u8], bytes: &[u8]) -> String {
+        use ed25519_dalek::Signer as _;
+        STANDARD.encode(
+            SigningKey::from_bytes(&[9u8; 32])
+                .sign(&[domain, bytes].concat())
+                .to_bytes(),
+        )
+    }
+
+    /// The signature covers the statement bytes as signed (#953): a field
+    /// this release does not know still verifies, the same statement
+    /// re-encoded does not, and drill evidence is not a promotion.
+    #[test]
+    fn evidence_verifies_over_the_statement_bytes_as_signed() {
+        let bytes = PROMOTION_JSON.replacen('{', r#"{"note":"newer","#, 1);
+        let evidence = Evidence {
+            schema: PROMOTION_SCHEMA.into(),
+            key_id: crate::signature_verification::key_id(&public_key()),
+            statement: STANDARD.encode(&bytes),
+            signature: signed(PROMOTION_DOMAIN, bytes.as_bytes()),
+        };
+        let verify = |evidence: &Evidence| {
+            verify_evidence::<PromotionStatement>(
+                &serde_json::to_vec(evidence).unwrap(),
+                &public_key(),
+            )
+        };
+        let statement = verify(&evidence).unwrap();
+        assert_eq!(statement.generation, 2);
+
+        let reencoded = Evidence {
+            statement: STANDARD.encode(serde_json::to_vec(&statement).unwrap()),
+            ..evidence.clone()
+        };
+        let error = verify(&reencoded).unwrap_err().to_string();
+        assert!(error.contains("signature does not verify"), "{error}");
+
+        let as_drill = Evidence {
+            schema: DRILL_SCHEMA.into(),
+            ..evidence
+        };
+        let error = verify(&as_drill).unwrap_err().to_string();
+        assert!(
+            error.contains("unsupported spoke-standby promotion schema"),
+            "{error}"
+        );
+    }
+
+    /// Evidence written before #953 still verifies by its frozen
+    /// re-encoding and refuses fields its signature cannot cover.
+    #[test]
+    fn legacy_v1_evidence_verifies_and_stays_strict() {
+        let statement: legacy::PromotionStatement = serde_json::from_str(PROMOTION_JSON).unwrap();
+        let mut stored = serde_json::json!({
+            "schema": LEGACY_PROMOTION_SCHEMA,
+            "key_id": crate::signature_verification::key_id(&public_key()),
+            "statement": statement,
+            "signature": signed(LEGACY_PROMOTION_DOMAIN, &serde_json::to_vec(&statement).unwrap()),
+        });
+        let verify = |stored: &serde_json::Value| {
+            verify_evidence::<PromotionStatement>(
+                &serde_json::to_vec(stored).unwrap(),
+                &public_key(),
+            )
+        };
+        assert_eq!(
+            verify(&stored).unwrap(),
+            PromotionStatement::from(statement)
+        );
+
+        stored["statement"]["note"] = "unsigned".into();
+        let error = verify(&stored).unwrap_err().to_string();
+        assert!(error.contains("evidence is not valid"), "{error}");
     }
 }
