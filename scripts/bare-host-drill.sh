@@ -348,6 +348,27 @@ approve_and_apply
 [ "$(subscription cluster deployed)" = 1.0.0 ] || fail "cluster is not recorded at 1.0.0"
 [ "$(app_available)" = 1 ] || fail "app is not available after the cluster rollback"
 
+echo "== cluster health waits out a k3s restart and names an API server that stays down"
+cp -R "$releases/cluster-1.0.0" "$work/health"
+# health WINDOW_S: the cluster release's health action, as the applier runs it.
+health() {
+  (cd "$work/health" && sudo env TENKAI_ENVIRONMENT="$environment" HEALTH_API_WINDOW_S="$1" sh health.sh) \
+    >/dev/null 2>"$work/health.err"
+}
+# Restart k3s as the check starts, so the API server drops out under it (#1130).
+(sleep 1 && sudo systemctl restart k3s.service) &
+restart=$!
+health 180 || fail "health did not wait out a k3s restart: $(cat "$work/health.err")"
+wait "$restart"
+sudo systemctl stop k3s.service
+if health 10; then
+  fail "health passed with k3s stopped"
+fi
+grep -q 'the API server at 127.0.0.1:6443 did not answer within 10s' "$work/health.err" ||
+  fail "health with k3s stopped did not name the API server: $(cat "$work/health.err")"
+sudo systemctl start k3s.service
+health 300 || fail "health failed once k3s was back: $(cat "$work/health.err")"
+
 echo "== uninstall the cluster through an approved plan"
 remote env unsubscribe "$environment" cluster --version 1.0.0 --generation "$(generation)" >/dev/null
 approve_and_apply
