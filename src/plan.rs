@@ -12,6 +12,7 @@ use crate::ontology::*;
 use crate::pb::sekai::Object;
 
 mod approval_brief;
+mod artifact_availability;
 mod convergence;
 mod lifecycle;
 mod release_selection;
@@ -50,6 +51,9 @@ pub use approval_brief::render as approval_brief_render;
 pub use approval_brief::{
     ApprovalBrief, ApprovalBriefActor, ApprovalBriefBlast, ApprovalBriefChanges,
     ApprovalBriefPolicy, PlanProposer,
+};
+pub use artifact_availability::{
+    ArtifactAvailability, ArtifactState, render as artifact_availability_render,
 };
 
 pub use crate::deploy_webhook::{
@@ -392,6 +396,11 @@ pub struct Plan {
     /// stored before this field; omitted so their digests stay unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_brief: Option<ApprovalBrief>,
+    /// Artifact digests checked against the environment's registry at
+    /// planning (#1062). Advice for the approver, outside the content
+    /// address; apply keeps its own check. Empty when no step names one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_availability: Vec<ArtifactAvailability>,
 }
 
 #[derive(Serialize)]
@@ -904,6 +913,7 @@ mod tests {
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            artifact_availability: Vec::new(),
             approval_brief: None,
         };
         plan.content_id = content_address(

@@ -122,6 +122,21 @@ not grant execution authority. Signed offline bundles may carry the same
 digest-bound layers for air-gapped import; see
 [offline bundles](offline-bundles.md).
 
+Planning checks the same digests first, through the same mirrors, against the
+store the planner is configured with (`TENKAI_OCI_STORE`). Each digest is
+recorded on the plan as `available`, `missing`, or `unverifiable`:
+
+- `missing` refuses the plan, naming the digest and the mirror registry. A
+  registry with no mirror is refused the same way.
+- `unverifiable` means the planner could not ask: no store is configured, the
+  store returned an error, or the environment's connectivity class is
+  `isolated`, which asks nothing. The plan stands, and `tenkaictl plan`, the
+  plan result, and the environment's latest plan summary show it.
+
+The record is advice for the approver. It sits outside the plan's content
+address, so it does not change the plan digest or what approvals sign, and
+apply still checks every digest itself.
+
 Unsigned publication is available only through the conspicuous
 `--allow-unsigned-development` flag. It is intended for local development and
 cannot be combined with signature options. Unsigned releases can only be

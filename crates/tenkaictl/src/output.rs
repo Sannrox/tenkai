@@ -76,6 +76,9 @@ pub(crate) fn print_plan_human(stored: &plan::Plan) {
             println!("  {line}");
         }
     }
+    for line in tenkai::plan::artifact_availability_render(&stored.artifact_availability) {
+        println!("{line}");
+    }
     if stored.steps.is_empty() {
         println!("{} is up to date", stored.environment);
     } else {

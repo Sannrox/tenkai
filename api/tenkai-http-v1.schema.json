@@ -421,6 +421,26 @@
       ],
       "type": "object"
     },
+    "ArtifactAvailability": {
+      "description": "What planning found for one artifact digest in the registry the\nenvironment pulls from (the mirror when one is configured).",
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "registry": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/ArtifactState"
+        }
+      },
+      "required": [
+        "digest",
+        "registry",
+        "state"
+      ],
+      "type": "object"
+    },
     "ArtifactKind": {
       "description": "Which stored signed artifact an [`ArtifactRunway`] grades.",
       "enum": [
@@ -463,6 +483,14 @@
         "status"
       ],
       "type": "object"
+    },
+    "ArtifactState": {
+      "enum": [
+        "available",
+        "missing",
+        "unverifiable"
+      ],
+      "type": "string"
     },
     "AuditSequences": {
       "description": "Inclusive chain sequences.",
@@ -3958,6 +3986,13 @@
         "approval_brief": {
           "$ref": "#/$defs/ApprovalBrief",
           "description": "Bounded approval brief, returned before step detail (#1089)."
+        },
+        "artifact_availability": {
+          "description": "Artifact digests checked at planning (#1062); advice, not proof.",
+          "items": {
+            "$ref": "#/$defs/ArtifactAvailability"
+          },
+          "type": "array"
         },
         "created_at": {
           "format": "int64",

@@ -390,6 +390,7 @@ mod tests {
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            artifact_availability: Vec::new(),
             approval_brief: None,
         };
         let env = EnvironmentInspectReport {
@@ -549,6 +550,7 @@ mod tests {
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
             credential_runway: None,
+            artifact_availability: Vec::new(),
             approval_brief: None,
         };
         let env = EnvironmentInspectReport {

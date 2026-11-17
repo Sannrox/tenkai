@@ -2333,6 +2333,102 @@ media_type = "{}"
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// #1062: planning asks the environment mirror for each digest. Absent
+    /// there refuses the plan, naming digest and mirror; an environment the
+    /// planner cannot reach records `unverifiable` and the plan stands.
+    #[tokio::test]
+    async fn planning_checks_artifact_digests_against_the_environment_mirror() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-oci-plan-availability-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = root.join("oci");
+        std::fs::create_dir_all(&store).unwrap();
+        let _store = crate::host_env::overlay::set([("TENKAI_OCI_STORE", Some(store.as_os_str()))]);
+        let origin = sample_oci_ref(b"payload-a");
+        write_oci_manifest(&root, "1.0.0", &origin);
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let publication = std::sync::Arc::new(crate::oci_artifact::MemoryArtifactRegistry::new());
+        publication.put(&origin, b"payload-a".to_vec()).unwrap();
+        publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &PublishOptions {
+                allow_unsigned_development: true,
+                artifact_registry: Some(publication),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("oci-artifacts");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::plan::env_add(&mut ctx, "local", "fixture")
+            .await
+            .unwrap();
+        crate::plan::subscribe(&mut ctx, "local", "api", "stable")
+            .await
+            .unwrap();
+        crate::environment::set_artifact_mirror(&mut ctx, "local", "ghcr.io", "mirror.internal")
+            .await
+            .unwrap();
+
+        let refused = crate::plan::create(&mut ctx, "local")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains(&origin.digest) && refused.contains("mirror.internal"),
+            "{refused}"
+        );
+
+        let mirrored = crate::oci_artifact::OciArtifactRef {
+            registry: "mirror.internal".into(),
+            ..origin.clone()
+        };
+        crate::oci_artifact::FilesystemArtifactRegistry::new(store.clone())
+            .put(&mirrored, b"payload-a".to_vec())
+            .unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        let checked = |plan: &crate::plan::Plan| {
+            plan.artifact_availability
+                .iter()
+                .map(|result| (result.digest.clone(), result.registry.clone(), result.state))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            checked(&plan),
+            [(
+                origin.digest.clone(),
+                "mirror.internal".to_string(),
+                crate::plan::ArtifactState::Available
+            )]
+        );
+
+        std::fs::remove_dir_all(&store).unwrap();
+        crate::connectivity::set_connectivity_class(
+            &mut ctx,
+            "local",
+            crate::connectivity::ConnectivityClass::Isolated,
+        )
+        .await
+        .unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert_eq!(
+            checked(&plan),
+            [(
+                origin.digest.clone(),
+                "mirror.internal".to_string(),
+                crate::plan::ArtifactState::Unverifiable
+            )]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn apply_pulls_digest_bound_artifacts_from_the_environment_mirror_only() {
         let root = std::env::temp_dir().join(format!(

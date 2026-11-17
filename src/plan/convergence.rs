@@ -2625,6 +2625,7 @@ fn assemble_plan(
         prior_warnings: Vec::new(),
         recalled_recovery_reason,
         credential_runway: None,
+        artifact_availability: Vec::new(),
         approval_brief,
     })
 }
@@ -2657,6 +2658,10 @@ async fn create_with_content(
     refuse_unadmitted_callers(ctx, env, &steps).await?;
     let env_obj = crate::environment::active_environment(ctx, env).await?;
     attach_target_changes(ctx, env, &env_obj, executors, &mut steps).await?;
+    let registry = crate::oci_artifact::selected_registry()?;
+    let artifact_availability =
+        super::artifact_availability::check(ctx, &env_obj.properties, &steps, registry.as_deref())
+            .await?;
     let approval_brief = Some(
         crate::plan::compute_approval_brief(ctx, env, &env_obj, &steps, default_proposer).await,
     );
@@ -2667,6 +2672,7 @@ async fn create_with_content(
         recalled_recovery_reason,
         approval_brief,
     )?;
+    plan.artifact_availability = artifact_availability;
     // Optional advisory priors (default off). Never hard-block or change steps.
     if let Ok(inspect) = inspect_environment(ctx, env).await {
         let _ = crate::plan_priors::annotate_plan_with_priors(
