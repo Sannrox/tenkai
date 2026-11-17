@@ -75,17 +75,20 @@ A `v*` tag push runs `.github/workflows/release-dispatch.yml`. It only runs
 release always runs **main's** `release-binaries.yml`, never the copy at the
 tagged commit.
 
-`release-binaries.yml` refuses a tagged run that does not start from `main`.
-It then:
+`release-binaries.yml` checks out the tag and runs main's
+`scripts/release/verify-tag.sh release-commit`, which:
 
-- checks out the tag and fetches the annotated tag object
-- verifies the signed tag with main's `scripts/verify-release-tag.sh` and
-  main's allowed keys against the tagged commit's `Cargo.toml`
+- refuses a tagged run that does not start from `main`
+- fetches the annotated tag object and verifies the signed tag with main's
+  allowed keys against the tagged commit's `Cargo.toml`
 - requires the tagged commit to be on `main` or the matching `release-*` line
+
+The workflow then:
+
 - builds the hosts, writes a CycloneDX SBOM, attests provenance and the SBOM,
   and writes the manifest `git_sha` from that commit
-- drafts the GitHub Release with `gh release create <tag> --verify-tag` from
-  the matching CHANGELOG section, attaches the hosts with `tenkai-release.json`,
+- drafts the GitHub Release with `scripts/release/github-release.sh` (the
+  only script that changes a Release) from the matching CHANGELOG section, attaches the hosts with `tenkai-release.json`,
   the attested [family release manifest](docs/family-release-manifests.md),
   and publishes it last
 
@@ -105,11 +108,17 @@ comes from the tagged commit, so a bug there needs a new rc or patch version.
 
 A re-run resumes the draft release and replaces its assets. Every job that
 uploads, attests, or publishes refuses a release that is already published,
-so neither a new run nor "Re-run failed jobs" on an old one can change it;
-cut a new version instead. One run per tag executes at a time.
+and stops when the Release cannot be read, so neither a new run nor "Re-run
+failed jobs" on an old one can change it; cut a new version instead. A tag
+cut before the release scripts moved to `scripts/release/` cannot be re-run
+from the current `main`: the run fails on the missing paths before anything
+is published. One run per tag executes at a time.
 
 CI runs `scripts/release-dry-run.sh` on pushes to `main` and on pull
-requests that touch release packaging; it never attests or publishes. `workflow_dispatch` without a tag dry-runs the same packaging
+requests that touch release packaging; it never attests or publishes. CI's
+`Release tests` job runs the release unit tests in `scripts/tests/release/`,
+which also check the release workflows' structure, and `Lint workflows` runs
+`scripts/check-workflows.sh` on every workflow. `workflow_dispatch` without a tag dry-runs the same packaging
 path on that ref.
 
 Attestations record the workflow that built the artifacts, which is main's

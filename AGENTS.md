@@ -46,8 +46,16 @@ repository-only operating Skill.
 - `make test` runs the default test suite.
 - `make validate` runs every `scripts/validate-*.sh` (format, clippy, shell,
   diff, make dry-run, shared agent-kit stubs, rust filenames, secrets, relative
-  Markdown links and anchors, HTTP API contract, and release packaging).
+  Markdown links and anchors, and HTTP API contract).
 - `make test-integration` runs all checked-in integration-test targets.
+- `bash scripts/check-workflows.sh` lints `.github/workflows/` with pinned
+  `actionlint` and `zizmor`; suppressions live in `.github/zizmor.yml`, one
+  reason each. CI runs it as `Lint workflows`.
+- `python3 -m unittest discover -s scripts/tests -t .` runs the release tests
+  (scripts under `scripts/release/` and the release workflows' structure);
+  `scripts/tests/requirements.txt` pins PyYAML by hash. CI runs it, with
+  `bash scripts/package-release-binaries.sh self-test` and
+  `bash scripts/test-install-script.sh`, as `Release tests`.
 - `make update` formats Rust, refreshes build-generated protobuf bindings, and
   regenerates the HTTP API contract in `api/`, without changing the locked
   dependency graph.
@@ -148,6 +156,13 @@ leases, process fencing, persistence, migrations, signing, approvals,
 authorization, provider behavior, rollback, or protocol compatibility. Test
 failure and recovery paths, not only success paths. Avoid external-service
 dependencies in the normal suite; isolate and document service-dependent tests.
+
+Release logic lives in scripts under `scripts/release/`, tested in
+`scripts/tests/release/` with standard-library `unittest` (the root `tests/`
+holds Cargo integration tests). A release invariant no workflow linter
+expresses is a test over the parsed workflow YAML that asserts structure
+(triggers, permissions, job graph, step order, which script a step runs),
+never step names or wording. Never grep raw workflow text.
 
 Verification should be proportional to the change. At minimum, format and run
 the narrowest relevant tests. Before delivery, prefer the shared
@@ -269,8 +284,9 @@ zero.
 `check` inspects one Issue; `release` removes a finished claim.
 
 Parallel lanes must not collide. Collision surfaces in this repository are
-`proto/`, operational persistence, the planner, execution, and catalog versus
-environment state. Lanes that would both change one of these surfaces run in
+`proto/`, operational persistence, the planner, execution, catalog versus
+environment state, and the release path (`.github/workflows/`,
+`scripts/release/`, `scripts/tests/release/`, `RELEASING.md`). Lanes that would both change one of these surfaces run in
 sequence, not in parallel.
 
 A lane publishes its first Verified commit to the claim branch as a draft Pull
@@ -376,6 +392,7 @@ Rows beyond `## Testing Guidelines`:
 | configuration or manifest | parsing/default tests, examples, operator documentation |
 | `sekai-chisei` integration | deterministic CLI or local integration checks; live provider tests only with intentional prerequisites |
 | packaging, features, or binaries | `cargo build --workspace --all-targets --locked` |
+| release scripts or workflows | `bash scripts/check-workflows.sh` and `python3 -m unittest discover -s scripts/tests -t .` |
 | any diff | no `.tenkai-state/`, databases, or runtime state staged |
 
 ### Release audit

@@ -202,9 +202,9 @@ Spoke and embedded CLI continue to refuse `TENKAI_POSTGRES_URL`.
 A `v*` tag push starts `.github/workflows/release-dispatch.yml`, which only
 runs `gh workflow run release-binaries.yml --ref main -f tag=<tag>`. The
 release always uses main's workflow and tag verifier; a failed run is fixed
-on main and re-run for the same tag. `release-binaries.yml` refuses a tagged
-run that is not from main, checks out the tag, and runs main's
-`scripts/verify-release-tag.sh verify-signed` against main's
+on main and re-run for the same tag. `release-binaries.yml` checks out the
+tag and runs main's `scripts/release/verify-tag.sh release-commit`, which
+refuses a tagged run that is not from main and checks the tag against main's
 `security/release-tag-fingerprints` (public key in
 `security/release-tag-key.asc`): the tag must be annotated, signed by an
 allowed key, resolve to a commit on main or the matching `release-*`
@@ -221,7 +221,7 @@ rebuilds `tenkai-server` with `-p tenkai-server --features postgres,ui` and name
 contract, and `install.sh` with the tag's version written in plus the
 applier's unit and polkit rule
 (`scripts/package-release-binaries.sh install-script`), refuses Linux hosts
-above the glibc floor, and writes `SHA256SUMS`. `scripts/release-metadata.py` writes
+above the glibc floor, and writes `SHA256SUMS`. `scripts/release/metadata.py` writes
 `tenkai.cdx.json`, a CycloneDX 1.5 SBOM of the locked Cargo graph and the
 pinned web console. A separate job validates it against the CycloneDX schema
 and SPDX license expressions; the attest job regenerates it and requires the
@@ -238,7 +238,8 @@ creates a draft GitHub Release whose body is the tag's `CHANGELOG.md`
 section, attaches the assets, and publishes it: marked latest for a `vX.Y.Z` tag on `main`, as a pre-release
 not marked latest for a tag that contains `-`, and never marked latest for a
 tag on a `release-*` maintenance line. A rerun
-resumes a draft. An already published Release is refused, not edited. A tag
+resumes a draft. An already published Release, or one that cannot be read,
+is refused, not edited (`scripts/release/github-release.sh`). A tag
 mismatch fails closed before assets are uploaded. CI's release dry run builds
 the Linux hosts the same way, run them on older distributions, and run
 `scripts/release-dry-run.sh --linux-hosts` instead, which writes the same

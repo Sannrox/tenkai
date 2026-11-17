@@ -20,3 +20,6 @@ id_ed25519
 
 # Delivery lane worktrees (AGENTS.md, "Parallel delivery lanes")
 /.worktrees/
+
+# Release test bytecode (scripts/tests/)
+__pycache__/
