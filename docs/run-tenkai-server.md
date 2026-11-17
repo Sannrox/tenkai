@@ -86,6 +86,10 @@ never an argument.
   is unauthenticated.
 - **Versions.** TLS 1.3 only by default; `--tls-min-version 1.2` also accepts
   TLS 1.2.
+- **Handshakes.** At most 256 handshakes run at once, each for at most ten
+  seconds. Further connections wait in the accept backlog. A failed accept is
+  logged as `tenkai.tls_accept outcome=failed` and retried after a backoff
+  that grows to one second.
 - **Client certificates.** With `--tls-client-ca` (`TENKAI_TLS_CLIENT_CA`), a
   client certificate is verified against that CA when presented and is
   optional otherwise; an untrusted one fails the handshake.

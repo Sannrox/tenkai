@@ -26,6 +26,14 @@ use tokio_rustls::server::TlsStream;
 /// A client that has not finished its TLS handshake by then is dropped.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Handshakes in flight at once. Past this, connections wait in the kernel's
+/// accept backlog until one finishes, so a flood costs no tasks (#1311).
+const MAX_HANDSHAKES: usize = 256;
+
+/// How long the accept loop waits after a failed accept, doubling to the cap.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+const ACCEPT_BACKOFF_CAP: Duration = Duration::from_secs(1);
+
 /// The lowest protocol version a listener accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TlsMinVersion {
@@ -234,7 +242,8 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> anyhow::Error {
 }
 
 /// Accepts TCP connections and completes their TLS handshakes, each on its
-/// own task, so a slow client never blocks the next one.
+/// own task, so a slow client never blocks the next one. At most
+/// [`MAX_HANDSHAKES`] handshakes run at once.
 pub struct TlsListener {
     incoming: tokio::sync::mpsc::Receiver<(TlsStream<TcpStream>, SocketAddr)>,
     local: SocketAddr,
@@ -254,24 +263,45 @@ impl TlsListener {
         listener: TcpListener,
         acceptor: impl Fn() -> TlsAcceptor + Send + 'static,
     ) -> Result<Self> {
+        Self::spawn_limited(listener, acceptor, MAX_HANDSHAKES)
+    }
+
+    fn spawn_limited(
+        listener: TcpListener,
+        acceptor: impl Fn() -> TlsAcceptor + Send + 'static,
+        max_handshakes: usize,
+    ) -> Result<Self> {
         let local = listener.local_addr()?;
         let (sender, incoming) = tokio::sync::mpsc::channel(64);
+        let handshakes = Arc::new(tokio::sync::Semaphore::new(max_handshakes));
         let accepting = tokio::spawn(async move {
+            let mut backoff = ACCEPT_BACKOFF;
             loop {
+                // A permit before accept: excess clients stay in the backlog.
+                let Ok(permit) = handshakes.clone().acquire_owned().await else {
+                    return;
+                };
                 let (stream, peer) = match listener.accept().await {
                     Ok(accepted) => accepted,
-                    // Out of descriptors and the like: back off and go on.
-                    Err(_) => {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    // Out of descriptors and the like: say so, back off, go on.
+                    Err(error) => {
+                        eprintln!(
+                            "tenkai.tls_accept outcome=failed retry_in_ms={} detail={error}",
+                            backoff.as_millis()
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(ACCEPT_BACKOFF_CAP);
                         continue;
                     }
                 };
+                backoff = ACCEPT_BACKOFF;
                 let acceptor = acceptor();
                 let sender = sender.clone();
                 tokio::spawn(async move {
-                    if let Ok(Ok(tls)) =
-                        tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await
-                    {
+                    let handshake =
+                        tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
+                    drop(permit);
+                    if let Ok(Ok(tls)) = handshake {
                         let _ = sender.send((tls, peer)).await;
                     }
                 });
@@ -537,6 +567,32 @@ mod tests {
             None,
             "new connections get the renewed certificate"
         );
+    }
+
+    #[tokio::test]
+    async fn handshakes_past_the_limit_wait_until_one_finishes() {
+        let (server_ca, client_ca) = (Authority::new(), Authority::new());
+        let site = site(&server_ca, &client_ca).await;
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        let tls = site.tls.clone();
+        let listener = TlsListener::spawn_limited(tcp, move || tls.acceptor(), 1).unwrap();
+        let router = axum::Router::new().route("/healthz", get(|| async { "ok" }));
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        let limited = Site { port, ..site };
+        let client = limited.client(&server_ca, None);
+
+        // An idle client holds the only handshake slot.
+        let idle = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let waiting = tokio::time::timeout(
+            Duration::from_millis(500),
+            limited.status(&client, "/healthz"),
+        )
+        .await;
+        assert!(waiting.is_err(), "a handshake past the limit did not wait");
+
+        drop(idle);
+        assert_eq!(limited.status(&client, "/healthz").await, Some(200));
     }
 
     #[tokio::test]

@@ -8,7 +8,10 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::Duration;
+
+use anyhow::Result;
 
 use serde::Serialize;
 
@@ -288,11 +291,87 @@ impl Telemetry for MemoryTelemetry {
     }
 }
 
+/// Connect and whole-request bounds on one OTLP export, so a stalled
+/// collector holds an export for at most this long (#1311).
+const EXPORT_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+const EXPORT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Export clients shared by every exporter in the process. They keep no idle
+/// connections, so a connection never outlives the runtime that opened it.
+static ASYNC_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static BLOCKING_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+
+/// The client in `cell`, built on first use. A build failure is not cached:
+/// the next export tries again.
+fn shared_client<T: Clone>(cell: &OnceLock<T>, build: impl FnOnce() -> Result<T>) -> Option<T> {
+    if let Some(client) = cell.get() {
+        return Some(client.clone());
+    }
+    let client = build().ok()?;
+    Some(cell.get_or_init(|| client).clone())
+}
+
+fn async_export_client() -> Result<reqwest::Client> {
+    Ok(crate::outbound_tls::client()?
+        .connect_timeout(EXPORT_CONNECT_TIMEOUT)
+        .timeout(EXPORT_TIMEOUT)
+        .pool_max_idle_per_host(0)
+        .build()?)
+}
+
+fn blocking_export_client() -> Result<reqwest::blocking::Client> {
+    Ok(crate::outbound_tls::blocking_client()?
+        .connect_timeout(EXPORT_CONNECT_TIMEOUT)
+        .timeout(EXPORT_TIMEOUT)
+        .pool_max_idle_per_host(0)
+        .build()?)
+}
+
+/// One finished span as exported: its identity and wall-clock bounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpanRecord {
+    pub name: String,
+    pub trace_id: [u8; 16],
+    pub span_id: [u8; 8],
+    pub start_unix_nanos: u64,
+    pub end_unix_nanos: u64,
+}
+
+impl SpanRecord {
+    /// A span opened now, in a trace of its own.
+    fn open(name: impl Into<String>) -> Self {
+        let span = uuid::Uuid::new_v4();
+        let mut span_id = [0; 8];
+        span_id.copy_from_slice(&span.as_bytes()[..8]);
+        let now = unix_nanos();
+        Self {
+            name: name.into(),
+            // Random v4 bytes carry a version nibble, so neither id is all zero.
+            trace_id: *uuid::Uuid::new_v4().as_bytes(),
+            span_id,
+            start_unix_nanos: now,
+            end_unix_nanos: now,
+        }
+    }
+}
+
+fn unix_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
+        })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// OTLP/HTTP JSON exporter. Export failures never fail a delivery operation.
 pub struct OtlpHttpTelemetry {
     endpoint: String,
     next: AtomicU64,
-    open: Mutex<BTreeMap<u64, String>>,
+    open: Mutex<BTreeMap<u64, SpanRecord>>,
 }
 
 impl OtlpHttpTelemetry {
@@ -304,21 +383,18 @@ impl OtlpHttpTelemetry {
         }
     }
 
+    /// Fire and forget inside a runtime; synchronous, within the export
+    /// timeout, outside one.
     fn export(&self, path: &str, body: serde_json::Value) {
         let url = format!("{}{path}", self.endpoint);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let Some(client) = shared_client(&ASYNC_CLIENT, async_export_client) else {
+                return;
+            };
             handle.spawn(async move {
-                // Export is best effort; a client that cannot be built drops it.
-                let Ok(client) =
-                    crate::outbound_tls::client().and_then(|builder| Ok(builder.build()?))
-                else {
-                    return;
-                };
                 let _ = client.post(url).json(&body).send().await;
             });
-        } else if let Ok(client) =
-            crate::outbound_tls::blocking_client().and_then(|builder| Ok(builder.build()?))
-        {
+        } else if let Some(client) = shared_client(&BLOCKING_CLIENT, blocking_export_client) {
             let _ = client.post(url).json(&body).send();
         }
     }
@@ -330,18 +406,19 @@ impl Telemetry for OtlpHttpTelemetry {
         self.open
             .lock()
             .expect("telemetry mutex")
-            .insert(id, name.into());
+            .insert(id, SpanRecord::open(name));
         SpanToken(id)
     }
 
     fn end_span(&self, token: SpanToken, attrs: &DeliveryAttributes, status: SpanStatus) {
-        let name = self
+        let mut span = self
             .open
             .lock()
             .expect("telemetry mutex")
             .remove(&token.0)
-            .unwrap_or_else(|| "tenkai.unknown".into());
-        self.export("/v1/traces", otlp_trace_payload(&name, attrs, status));
+            .unwrap_or_else(|| SpanRecord::open("tenkai.unknown"));
+        span.end_unix_nanos = unix_nanos().max(span.start_unix_nanos);
+        self.export("/v1/traces", otlp_trace_payload(&span, attrs, status));
     }
 
     fn record_metric(&self, name: &str, value: f64, attrs: &DeliveryAttributes) {
@@ -349,12 +426,12 @@ impl Telemetry for OtlpHttpTelemetry {
     }
 }
 
+/// OTLP/JSON encodes ids as lowercase hex and 64-bit times as decimal strings.
 pub fn otlp_trace_payload(
-    name: &str,
+    span: &SpanRecord,
     attrs: &DeliveryAttributes,
     status: SpanStatus,
 ) -> serde_json::Value {
-    let attributes = otlp_attributes(attrs);
     serde_json::json!({
         "resourceSpans": [{
             "resource": {
@@ -364,8 +441,13 @@ pub fn otlp_trace_payload(
             },
             "scopeSpans": [{
                 "spans": [{
-                    "name": name,
-                    "attributes": attributes,
+                    "traceId": hex(&span.trace_id),
+                    "spanId": hex(&span.span_id),
+                    "name": span.name,
+                    "kind": 1,
+                    "startTimeUnixNano": span.start_unix_nanos.to_string(),
+                    "endTimeUnixNano": span.end_unix_nanos.to_string(),
+                    "attributes": otlp_attributes(attrs),
                     "status": {
                         "code": match status {
                             SpanStatus::Ok => 1,
@@ -395,6 +477,7 @@ pub fn otlp_metric_payload(
                     "name": name,
                     "gauge": {
                         "dataPoints": [{
+                            "timeUnixNano": unix_nanos().to_string(),
                             "asDouble": value,
                             "attributes": otlp_attributes(attrs)
                         }]
@@ -598,7 +681,7 @@ mod tests {
             .environment("lab")
             .release_digest("deadbeef")
             .fencing_generation(9);
-        let payload = otlp_trace_payload("tenkai.apply", &attrs, SpanStatus::Ok);
+        let payload = otlp_trace_payload(&SpanRecord::open("tenkai.apply"), &attrs, SpanStatus::Ok);
         let encoded = payload.to_string();
         assert!(encoded.contains(ATTR_PLAN_ID));
         assert!(encoded.contains("deadbeef"));
@@ -606,6 +689,63 @@ mod tests {
         assert!(!encoded.contains("token="));
         assert!(!encoded.contains("bearer"));
         assert!(!encoded.contains("kubeconfig"));
+    }
+
+    #[test]
+    fn otlp_payloads_carry_the_fields_a_collector_requires() {
+        let attrs = DeliveryAttributes::new(Operation::Apply);
+        let mut opened = SpanRecord::open("tenkai.apply");
+        opened.end_unix_nanos = opened.start_unix_nanos + 5;
+        let trace = otlp_trace_payload(&opened, &attrs, SpanStatus::Ok);
+        let span = &trace["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
+        let id = |key: &str, len: usize| {
+            let value = span[key].as_str().expect("id is a string");
+            assert_eq!(value.len(), len, "{key}");
+            assert!(
+                value
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            );
+            assert!(value.bytes().any(|b| b != b'0'), "{key} is all zero");
+        };
+        id("traceId", 32);
+        id("spanId", 16);
+        let time = |key: &str| -> u64 { span[key].as_str().expect("time").parse().expect("u64") };
+        assert!(time("startTimeUnixNano") > 0);
+        assert_eq!(time("endTimeUnixNano"), time("startTimeUnixNano") + 5);
+
+        let metric = otlp_metric_payload(METRIC_APPLY_OUTCOME, 1.0, &attrs);
+        let point = &metric["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0]["gauge"]["dataPoints"]
+            [0];
+        let at: u64 = point["timeUnixNano"]
+            .as_str()
+            .expect("time")
+            .parse()
+            .expect("u64");
+        assert!(at > 0);
+    }
+
+    #[test]
+    fn export_to_a_stalled_collector_gives_up_within_the_timeout() {
+        // Accepts into the backlog and never answers.
+        let collector = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let exporter =
+            OtlpHttpTelemetry::from_endpoint(format!("http://{}", collector.local_addr().unwrap()));
+        let started = std::time::Instant::now();
+        exporter.record_metric(
+            METRIC_APPLY_OUTCOME,
+            1.0,
+            &DeliveryAttributes::new(Operation::Apply),
+        );
+        let waited = started.elapsed();
+        assert!(
+            waited >= EXPORT_TIMEOUT / 2,
+            "export returned before reaching the collector"
+        );
+        assert!(
+            waited < EXPORT_TIMEOUT + Duration::from_secs(2),
+            "export waited {waited:?}"
+        );
     }
 
     #[tokio::test]

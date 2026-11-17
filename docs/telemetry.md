@@ -20,6 +20,13 @@ export TENKAI_OTEL_ENDPOINT=http://127.0.0.1:4318
 ```
 
 Unset, empty, or unreachable endpoints leave delivery behavior unchanged.
+Each export gives up after one second to connect and three seconds in all,
+and export runs in the background, so a stalled collector never delays a
+delivery operation.
+
+Every span carries a random trace and span id and its start and end time;
+every metric point carries the time it was recorded. Each span is its own
+trace: spans are not yet linked to the span that started them.
 
 ## Inbound correlation identity
 
