@@ -118,9 +118,19 @@ pub trait ArtifactRegistry: Send + Sync {
     fn verify(&self, reference: &OciArtifactRef) -> Result<OciArtifactRef>;
     fn fetch(&self, reference: &OciArtifactRef) -> Result<Vec<u8>>;
     /// The stored blob's size and a reader over it, or `None` when absent,
-    /// for blobs too large to fetch whole (#851). Unverified: the caller
-    /// hashes what it reads and compares it with `reference.digest`.
-    fn open(&self, reference: &OciArtifactRef) -> Result<Option<(u64, Box<dyn Read>)>>;
+    /// for blobs too large to fetch whole (#851). The caller hashes what it
+    /// reads and compares it with `reference.digest`.
+    /// Default: [`Self::fetch`] it whole; stores that can stream override it.
+    fn open(&self, reference: &OciArtifactRef) -> Result<Option<(u64, Box<dyn Read>)>> {
+        if self.stored(reference)?.is_none() {
+            return Ok(None);
+        }
+        let bytes = self.fetch(reference)?;
+        Ok(Some((
+            bytes.len() as u64,
+            Box::new(std::io::Cursor::new(bytes)),
+        )))
+    }
     fn store(&self, reference: &OciArtifactRef, bytes: Vec<u8>) -> Result<()>;
     /// Store the blob read from `reader`, for blobs too large to hold in
     /// memory (#684). The digest is checked before the blob is visible.
