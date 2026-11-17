@@ -11,7 +11,6 @@ use super::PostgresTenantPartition;
 #[cfg(feature = "postgres")]
 use super::postgres_imp;
 use super::tenant_postgres_store_capabilities;
-use super::tenant_schema_name;
 
 /// Multi-tenant Postgres operational store factory (hub).
 ///
@@ -90,12 +89,11 @@ impl PostgresTenantOperationalStore {
         &self,
         tenant_id: &str,
     ) -> std::result::Result<PostgresTenantPartition, IsolationError> {
-        let schema = tenant_schema_name(tenant_id)
-            .map_err(|error| IsolationError::Contract(error.to_string()))?;
         #[cfg(feature = "postgres")]
         {
-            self.inner
-                .ensure_tenant_schema(&schema)
+            let schema = self
+                .inner
+                .open_tenant_schema(tenant_id)
                 .map_err(|error| IsolationError::Contract(error.to_string()))?;
             Ok(PostgresTenantPartition {
                 tenant_id: tenant_id.to_string(),
@@ -105,7 +103,8 @@ impl PostgresTenantOperationalStore {
         }
         #[cfg(not(feature = "postgres"))]
         {
-            let _ = schema;
+            crate::tenant_schema_name(tenant_id)
+                .map_err(|error| IsolationError::Contract(error.to_string()))?;
             Err(IsolationError::Contract(
                 "postgres feature is not enabled in this binary".into(),
             ))

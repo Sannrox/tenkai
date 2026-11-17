@@ -65,6 +65,15 @@ database tenkai
 Cross-tenant reads use non-disclosing deny (`resource not found`). Never put
 identity-plane tables in this database (ADR 0005).
 
+The schema name folds the tenant id to lower case, maps `-` to `_`, and is cut
+at PostgreSQL's 63-byte identifier limit, so distinct tenant ids can name the
+same schema (`Team-A` and `team_a`). `tenkai_tenant_schema_owners` binds each
+schema to the exact tenant id that first opened it, on every replica. Any other
+id that names that schema is refused before it reads or writes. A schema created
+before the owner table existed has no owner row; its first opener after the
+upgrade claims it. To repair a schema claimed by the wrong id, stop the hub and
+correct its row in `tenkai_tenant_schema_owners`.
+
 Each tenant schema is migrated in place the first time a replica uses it at a
 new tenant-schema stamp, under a per-schema advisory lock. `tenkai_tenant_schema_versions`
 records that stamp (`TENANT_SCHEMA_VERSION` in the Postgres adapter, independent

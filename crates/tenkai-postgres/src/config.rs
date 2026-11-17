@@ -158,7 +158,15 @@ pub fn resolve_fenced_enterprise_hub(
     }
 }
 
+/// PostgreSQL identifiers keep at most this many bytes and drop the rest.
+const POSTGRES_IDENTIFIER_MAX_BYTES: usize = 63;
+
 /// Sanitize tenant id into a safe Postgres schema name (`tenkai_t_*`).
+///
+/// The mapping is not one-to-one: case, `-` versus `_`, and anything past
+/// PostgreSQL's identifier length do not survive. The name is cut to the
+/// length PostgreSQL keeps, so it names the schema that is really used, and
+/// opening a tenant schema binds each schema to the one tenant id that owns it.
 pub fn tenant_schema_name(tenant_id: &str) -> Result<String> {
     if tenant_id.trim().is_empty() || tenant_id.len() > 64 {
         return Err(StoreError::InvalidData {
@@ -185,5 +193,6 @@ pub fn tenant_schema_name(tenant_id: &str) -> Result<String> {
             detail: "tenant id produced an empty schema suffix".into(),
         });
     }
+    out.truncate(POSTGRES_IDENTIFIER_MAX_BYTES);
     Ok(out)
 }

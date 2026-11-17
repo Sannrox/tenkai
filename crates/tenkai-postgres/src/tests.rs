@@ -42,6 +42,22 @@ fn schema_names_are_safe() {
     assert!(tenant_schema_name(&"x".repeat(65)).is_err());
 }
 
+/// Distinct ids can name one schema, so ownership, not the name, keeps
+/// tenants apart. The name is cut where PostgreSQL cuts identifiers.
+#[test]
+fn distinct_tenant_ids_can_name_one_schema() {
+    let same = tenant_schema_name("team_a").unwrap();
+    assert_eq!(tenant_schema_name("Team-A").unwrap(), same);
+    assert_eq!(tenant_schema_name("TEAM_A").unwrap(), same);
+    let (left, right) = (
+        format!("{}a", "x".repeat(60)),
+        format!("{}b", "x".repeat(60)),
+    );
+    let long = tenant_schema_name(&left).unwrap();
+    assert_eq!(long.len(), 63);
+    assert_eq!(tenant_schema_name(&right).unwrap(), long);
+}
+
 #[test]
 fn config_rejects_non_postgres_urls() {
     assert!(PostgresTenantConfig::new("postgres://localhost/tenkai").is_ok());
@@ -301,6 +317,8 @@ mod live_property_lookup;
 mod live_retirement;
 #[cfg(feature = "postgres")]
 mod live_schema_ensure;
+#[cfg(feature = "postgres")]
+mod live_schema_owner;
 #[cfg(feature = "postgres")]
 mod live_sole_store;
 #[cfg(feature = "postgres")]

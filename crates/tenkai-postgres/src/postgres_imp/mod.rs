@@ -2,7 +2,7 @@ use postgres::{Client, Transaction};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread::{self, JoinHandle};
 
-use crate::tenant_schema::EnsuredTenantSchemas;
+use crate::tenant_schema::{EnsuredTenantSchemas, TenantSchemaOwners};
 
 pub(crate) use tenkai::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
@@ -19,6 +19,8 @@ pub struct Inner {
     fence: std::sync::OnceLock<std::sync::Arc<tenkai::writer_fence::WriterFence>>,
     /// Schemas already migrated at this process's tenant stamp (#870).
     ensured_tenant_schemas: EnsuredTenantSchemas,
+    /// Owner tenant id recorded for each tenant schema this process opened.
+    tenant_schema_owners: TenantSchemaOwners,
 }
 
 enum WorkerMessage<C> {

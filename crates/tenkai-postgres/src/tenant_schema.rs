@@ -4,6 +4,8 @@
 //! [`TENANT_SCHEMA_VERSION`] when `migrate_tenant_schema` changes shape.
 //! SQLite [`tenkai::storage::SCHEMA_VERSION`] is independent.
 
+#[cfg(feature = "postgres")]
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::RwLock;
 
@@ -45,6 +47,35 @@ impl EnsuredTenantSchemas {
     pub(crate) fn remove(&self, schema: &str) {
         if let Ok(mut guard) = self.inner.write() {
             guard.remove(schema);
+        }
+    }
+}
+
+/// Process-local memo of each tenant schema's recorded owner tenant id. An
+/// owner row is written once and never changes, so a hit needs no query.
+#[cfg(feature = "postgres")]
+pub(crate) struct TenantSchemaOwners {
+    inner: RwLock<HashMap<String, String>>,
+}
+
+#[cfg(feature = "postgres")]
+impl TenantSchemaOwners {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn owner(&self, schema: &str) -> Option<String> {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(schema).cloned())
+    }
+
+    pub(crate) fn record(&self, schema: String, tenant_id: String) {
+        if let Ok(mut guard) = self.inner.write() {
+            guard.insert(schema, tenant_id);
         }
     }
 }
