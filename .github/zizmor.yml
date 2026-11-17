@@ -1,0 +1,7 @@
+# Suppressions for scripts/check-workflows.sh, one reason each.
+rules:
+  cache-poisoning:
+    ignore:
+      # CI only builds and tests; it publishes nothing, and the release
+      # workflow restores no cache.
+      - ci.yml

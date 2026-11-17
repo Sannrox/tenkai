@@ -2,26 +2,26 @@
 """Release metadata for the v* workflow: CHANGELOG notes, SBOM, family manifest.
 
 Usage:
-  scripts/release-metadata.py notes VERSION
+  scripts/release/metadata.py notes VERSION
       Print the CHANGELOG.md section for VERSION (the GitHub Release body).
-  scripts/release-metadata.py sbom OUT
+  scripts/release/metadata.py sbom OUT
       Write a CycloneDX 1.5 SBOM of the locked Cargo dependency graph and the
       pinned web-console bundle the release hosts embed.
-  scripts/release-metadata.py check-sbom PATH
+  scripts/release/metadata.py check-sbom PATH
       Validate PATH against the CycloneDX 1.5 JSON schema and SPDX license
       expressions. Needs cyclonedx-python-lib[json-validation]; the release
       workflow runs it in a job without attestation permissions.
-  scripts/release-metadata.py gate-flags VERSION
+  scripts/release/metadata.py gate-flags VERSION
       Print the gate flags of the VERSION section; fail when its
       `Gate flags:` line is missing.
-  scripts/release-metadata.py manifest --version V --git-sha SHA --tag TAG
+  scripts/release/metadata.py manifest --version V --git-sha SHA --tag TAG
       --dist DIR --out PATH [--attestation URL]... [--allow-missing-gate-flags]
       Write the tenkai.family-release-manifest.v1 (docs/family-release-manifests.md)
       for the release assets in DIR, with gate flags from the CHANGELOG section.
       Only the dry run of an already released version allows a missing line.
-  scripts/release-metadata.py self-test
 
 Everything except check-sbom uses only the standard library.
+scripts/tests/release/test_metadata.py tests it.
 """
 
 from __future__ import annotations
@@ -32,11 +32,10 @@ import json
 import re
 import subprocess
 import sys
-import tempfile
 import uuid
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 COMPONENT = "tenkai"
 MANIFEST_SCHEMA = "tenkai.family-release-manifest.v1"
 GATE_FLAGS = ("breaking", "migration", "realm")
@@ -210,84 +209,6 @@ def build_manifest(
     }
 
 
-def expect_exit(message: str, call) -> None:
-    try:
-        call()
-    except SystemExit as error:
-        if message not in str(error):
-            raise SystemExit(f"expected failure mentioning {message!r}, got {error}") from error
-    else:
-        raise SystemExit(f"expected failure mentioning {message!r}")
-
-
-def self_test() -> None:
-    changelog = (
-        "# Changelog\n\n## [Unreleased]\n\n"
-        "## v0.7.0 (2026-11-03)\n\nGate flags: migration, breaking\n\n### What's Changed\n- feat: one\n\n"
-        "## v0.7.0-rc.1 (2026-11-02)\n\nGate flags: breaking\n\n- feat: candidate\n\n"
-        "## [0.6.2-rc.1] - 2026-11-01\n\nGate flags: none\n\n- fix: candidate\n\n"
-        "## [0.6.1] - 2026-11-01\n\n- fix: two\n\n"
-        "## v0.6.0 (2026-10-30)\n\n"
-    )
-    section = changelog_section(changelog, "0.7.0")
-    assert "feat: one" in section and "fix: two" not in section, section
-    assert changelog_section(changelog, "0.6.1") == "- fix: two"
-    # A release candidate has its own section; the final never borrows it.
-    candidate = changelog_section(changelog, "0.7.0-rc.1")
-    assert "feat: candidate" in candidate and "feat: one" not in candidate, candidate
-    assert gate_flags(candidate) == ["breaking"]
-    assert "fix: candidate" in changelog_section(changelog, "0.6.2-rc.1")
-    expect_exit("no section for 0.6.1-rc.1", lambda: changelog_section(changelog, "0.6.1-rc.1"))
-    assert gate_flags(section) == ["breaking", "migration"]
-    expect_exit("no 'Gate flags:' line", lambda: gate_flags("- fix: two"))
-    assert gate_flags("- fix: two", required=False) == []
-    assert gate_flags("Gate flags: none") == []
-    expect_exit("unknown gate flags", lambda: gate_flags("Gate flags: risky"))
-    expect_exit("no section for 9.9.9", lambda: changelog_section(changelog, "9.9.9"))
-    expect_exit("is empty", lambda: changelog_section(changelog, "0.6.0"))
-
-    metadata = {
-        "workspace_members": ["path+file:///w#tenkai@0.7.0", "path+file:///w/crates/tenkai-wire#0.7.0"],
-        "packages": [
-            {"id": "path+file:///w#tenkai@0.7.0", "name": "tenkai", "version": "0.7.0", "license": "Apache-2.0"},
-            {"id": "path+file:///w/crates/tenkai-wire#0.7.0", "name": "tenkai-wire", "version": "0.7.0", "license": "Apache-2.0"},
-            {"id": "registry+x#libc@0.2.0", "name": "libc", "version": "0.2.0", "license": "MIT OR Apache-2.0"},
-            {"id": "registry+x#memchr@2.0.0", "name": "memchr", "version": "2.0.0", "license": "MIT/Unlicense"},
-            {"id": "registry+x#ring@0.17.0", "name": "ring", "version": "0.17.0", "license": None},
-        ],
-    }
-    console = console_component("v0.2.0 " + "e" * 64)
-    bom = bom_from_metadata(metadata, console)
-    assert bom == bom_from_metadata(metadata, console), "serial number must be stable"
-    uuid.UUID(bom["serialNumber"].removeprefix("urn:uuid:"))
-    assert bom["metadata"]["component"]["name"] == "tenkai"
-    by_name = {component["name"]: component for component in bom["components"]}
-    assert set(by_name) == {"libc", "memchr", "ring", "tenkai-console"}, by_name
-    assert by_name["tenkai-console"]["hashes"] == [{"alg": "SHA-256", "content": "e" * 64}]
-    assert by_name["memchr"]["licenses"] == [{"expression": "MIT OR Unlicense"}]
-    assert "licenses" not in by_name["ring"]
-
-    with tempfile.TemporaryDirectory(prefix="tenkai-release-metadata.") as tmp:
-        dist = Path(tmp)
-        (dist / "tenkaictl-linux-x86_64").write_bytes(b"bin")
-        (dist / "tenkai-http-v1.schema.json").write_text("{}\n")
-        for name in METADATA_FILES:
-            (dist / name).write_text("metadata\n")
-        common = {"version": "0.7.0", "dist": dist, "attestations": [], "flags": []}
-        manifest = build_manifest(git_sha="a" * 40, tag="v0.7.0", **common)
-        assert [item["name"] for item in manifest["binaries"]] == [
-            "tenkai-http-v1.schema.json",
-            "tenkaictl-linux-x86_64",
-        ], manifest
-        assert manifest["binaries"][1]["digest"] == "sha256:" + hashlib.sha256(b"bin").hexdigest()
-        expect_exit("full lowercase SHA", lambda: build_manifest(git_sha="abc", tag="v0.7.0", **common))
-        expect_exit("does not match version", lambda: build_manifest(git_sha="a" * 40, tag="v0.7.1", **common))
-        candidate = build_manifest(git_sha="a" * 40, tag="v0.7.1-rc.1", **(common | {"version": "0.7.1-rc.1"}))
-        assert candidate["version"] == "0.7.1-rc.1" and candidate["tag"] == "v0.7.1-rc.1", candidate
-        expect_exit("does not match version", lambda: build_manifest(git_sha="a" * 40, tag="v0.7.0-rc.1", **common))
-    print("release-metadata self-test passed")
-
-
 def main(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -307,12 +228,9 @@ def main(argv: list[str]) -> None:
     manifest.add_argument("--out", required=True, type=Path)
     manifest.add_argument("--attestation", action="append", default=[])
     manifest.add_argument("--allow-missing-gate-flags", action="store_true")
-    commands.add_parser("self-test")
     args = parser.parse_args(argv)
 
-    if args.command == "self-test":
-        self_test()
-    elif args.command == "notes":
+    if args.command == "notes":
         print(changelog_section((ROOT / "CHANGELOG.md").read_text(), args.version))
     elif args.command == "gate-flags":
         section = changelog_section((ROOT / "CHANGELOG.md").read_text(), args.version)
