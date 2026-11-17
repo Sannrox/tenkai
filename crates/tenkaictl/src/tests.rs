@@ -1509,3 +1509,49 @@ fn parses_plan_show() {
         } if env.as_deref() == Some("prod")
     ));
 }
+
+/// #1320: a failed certificate write used to leave `runner-ca-key.pem`
+/// behind, and every retry then failed on the key's exclusive create.
+#[test]
+fn failed_runner_ca_init_leaves_nothing_and_a_retry_succeeds() {
+    let dir = std::env::temp_dir().join(format!(
+        "tenkaictl-runner-ca-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    // A dangling symlink makes the certificate's link fail after the key
+    // was already linked into place.
+    let blocker = dir.join("runner-ca.pem");
+    std::os::unix::fs::symlink(dir.join("absent"), &blocker).unwrap();
+
+    let error = crate::init_runner_ca(&dir, "runners").unwrap_err();
+    assert!(format!("{error:#}").contains("runner-ca.pem"), "{error:#}");
+    std::fs::remove_file(&blocker).unwrap();
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        0,
+        "partial CA left behind"
+    );
+
+    crate::init_runner_ca(&dir, "runners").unwrap();
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["runner-ca-key.pem", "runner-ca.pem"]);
+    let mode = |name: &str| {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(dir.join(name))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(
+        (mode("runner-ca-key.pem"), mode("runner-ca.pem")),
+        (0o600, 0o644)
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

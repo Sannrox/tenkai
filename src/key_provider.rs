@@ -241,7 +241,7 @@ fn run_software_ceremony(request: CeremonyRequest<'_>) -> Result<CeremonyEvidenc
         }
         if provider_dir.join(ROOT_KEK).exists() || provider_dir.join(ROOT_ID).exists() {
             bail!(
-                "software provider dir {} already holds a root key; use a new directory",
+                "software provider dir {} already holds a root key; use a new directory, or remove the key files an older failed ceremony left behind",
                 provider_dir.display()
             );
         }
@@ -259,7 +259,7 @@ fn run_software_ceremony(request: CeremonyRequest<'_>) -> Result<CeremonyEvidenc
         create_owned_dir(&tenant_dir)?;
         if tenant_dir.join(TENANT_DEK_WRAP).exists() || tenant_dir.join(TENANT_ID).exists() {
             bail!(
-                "software provider dir {} already holds tenant keys for {tenant}; use a new directory",
+                "software provider dir {} already holds tenant keys for {tenant}; use a new directory, or remove the key files an older failed ceremony left behind",
                 provider_dir.display()
             );
         }
@@ -274,35 +274,76 @@ fn run_software_ceremony(request: CeremonyRequest<'_>) -> Result<CeremonyEvidenc
         }
     }
 
+    // Each key file is recorded as it is written. On any later failure the
+    // ceremony removes exactly those files, so a retry on the same directory
+    // starts clean instead of tripping the "already holds" guards above.
+    let mut written = Vec::new();
+    let result = write_software_keys(provider_dir, &tenants, tenant_dirs, &mut written).and_then(
+        |(root_key_id, data_keys)| {
+            let statement = CeremonyStatement {
+                issued_at: request.issued_at,
+                class: request.profile.class,
+                provider_kind: KeyProviderKind::Software,
+                root_key_id,
+                data_keys,
+                custodians,
+            };
+            sign_statement(statement, &signer)
+        },
+    );
+    result.map_err(|error| {
+        let leftovers: Vec<String> = written
+            .iter()
+            .filter_map(|path| {
+                crate::atomic_state::remove_if_exists(path)
+                    .err()
+                    .map(|cleanup| format!("{cleanup:#}"))
+            })
+            .collect();
+        if leftovers.is_empty() {
+            error
+        } else {
+            error.context(format!(
+                "and removing the partial key files failed, remove them by hand: {}",
+                leftovers.join("; ")
+            ))
+        }
+    })
+}
+
+/// Write the root KEK, its id, and each tenant's wrapped DEK and id, pushing
+/// every created path onto `written` before the next write.
+fn write_software_keys(
+    provider_dir: &Path,
+    tenants: &[String],
+    tenant_dirs: Vec<PathBuf>,
+    written: &mut Vec<PathBuf>,
+) -> Result<(String, Vec<TenantDataKey>)> {
+    let mut write = |path: PathBuf, bytes: &[u8]| {
+        write_owner_only(&path, bytes)?;
+        written.push(path);
+        Ok::<_, anyhow::Error>(())
+    };
     let root_secret = random_bytes()?;
     let root_key_id = key_id_for(&random_bytes()?);
-    write_secret(provider_dir.join(ROOT_KEK), &root_secret)?;
-    write_text(provider_dir.join(ROOT_ID), &root_key_id)?;
+    write(provider_dir.join(ROOT_KEK), &root_secret)?;
+    write(provider_dir.join(ROOT_ID), root_key_id.as_bytes())?;
 
     let mut data_keys = Vec::with_capacity(tenants.len());
     for (tenant, tenant_dir) in tenants.iter().zip(tenant_dirs) {
         let dek = random_bytes()?;
         let key_id = key_id_for(&random_bytes()?);
-        write_owner_only(
-            &tenant_dir.join(TENANT_DEK_WRAP),
+        write(
+            tenant_dir.join(TENANT_DEK_WRAP),
             &wrap_dek(&root_secret, &dek)?,
         )?;
-        write_text(tenant_dir.join(TENANT_ID), &key_id)?;
+        write(tenant_dir.join(TENANT_ID), key_id.as_bytes())?;
         data_keys.push(TenantDataKey {
             tenant: tenant.clone(),
             key_id,
         });
     }
-
-    let statement = CeremonyStatement {
-        issued_at: request.issued_at,
-        class: request.profile.class,
-        provider_kind: KeyProviderKind::Software,
-        root_key_id,
-        data_keys,
-        custodians,
-    };
-    sign_statement(statement, &signer)
+    Ok((root_key_id, data_keys))
 }
 
 fn sign_statement(
@@ -426,14 +467,6 @@ fn restrict_dir(path: &Path) -> Result<()> {
             .with_context(|| format!("restricting {}", path.display()))?;
     }
     Ok(())
-}
-
-fn write_secret(path: PathBuf, bytes: &[u8; 32]) -> Result<()> {
-    write_owner_only(&path, bytes)
-}
-
-fn write_text(path: PathBuf, text: &str) -> Result<()> {
-    write_owner_only(&path, text.as_bytes())
 }
 
 fn create_owner_only(path: &Path) -> Result<fs::File> {
@@ -769,6 +802,62 @@ mod tests {
             provider_dir: provider,
             issued_at: 1,
         }
+    }
+
+    /// #1320: a failure after the first key file used to leave orphaned key
+    /// material that made every retry on the same directory refuse.
+    #[test]
+    fn failed_ceremony_removes_its_key_files_so_a_retry_succeeds() {
+        let dir = temp_dir();
+        let provider = dir.join("provider");
+        let profile = lab_profile();
+        let custodians = ["alice".into(), "bob".into()];
+        let tenants = ["acme".into(), "contoso".into()];
+        let signing = seed_file(&dir);
+        // A dangling symlink passes the "already holds" check, then makes the
+        // exclusive create of contoso's wrapped key fail after the root and
+        // acme keys are already on disk.
+        let blocker = provider.join("tenants/contoso").join(TENANT_DEK_WRAP);
+        fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(dir.join("absent"), &blocker).unwrap();
+
+        let error = run_ceremony(ceremony(
+            &profile,
+            &custodians,
+            &tenants,
+            &provider,
+            &signing,
+        ))
+        .unwrap_err();
+        assert!(format!("{error:#}").contains(TENANT_DEK_WRAP), "{error:#}");
+        fs::remove_file(&blocker).unwrap();
+        let files: Vec<PathBuf> = walk_files(&provider);
+        assert!(files.is_empty(), "partial key files left behind: {files:?}");
+
+        run_ceremony(ceremony(
+            &profile,
+            &custodians,
+            &tenants,
+            &provider,
+            &signing,
+        ))
+        .unwrap()
+        .verify()
+        .unwrap();
+    }
+
+    fn walk_files(dir: &Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .flat_map(|entry| {
+                let path = entry.unwrap().path();
+                if fs::symlink_metadata(&path).unwrap().is_dir() {
+                    walk_files(&path)
+                } else {
+                    vec![path]
+                }
+            })
+            .collect()
     }
 
     #[test]

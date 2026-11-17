@@ -419,30 +419,24 @@ fn track_leave(
     }
 }
 
-/// Load a posture baseline from a JSON file (missing file → empty snapshot).
+/// Load a posture baseline from a JSON file. Only a missing file is an empty
+/// snapshot; any other read error is reported.
 pub fn load_fleet_posture_baseline(path: &Path) -> Result<FleetPostureSnapshot> {
-    if !path.exists() {
+    let Some(raw) = crate::atomic_state::read_optional(path)
+        .with_context(|| format!("read fleet posture baseline {}", path.display()))?
+    else {
         return Ok(FleetPostureSnapshot::default());
-    }
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("read fleet posture baseline {}", path.display()))?;
-    let snapshot: FleetPostureSnapshot = serde_json::from_str(&raw)
-        .with_context(|| format!("parse fleet posture baseline {}", path.display()))?;
-    Ok(snapshot)
+    };
+    serde_json::from_slice(&raw)
+        .with_context(|| format!("parse fleet posture baseline {}", path.display()))
 }
 
-/// Persist a posture baseline as JSON (no secrets; names and postures only).
+/// Atomically replace a posture baseline with JSON (no secrets; names and
+/// postures only). A crash leaves the previous baseline or the new one.
 pub fn write_fleet_posture_baseline(path: &Path, snapshot: &FleetPostureSnapshot) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create baseline directory {}", parent.display()))?;
-    }
     let raw = serde_json::to_string_pretty(snapshot).context("encode fleet posture baseline")?;
-    std::fs::write(path, format!("{raw}\n"))
-        .with_context(|| format!("write fleet posture baseline {}", path.display()))?;
-    Ok(())
+    crate::atomic_state::write_bytes_verified(path, format!("{raw}\n").as_bytes(), |_| Ok(()))
+        .with_context(|| format!("write fleet posture baseline {}", path.display()))
 }
 
 fn aggregate_fleet_report(environments: Vec<FleetEnvironmentRow>) -> FleetStatusReport {

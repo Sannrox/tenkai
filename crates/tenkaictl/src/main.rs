@@ -500,34 +500,87 @@ async fn run(mut cli: Cli) -> Result<()> {
 }
 
 /// Write a new runner CA into `dir`, refusing to replace an existing one.
+///
+/// Both files are written to hidden temporaries with their final modes, then
+/// hard-linked into place: `link` never replaces an existing name. If the
+/// second link fails, the first is removed again, so a failed run leaves no
+/// orphaned key that blocks the next attempt.
 fn init_runner_ca(dir: &std::path::Path, name: &str) -> Result<()> {
     use anyhow::Context as _;
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
     let (cert, key) = tenkai::runner_ca::RunnerCa::generate(name)?;
     std::fs::create_dir_all(dir)?;
-    for (file, contents, mode) in [
+    let files = [
         ("runner-ca-key.pem", &key, 0o600),
         ("runner-ca.pem", &cert, 0o644),
-    ] {
-        let path = dir.join(file);
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&path)
-            .with_context(|| {
+    ];
+    let mut temporaries = Vec::new();
+    let mut published = Vec::new();
+    let result = (|| {
+        for (file, contents, mode) in files {
+            let temporary = dir.join(format!(".{file}.{}.tmp", uuid::Uuid::new_v4().simple()));
+            temporaries.push(temporary.clone());
+            write_new_file(&temporary, contents.as_bytes(), mode)?;
+        }
+        for ((file, _, _), temporary) in files.iter().zip(&temporaries) {
+            let path = dir.join(file);
+            std::fs::hard_link(temporary, &path).with_context(|| {
                 format!(
-                    "creating {} (an existing CA is never replaced)",
+                    "creating {} (an existing CA is never replaced; if only one of runner-ca.pem and runner-ca-key.pem exists, an interrupted init left it: remove it by hand)",
                     path.display()
                 )
             })?;
-        out.write_all(contents.as_bytes())?;
-        out.sync_all()?;
+            published.push(path);
+        }
+        tenkai::atomic_state::sync_dir(dir)
+    })();
+    // On success only the temporaries go; on failure also every name this
+    // run linked, never a file that already existed.
+    let remove = if result.is_ok() {
+        temporaries
+    } else {
+        temporaries.into_iter().chain(published).collect()
+    };
+    let leftovers: Vec<String> = remove
+        .iter()
+        .filter_map(|path| {
+            tenkai::atomic_state::remove_if_exists(path)
+                .err()
+                .map(|error| format!("{error:#}"))
+        })
+        .collect();
+    if let Err(error) = result {
+        return Err(if leftovers.is_empty() {
+            error
+        } else {
+            error.context(format!(
+                "and removing the partial runner CA failed, remove it by hand: {}",
+                leftovers.join("; ")
+            ))
+        });
+    }
+    for leftover in &leftovers {
+        eprintln!("warning: runner CA written, but a temporary file remains: {leftover}");
     }
     println!(
         "wrote {}/runner-ca.pem and runner-ca-key.pem",
         dir.display()
     );
+    Ok(())
+}
+
+/// Create `path` exclusively with exactly `mode`, write `bytes` and sync.
+fn write_new_file(path: &std::path::Path, bytes: &[u8], mode: u32) -> Result<()> {
+    use anyhow::Context as _;
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    out.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    out.write_all(bytes)?;
+    out.sync_all()?;
     Ok(())
 }
