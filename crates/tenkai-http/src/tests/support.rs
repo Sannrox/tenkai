@@ -34,20 +34,6 @@ impl ReconcilePort for FixedReconciler {
         })
     }
 
-    fn reconcile_environments(&self, environments: Vec<String>) -> ReconcileFuture<'_> {
-        Box::pin(async move {
-            Ok(TickReport {
-                environments: environments
-                    .into_iter()
-                    .map(|environment| tenkai::reconciler::EnvironmentResult {
-                        environment,
-                        status: tenkai::reconciler::EnvironmentStatus::Current,
-                    })
-                    .collect(),
-            })
-        })
-    }
-
     fn pending_work(&self, environment: String) -> WorkFuture<'_> {
         Box::pin(async move {
             let plan = self
@@ -181,10 +167,6 @@ impl ReconcilePort for FixedReconciler {
                 promotion_policies: Vec::new(),
             })
         })
-    }
-
-    fn fleet_status_without_outcome_export(&self) -> FleetStatusFuture<'_> {
-        self.fleet_status()
     }
 
     fn apply_inventory_facts(

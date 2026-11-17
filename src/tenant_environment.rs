@@ -1,12 +1,12 @@
 //! Tenant-only Environment application operations.
 //!
-//! This deep module resolves authenticated tenant visibility before reads or
-//! bounded reconciliation. It also hides synchronous tenant-store adaptation,
-//! development-fixture projections, tenant-partition outcome inspection, and
-//! non-disclosing failures from transport adapters.
+//! This deep module resolves authenticated tenant visibility before every
+//! read. It also hides synchronous tenant-store adaptation, development-fixture
+//! projections, tenant-partition outcome inspection, and non-disclosing
+//! failures from transport adapters. Every operation reads only the caller's
+//! partition: environment names are not namespaced by tenant, so nothing here
+//! consults the process-global reconciler, whose rows are keyed by bare name.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::auth_context::AuthenticatedRequestContext;
@@ -17,23 +17,6 @@ use crate::plan::{EnvironmentInspectReport, EnvironmentListEntry, FleetStatusRep
 use crate::reconciler::TickReport;
 use crate::tenant_isolation::IsolationError;
 use crate::tenant_store::TenantOperationalStore;
-
-pub type TenantEnvironmentFuture<'a, T> =
-    Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
-
-/// Narrow view of shared Environment behavior needed by tenant operations.
-pub trait TenantEnvironmentView: Send + Sync {
-    fn inspect_without_outcome_export(
-        &self,
-        environment: String,
-    ) -> TenantEnvironmentFuture<'_, EnvironmentInspectReport>;
-    fn status(&self, environment: String) -> TenantEnvironmentFuture<'_, Vec<StatusRow>>;
-    fn fleet_without_outcome_export(&self) -> TenantEnvironmentFuture<'_, FleetStatusReport>;
-    fn reconcile_bounded(
-        &self,
-        environments: Vec<String>,
-    ) -> TenantEnvironmentFuture<'_, TickReport>;
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TenantEnvironmentError {
@@ -52,15 +35,11 @@ pub enum TenantEnvironmentError {
 /// Deep tenant-only Environment operations used after host authentication.
 pub struct TenantEnvironmentOperations {
     store: Arc<dyn TenantOperationalStore>,
-    view: Arc<dyn TenantEnvironmentView>,
 }
 
 impl TenantEnvironmentOperations {
-    pub fn new(
-        store: Arc<dyn TenantOperationalStore>,
-        view: Arc<dyn TenantEnvironmentView>,
-    ) -> Self {
-        Self { store, view }
+    pub fn new(store: Arc<dyn TenantOperationalStore>) -> Self {
+        Self { store }
     }
 
     pub async fn list(
@@ -210,18 +189,16 @@ impl TenantEnvironmentOperations {
         })
     }
 
+    /// Tenant-scoped reconcile. A tenant partition holds no state the
+    /// process-global reconciler executes, so this reconciles nothing and
+    /// reports no environments. It never passes partition environment names
+    /// to that reconciler: a name a tenant chose can equal a host
+    /// environment's name.
     pub async fn reconcile(
         &self,
-        context: &AuthenticatedRequestContext,
+        _context: &AuthenticatedRequestContext,
     ) -> Result<TickReport, TenantEnvironmentError> {
-        let store = self.store.clone();
-        let context = context.clone();
-        let environments =
-            run_store(move || store.list_active_environment_ids_for(&context)).await?;
-        self.view
-            .reconcile_bounded(environments)
-            .await
-            .map_err(internal)
+        Ok(TickReport::default())
     }
 
     pub async fn retire(
@@ -427,7 +404,7 @@ fn partition_local_inspect(name: &str) -> EnvironmentInspectReport {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use super::*;
     use crate::auth_context::{
@@ -436,46 +413,6 @@ mod tests {
     };
     use crate::storage::EnvironmentRecord;
     use crate::tenant_store::InMemoryTenantOperationalStore;
-
-    #[derive(Default)]
-    struct View {
-        reconciled: Mutex<Vec<String>>,
-    }
-
-    impl TenantEnvironmentView for View {
-        fn inspect_without_outcome_export(
-            &self,
-            environment: String,
-        ) -> TenantEnvironmentFuture<'_, EnvironmentInspectReport> {
-            Box::pin(async move { anyhow::bail!("environment {environment} not registered") })
-        }
-
-        fn status(&self, environment: String) -> TenantEnvironmentFuture<'_, Vec<StatusRow>> {
-            Box::pin(async move { anyhow::bail!("environment {environment} not registered") })
-        }
-
-        fn fleet_without_outcome_export(&self) -> TenantEnvironmentFuture<'_, FleetStatusReport> {
-            Box::pin(async { Ok(crate::plan::fleet_status_from_rows(Vec::new())) })
-        }
-
-        fn reconcile_bounded(
-            &self,
-            environments: Vec<String>,
-        ) -> TenantEnvironmentFuture<'_, TickReport> {
-            *self.reconciled.lock().unwrap() = environments.clone();
-            Box::pin(async move {
-                Ok(TickReport {
-                    environments: environments
-                        .into_iter()
-                        .map(|environment| crate::reconciler::EnvironmentResult {
-                            environment,
-                            status: crate::reconciler::EnvironmentStatus::Current,
-                        })
-                        .collect(),
-                })
-            })
-        }
-    }
 
     fn context(tenant: &str) -> AuthenticatedRequestContext {
         AuthenticatedRequestContextBuilder::new(
@@ -493,7 +430,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_and_reconcile_use_only_authenticated_tenant_environments() {
+    async fn list_uses_only_authenticated_tenant_environments() {
         let store = Arc::new(InMemoryTenantOperationalStore::new());
         let tenant_a = context("tenant-a");
         let tenant_b = context("tenant-b");
@@ -517,8 +454,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let view = Arc::new(View::default());
-        let operations = TenantEnvironmentOperations::new(store, view.clone());
+        let operations = TenantEnvironmentOperations::new(store);
 
         let listed = operations.list(&tenant_a).await.unwrap();
         assert_eq!(
@@ -528,9 +464,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["env-a"]
         );
-        let report = operations.reconcile(&tenant_a).await.unwrap();
-        assert_eq!(report.environments[0].environment, "env-a");
-        assert_eq!(*view.reconciled.lock().unwrap(), vec!["env-a"]);
     }
 
     #[tokio::test]
@@ -550,8 +483,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let view = Arc::new(View::default());
-        let operations = TenantEnvironmentOperations::new(store.clone(), view.clone());
+        let operations = TenantEnvironmentOperations::new(store.clone());
         let retirement = operations
             .retire(&tenant_a, "prod", "service ended", "principal-tenant-a")
             .await
@@ -613,7 +545,6 @@ mod tests {
             .to_string()
             .contains("retired")
         );
-        assert!(view.reconciled.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -631,7 +562,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let operations = TenantEnvironmentOperations::new(store, Arc::new(View::default()));
+        let operations = TenantEnvironmentOperations::new(store);
 
         let error = operations.inspect(&tenant_a, "env-b").await.unwrap_err();
         assert!(matches!(error, TenantEnvironmentError::NotFound));
@@ -653,7 +584,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let operations = TenantEnvironmentOperations::new(store, Arc::new(View::default()));
+        let operations = TenantEnvironmentOperations::new(store);
         let page = operations.history(&tenant_a, "prod").await.unwrap();
         assert!(page.items.is_empty());
         assert!(page.next_cursor.is_none());
@@ -691,7 +622,7 @@ mod tests {
             crate::providers::provider_event_record("outcome", &provider_event, 100).unwrap();
         let partition = store.partition_for(&tenant_a).unwrap();
         crate::storage::OperationalStore::enqueue_provider_event(&partition, &event).unwrap();
-        let operations = TenantEnvironmentOperations::new(store.clone(), Arc::new(View::default()));
+        let operations = TenantEnvironmentOperations::new(store.clone());
         let report = operations.inspect(&tenant_a, "prod").await.unwrap();
         assert_eq!(report.terminal_outcomes.len(), 1);
         assert_eq!(report.terminal_outcomes[0].environment_id, "prod");
@@ -766,119 +697,6 @@ mod tests {
         crate::storage::OperationalStore::enqueue_provider_event(&partition, &event).unwrap();
     }
 
-    struct SharedNameView;
-
-    fn foreign_prod_inspect() -> EnvironmentInspectReport {
-        EnvironmentInspectReport {
-            name: "prod".into(),
-            id: "tenkai:env:prod".into(),
-            description: "foreign delivery".into(),
-            subscriptions: vec![crate::plan::EnvironmentSubscriptionView {
-                product: "secret-app".into(),
-
-                instance: "secret-app".into(),
-                channel: "stable".into(),
-                head: "9.9.9".into(),
-                deployed: Some("9.9.9".into()),
-                health: Some("ok".into()),
-                error: None,
-                overlay_digest: None,
-                applied_overlay: None,
-                state: "current".into(),
-                delivery_hold: None,
-                spec_drift: None,
-            }],
-            facts: Default::default(),
-            overlays: Default::default(),
-            config: Vec::new(),
-            lease: crate::apply::EnvironmentLeaseInspect {
-                held: true,
-                owner: Some("foreign-controller".into()),
-                generation: Some(7),
-                expires_at_ms: None,
-                status: "held".into(),
-            },
-            latest_plan: None,
-            maintenance: None,
-            constraints: Vec::new(),
-            webhooks: Vec::new(),
-            owner: None,
-            approval_policy: None,
-            exposure_grace_ms: None,
-            terminal_outcomes: Vec::new(),
-            execution_note: "foreign".into(),
-            observed_type_digest: None,
-            observed_runtime_digest: None,
-            module_activations: Vec::new(),
-            retirement: None,
-            preview: None,
-            delivery_hold: None,
-            delivery_freezes: Vec::new(),
-            criticality: None,
-            latest_failures: Vec::new(),
-            sealed_recovery_warning: None,
-            identity_issuer: None,
-            identity_issuer_waiting: Vec::new(),
-        }
-    }
-
-    impl TenantEnvironmentView for SharedNameView {
-        fn inspect_without_outcome_export(
-            &self,
-            _environment: String,
-        ) -> TenantEnvironmentFuture<'_, EnvironmentInspectReport> {
-            Box::pin(async { Ok(foreign_prod_inspect()) })
-        }
-
-        fn status(&self, _environment: String) -> TenantEnvironmentFuture<'_, Vec<StatusRow>> {
-            Box::pin(async {
-                Ok(vec![StatusRow {
-                    product: "secret-app".into(),
-
-                    instance: "secret-app".into(),
-                    channel: "stable".into(),
-                    deployed: Some("9.9.9".into()),
-                    health: Some("ok".into()),
-                    error: None,
-                    head: "9.9.9".into(),
-                    overlay_stale: false,
-                    delivery_hold: None,
-                    dependency_hold: None,
-                    spec_drift: None,
-                    certificate: None,
-                    health_checks: Vec::new(),
-                    health_observed_at_ms: None,
-                    owner: None,
-                }])
-            })
-        }
-
-        fn fleet_without_outcome_export(&self) -> TenantEnvironmentFuture<'_, FleetStatusReport> {
-            Box::pin(async {
-                Ok(crate::plan::fleet_status_from_inspects(vec![
-                    foreign_prod_inspect(),
-                ]))
-            })
-        }
-
-        fn reconcile_bounded(
-            &self,
-            environments: Vec<String>,
-        ) -> TenantEnvironmentFuture<'_, TickReport> {
-            Box::pin(async move {
-                Ok(TickReport {
-                    environments: environments
-                        .into_iter()
-                        .map(|environment| crate::reconciler::EnvironmentResult {
-                            environment,
-                            status: crate::reconciler::EnvironmentStatus::Current,
-                        })
-                        .collect(),
-                })
-            })
-        }
-    }
-
     #[tokio::test]
     async fn colliding_environment_names_do_not_join_process_global_reconciler() {
         let store = Arc::new(InMemoryTenantOperationalStore::new());
@@ -896,7 +714,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let operations = TenantEnvironmentOperations::new(store, Arc::new(SharedNameView));
+        let operations = TenantEnvironmentOperations::new(store);
 
         let fleet = operations.fleet_status(&tenant_b).await.unwrap();
         assert_eq!(fleet.environments.len(), 1);

@@ -50,41 +50,9 @@ use crate::reconciler::TickReport;
 use crate::runtime_delivery::ReconcilePort;
 use crate::signature_verification::TrustRoots;
 use crate::storage::{AuditRecord, OperationalStore};
-use crate::tenant_environment::{
-    TenantEnvironmentError, TenantEnvironmentFuture, TenantEnvironmentOperations,
-    TenantEnvironmentView,
-};
+use crate::tenant_environment::{TenantEnvironmentError, TenantEnvironmentOperations};
 use crate::tenant_isolation::NON_DISCLOSING_DENY;
 use crate::tenant_store::TenantOperationalStore;
-
-struct ReconcileTenantEnvironmentView {
-    reconciler: Arc<dyn ReconcilePort>,
-}
-
-impl TenantEnvironmentView for ReconcileTenantEnvironmentView {
-    fn inspect_without_outcome_export(
-        &self,
-        environment: String,
-    ) -> TenantEnvironmentFuture<'_, EnvironmentInspectReport> {
-        self.reconciler
-            .inspect_environment_without_outcome_export(environment)
-    }
-
-    fn status(&self, environment: String) -> TenantEnvironmentFuture<'_, Vec<StatusRow>> {
-        self.reconciler.environment_status(environment)
-    }
-
-    fn fleet_without_outcome_export(&self) -> TenantEnvironmentFuture<'_, FleetStatusReport> {
-        self.reconciler.fleet_status_without_outcome_export()
-    }
-
-    fn reconcile_bounded(
-        &self,
-        environments: Vec<String>,
-    ) -> TenantEnvironmentFuture<'_, TickReport> {
-        self.reconciler.reconcile_environments(environments)
-    }
-}
 
 /// Non-disclosing body for every rejected management credential.
 pub const INVALID_CREDENTIAL: &str = "invalid management credential";
@@ -187,14 +155,7 @@ impl ManagementOperations {
         release_trust_roots: Option<std::path::PathBuf>,
         environment_grants: std::collections::HashMap<String, String>,
     ) -> Self {
-        let tenant_environments = tenant_store.clone().map(|tenant_store| {
-            TenantEnvironmentOperations::new(
-                tenant_store,
-                Arc::new(ReconcileTenantEnvironmentView {
-                    reconciler: reconciler.clone(),
-                }),
-            )
-        });
+        let tenant_environments = tenant_store.clone().map(TenantEnvironmentOperations::new);
         Self {
             agent_actor_policy: AgentActorPolicy::default(),
             auth,
