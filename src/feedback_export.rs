@@ -760,7 +760,10 @@ impl FeedbackProvider for ChiseiFeedbackProvider {
 /// Only an `admitted` instance counts as delivered, whether fresh or a
 /// replay. A denial is durable under the idempotency key, so a replay can
 /// carry it too; a denied or parked instance stays undelivered with its
-/// reason as the outbox's visible `last_error`, and keeps retrying.
+/// reason as the outbox's visible `last_error`, and keeps retrying. A denial
+/// is [`ProviderError::Denied`], which the outbox retries only after a long
+/// quarantine (#989); a parked instance awaits approval and keeps the normal
+/// backoff.
 pub fn observation_admission(
     response: crate::pb::sekai::SubmitActionInstanceResponse,
 ) -> Result<(), ProviderError> {
@@ -776,10 +779,15 @@ pub fn observation_admission(
     } else {
         format!(": {}", instance.deny_reason)
     };
-    Err(ProviderError::Unavailable(format!(
+    let detail = format!(
         "Sekai feedback observation Action status {}{replay}{reason}",
         instance.status
-    )))
+    );
+    Err(if instance.status == "denied" {
+        ProviderError::Denied(detail)
+    } else {
+        ProviderError::Unavailable(detail)
+    })
 }
 
 impl FeedbackProvider for crate::providers::LocalEventSink {
@@ -1326,13 +1334,21 @@ mod tests {
         assert!(observation_admission(action_reply("admitted", "allow", true)).is_ok());
         // A budget deny keeps `policy_decision = allow`; a replay carries the
         // stored denial. Neither is an admission.
+        // A denial is durable, so the outbox quarantines it (#989); a parked
+        // instance awaits approval and keeps the transport backoff.
         for reply in [
             action_reply("denied", "allow", false),
             action_reply("denied", "deny", true),
-            action_reply("parked", "require_approval", true),
         ] {
-            assert!(observation_admission(reply).is_err());
+            assert!(matches!(
+                observation_admission(reply),
+                Err(ProviderError::Denied(_))
+            ));
         }
+        assert!(matches!(
+            observation_admission(action_reply("parked", "require_approval", true)),
+            Err(ProviderError::Unavailable(_))
+        ));
         assert!(
             observation_admission(SubmitActionInstanceResponse {
                 instance: None,
@@ -1355,7 +1371,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn denied_observation_replay_stays_undelivered_and_retryable() {
+    async fn denied_observation_is_quarantined_and_stays_retryable() {
         let dir = std::env::temp_dir().join(format!(
             "tenkai-feedback-denied-{}-{}",
             std::process::id(),
@@ -1379,8 +1395,10 @@ mod tests {
                 .unwrap()
                 .remove(0)
         };
-        // The first denial and its replay both defer; the outbox shows why.
-        for now in [200, 60_000] {
+        let quarantine = crate::provider_event::DENIED_RETRY_MS;
+        // The first denial and its replay both defer for the quarantine, not
+        // the transport backoff, and the outbox shows why (#989).
+        for now in [200, 200 + quarantine] {
             assert_eq!(
                 deliver_feedback_batch(&store, &plane, Duration::from_secs(1), now, 10)
                     .await
@@ -1389,19 +1407,34 @@ mod tests {
             );
             let pending = pending();
             assert_eq!(pending.delivered_at, None);
+            assert_eq!(pending.next_attempt_at, now + quarantine);
             assert!(
                 pending.last_error.contains("budget exhausted"),
                 "{}",
                 pending.last_error
             );
         }
+        // Inside the quarantine a sweep claims nothing.
         assert_eq!(
-            deliver_feedback_batch(&store, &plane, Duration::from_secs(1), 120_000, 10)
+            deliver_feedback_batch(
+                &store,
+                &plane,
+                Duration::from_secs(1),
+                60_000 + quarantine,
+                10
+            )
+            .await
+            .unwrap(),
+            (0, 0)
+        );
+        let admitted_at = 200 + 2 * quarantine;
+        assert_eq!(
+            deliver_feedback_batch(&store, &plane, Duration::from_secs(1), admitted_at, 10)
                 .await
                 .unwrap(),
             (1, 0)
         );
-        assert_eq!(pending().delivered_at, Some(120_000));
+        assert_eq!(pending().delivered_at, Some(admitted_at));
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

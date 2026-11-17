@@ -677,6 +677,11 @@ pub enum ProviderError {
     InvalidEvidence(String),
     #[error("required provider blocked {action}: {reason}")]
     Blocked { action: String, reason: String },
+    /// The provider durably refused this delivery (for example a plane
+    /// denial stored under the idempotency key). Retrying soon returns the
+    /// same answer, so the outbox quarantines it instead of backing off (#989).
+    #[error("provider denied delivery: {0}")]
+    Denied(String),
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error("provider event serialization failed: {0}")]
