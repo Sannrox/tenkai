@@ -21,8 +21,8 @@ use crate::pb::sekai::Object;
 
 use super::{
     AUTO_RECALL_SEVERITY_PROPERTY, Advisory, AdvisoryFeed, KIND_DEPLOYED_EXPOSURE,
-    KIND_EXPOSURE_ASSESSMENT, MAX_EXPOSURE_AGE_PROPERTY_PREFIX, Severity, load_advisory_feed,
-    stored_inventory, validate_stored_inventory, version_in_range,
+    KIND_EXPOSURE_ASSESSMENT, MAX_EXPOSURE_AGE_PROPERTY_PREFIX, Severity, checked_inventory,
+    load_advisory_feed, version_in_range,
 };
 
 const AUTO_RECALL_AUTHENTICATOR: &str = "deployed-exposure-auto-recall";
@@ -328,8 +328,7 @@ async fn match_scoped(
         if !in_scope.contains(&release.id) {
             continue;
         }
-        validate_stored_inventory(&release, None)?;
-        let Some(inventory) = stored_inventory(&release)? else {
+        let Some(inventory) = checked_inventory(&release, None)? else {
             continue;
         };
         let product = release
