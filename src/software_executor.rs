@@ -236,6 +236,10 @@ pub fn materialize_kubernetes_manifests(
             src.display()
         );
     }
+    // The guard exists before the first write, so a failure part-way through
+    // the copy removes `dest` instead of leaking it.
+    let materialized = MaterializedManifests { dir: dest };
+    let dest = &materialized.dir;
     for path in &files {
         let rel = path.strip_prefix(&src).with_context(|| {
             format!("manifest {} is not under {}", path.display(), src.display())
@@ -250,7 +254,7 @@ pub fn materialize_kubernetes_manifests(
         let rendered = substitute_instance_placeholder(&raw, request.instance_name());
         std::fs::write(&out, rendered).with_context(|| format!("writing {}", out.display()))?;
     }
-    Ok(MaterializedManifests { dir: dest })
+    Ok(materialized)
 }
 
 /// An executor cannot reach its target, found before anything was applied:
@@ -1269,6 +1273,36 @@ mod tests {
             remove_owned_secrets: false,
             identity: None,
         }
+    }
+
+    /// #1320: a copy that fails after the first rendered file used to leak
+    /// the temporary directory, because its cleanup guard did not exist yet.
+    #[test]
+    fn failed_manifest_copy_removes_the_partial_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-soft-copy-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let request = sample_request(&root);
+        let manifests = root.join(KUBERNETES_MANIFESTS_DIR);
+        std::fs::create_dir_all(&manifests).unwrap();
+        let marker = uuid::Uuid::new_v4().simple().to_string();
+        std::fs::write(manifests.join("a.yaml"), format!("# {marker}\n")).unwrap();
+        std::fs::write(manifests.join("b.yaml"), [0xff, 0xfe]).unwrap();
+
+        let error = match materialize_kubernetes_manifests(&request) {
+            Ok(_) => panic!("a non-UTF-8 manifest was rendered"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(error.contains("b.yaml"), "{error}");
+        let leaked: Vec<PathBuf> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("a.yaml"))
+            .filter(|copy| std::fs::read_to_string(copy).is_ok_and(|text| text.contains(&marker)))
+            .collect();
+        assert!(leaked.is_empty(), "partial copy left behind: {leaked:?}");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
