@@ -67,6 +67,35 @@ pub struct Manifest {
     /// Replica environments and their anti-affinity (`[topology]`, #689).
     #[serde(default)]
     pub topology: Option<crate::topology::TopologySection>,
+    /// Host operating system image to boot (`[os_image]`, ADR 0051). Only
+    /// host releases may carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_image: Option<OsImageSection>,
+}
+
+/// The image an OS image host release asks the on-host updater to boot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OsImageSection {
+    /// `sha256:<hex>` digest of the image the updater must boot.
+    pub digest: String,
+    /// Seconds the server waits for the host to return after `reboot`.
+    pub boot_deadline_seconds: u64,
+}
+
+/// Longest boot deadline a release may sign (one day).
+const MAX_BOOT_DEADLINE_SECONDS: u64 = 86_400;
+
+impl OsImageSection {
+    fn validate(&self) -> Result<()> {
+        crate::signature_verification::validate_prefixed_digest("os_image.digest", &self.digest)?;
+        if !(1..=MAX_BOOT_DEADLINE_SECONDS).contains(&self.boot_deadline_seconds) {
+            bail!(
+                "os_image.boot_deadline_seconds must be between 1 and {MAX_BOOT_DEADLINE_SECONDS}"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Component inventory document covered by the release signature.
@@ -895,6 +924,12 @@ fn validate_deploy_executor(manifest: &Manifest) -> Result<()> {
         }
         crate::workload_identity::validate(identity, manifest.deploy.instances.allows_several())?;
     }
+    if let Some(os_image) = &manifest.os_image {
+        if manifest.deploy.executor != Some(crate::software_executor::SoftwareExecutorKind::Host) {
+            bail!("[os_image] is only supported on releases with deploy.executor = \"host\"");
+        }
+        os_image.validate()?;
+    }
     Ok(())
 }
 
@@ -1340,6 +1375,7 @@ mod tests {
             delivery: Default::default(),
             inventory: None,
             topology: None,
+            os_image: None,
         };
         assert_eq!(manifest.immutable_inputs(), vec!["routing.json"]);
     }
@@ -1375,6 +1411,7 @@ mod tests {
                 document: "sbom.json".into(),
             }),
             topology: None,
+            os_image: None,
         };
         assert_eq!(manifest.immutable_inputs(), vec!["sbom.json"]);
         manifest.deploy.inputs = vec!["bin".into()];
@@ -1783,6 +1820,87 @@ max_startup_seconds = 30
             "{err}"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn os_image_needs_a_host_executor_a_digest_and_a_bounded_deadline() {
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let manifest = |executor: &str, section: &str| {
+            format!(
+                "{}\n[os_image]\n{section}\n",
+                with_executor(HELLO_LOCAL, executor)
+            )
+        };
+        let valid = format!("digest = \"{digest}\"\nboot_deadline_seconds = 900");
+        assert_eq!(
+            parse_raw(&manifest("host", &valid)).unwrap().os_image,
+            Some(OsImageSection {
+                digest: digest.clone(),
+                boot_deadline_seconds: 900,
+            })
+        );
+        for (executor, section, refusal) in [
+            (
+                "shell",
+                valid.as_str(),
+                "only supported on releases with deploy.executor = \"host\"",
+            ),
+            (
+                "helm",
+                valid.as_str(),
+                "only supported on releases with deploy.executor = \"host\"",
+            ),
+            (
+                "host",
+                "boot_deadline_seconds = 900",
+                "missing field `digest`",
+            ),
+            (
+                "host",
+                &format!("digest = \"{digest}\""),
+                "missing field `boot_deadline_seconds`",
+            ),
+            (
+                "host",
+                "digest = \"sha256:abc\"\nboot_deadline_seconds = 900",
+                "os_image.digest",
+            ),
+            (
+                "host",
+                &format!(
+                    "digest = \"{}\"\nboot_deadline_seconds = 900",
+                    "b".repeat(64)
+                ),
+                "os_image.digest must use sha256:",
+            ),
+            (
+                "host",
+                &format!("digest = \"{digest}\"\nboot_deadline_seconds = 0"),
+                "boot_deadline_seconds must be between 1 and 86400",
+            ),
+            (
+                "host",
+                &format!("digest = \"{digest}\"\nboot_deadline_seconds = 86401"),
+                "boot_deadline_seconds must be between 1 and 86400",
+            ),
+            (
+                "host",
+                &format!("{valid}\nslot = \"b\""),
+                "unknown field `slot`",
+            ),
+        ] {
+            let error = match parse_raw(&manifest(executor, section)) {
+                Ok(_) => panic!("{executor} with [os_image] {section:?} was admitted"),
+                Err(error) => format!("{error:#}"),
+            };
+            assert!(error.contains(refusal), "{executor} {section:?}: {error}");
+        }
+        // Without an executor the release is a shell release: still refused.
+        let error = parse_raw(&format!("{HELLO_LOCAL}\n[os_image]\n{valid}\n")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("deploy.executor = \"host\""),
+            "{error:#}"
+        );
     }
 
     #[test]

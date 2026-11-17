@@ -705,3 +705,54 @@ async fn a_runtime_gets_no_removal_package_once_the_instance_is_subscribed_again
         "{error:#}"
     );
 }
+
+/// ADR 0051 §2: a host release carries `[os_image]` inside the content its
+/// signature covers; publication refuses the section on any other executor.
+#[tokio::test]
+async fn publication_binds_os_image_to_host_releases_only() {
+    let mut fixture = Fixture::new("os-image").await;
+    let os_image = format!(
+        "\n[os_image]\ndigest = \"sha256:{}\"\nboot_deadline_seconds = 900\n",
+        "a".repeat(64)
+    );
+    let publish = |executor: &str, version: &str| {
+        let dir = fixture.root.join(format!("os-{version}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = format!(
+            "[product]\nname = \"os\"\nversion = \"{version}\"\n\n[deploy]\nexecutor = \"{executor}\"\ninstall = \"true\"\n{os_image}"
+        );
+        std::fs::write(dir.join("tenkai.toml"), &raw).unwrap();
+        (dir.join("tenkai.toml"), raw)
+    };
+    let options = crate::catalog::PublishOptions {
+        allow_unsigned_development: true,
+        ..Default::default()
+    };
+
+    let (host, raw) = publish("host", "1.0.0");
+    crate::catalog::publish(&mut fixture.ctx, &host, &options)
+        .await
+        .unwrap();
+    let release = fixture
+        .ctx
+        .get(&crate::ontology::release_id("os", "1.0.0"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(release.properties["manifest"], raw);
+    assert_eq!(
+        release.properties["digest"],
+        crate::manifest::digest(&raw),
+        "the signed digest covers [os_image]"
+    );
+
+    let (shell, _) = publish("shell", "2.0.0");
+    let error = crate::catalog::publish(&mut fixture.ctx, &shell, &options)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}")
+            .contains("[os_image] is only supported on releases with deploy.executor = \"host\""),
+        "{error:#}"
+    );
+}

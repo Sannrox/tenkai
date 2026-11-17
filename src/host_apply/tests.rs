@@ -116,6 +116,27 @@ fn tampered_artifact_is_refused() {
     assert!(refusal(case.verify(&request)).contains("do not match their signed digest"));
 }
 
+/// A signed `[os_image]` release must not run as an ordinary install, which
+/// would record `applied(new)` before the host ever booted the image.
+#[test]
+fn os_image_release_is_refused_until_the_image_actions_exist() {
+    let mut case = Case::new(Vec::new());
+    case.release.manifest.push_str(&format!(
+        "\n[os_image]\ndigest = \"sha256:{}\"\nboot_deadline_seconds = 900\n",
+        "c".repeat(64)
+    ));
+    case.release.signature = case.fixture.sign_release(
+        &crate::manifest::digest(&case.release.manifest),
+        &case.release.signature.statement.artifact_digest,
+        crate::now_millis(),
+    );
+    let request = case.install_request(&[0]);
+    assert!(
+        refusal(case.verify(&request))
+            .contains("declares [os_image], and this applier has no OS image actions")
+    );
+}
+
 #[test]
 fn unsigned_or_untrusted_release_signer_is_refused() {
     let case = Case::new(Vec::new());

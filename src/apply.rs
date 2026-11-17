@@ -435,6 +435,7 @@ mod tests {
                 delivery: Default::default(),
                 inventory: None,
                 topology: None,
+                os_image: None,
             },
             artifact_digest: manifest::artifact_digest(&workdir, &[]).unwrap(),
             workdir,
