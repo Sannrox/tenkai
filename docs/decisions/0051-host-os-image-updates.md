@@ -1,6 +1,6 @@
 # ADR 0051: Host operating system image updates across a reboot
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-16
 - Issue: [#901](https://github.com/Sannrox/tenkai/issues/901)
 - Owner: Tenkai maintainers
