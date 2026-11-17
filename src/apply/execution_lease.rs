@@ -433,17 +433,28 @@ where
     Ok(guarded.map_err(|error| error.to_string()))
 }
 
-/// Renew at a quarter of the shortest TTL this apply holds, at most every
-/// 10 s. A renewal that takes longer than one interval counts as failed, so
-/// the work is told to stop with at least half a TTL of the lease left.
+/// Renew at a quarter of the shortest TTL this apply holds (#988). With the
+/// production two-hour leases that is every 30 minutes, so a wait of a few
+/// minutes renews only once, when it ends. A renewal that does not finish
+/// within [`renewal_timeout`] counts as failed, so the work is told to stop
+/// with at least half a TTL of the lease left.
 fn renewal_interval(ctx: &Ctx, lease: &EnvironmentLease) -> std::time::Duration {
     let shortest = ctx
         .held_execution_leases
         .iter()
         .map(|held| held.ttl_ms)
         .fold(lease.ttl_ms, i64::min);
-    let quarter = u64::try_from(shortest / 4).unwrap_or(0).max(10);
-    std::time::Duration::from_millis(quarter.min(10_000))
+    interval_for_ttl(shortest)
+}
+
+fn interval_for_ttl(shortest_ttl_ms: i64) -> std::time::Duration {
+    std::time::Duration::from_millis(u64::try_from(shortest_ttl_ms / 4).unwrap_or(0).max(10))
+}
+
+/// How long one renewal may take: one interval, and never more than 10 s,
+/// so a stalled store is noticed as fast as before the interval grew.
+fn renewal_timeout(interval: std::time::Duration) -> std::time::Duration {
+    interval.min(std::time::Duration::from_secs(10))
 }
 
 /// One renewal, failing as a lost fence when it errs or does not finish
@@ -504,6 +515,7 @@ where
         move || work(&stop)
     });
     let interval = renewal_interval(ctx, lease);
+    let timeout = renewal_timeout(interval);
     let mut renew = tokio::time::interval(interval);
     renew.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     renew.tick().await;
@@ -512,7 +524,7 @@ where
         tokio::select! {
             joined = &mut running => break joined,
             _ = renew.tick(), if lost.is_none() => {
-                if let Err(error) = renew_within(ctx, lease, interval).await {
+                if let Err(error) = renew_within(ctx, lease, timeout).await {
                     stop.store(true, Ordering::SeqCst);
                     lost = Some(error);
                 }
@@ -522,7 +534,7 @@ where
     let finished = finished.context("software executor task failed")?;
     let fenced = match lost {
         Some(error) => Err(error),
-        None => renew_within(ctx, lease, interval).await,
+        None => renew_within(ctx, lease, timeout).await,
     };
     match (fenced, finished) {
         (Ok(()), finished) => Ok(finished),
@@ -970,6 +982,21 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// Hour-long leases renew every quarter TTL, not every 10 s (#988); a
+    /// renewal still times out within 10 s, and short TTLs keep a short
+    /// cadence.
+    #[test]
+    fn renewal_follows_the_shortest_ttl_and_times_out_within_ten_seconds() {
+        use std::time::Duration;
+        let two_hours = interval_for_ttl(ENVIRONMENT_LEASE_MS);
+        assert_eq!(two_hours, Duration::from_secs(30 * 60));
+        assert_eq!(renewal_timeout(two_hours), Duration::from_secs(10));
+        let short = interval_for_ttl(30_000);
+        assert_eq!(short, Duration::from_millis(7_500));
+        assert_eq!(renewal_timeout(short), short);
+        assert_eq!(interval_for_ttl(0), Duration::from_millis(10));
     }
 
     #[test]
