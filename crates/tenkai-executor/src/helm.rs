@@ -84,7 +84,7 @@ impl HelmSoftwareExecutor {
             .arg("--wait")
             .arg("--timeout")
             .arg("5m");
-        apply_helm_set_flags(&mut command, request);
+        let _values_file = helm_values_file(request, &mut command)?;
         let _dependency_file = helm_dependency_file(request, &mut command)?;
         let secret_sets = secrets.iter().flat_map(|(_, sets)| sets);
         for set in extra_sets.iter().chain(secret_sets).chain(&identity_sets) {
@@ -243,22 +243,75 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
     }
 }
 
-fn apply_helm_set_flags(command: &mut Command, request: &SoftwareApplyRequest) {
-    command
-        .arg("--set")
-        .arg(format!("tenkai.version={}", request.version))
-        .arg("--set")
-        .arg(format!("tenkai.releaseId={}", request.release_id))
-        .arg("--set")
-        .arg(format!("tenkai.instance={}", request.instance_name()));
-    command
-        .arg("--set")
-        .arg(format!("tenkai.configDigest={}", request.config_digest));
+/// Writes the Tenkai-managed values to a generated values file and passes it
+/// with `-f`. Helm reads a values file as data, so no value can add structure
+/// the way `--set` syntax (`,`, `=`, `[`, `\`) would. Tenkai metadata stays a
+/// string; overlay values keep the scalar typing `--set` gave them.
+fn helm_values_file(request: &SoftwareApplyRequest, command: &mut Command) -> Result<TempDoc> {
+    let values = serde_json::json!({ "tenkai": tenkai_values(request)? });
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-values-{}-{}.json",
+        std::process::id(),
+        uuid_like()
+    ));
+    let doc = TempDoc(path);
+    std::fs::write(&doc.0, values.to_string())
+        .with_context(|| format!("writing {}", doc.0.display()))?;
+    command.arg("-f").arg(&doc.0);
+    Ok(doc)
+}
+
+/// The `tenkai` values tree for `request`. A dotted overlay key nests, as it
+/// did under `--set`; a key that collides with another key's path is refused.
+fn tenkai_values(request: &SoftwareApplyRequest) -> Result<serde_json::Value> {
+    use serde_json::{Map, Value};
+    let mut config = Map::new();
     for (key, value) in &request.overlays {
-        command
-            .arg("--set")
-            .arg(format!("tenkai.config.{key}={value}"));
+        let (parents, leaf) = match key.rsplit_once('.') {
+            Some((parents, leaf)) => (parents.split('.').collect(), leaf),
+            None => (Vec::new(), key.as_str()),
+        };
+        let mut node = &mut config;
+        for part in parents {
+            let child = node
+                .entry(part)
+                .or_insert_with(|| Value::Object(Map::new()));
+            node = child
+                .as_object_mut()
+                .with_context(|| format!("overlay {key} collides with another overlay key"))?;
+        }
+        if node
+            .insert(leaf.to_owned(), overlay_scalar(value))
+            .is_some()
+        {
+            bail!("overlay {key} collides with another overlay key");
+        }
     }
+    Ok(serde_json::json!({
+        "version": request.version,
+        "releaseId": request.release_id,
+        "instance": request.instance_name(),
+        "configDigest": request.config_digest,
+        "config": config,
+    }))
+}
+
+/// One overlay value typed as Helm `--set` types a scalar: `true` / `false`
+/// and integers without a leading zero; everything else, `null` included,
+/// stays a string.
+fn overlay_scalar(value: &str) -> serde_json::Value {
+    if value.eq_ignore_ascii_case("true") {
+        return true.into();
+    }
+    if value.eq_ignore_ascii_case("false") {
+        return false.into();
+    }
+    if (value == "0" || !value.starts_with('0'))
+        && let Ok(number) = value.parse::<i64>()
+    {
+        return number.into();
+    }
+    value.into()
 }
 
 struct TempDoc(PathBuf);
@@ -401,6 +454,69 @@ mod tests {
             "{calls}"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn overlay_values_reach_only_their_own_config_key() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("tenkai-helm-vals-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (argv, values) = (root.join("argv"), root.join("values.json"));
+        let script = root.join("fake-helm");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"$@\" > {argv}\nwhile [ $# -gt 0 ]; do [ \"$1\" = -f ] && cp \"$2\" {values}; shift; done\n",
+                argv = argv.display(),
+                values = values.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut request = sample_request(&root.join("chart"));
+        request.config_digest = "123".into();
+        request.overlays = BTreeMap::from([
+            ("motd".into(), r"x,image.repository=evil,a[0]=b\,c.d".into()),
+            ("db.port".into(), "5432".into()),
+            ("zone".into(), "007".into()),
+            ("debug".into(), "false".into()),
+        ]);
+        let executor = HelmSoftwareExecutor {
+            helm_binary: script,
+        };
+        executor.apply(&request).unwrap();
+        let delivered: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&values).unwrap()).unwrap();
+        assert_eq!(
+            delivered,
+            serde_json::json!({"tenkai": {
+                "version": "1.0.0",
+                "releaseId": "tenkai:release:api@1.0.0",
+                "instance": "api",
+                "configDigest": "123",
+                "config": {
+                    "motd": r"x,image.repository=evil,a[0]=b\,c.d",
+                    "db": {"port": 5432},
+                    "zone": "007",
+                    "debug": false,
+                },
+            }})
+        );
+        let argv = std::fs::read_to_string(&argv).unwrap();
+        assert!(!argv.contains("--set"), "{argv}");
+        assert!(!helm_values_mismatch(&delivered.to_string(), &request));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn colliding_overlay_keys_are_refused() {
+        let root = std::env::temp_dir().join(format!("tenkai-helm-clash-{}", uuid::Uuid::new_v4()));
+        let mut request = sample_request(&root);
+        request.overlays =
+            BTreeMap::from([("db".into(), "x".into()), ("db.port".into(), "1".into())]);
+        let err = tenkai_values(&request).unwrap_err().to_string();
+        assert!(err.contains("collides"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
