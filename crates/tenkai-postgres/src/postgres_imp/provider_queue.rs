@@ -94,12 +94,19 @@ impl Inner {
         })
     }
 
-    /// The hub and tenant schemas holding a `provider_kind` event that a
-    /// claim at `now` would take (#872): one catalog read and one query for
-    /// the whole hub, so an idle export tick does not visit every tenant.
-    /// Writer-gated like the claim it precedes.
-    pub fn due_provider_event_schemas(&self, provider_kind: &str, now: i64) -> Result<Vec<String>> {
-        let provider_kind = provider_kind.to_owned();
+    /// The hub and tenant schemas holding an event of any of `provider_kinds`
+    /// that a claim at `now` would take (#872, #877): one catalog read and one
+    /// query for the whole hub, so an idle export tick does not visit every
+    /// tenant. Writer-gated like the claim it precedes.
+    pub fn due_provider_event_schemas(
+        &self,
+        provider_kinds: &[&str],
+        now: i64,
+    ) -> Result<Vec<String>> {
+        let provider_kinds: Vec<String> = provider_kinds
+            .iter()
+            .map(|kind| (*kind).to_owned())
+            .collect();
         self.with_writer_schema("public", move |tx| {
             let schemas: Vec<String> = tx
                 .query(
@@ -125,7 +132,7 @@ impl Inner {
                     format!(
                         "SELECT {literal}::text WHERE EXISTS (
                            SELECT 1 FROM {ident}.provider_events
-                           WHERE provider_kind = $1 AND delivered_at IS NULL
+                           WHERE provider_kind = ANY($1) AND delivered_at IS NULL
                              AND next_attempt_at <= $2
                              AND (claim_until IS NULL OR claim_until <= $2))",
                         literal = format_args!("'{}'", schema.replace('\'', "''")),
@@ -134,7 +141,7 @@ impl Inner {
                 })
                 .collect::<Vec<_>>()
                 .join(" UNION ALL ");
-            let rows = tx.query(&sql, &[&provider_kind, &now]).map_err(pg)?;
+            let rows = tx.query(&sql, &[&provider_kinds, &now]).map_err(pg)?;
             Ok(rows.into_iter().map(|row| row.get(0)).collect())
         })
     }

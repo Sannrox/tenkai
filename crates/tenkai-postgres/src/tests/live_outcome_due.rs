@@ -18,8 +18,8 @@ fn event(id: &str, provider_kind: &str, next_attempt_at: i64) -> ProviderEventRe
 }
 
 /// The export sweep visits only schemas with an outcome a claim would take
-/// (#872): due, unclaimed or past its claim, and undelivered. Other kinds
-/// and quiet tenants are skipped. Other tests share the database, so this
+/// (#872): due, unclaimed or past its claim, and undelivered. Kinds not
+/// asked for and quiet tenants are skipped. Other tests share the database, so this
 /// checks only its own schemas.
 #[test]
 #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
@@ -38,17 +38,19 @@ fn live_postgres_export_sweep_visits_only_tenants_with_an_outcome_due() {
     quiet
         .enqueue_provider_event(&event("feedback-1", "feedback", 1_000))
         .unwrap();
-    let due = |now| {
-        store
-            .inner
-            .due_provider_event_schemas(OUTCOME_PROVIDER_KIND, now)
-            .unwrap()
-    };
+    let due_any = |kinds: &[&str], now| store.inner.due_provider_event_schemas(kinds, now).unwrap();
+    let due = |now| due_any(&[OUTCOME_PROVIDER_KIND], now);
 
     let at_due = due(1_000);
     assert!(at_due.contains(&busy.schema), "{at_due:?}");
     assert!(!at_due.contains(&quiet.schema), "another kind is not due");
     assert!(!due(999).contains(&busy.schema), "not yet due");
+    // One query covers every enabled kind (#877).
+    let either = due_any(&[OUTCOME_PROVIDER_KIND, "feedback"], 1_000);
+    assert!(
+        either.contains(&busy.schema) && either.contains(&quiet.schema),
+        "{either:?}"
+    );
 
     let claimed = busy
         .claim_provider_events_for_kind(OUTCOME_PROVIDER_KIND, 1_000, 10, "worker-a", 5_000)
