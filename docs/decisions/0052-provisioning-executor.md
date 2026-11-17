@@ -1,6 +1,6 @@
 # ADR 0052: Provisioning executor with approval bound to the saved plan
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-16
 - Issue: [#902](https://github.com/Sannrox/tenkai/issues/902)
 - Owner: Tenkai maintainers
