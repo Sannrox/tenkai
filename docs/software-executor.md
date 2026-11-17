@@ -63,10 +63,11 @@ closed until that revision is the one serving, naming the gap and its cause
 an explicit conflict, not a silent overwrite.
 
 Apply renews the environment apply lease while a software executor runs, at a
-quarter of the shortest lease TTL it holds and at most every 10 s. A rollout
+quarter of the shortest lease TTL it holds: every 30 minutes with the default
+two-hour leases, so a short wait renews only once, when it ends. A rollout
 may take longer than the lease TTL without losing its lease; the executor's own
 timeout bounds the step instead. A renewal that fails, or takes longer than
-one interval, leaves at least half a TTL of the lease: apply tells the
+one interval or 10 s, leaves at least half a TTL of the lease: apply tells the
 executor to stop, waits for it to return, and reports the lost lease after
 the step's own failure, if any; a
 cancelled apply stops it too. The in-process executor checks before every
