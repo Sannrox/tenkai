@@ -298,6 +298,7 @@ mod tests {
             generation: 1,
             started_at: 1_000,
             cgroup: None,
+            image_digest: None,
         };
         let running = AppliedStateRecord {
             generation: 1,

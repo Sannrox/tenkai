@@ -355,6 +355,7 @@ async fn host_steps_are_planned_from_reported_records_and_run_once_through_the_r
         generation: 0,
         started_at: 1,
         cgroup: None,
+        image_digest: None,
     };
     Applier::write(
         &instance_dir(&applier.state, &orphan).join(tenkai::host_apply::state::STARTED_FILE),

@@ -50,6 +50,7 @@ impl Host {
             config_dir: root.join("etc"),
             state_dir: root.join("state"),
             run_dir: root.join("run"),
+            boot_id: root.join("boot_id"),
         };
         for dir in [&paths.config_dir, &paths.state_dir, &paths.run_dir] {
             std::fs::create_dir_all(dir).unwrap();
@@ -61,6 +62,7 @@ impl Host {
             timeout_seconds: 60,
             max_artifact_bytes: 1024 * 1024,
             max_artifact_entries: 1_000,
+            os_image: None,
         };
         std::fs::create_dir_all(&config.spool_dir).unwrap();
         Self {
@@ -164,6 +166,9 @@ impl Host {
     ) -> anyhow::Result<HostApplyResult> {
         match self.admit(instance)? {
             Admission::Recorded(result) => Ok(result),
+            Admission::AwaitingBoot(awaiting) => {
+                anyhow::bail!("{} awaits a boot", awaiting.instance)
+            }
             Admission::Run(running) => running.finish(
                 outcome,
                 Some(if outcome.succeeded() { 0 } else { 1 }),
@@ -187,16 +192,20 @@ impl Host {
             std::fs::write(&path, contents).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         };
-        write(
-            tenkai_host_applier::config::CONFIG_FILE,
-            format!(
-                "version = 1\nspool_dir = {:?}\ntimeout_seconds = {}\nmax_artifact_bytes = {}\nmax_artifact_entries = {}\n",
-                self.config.spool_dir.display().to_string(),
-                self.config.timeout_seconds,
-                self.config.max_artifact_bytes,
-                self.config.max_artifact_entries,
-            ),
+        let mut config = format!(
+            "version = 1\nspool_dir = {:?}\ntimeout_seconds = {}\nmax_artifact_bytes = {}\nmax_artifact_entries = {}\n",
+            self.config.spool_dir.display().to_string(),
+            self.config.timeout_seconds,
+            self.config.max_artifact_bytes,
+            self.config.max_artifact_entries,
         );
+        if let Some(os_image) = &self.config.os_image {
+            config.push_str(&format!(
+                "\n[os_image]\nreader = {:?}\nreboot = {:?}\n",
+                os_image.reader, os_image.reboot
+            ));
+        }
+        write(tenkai_host_applier::config::CONFIG_FILE, config);
         write(
             tenkai_host_applier::config::RELEASE_TRUST_ROOTS_FILE,
             toml::to_string(&self.fixture.trust.release_roots).unwrap(),

@@ -8,7 +8,7 @@ use tenkai::approval_policy::{QuorumPurpose, QuorumRule};
 use tenkai::host_apply::HostAction;
 use tenkai::host_apply::state::{AppliedState, HostApplyOutcome};
 use tenkai::plan::Action;
-use tenkai_host_applier::store::{self, Admission};
+use tenkai_host_applier::store::{self, Admission, Ended};
 
 fn downgrade_needs_qa() -> Vec<QuorumRule> {
     vec![QuorumRule {
@@ -184,7 +184,7 @@ fn two_plans_racing_for_one_generation_run_once() {
                             running.finish(HostApplyOutcome::Succeeded, Some(0), "", 0)?;
                             Ok(true)
                         }
-                        Admission::Recorded(_) => Ok(false),
+                        Admission::Recorded(_) | Admission::AwaitingBoot(_) => Ok(false),
                     }
                 })
             })
@@ -468,11 +468,13 @@ fn a_crashed_instance_resolves_from_root_owned_records_without_its_request() {
     drop(running);
     // The server's spool is gone, or the approvals expired: recovery needs neither.
     std::fs::remove_dir_all(host.config.spool_dir.join(&install_a)).unwrap();
-    let recovered = store::recover(&host.paths, &install_a).unwrap().unwrap();
+    let Some(Ended::Result(recovered)) = store::recover(&host.paths, &install_a).unwrap() else {
+        panic!("a crashed install ends");
+    };
     assert_eq!(recovered.outcome, HostApplyOutcome::Interrupted);
     assert_eq!(
         store::recover(&host.paths, &install_a).unwrap(),
-        Some(recovered)
+        Some(Ended::Result(recovered))
     );
 }
 
@@ -490,6 +492,6 @@ fn a_result_kept_only_in_the_record_is_recovered() {
     .unwrap();
     assert_eq!(
         store::recover(&host.paths, &install_a).unwrap(),
-        Some(finished)
+        Some(Ended::Result(finished))
     );
 }

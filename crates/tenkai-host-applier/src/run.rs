@@ -2,7 +2,9 @@
 //! §2, fencing).
 //!
 //! The command is the signed manifest's command for the step's action, run
-//! by `/bin/sh -c` in the root-owned copy of the release workdir. Its
+//! by `/bin/sh -c` in the root-owned copy of the release workdir, or, for an
+//! OS image `reboot`, the updater's reboot command from root-owned
+//! configuration. Its
 //! environment is built here from a fixed allowlist and verified values;
 //! nothing the server supplied becomes an environment variable, an argument,
 //! or a path. The applier's timeout and a `stop` (SIGTERM or SIGINT to the
@@ -100,23 +102,39 @@ pub fn adopt_descendants() -> Result<()> {
     Ok(())
 }
 
-/// Run `step`'s command in `workdir` until it exits, `timeout` passes, or
-/// `stop` resolves; the last two kill its process group. In every case,
-/// whatever else the command started is stopped before this returns.
-pub async fn run_command(
+/// `step`'s signed command, run by `/bin/sh -c` in `workdir` with only
+/// [`command_environment`].
+pub fn step_command(
     step: &VerifiedHostStep,
     workdir: &Path,
     written: &Written,
+) -> Result<std::process::Command> {
+    let script = step
+        .command
+        .as_deref()
+        .with_context(|| format!("a host {} step runs no release command", step.action))?;
+    let mut command = std::process::Command::new(SHELL);
+    command
+        .arg("-c")
+        .arg(script)
+        .current_dir(workdir)
+        .env_clear()
+        .envs(command_environment(step, written));
+    Ok(command)
+}
+
+/// Run a trusted root command ([`step_command`], or an updater command from
+/// root-owned configuration) as its own process group until it exits,
+/// `timeout` passes, or `stop` resolves; the last two kill its process
+/// group. In every case, whatever else the command started is stopped
+/// before this returns.
+pub async fn run_command(
+    command: std::process::Command,
     timeout: Duration,
     stop: impl Future<Output = ()>,
 ) -> Result<CommandEnd> {
-    let mut command = tokio::process::Command::new(SHELL);
+    let mut command = tokio::process::Command::from(command);
     command
-        .arg("-c")
-        .arg(&step.command)
-        .current_dir(workdir)
-        .env_clear()
-        .envs(command_environment(step, written))
         .stdin(Stdio::null())
         .kill_on_drop(true)
         .process_group(0);

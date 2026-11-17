@@ -24,6 +24,7 @@ fn started(cgroup: Option<&str>) -> HostApplyStarted {
         generation: 1,
         started_at: 1,
         cgroup: cgroup.map(str::to_owned),
+        image_digest: None,
     }
 }
 

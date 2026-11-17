@@ -41,6 +41,7 @@ impl Host {
             config_dir: root.join("etc"),
             state_dir: root.join("state"),
             run_dir: root.join("run"),
+            boot_id: root.join("boot_id"),
         };
         for dir in [&paths.config_dir, &paths.state_dir, &paths.run_dir] {
             std::fs::create_dir_all(dir).unwrap();

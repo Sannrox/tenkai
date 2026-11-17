@@ -273,6 +273,10 @@ impl DesiredStateInput {
 /// is the release the applier's record must hold at `expected_generation`
 /// (`None` for a product with nothing applied). `uninstall` and `health` act
 /// on the installed release, so their `from` equals `to`.
+///
+/// An OS image release (`[os_image]`, ADR 0051) updates through `stage`,
+/// `reboot`, `verify` and `confirm` instead of `install`, all from `from`
+/// toward `to`, against the applier's one host-wide OS image record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostStep {
@@ -301,6 +305,14 @@ pub enum HostAction {
     Install,
     Uninstall,
     Health,
+    /// Run `deploy.install` to stage the image and arm a one-shot boot.
+    Stage,
+    /// Record `awaiting_boot`, then ask the updater to reboot.
+    Reboot,
+    /// Settle the `reboot` from the booted image the root side reads.
+    Verify,
+    /// Run `deploy.confirm` to make the booted image permanent.
+    Confirm,
 }
 
 impl HostAction {
@@ -309,7 +321,25 @@ impl HostAction {
             Self::Install => "install",
             Self::Uninstall => "uninstall",
             Self::Health => "health",
+            Self::Stage => "stage",
+            Self::Reboot => "reboot",
+            Self::Verify => "verify",
+            Self::Confirm => "confirm",
         }
+    }
+
+    /// Whether a start of this action advances the applied-state record's
+    /// generation; health and verify run at the current one.
+    pub fn advances_generation(self) -> bool {
+        !matches!(self, Self::Health | Self::Verify)
+    }
+
+    /// Whether only an OS image release takes this action.
+    pub fn updates_os_image(self) -> bool {
+        matches!(
+            self,
+            Self::Stage | Self::Reboot | Self::Verify | Self::Confirm
+        )
     }
 }
 

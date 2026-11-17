@@ -39,6 +39,7 @@ impl Host {
             config_dir: root.join("etc"),
             state_dir: root.join("state"),
             run_dir: root.join("run"),
+            boot_id: root.join("boot_id"),
         };
         for dir in [&paths.config_dir, &paths.state_dir, &paths.run_dir] {
             std::fs::create_dir_all(dir).unwrap();
@@ -50,6 +51,7 @@ impl Host {
             timeout_seconds: 60,
             max_artifact_bytes: 1024 * 1024,
             max_artifact_entries: 1_000,
+            os_image: None,
         };
         std::fs::create_dir_all(&config.spool_dir).unwrap();
         Self {

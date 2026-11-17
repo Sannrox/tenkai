@@ -1,7 +1,8 @@
 //! `tenkai-host-applier run <instance>`: the root side of a privileged host
 //! release step (ADR 0041 §2). `tenkai-host-apply@<instance>.service` runs
 //! it; see `docs/host-releases.md`. Exit status: 0 succeeded, 1 the step
-//! failed, 2 refused before anything started.
+//! failed, 2 refused before anything started, 3 an OS image `reboot` awaits
+//! the boot its `verify` settles.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -10,7 +11,7 @@ use anyhow::{Context as _, Result, bail};
 use tenkai_host_applier::renew::{self, Renewal};
 use tenkai_host_applier::{Applied, ApplierPaths, apply};
 
-const USAGE: &str = "usage: tenkai-host-applier run <instance> [--config-dir DIR] [--state-dir DIR] [--run-dir DIR]";
+const USAGE: &str = "usage: tenkai-host-applier run <instance> [--config-dir DIR] [--state-dir DIR] [--run-dir DIR] [--boot-id FILE]";
 
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
@@ -51,6 +52,7 @@ fn run() -> Result<u8> {
             "--config-dir" => paths.config_dir = value,
             "--state-dir" => paths.state_dir = value,
             "--run-dir" => paths.run_dir = value,
+            "--boot-id" => paths.boot_id = value,
             _ => bail!("unknown argument {flag}\n{USAGE}"),
         }
     }
@@ -80,6 +82,7 @@ fn run() -> Result<u8> {
     match &applied {
         Applied::Result(result) => println!("{}", serde_json::to_string(result)?),
         Applied::Refused(reason) => eprintln!("tenkai-host-applier: refused: {reason}"),
+        Applied::AwaitingBoot(awaiting) => println!("{}", serde_json::to_string(awaiting)?),
     }
     Ok(applied.exit_code())
 }

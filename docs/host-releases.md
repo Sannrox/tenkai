@@ -44,8 +44,9 @@ applier then:
    the source release, and downgrade approvals, and durably writes the
    advanced record and the instance's `started` record;
 6. runs the signed command for the action (`deploy.install`,
-   `deploy.uninstall`, or `deploy.health`) with `/bin/sh -c` in the copied
-   workdir, with its own process group and a fixed environment;
+   `deploy.uninstall`, `deploy.health`, or for an OS image release
+   `deploy.confirm`) with `/bin/sh -c` in the copied workdir, with its own
+   process group and a fixed environment;
 7. stops anything the command left running, records the result, updates
    the product's record, and removes the copy.
 
@@ -193,6 +194,80 @@ and release; a missing or mismatched result is a failed step. Before it
 starts a unit, the server returns an instance's existing result, so a retry
 of the same step never starts it again.
 
+## OS image updates
+
+A release with an `[os_image]` section
+([ADR 0051](decisions/0051-host-os-image-updates.md)) updates the host's
+operating system image through the host's own updater. It never installs or
+uninstalls; it takes four host steps instead:
+
+| Step | Runs | Record afterwards |
+| --- | --- | --- |
+| `stage` | `deploy.install`: write the image to the inactive slot and arm a one-shot boot, without rebooting | `dirty(old, new)`, generation advanced |
+| `reboot` | records `awaiting_boot` (expected and previous image, deadline, boot id), then the updater's reboot command | `dirty(old, new)`, generation advanced |
+| `verify` | nothing: reads the booted image and settles the `reboot` | `dirty(old, new)`, generation unchanged |
+| `confirm` | `deploy.confirm`, then reads the booted image again | `applied(new)` only when the updater reports the expected image booted and confirmed |
+
+Every step of an OS image release, `health` included, acts on one host-wide
+record, `/var/lib/tenkai-host/records/os-image.json`, under one host-wide
+lock: the updater's slots belong to the host, not to a product. While that
+record is `dirty(old, new)`, a `stage` toward any third image is refused, so
+two updates never interleave.
+
+A `reboot` that started and has no result is the expected state, not an
+interruption: running its instance again prints the `awaiting_boot` record
+and exits `3`. That holds also when the shutdown stops the applier, or the
+applier's timeout ends the reboot command; only a reboot command that fails
+ends the step. If the applier dies after it wrote `awaiting_boot` and before
+the updater rebooted, the record waits for a reboot by hand. Only a `verify`
+settles a `reboot`, from what the reader reports after the boot id changed:
+
+- the expected image, `pending`: both succeed;
+- the previous image: both fail as `fell_back`;
+- the expected image already `confirmed` or `bad`, or any other image: both fail;
+- after the boot deadline: both fail as `no_return`, and the detail still
+  names the booted image.
+
+A `verify` before the host rebooted is refused and may run again. A
+`confirm` whose applier stopped before it recorded a result is settled the
+next time the instance runs, by the same check. `install`, `uninstall` and
+`health` keep the interrupted rule unchanged.
+
+The host declares its updater in `host-applier.toml`. Without this section
+every OS image step is refused:
+
+```toml
+[os_image]
+reader = ["/usr/local/libexec/tenkai/booted-image-reader"]
+reboot = ["/usr/bin/systemctl", "reboot"]
+```
+
+Each command is an argument vector run without a shell, with an empty
+environment apart from `PATH` and `LANG`. Its program is an absolute path
+owned by root and not writable by group or others. The reader has 60 seconds
+and prints exactly one `tenkai.booted-image.v1` object, at most 4096 bytes:
+
+```json
+{"booted_digest": "sha256:<64 hex>", "state": "pending"}
+```
+
+`state` is `pending` (booted once, held until confirmed), `confirmed`, or
+`bad`. Unknown fields, a missing or malformed digest, other output, or a
+failed exit refuse the step. `booted_digest` uses the form the release's
+`[os_image].digest` declares; an adapter maps the updater's own report to
+it.
+
+A supported host also:
+
+- holds a new image unconfirmed until `deploy.confirm` asks, and falls back
+  to the previous image when a boot fails. A host that confirms on its own
+  makes `verify` fail;
+- keeps `/var/lib/tenkai-host`, `/etc/tenkai`, and the runtime's enrollment
+  outside the image slots, so a switch or a fallback never rewinds them,
+  and ships the applier in both images;
+- lets a rollback release's `deploy.install` re-arm the previous image,
+  which also disarms a boot that a `stage` armed and no `reboot` used.
+
 ## Known limit: recall
 
 Catalog recall is server state the root side cannot see. A recalled host
@@ -321,7 +396,9 @@ changes network or mount configuration needs a drop-in that widens
 
 `tenkai-host-applier run <instance>` prints the result record and exits `0`
 when the step succeeded, `1` when it failed (also for a recorded failure of
-an earlier start), and `2` when it refused before anything started.
+an earlier start), and `2` when it refused before anything started. An OS
+image `reboot` that awaits its `verify` prints its `awaiting_boot` record and
+exits `3`.
 
 ## Request format
 

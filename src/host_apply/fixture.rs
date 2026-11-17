@@ -164,6 +164,40 @@ impl HostFixture {
             commands[2],
             inputs.join(", ")
         );
+        self.sign_manifest(workdir, product, version, manifest)
+    }
+
+    /// Write `files` under `workdir` and sign an OS image release (ADR 0051)
+    /// that boots `image_digest`: `install.sh` stages it, `confirm.sh`
+    /// confirms it, and `health.sh` checks it, each run by `sh`.
+    pub fn os_image_release(
+        &self,
+        workdir: &Path,
+        product: &str,
+        version: &str,
+        image_digest: &str,
+        files: &[(&str, &[u8])],
+    ) -> SignedRelease {
+        std::fs::create_dir_all(workdir).unwrap();
+        for (name, bytes) in files {
+            std::fs::write(workdir.join(name), bytes).unwrap();
+        }
+        let inputs: Vec<String> = files.iter().map(|(name, _)| format!("{name:?}")).collect();
+        let manifest = format!(
+            "[product]\nname = {product:?}\nversion = {version:?}\n\n[deploy]\nexecutor = \"host\"\ninstall = \"sh ./install.sh\"\nconfirm = \"sh ./confirm.sh\"\nhealth = \"sh ./health.sh\"\ninputs = [{}]\n\n[os_image]\ndigest = {image_digest:?}\nboot_deadline_seconds = 900\n",
+            inputs.join(", ")
+        );
+        self.sign_manifest(workdir, product, version, manifest)
+    }
+
+    /// Sign `manifest`, whose inputs are already written under `workdir`.
+    fn sign_manifest(
+        &self,
+        workdir: &Path,
+        product: &str,
+        version: &str,
+        manifest: String,
+    ) -> SignedRelease {
         let parsed = crate::manifest::parse_raw(&manifest).unwrap();
         let artifact_digest =
             crate::manifest::artifact_digest(workdir, &parsed.immutable_inputs()).unwrap();

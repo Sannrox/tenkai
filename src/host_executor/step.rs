@@ -387,6 +387,7 @@ mod tests {
             generation: 1,
             started_at: 1,
             cgroup: None,
+            image_digest: None,
         };
         std::fs::write(
             dir.join(crate::host_apply::state::STARTED_FILE),

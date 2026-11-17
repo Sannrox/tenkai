@@ -14,8 +14,8 @@ pub const HOST_APPROVAL_POLICY_FILE: &str = "host-approval-policy.toml";
 pub const KEY_REVOCATIONS_FILE: &str = "key-revocations.json";
 pub const KEY_REVOCATION_TRUST_ROOTS_FILE: &str = "key-revocation-trust-roots.toml";
 
-/// The three root-owned directories. Production uses the defaults; tests
-/// point every one at a unique temporary directory.
+/// The three root-owned directories and the kernel's boot id. Production
+/// uses the defaults; tests point every one at a unique temporary path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplierPaths {
     /// Configuration and trust: `/etc/tenkai`.
@@ -24,6 +24,9 @@ pub struct ApplierPaths {
     pub state_dir: PathBuf,
     /// Copies and locks, cleared at boot: `/run/tenkai-host`.
     pub run_dir: PathBuf,
+    /// The current boot's id: `/proc/sys/kernel/random/boot_id`. A `verify`
+    /// judges a reboot only once it changed.
+    pub boot_id: PathBuf,
 }
 
 impl Default for ApplierPaths {
@@ -32,6 +35,7 @@ impl Default for ApplierPaths {
             config_dir: PathBuf::from("/etc/tenkai"),
             state_dir: PathBuf::from("/var/lib/tenkai-host"),
             run_dir: PathBuf::from("/run/tenkai-host"),
+            boot_id: PathBuf::from("/proc/sys/kernel/random/boot_id"),
         }
     }
 }
@@ -60,6 +64,23 @@ pub struct ApplierConfig {
     /// Most files and directories one release's artifacts may hold.
     #[serde(default = "default_max_artifact_entries")]
     pub max_artifact_entries: u64,
+    /// The host's on-host updater (ADR 0051). Absent refuses every OS image
+    /// step.
+    #[serde(default)]
+    pub os_image: Option<OsImageConfig>,
+}
+
+/// `[os_image]` in `host-applier.toml`: the root commands that ask the
+/// on-host updater to reboot and report the booted image. Each is an
+/// argument vector run without a shell; its program must be an absolute
+/// path the applier trusts ([`require_trusted`]).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OsImageConfig {
+    /// Prints one `tenkai.booted-image.v1` object and exits 0.
+    pub reader: Vec<String>,
+    /// Reboots into the armed image.
+    pub reboot: Vec<String>,
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -103,7 +124,27 @@ impl ApplierConfig {
                 path.display()
             );
         }
+        if let Some(os_image) = &config.os_image {
+            for (name, command) in [("reader", &os_image.reader), ("reboot", &os_image.reboot)] {
+                if !command
+                    .first()
+                    .is_some_and(|program| Path::new(program).is_absolute())
+                {
+                    bail!(
+                        "{} os_image.{name} must start with an absolute program path",
+                        path.display()
+                    );
+                }
+            }
+        }
         Ok(config)
+    }
+
+    /// The updater commands, or a refusal naming the missing section.
+    pub fn os_image(&self) -> Result<&OsImageConfig> {
+        self.os_image.as_ref().with_context(|| {
+            format!("{CONFIG_FILE} has no [os_image] section; this host takes no OS image steps")
+        })
     }
 }
 

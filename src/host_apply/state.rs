@@ -52,7 +52,8 @@ pub enum AppliedState {
         release: HostRelease,
     },
     /// An install (`to` set) or uninstall (`to` absent) started and did not
-    /// succeed. Either side may be the source of the next step.
+    /// succeed, or an OS image update is between `stage` and `confirm`.
+    /// Either side may be the source of the next step.
     Dirty {
         from: Option<HostRelease>,
         to: Option<HostRelease>,
@@ -81,6 +82,11 @@ pub struct AppliedStateRecord {
     /// Its result, once it completed, so a crash before the instance's own
     /// result file is written loses nothing.
     pub last_result: Option<HostApplyResult>,
+    /// Set with a `reboot` start and cleared by the `verify` that settles it
+    /// (OS image record only, ADR 0051). While it is set, the reboot's start
+    /// without a result is the expected state, not an interruption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_boot: Option<super::os_image::AwaitingBoot>,
 }
 
 /// Written before a command runs. Without a result after a crash or reboot,
@@ -106,6 +112,10 @@ pub struct HostApplyStarted {
     /// this group must hold no process but the settling applier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cgroup: Option<String>,
+    /// `[os_image].digest` of an OS image release: the step acts on the
+    /// host-wide OS image record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_digest: Option<String>,
 }
 
 /// How a started instance ended.
@@ -120,6 +130,10 @@ pub enum HostApplyOutcome {
     Stopped,
     /// Started, then the applier crashed or the host rebooted.
     Interrupted,
+    /// A `reboot` came back on the previous image: the updater fell back.
+    FellBack,
+    /// A `reboot` was not verified before its boot deadline.
+    NoReturn,
 }
 
 impl HostApplyOutcome {
@@ -198,18 +212,23 @@ impl AppliedStateRecord {
             high_water: None,
             last_started: None,
             last_result: None,
+            awaiting_boot: None,
         }
     }
 
-    /// Admit `step` against this record, inside the per-product lock.
+    /// Admit `step` against this record, inside the per-product lock (the
+    /// host-wide lock for an OS image release).
     ///
     /// Requires the expected generation, the source release, and, for an
-    /// install whose target is not newer than the high-water release, the
-    /// downgrade (or, for a rollback step, rollback) approvals. Returns the
-    /// started record and the record to write before the command runs: for
-    /// an install or uninstall the generation advanced and the state `dirty`,
-    /// for health both unchanged; `last_started` names the step either way.
-    /// `cgroup` is the applier's control group, if it knows one.
+    /// install or stage whose target is not newer than the high-water
+    /// release, the downgrade (or, for a rollback step, rollback) approvals.
+    /// Returns the started record and the record to write before the command
+    /// runs: for an install, uninstall, stage, reboot or confirm the
+    /// generation advanced and the state `dirty`, for health and verify both
+    /// unchanged; `last_started` names the step either way. A `reboot` is
+    /// admitted through [`AppliedStateRecord::admit_reboot`], which adds the
+    /// `awaiting_boot` intent. `cgroup` is the applier's control group, if it
+    /// knows one.
     pub fn admit(
         &self,
         step: &VerifiedHostStep,
@@ -217,7 +236,13 @@ impl AppliedStateRecord {
         now_ms: i64,
     ) -> Result<(HostApplyStarted, Self)> {
         if self.environment != step.environment || self.product != step.product {
-            bail!("applied-state record belongs to another environment or product");
+            bail!(
+                "applied-state record belongs to {} in {}, not {} in {}",
+                self.product,
+                self.environment,
+                step.product,
+                step.environment
+            );
         }
         if step.expected_generation != self.generation {
             bail!(
@@ -228,6 +253,20 @@ impl AppliedStateRecord {
                 self.generation
             );
         }
+        match (&self.awaiting_boot, step.action) {
+            (Some(awaiting), action) if action != HostAction::Verify => bail!(
+                "the host awaits the boot of {} that {} started; a verify step settles it first",
+                awaiting.expected_digest,
+                awaiting.instance
+            ),
+            (None, HostAction::Verify) => {
+                bail!(
+                    "no reboot awaits verification at generation {}",
+                    self.generation
+                )
+            }
+            _ => {}
+        }
         let source = self.source(step.from.as_deref())?;
         if matches!(step.action, HostAction::Uninstall | HostAction::Health)
             && source.is_none_or(|source| source != &step.release)
@@ -237,12 +276,31 @@ impl AppliedStateRecord {
                 step.release.version
             );
         }
-        if step.action == HostAction::Health
-            && !matches!(&self.state, AppliedState::Applied { release } if release == &step.release)
-        {
-            bail!("health runs only on an applied release");
+        match step.action {
+            HostAction::Health if !matches!(&self.state, AppliedState::Applied { release } if release == &step.release) =>
+            {
+                bail!("health runs only on an applied release")
+            }
+            HostAction::Reboot | HostAction::Verify | HostAction::Confirm => {
+                self.require_staged(step)?
+            }
+            // A stage over a dirty pair continues toward one side of it;
+            // a third image waits until the pair is settled.
+            HostAction::Stage => {
+                if let AppliedState::Dirty { from, to } = &self.state
+                    && from.as_ref() != Some(&step.release)
+                    && to.as_ref() != Some(&step.release)
+                {
+                    bail!(
+                        "the record holds {}; staging {} would start a third image",
+                        self.describe(),
+                        step.release.version
+                    );
+                }
+            }
+            _ => {}
         }
-        if step.action == HostAction::Install
+        if matches!(step.action, HostAction::Install | HostAction::Stage)
             && let Some(high_water) = &self.high_water
             && !is_newer(&step.release.version, &high_water.version)
         {
@@ -259,12 +317,12 @@ impl AppliedStateRecord {
                 )
             })?;
         }
-        let generation = match step.action {
-            HostAction::Health => self.generation,
-            HostAction::Install | HostAction::Uninstall => self
-                .generation
+        let generation = if step.action.advances_generation() {
+            self.generation
                 .checked_add(1)
-                .ok_or_else(|| anyhow::anyhow!("generation overflow"))?,
+                .ok_or_else(|| anyhow::anyhow!("generation overflow"))?
+        } else {
+            self.generation
         };
         let started = HostApplyStarted {
             schema: STARTED_SCHEMA.into(),
@@ -279,13 +337,21 @@ impl AppliedStateRecord {
             generation,
             started_at: now_ms,
             cgroup,
+            image_digest: step
+                .os_image
+                .as_ref()
+                .map(|os_image| os_image.digest.clone()),
         };
         let state = match step.action {
-            HostAction::Health => self.state.clone(),
-            HostAction::Install | HostAction::Uninstall => AppliedState::Dirty {
-                from: source.cloned(),
-                to: (step.action == HostAction::Install).then(|| step.release.clone()),
-            },
+            HostAction::Install | HostAction::Uninstall | HostAction::Stage => {
+                AppliedState::Dirty {
+                    from: source.cloned(),
+                    to: (step.action != HostAction::Uninstall).then(|| step.release.clone()),
+                }
+            }
+            HostAction::Health | HostAction::Reboot | HostAction::Verify | HostAction::Confirm => {
+                self.state.clone()
+            }
         };
         let next = Self {
             generation,
@@ -297,14 +363,16 @@ impl AppliedStateRecord {
         Ok((started, next))
     }
 
-    /// The record after `started` ended with `result`: an install or
-    /// uninstall moves to `applied` or `empty` on success and stays `dirty`
-    /// otherwise; health changes nothing but the recorded result.
+    /// The record after `started` ended with `result`: an install or a
+    /// confirm moves to `applied` on success, an uninstall to `empty`, and
+    /// both stay `dirty` otherwise; a stage stays `dirty` either way; health
+    /// changes nothing but the recorded result. A finished reboot (its
+    /// command failed) or a verify that settled it clears `awaiting_boot`.
     pub fn complete(&self, started: &HostApplyStarted, result: &HostApplyResult) -> Self {
         let mut next = self.clone();
         if result.outcome.succeeded() {
             match started.action {
-                HostAction::Install => {
+                HostAction::Install | HostAction::Confirm => {
                     next.state = AppliedState::Applied {
                         release: started.release.clone(),
                     };
@@ -317,8 +385,21 @@ impl AppliedStateRecord {
                     }
                 }
                 HostAction::Uninstall => next.state = AppliedState::Empty,
-                HostAction::Health => {}
+                HostAction::Health
+                | HostAction::Stage
+                | HostAction::Reboot
+                | HostAction::Verify => {}
             }
+        }
+        // A verify interrupted before it settled the reboot leaves it for the
+        // next verify.
+        let settles_boot = match started.action {
+            HostAction::Reboot => true,
+            HostAction::Verify => result.outcome != HostApplyOutcome::Interrupted,
+            _ => false,
+        };
+        if settles_boot {
+            next.awaiting_boot = None;
         }
         next.last_result = Some(result.clone());
         next
@@ -344,7 +425,7 @@ impl AppliedStateRecord {
             })
     }
 
-    fn describe(&self) -> String {
+    pub(super) fn describe(&self) -> String {
         let name = |release: &Option<HostRelease>| {
             release
                 .as_ref()

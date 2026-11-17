@@ -14,6 +14,7 @@
 //! its command.
 
 pub mod identity;
+pub mod os_image;
 mod policy;
 mod request;
 pub mod sealed;
