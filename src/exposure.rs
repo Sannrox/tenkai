@@ -275,11 +275,21 @@ pub fn persist_inventory(
 
 /// Refuse a stored inventory that does not match its digest or workdir file.
 pub fn validate_stored_inventory(release: &Object, workdir: Option<&Path>) -> Result<()> {
+    checked_inventory(release, workdir).map(|_| ())
+}
+
+/// A release's stored inventory, digest-checked and parsed once, refused when
+/// its signed manifest does not declare it or (with `workdir`) when the
+/// workdir file differs.
+pub(super) fn checked_inventory(
+    release: &Object,
+    workdir: Option<&Path>,
+) -> Result<Option<ComponentInventory>> {
     let Some(stored) = stored_inventory(release)? else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(raw) = release.properties.get("manifest") else {
-        return Ok(());
+        return Ok(Some(stored));
     };
     let parsed = manifest::parse_raw(raw)?;
     let Some(section) = &parsed.inventory else {
@@ -299,7 +309,7 @@ pub fn validate_stored_inventory(release: &Object, workdir: Option<&Path>) -> Re
             );
         }
     }
-    Ok(())
+    Ok(Some(stored))
 }
 
 /// Query releases, channels, and environments that contain `component` in `range`.
@@ -330,8 +340,7 @@ pub async fn query_with(
     let environments = ctx.list_kind(KIND_ENVIRONMENT).await?;
     let mut matches = Vec::new();
     for release in ctx.list_kind(KIND_RELEASE).await? {
-        validate_stored_inventory(&release, None)?;
-        let Some(inventory) = stored_inventory(&release)? else {
+        let Some(inventory) = checked_inventory(&release, None)? else {
             continue;
         };
         let mut hit = None;
@@ -686,27 +695,62 @@ pub async fn match_advisories(ctx: &mut Ctx) -> Result<Vec<MatchedExposure>> {
     let Some((feed, _)) = load_advisory_feed(ctx).await? else {
         return Ok(Vec::new());
     };
+    let index = AdvisoryIndex::new(&feed)?;
     let mut matched = Vec::new();
     for release in ctx.list_kind(KIND_RELEASE).await? {
-        validate_stored_inventory(&release, None)?;
-        let Some(inventory) = stored_inventory(&release)? else {
-            continue;
-        };
-        let product = release
-            .properties
-            .get("product")
-            .cloned()
-            .unwrap_or_default();
-        let version = release
-            .properties
-            .get("version")
-            .cloned()
-            .unwrap_or_default();
-        let spec = format!("{product}@{version}");
+        index.match_release(&release, &mut matched)?;
+    }
+    sort_matches(&mut matched);
+    Ok(matched)
+}
+
+/// Ordered by release, then advisory; a stable sort keeps inventory order
+/// within one advisory.
+fn sort_matches(matched: &mut [MatchedExposure]) {
+    matched.sort_by(|left, right| {
+        left.release_id
+            .cmp(&right.release_id)
+            .then(left.advisory_id.cmp(&right.advisory_id))
+    });
+}
+
+/// A feed's advisories keyed by component, each range parsed once.
+struct AdvisoryIndex<'a> {
+    by_component: HashMap<&'a str, Vec<(&'a Advisory, semver::VersionReq)>>,
+}
+
+impl<'a> AdvisoryIndex<'a> {
+    fn new(feed: &'a AdvisoryFeed) -> Result<Self> {
+        let mut by_component: HashMap<&str, Vec<_>> = HashMap::new();
         for advisory in &feed.advisories {
-            for component in &inventory.components {
-                if component.name == advisory.component
-                    && version_in_range(&component.version, &advisory.range)?
+            let range = semver::VersionReq::parse(&advisory.range)
+                .with_context(|| format!("invalid version range {:?}", advisory.range))?;
+            by_component
+                .entry(advisory.component.as_str())
+                .or_default()
+                .push((advisory, range));
+        }
+        Ok(Self { by_component })
+    }
+
+    /// Push every advisory that hits `release`'s validated inventory.
+    fn match_release(&self, release: &Object, matched: &mut Vec<MatchedExposure>) -> Result<()> {
+        let Some(inventory) = checked_inventory(release, None)? else {
+            return Ok(());
+        };
+        let property = |name: &str| release.properties.get(name).cloned().unwrap_or_default();
+        let spec = format!("{}@{}", property("product"), property("version"));
+        for component in &inventory.components {
+            let Some(advisories) = self.by_component.get(component.name.as_str()) else {
+                continue;
+            };
+            // Inventories admit non-SemVer strings (`1.1.1k`). Nothing proves
+            // those outside a range, so they match (as `version_in_range`).
+            let version = semver::Version::parse(&component.version).ok();
+            for (advisory, range) in advisories {
+                if version
+                    .as_ref()
+                    .is_none_or(|version| range.matches(version))
                 {
                     matched.push(MatchedExposure {
                         advisory_id: advisory.id.clone(),
@@ -721,13 +765,8 @@ pub async fn match_advisories(ctx: &mut Ctx) -> Result<Vec<MatchedExposure>> {
                 }
             }
         }
+        Ok(())
     }
-    matched.sort_by(|left, right| {
-        left.release_id
-            .cmp(&right.release_id)
-            .then(left.advisory_id.cmp(&right.advisory_id))
-    });
-    Ok(matched)
 }
 
 /// Enqueue matched exposures on the optional integration outbox.
@@ -786,7 +825,15 @@ pub async fn plan_gate(ctx: &mut Ctx, environment: &str, steps: &[Step]) -> Resu
         return Ok(None);
     }
     let env = crate::environment::environment(ctx, environment).await?;
-    if let Some(detail) = stale_feed_reason(&env, ctx).await? {
+    // Both feed policies read the same preferred generation: load it once.
+    let feed = if env.properties.contains_key(MAX_FEED_AGE_PROPERTY)
+        || env.properties.contains_key(BLOCK_SEVERITY_PROPERTY)
+    {
+        load_advisory_feed(ctx).await?
+    } else {
+        None
+    };
+    if let Some(detail) = stale_feed_reason(&env, feed.as_ref()) {
         return Ok(Some(detail));
     }
     if let Some(detail) = scan_reason(ctx, &env, steps).await? {
@@ -803,12 +850,27 @@ pub async fn plan_gate(ctx: &mut Ctx, environment: &str, steps: &[Step]) -> Resu
             )));
         }
     };
-    if load_advisory_feed(ctx).await?.is_none() {
+    let Some((feed, _)) = &feed else {
         return Ok(Some(
             "exposure_unmitigated: no advisory feed has been imported".into(),
         ));
+    };
+    // Only the releases this plan deploys can block it.
+    let index = AdvisoryIndex::new(feed)?;
+    let mut matched = Vec::new();
+    let release_ids: std::collections::BTreeSet<&str> = steps
+        .iter()
+        .filter(deploys)
+        .map(|step| step.release_id.as_str())
+        .collect();
+    for release_id in release_ids {
+        if let Some(release) = ctx.get(release_id).await?
+            && release.kind == KIND_RELEASE
+        {
+            index.match_release(&release, &mut matched)?;
+        }
     }
-    let matched = match_advisories(ctx).await?;
+    sort_matches(&mut matched);
     let now_ms = crate::now_millis();
     for step in steps.iter().filter(deploys) {
         let mut blocking: Option<&MatchedExposure> = None;
@@ -1008,20 +1070,15 @@ pub(super) fn stored_inventory(release: &Object) -> Result<Option<ComponentInven
             release.id
         );
     }
-    let parsed = parse_inventory_bytes(document.as_bytes())?;
-    if parsed.digest != digest {
-        bail!(
-            "release {} stored inventory does not match its recorded digest",
-            release.id
-        );
-    }
-    Ok(Some(parsed))
+    // The digest was just checked, so the bytes are not hashed again.
+    let value: serde_json::Value =
+        serde_json::from_slice(document.as_bytes()).context("inventory document is not JSON")?;
+    Ok(Some(parse_inventory_value(&value, digest)?))
 }
 
 /// Require a validated stored inventory. Absence is not "unaffected".
 pub(crate) fn require_stored_inventory(release: &Object) -> Result<ComponentInventory> {
-    validate_stored_inventory(release, None)?;
-    stored_inventory(release)?
+    checked_inventory(release, None)?
         .ok_or_else(|| anyhow::anyhow!("release {} has no component inventory", release.id))
 }
 
@@ -1252,42 +1309,28 @@ fn feed_clock(feed: &AdvisoryFeed, imported_at: i64) -> i64 {
     }
 }
 
-async fn stale_feed_reason(env: &Object, ctx: &mut Ctx) -> Result<Option<String>> {
-    let Some(max_age) = env.properties.get(MAX_FEED_AGE_PROPERTY) else {
-        return Ok(None);
-    };
+fn stale_feed_reason(env: &Object, feed: Option<&(AdvisoryFeed, i64)>) -> Option<String> {
+    let max_age = env.properties.get(MAX_FEED_AGE_PROPERTY)?;
     let max_age = match max_age.parse::<i64>() {
         Ok(value) if value > 0 => value,
         _ => {
-            return Ok(Some(format!(
+            return Some(format!(
                 "exposure_feed_stale: environment policy {MAX_FEED_AGE_PROPERTY} is invalid"
-            )));
-        }
-    };
-    let clock = match load_advisory_feed(ctx).await? {
-        Some((feed, imported_at)) => {
-            let clock = feed_clock(&feed, imported_at);
-            if clock > 0 {
-                clock
-            } else {
-                return Ok(Some(
-                    "exposure_feed_stale: no advisory feed has been imported".into(),
-                ));
-            }
-        }
-        _ => {
-            return Ok(Some(
-                "exposure_feed_stale: no advisory feed has been imported".into(),
             ));
         }
     };
+    let clock = feed
+        .map(|(feed, imported_at)| feed_clock(feed, *imported_at))
+        .filter(|clock| *clock > 0);
+    let Some(clock) = clock else {
+        return Some("exposure_feed_stale: no advisory feed has been imported".into());
+    };
     let now = crate::now_millis();
-    if now.saturating_sub(clock) > max_age {
-        return Ok(Some(format!(
+    (now.saturating_sub(clock) > max_age).then(|| {
+        format!(
             "exposure_feed_stale: advisory feed generated_at {clock} is older than {max_age} ms"
-        )));
-    }
-    Ok(None)
+        )
+    })
 }
 
 /// Require a recent signed inventory when `exposure.max_inventory_age_ms` is set.
@@ -2010,6 +2053,71 @@ install = "true"
                 .await
                 .unwrap(),
             None
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #871: the gate reads only the plan's own releases. Before, it validated
+    /// every stored release, so one unrelated release with a damaged
+    /// inventory failed every plan start in the catalog.
+    #[tokio::test]
+    async fn plan_gate_reads_only_the_releases_its_plan_deploys() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-scope-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        for version in ["1.0.0", "2.0.0"] {
+            signed_publish(
+                &mut ctx,
+                &root,
+                version,
+                &native_inventory("openssl", "1.1.1"),
+            )
+            .await;
+        }
+        let unrelated = release_id("api", "2.0.0");
+        let mut release = ctx.get(&unrelated).await.unwrap().unwrap();
+        release.properties.insert(
+            INVENTORY_DOCUMENT_PROPERTY.into(),
+            native_inventory("openssl", "9.9.9"),
+        );
+        ctx.put(release).await.unwrap();
+        crate::environment::env_add(&mut ctx, "hub", "hub")
+            .await
+            .unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "hub")
+            .await
+            .unwrap();
+        env.properties
+            .insert(BLOCK_SEVERITY_PROPERTY.into(), "high".into());
+        ctx.put(env).await.unwrap();
+        import_advisory_feed(
+            &mut ctx,
+            feed_document(vec![matched_advisory()], 0),
+            crate::now_millis(),
+        )
+        .await
+        .unwrap();
+
+        let blocked = plan_gate(&mut ctx, "hub", &[upgrade_step("1.0.0")])
+            .await
+            .unwrap()
+            .expect("the step release matches a high advisory");
+        assert!(
+            blocked.starts_with("exposure_unmitigated:") && blocked.contains("api@1.0.0"),
+            "{blocked}"
+        );
+        // The damaged release still fails closed when its own plan starts.
+        let error = plan_gate(&mut ctx, "hub", &[upgrade_step("2.0.0")])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("does not match its recorded digest"),
+            "{error:#}"
         );
         let _ = std::fs::remove_dir_all(root);
     }
