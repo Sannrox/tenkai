@@ -5547,6 +5547,79 @@ anti_affinity = "host"
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A variant is deployable only when it is the channel release or a
+    /// semver release at or below a semver channel head. An unpromoted
+    /// non-semver release never wins, whichever head the channel has.
+    #[tokio::test]
+    async fn model_runtime_variants_stay_at_or_below_the_channel_head() {
+        // Unsigned fixtures deploy only to `local`, so each channel gets its
+        // own store.
+        for (channel, expected) in [("stable", "1.0.0"), ("edge", "2024-r1")] {
+            let root = std::env::temp_dir().join(format!(
+                "tenkai-variant-head-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+            crate::ontology::register(&mut ctx).await.unwrap();
+            let options = crate::catalog::PublishOptions {
+                signature: None,
+                trust_roots: None,
+                allow_unsigned_development: true,
+                provenance: Vec::new(),
+                provenance_trust_roots: None,
+                change_set_evidence: None,
+                family_release: None,
+                artifact_registry: None,
+                state_dir: None,
+            };
+            let actor = crate::auth_context::test_management_context("variant-head");
+            // `nightly` is published but never promoted. Under the old string
+            // ordering it outranked both heads.
+            let releases = [
+                ("1.0.0", Some("stable")),
+                ("nightly", None),
+                ("2024-r1", Some("edge")),
+            ];
+            for (version, promoted_to) in releases {
+                let dir = root.join(version);
+                std::fs::create_dir_all(&dir).unwrap();
+                write_model_runtime_manifest(&dir, version, 16, "Q4_K_M");
+                crate::catalog::publish(&mut ctx, &dir.join("tenkai.toml"), &options)
+                    .await
+                    .unwrap();
+                let release = format!("qwen-coder@{version}");
+                crate::model_release_evidence::record_passing_evaluation_for_release(
+                    &mut ctx, &release,
+                )
+                .await
+                .unwrap();
+                if let Some(promoted_to) = promoted_to {
+                    crate::catalog::promote(&mut ctx, &actor, &release, promoted_to)
+                        .await
+                        .unwrap();
+                }
+            }
+            env_add(&mut ctx, "local", "fixture").await.unwrap();
+            subscribe(&mut ctx, "local", "qwen-coder", channel)
+                .await
+                .unwrap();
+            for (fact, value) in [
+                ("architecture", "arm64"),
+                ("accelerator", "apple-metal"),
+                ("memory_gib", "24"),
+            ] {
+                set_environment_fact(&mut ctx, "local", fact, value)
+                    .await
+                    .unwrap();
+            }
+            let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+            assert_eq!(plan.steps[0].to, expected, "{channel}");
+            assert_eq!(plan.steps[0].release_id, release_id("qwen-coder", expected));
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
     #[tokio::test]
     async fn an_upgrade_records_a_service_port_change_and_refuses_a_moved_target() {
         use crate::software_executor::{

@@ -133,8 +133,11 @@ When planning a `model_runtime` subscription:
 
 1. Environment capability facts (`architecture`, `memory_gib`, and
    `accelerator` when required) are read from the environment.
-2. Candidates are published releases of that product at or below the channel
-   head, optionally filtered by `constraint.version_range.<product>`.
+2. Candidates are the channel release itself and, when the channel head is
+   semver, the semver releases of that product at or below it, optionally
+   filtered by `constraint.version_range.<product>`. A release whose version
+   is not semver is a candidate only when it is the channel release, and a
+   channel head that is not semver admits no other release.
 3. A candidate fits when facts satisfy its requirements (architecture and
    accelerator membership; `memory_gib` ≥ requirement; GPU requirements below).
 4. Plan selects the **highest semver** among feasible candidates.

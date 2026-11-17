@@ -445,13 +445,17 @@ async fn select_model_runtime_variant(
         let Some(version) = release.properties.get("version").cloned() else {
             continue;
         };
-        if let Some(range) = range
-            && !version_in_range(&version, range)?
+        // Only the channel release, or a semver release at or below a semver
+        // channel head, was promoted far enough to deploy.
+        if release.id != channel_release
+            && !channel_semver.as_ref().is_some_and(|head| {
+                semver::Version::parse(&version).is_ok_and(|candidate| candidate <= *head)
+            })
         {
             continue;
         }
-        if let (Some(head), Ok(candidate)) = (&channel_semver, semver::Version::parse(&version))
-            && candidate > *head
+        if let Some(range) = range
+            && !version_in_range(&version, range)?
         {
             continue;
         }
@@ -485,14 +489,21 @@ async fn select_model_runtime_variant(
         );
     }
 
-    candidates.sort_by(|(a, _), (b, _)| {
-        match (semver::Version::parse(a), semver::Version::parse(b)) {
-            (Ok(a), Ok(b)) => a.cmp(&b),
-            _ => a.cmp(b),
-        }
-    });
+    // Every candidate but the channel release is semver and at or below the
+    // head, so the channel release ranks first; the rest order by semver,
+    // then by release id. That is a total order.
     Ok(candidates
-        .pop()
+        .into_iter()
+        .max_by(|(a_version, a_id), (b_version, b_id)| {
+            (a_id == channel_release)
+                .cmp(&(b_id == channel_release))
+                .then_with(|| {
+                    semver::Version::parse(a_version)
+                        .ok()
+                        .cmp(&semver::Version::parse(b_version).ok())
+                })
+                .then_with(|| a_id.cmp(b_id))
+        })
         .expect("candidates non-empty after empty check"))
 }
 
