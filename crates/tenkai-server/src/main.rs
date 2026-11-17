@@ -1152,8 +1152,14 @@ async fn main() -> Result<()> {
                         let partitions = match &tenant_store {
                             Some(tenant) => {
                                 let tenant = Arc::clone(tenant);
+                                // Only partitions with an outcome due: an idle
+                                // tick is one query, not a claim per tenant (#872).
+                                let now = tenkai::now_millis();
                                 match tokio::task::spawn_blocking(move || {
-                                    tenant.provider_event_partitions()
+                                    tenant.provider_event_partitions_due(
+                                        tenkai::providers::OUTCOME_PROVIDER_KIND,
+                                        now,
+                                    )
                                 })
                                 .await
                                 {

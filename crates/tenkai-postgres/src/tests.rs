@@ -316,6 +316,8 @@ mod live_ha_qualification_drill;
 #[cfg(feature = "postgres")]
 mod live_isolation;
 #[cfg(feature = "postgres")]
+mod live_outcome_due;
+#[cfg(feature = "postgres")]
 mod live_property_lookup;
 #[cfg(feature = "postgres")]
 mod live_retirement;
