@@ -649,7 +649,7 @@ async fn admit_worker_pool(
             Ok(result) => result,
             Err(error) => return Ok(Err(error.to_string())),
         };
-    crate::worker_pool::persist_observation(&mut env.properties, &observed);
+    crate::worker_pool::persist_observation(&mut env.properties, &observed, &decision);
     crate::worker_pool::persist_observation_source(&mut env.properties, &spec.product, source);
     if let Some(started) = next_drain {
         env.properties.insert(

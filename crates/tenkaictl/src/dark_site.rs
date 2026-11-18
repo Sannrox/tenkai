@@ -100,7 +100,15 @@ fn synthetic_workers(
     } else {
         profile.site_agent.version.clone()
     };
-    (0..ready_replicas.max(1))
+    // `--ready-replicas 0` means no worker is ready, so no worker is
+    // synthesized and the pool reports not ready (#1310). Active claims
+    // need a worker to hold them.
+    let workers = if active_claims > 0 {
+        ready_replicas.max(1)
+    } else {
+        ready_replicas
+    };
+    (0..workers)
         .map(|index| WorkerLifecycleSnapshot {
             schema_version: tenkai::worker_pool::LIFECYCLE_SCHEMA_VERSION,
             protocol: tenkai::worker_pool::LIFECYCLE_PROTOCOL.into(),
@@ -133,4 +141,26 @@ fn print_ready(report: &ReadyReport) {
         report.workers_ready,
         report.workers_desired
     );
+}
+
+#[cfg(test)]
+mod tests {
+    // #1310: zero ready replicas synthesize no worker; active claims still
+    // get one to hold them.
+    #[test]
+    fn zero_ready_replicas_synthesize_no_worker() {
+        let profile = tenkai::dark_site::DarkSiteProfile::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/dark-site/profile.toml"
+        )));
+        let Ok(profile) = profile else {
+            panic!("example dark-site profile must load: {profile:?}");
+        };
+        assert!(super::synthetic_workers(&profile, 0, 0).is_empty());
+        assert_eq!(super::synthetic_workers(&profile, 0, 1).len(), 1);
+        let report =
+            tenkai::dark_site::ready(&profile, true, &super::synthetic_workers(&profile, 0, 0))
+                .unwrap();
+        assert!(!report.ready, "{}", report.detail);
+    }
 }

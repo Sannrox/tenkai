@@ -80,7 +80,7 @@ jobs:
       # The hub writer lease and the kill-the-leader drill (#748, #749),
       # the hub HA qualification drill (#903), the large property value
       # migration (#879), and tenant feedback observation capture (#868).
-      - run: cargo test --locked -p tenkai-postgres --features postgres --lib -- --ignored live_writer_lease live_failover_drill live_ha_qualification live_property_lookup live_feedback_capture
+      - run: cargo test --locked -p tenkai-postgres --features postgres --lib -- --ignored live_writer_lease live_failover_drill live_ha_qualification live_property_lookup live_feedback_capture live_provider_enqueue
 
   fmt:
     name: Rustfmt

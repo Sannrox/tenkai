@@ -581,10 +581,10 @@ async fn mutate(
             crate::environment::clear_environment_fact(ctx, environment, key).await?
         }
         Change::SetLabel { key, value } => {
-            crate::labels::set_environment(ctx, environment, key, value, actor, reason).await?
+            crate::labels::set_environment_held(ctx, environment, key, value, actor, reason).await?
         }
         Change::ClearLabel { key } => {
-            crate::labels::clear_environment(ctx, environment, key, actor, reason).await?
+            crate::labels::clear_environment_held(ctx, environment, key, actor, reason).await?
         }
         Change::SetConstraint {
             constraint,

@@ -391,22 +391,52 @@ pub async fn apply_verified(ctx: &mut Ctx, verified: &VerifiedDerived, now: i64)
     apply_assignments(ctx, verified, now).await
 }
 
+/// Each target is its own object under its own lease, so a statement cannot
+/// commit atomically. Every assignment is first checked without writing (the
+/// target exists, no conflicting value at this generation), so a statement
+/// that would fail on its content changes nothing. A fault while writing
+/// names the targets already applied; importing the same statement again is
+/// idempotent and finishes the rest (#1310).
 async fn apply_assignments(ctx: &mut Ctx, verified: &VerifiedDerived, now: i64) -> Result<usize> {
-    let mut applied = 0usize;
-    for assignment in &verified.statement.assignments {
+    let statement = &verified.statement;
+    for assignment in &statement.assignments {
+        let mut object = match assignment.kind {
+            CriticalityTargetKind::Environment => load_environment(ctx, &assignment.name).await?,
+            CriticalityTargetKind::Product => load_product(ctx, &assignment.name).await?,
+        };
+        apply_derived_if_newer(
+            &mut object,
+            assignment,
+            statement.generated_at,
+            now,
+            statement.max_age_ms,
+            &verified.key_id,
+        )
+        .with_context(|| format!("{} {}", assignment.kind.as_str(), assignment.name))?;
+    }
+    let mut applied = Vec::new();
+    for assignment in &statement.assignments {
         let wrote = match assignment.kind {
             CriticalityTargetKind::Environment => {
-                apply_environment_assignment(ctx, verified, assignment, now).await?
+                apply_environment_assignment(ctx, verified, assignment, now).await
             }
             CriticalityTargetKind::Product => {
-                apply_product_assignment(ctx, verified, assignment, now).await?
+                apply_product_assignment(ctx, verified, assignment, now).await
             }
         };
-        if wrote {
-            applied += 1;
+        match wrote {
+            Ok(true) => applied.push(format!("{} {}", assignment.kind.as_str(), assignment.name)),
+            Ok(false) => {}
+            Err(error) if applied.is_empty() => return Err(error),
+            Err(error) => {
+                return Err(error.context(format!(
+                    "derived criticality partly applied ({}); import the same statement again to finish",
+                    applied.join(", ")
+                )));
+            }
         }
     }
-    Ok(applied)
+    Ok(applied.len())
 }
 
 async fn apply_product_assignment(
@@ -710,6 +740,42 @@ mod tests {
                 reason: "reaches marked data".into(),
             }],
         }
+    }
+
+    #[tokio::test]
+    async fn a_statement_with_a_bad_target_changes_nothing_and_a_fault_names_the_applied() {
+        let root = temp_dir("all-or-report");
+        let mut ctx = seeded_env(&root, "prod").await;
+        let mut derived = statement(CriticalityLevel::Critical);
+        let mut missing = derived.assignments[0].clone();
+        missing.name = "missing".into();
+        derived.assignments.push(missing);
+        let verified = VerifiedDerived {
+            key_id: "governance".into(),
+            statement: derived,
+        };
+        let now = crate::now_millis();
+        let error = apply_verified(&mut ctx, &verified, now).await.unwrap_err();
+        assert!(format!("{error:#}").contains("missing"), "{error:#}");
+        let view = inspect_environment(&mut ctx, "prod").await.unwrap();
+        assert!(view.derived.is_none(), "nothing applied: {view:?}");
+
+        // Both targets exist, but the second is busy when its turn comes.
+        crate::plan::env_add(&mut ctx, "missing", "m")
+            .await
+            .unwrap();
+        let busy = crate::apply::claim_environment(&mut ctx, "missing", "apply-test")
+            .await
+            .unwrap();
+        let error = apply_verified(&mut ctx, &verified, now).await.unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("partly applied (environment prod)"), "{text}");
+        crate::apply::release_environment(&mut ctx, &busy)
+            .await
+            .unwrap();
+        // Importing again finishes the rest; prod is already current.
+        assert_eq!(apply_verified(&mut ctx, &verified, now).await.unwrap(), 1);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

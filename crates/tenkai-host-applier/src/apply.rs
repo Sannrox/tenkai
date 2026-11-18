@@ -188,12 +188,23 @@ pub async fn apply<F: Future<Output = ()>>(
         }
         _ => (outcome, detail),
     };
-    // Still under the product lock, before the result is recorded.
-    if forgets_identity && outcome.succeeded() {
+    // Still under the product lock, before the result is recorded. The
+    // step's command already ran, so a record that cannot be removed is
+    // named in the result instead of leaving the step unrecorded, where it
+    // would later settle as Interrupted and leave the product dirty (#1310).
+    let detail = if forgets_identity && outcome.succeeded() {
         let step = &intake.verified;
-        store::remove_identity_record(paths, &step.environment, secrets::step_instance(step))
-            .context("forgetting the instance's workload certificate")?;
-    }
+        match store::remove_identity_record(paths, &step.environment, secrets::step_instance(step))
+        {
+            Ok(()) => detail,
+            Err(error) => format!(
+                "{detail}{}forgetting the instance's workload certificate record failed: {error:#}",
+                if detail.is_empty() { "" } else { "; " }
+            ),
+        }
+    } else {
+        detail
+    };
     let result = running.finish(outcome, exit_status, detail, tenkai::now_millis())?;
     discard_work(&paths.work_dir(instance))?;
     Ok(Applied::Result(result))

@@ -43,6 +43,37 @@ pub(crate) async fn claim_environment(
     claim_environment_with_options(ctx, environment, owner, ENVIRONMENT_LEASE_MS, false).await
 }
 
+/// A claim refused because another holder runs an apply on the environment:
+/// contention, which callers may retry, unlike a store fault (#1310).
+#[derive(Debug)]
+pub(crate) struct ApplyInProgress {
+    environment: String,
+    owner: String,
+}
+
+impl std::fmt::Display for ApplyInProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "environment {} already has an apply in progress owned by {}",
+            self.environment, self.owner
+        )
+    }
+}
+
+impl std::error::Error for ApplyInProgress {}
+
+/// Whether `error` is contention on the environment lease, not a fault.
+pub(crate) fn is_apply_in_progress(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.is::<ApplyInProgress>()
+            || matches!(
+                cause.downcast_ref::<crate::client::LeaseError>(),
+                Some(crate::client::LeaseError::AlreadyExists)
+            )
+    })
+}
+
 /// Apply lease for a topology drill. An expired holder owned by another
 /// drill is taken over so crash recovery does not wait on `env unlock`.
 pub(crate) async fn claim_environment_for_drill(
@@ -205,10 +236,11 @@ async fn claim_environment_with_options(
                     )
                     .await?
                 } else {
-                    bail!(
-                        "environment {environment} already has an apply in progress owned by {}",
-                        existing.owner
-                    );
+                    return Err(ApplyInProgress {
+                        environment: environment.into(),
+                        owner: existing.owner,
+                    }
+                    .into());
                 }
             } else {
                 return Err(crate::client::LeaseError::AlreadyExists.into());

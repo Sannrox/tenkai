@@ -517,7 +517,59 @@ async fn changes(ctx: &mut Ctx, subject: Subject<'_>, object: &Object) -> Result
     Ok(changes)
 }
 
+/// Set `key` on `env`, holding the environment apply lease for the write so
+/// it cannot interleave with an apply or another configuration change, which
+/// also replace the environment object (#1310). Refused while one runs.
 pub async fn set_environment(
+    ctx: &mut Ctx,
+    env: &str,
+    key: &str,
+    value: &str,
+    actor: &str,
+    reason: &str,
+) -> Result<String> {
+    under_environment_lease(ctx, env, async |ctx| {
+        set_environment_held(ctx, env, key, value, actor, reason).await
+    })
+    .await
+}
+
+/// Clear `key` on `env` under the environment apply lease, like
+/// [`set_environment`].
+pub async fn clear_environment(
+    ctx: &mut Ctx,
+    env: &str,
+    key: &str,
+    actor: &str,
+    reason: &str,
+) -> Result<String> {
+    under_environment_lease(ctx, env, async |ctx| {
+        clear_environment_held(ctx, env, key, actor, reason).await
+    })
+    .await
+}
+
+async fn under_environment_lease(
+    ctx: &mut Ctx,
+    env: &str,
+    write: impl AsyncFnOnce(&mut Ctx) -> Result<String>,
+) -> Result<String> {
+    let owner = format!("environment-labels:{}", crate::now_millis());
+    let lease = crate::apply::claim_environment(ctx, env, &owner).await?;
+    let result = write(ctx).await;
+    let unlock = crate::apply::release_environment(ctx, &lease).await;
+    match (result, unlock) {
+        (Ok(message), Ok(())) => Ok(message),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(unlock)) => Err(error.context(format!(
+            "releasing the environment label lease also failed: {unlock}"
+        ))),
+        (Ok(_), Err(error)) => Err(error.context("releasing the environment label lease")),
+    }
+}
+
+/// [`set_environment`] for a caller that already holds the environment lease.
+pub(crate) async fn set_environment_held(
     ctx: &mut Ctx,
     env: &str,
     key: &str,
@@ -541,7 +593,9 @@ pub async fn set_environment(
     Ok(format!("set {env} label {key}={value}"))
 }
 
-pub async fn clear_environment(
+/// [`clear_environment`] for a caller that already holds the environment
+/// lease.
+pub(crate) async fn clear_environment_held(
     ctx: &mut Ctx,
     env: &str,
     key: &str,
@@ -829,6 +883,38 @@ mod tests {
                 .unwrap(),
             vec!["alpha".to_string(), "beta".to_string()]
         );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn a_label_write_waits_for_no_apply_and_releases_its_lease() {
+        let database = temp_db("leased");
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        plan::env_add(&mut ctx, "alpha", "a").await.unwrap();
+        let apply = crate::apply::claim_environment(&mut ctx, "alpha", "apply-test")
+            .await
+            .unwrap();
+        let error = set_environment(&mut ctx, "alpha", "tier", "canary", "test", "")
+            .await
+            .unwrap_err();
+        assert!(crate::apply::is_apply_in_progress(&error), "{error:#}");
+        assert!(
+            list_environment(&mut ctx, "alpha")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        crate::apply::release_environment(&mut ctx, &apply)
+            .await
+            .unwrap();
+        set_environment(&mut ctx, "alpha", "tier", "canary", "test", "")
+            .await
+            .unwrap();
+        clear_environment(&mut ctx, "alpha", "tier", "test", "")
+            .await
+            .unwrap();
         let _ = std::fs::remove_file(&database);
     }
 

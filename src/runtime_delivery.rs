@@ -553,19 +553,31 @@ pub(crate) async fn complete_runtime_work(
             .await?;
         }
         if let Some(environment) = environment_object {
-            if !ctx.is_embedded() {
-                ctx.guarded_update(
+            // Remote application state cannot commit the plan, environment,
+            // and provider events together. It writes the environment fenced
+            // to the lease (refusing events it cannot enqueue rather than
+            // dropping them) and then the plan, also fenced (#1310).
+            if !ctx.commits_provider_events_atomically() {
+                ctx.guarded_put_with_provider_events(
                     environment,
                     crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
                     &lease.environment,
                     &lease.fencing_token,
+                    &provider_events,
+                    &observations,
                 )
                 .await?;
                 crate::plan::transition(
                     ctx,
                     &mut stored,
                     crate::plan::Transition::new(terminal, completion.detail.clone()),
-                    crate::plan::Persistence::Standard,
+                    crate::plan::Persistence::Guarded {
+                        namespace: crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+                        key: &lease.environment,
+                        fencing_token: &lease.fencing_token,
+                        confirm_ambiguous: false,
+                        observations: &[],
+                    },
                 )
                 .await?;
                 return Ok(());
