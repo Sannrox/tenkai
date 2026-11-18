@@ -36,14 +36,33 @@ impl HostExecutor {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error).with_context(|| format!("reading {}", dir.display())),
         };
+        // One unreadable record is reported as its own entry; the others
+        // still renew (#1307).
         let mut found = Vec::new();
         for entry in entries {
-            let path = entry?.path();
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(error) => {
+                    found.push((
+                        dir.display().to_string(),
+                        Err(anyhow::Error::from(error).context("listing identity records")),
+                    ));
+                    continue;
+                }
+            };
             if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
                 continue;
             }
-            let Some(bytes) = read_record(&path)? else {
-                continue;
+            let bytes = match read_record(&path) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => continue,
+                Err(error) => {
+                    found.push((
+                        path.display().to_string(),
+                        Err(error.context("reading the identity record")),
+                    ));
+                    continue;
+                }
             };
             let record: HostIdentityRecord = match serde_json::from_slice(&bytes) {
                 Ok(record) => record,
@@ -62,16 +81,29 @@ impl HostExecutor {
             {
                 continue;
             }
-            if self.applied_state(environment, &record.product)?.state == AppliedState::Empty {
-                continue;
+            match self.applied_state(environment, &record.product) {
+                Ok(applied) if applied.state == AppliedState::Empty => continue,
+                Ok(_) => {}
+                Err(error) => {
+                    found.push((
+                        record.instance.clone(),
+                        Err(error
+                            .context(format!("reading the applied state of {}", record.product))),
+                    ));
+                    continue;
+                }
             }
-            let installed = InstalledIdentity::read(
-                environment,
-                &record.instance,
-                &record.certificate,
-                &record.ca,
-                &serde_json::to_vec(&record.grant)?,
-            );
+            let installed = serde_json::to_vec(&record.grant)
+                .map_err(anyhow::Error::from)
+                .and_then(|grant| {
+                    InstalledIdentity::read(
+                        environment,
+                        &record.instance,
+                        &record.certificate,
+                        &record.ca,
+                        &grant,
+                    )
+                });
             found.push((
                 record.instance.clone(),
                 installed.map(|installed| InstalledHostIdentity { record, installed }),
@@ -351,5 +383,33 @@ mod tests {
             &AppliedStateRecord::empty("edge", "api"),
         );
         assert!(executor.installed_identities("edge").unwrap().is_empty());
+    }
+
+    /// #1307: a record the executor cannot read is reported as its own
+    /// entry, and every other certificate is still listed for renewal.
+    #[test]
+    fn one_unreadable_record_does_not_stop_the_other_renewals() {
+        let shm = Path::new("/dev/shm");
+        if crate::host_apply::sealed::require_memory_backed(shm).is_err() {
+            eprintln!("skipped: no memory-backed /dev/shm on this host");
+            return;
+        }
+        let case = Case::new(shm);
+        write(
+            &identity_record_path(&case.state, "edge", "web"),
+            &HostIdentityRecord::new("edge", "web", "web", &case.issue()),
+        );
+        let applied = record_path(&case.state, "edge", "web");
+        std::fs::write(&applied, b"{not json").unwrap();
+
+        let mut found = case.executor(false).installed_identities("edge").unwrap();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        let [(api, api_identity), (web, web_identity)] = found.as_slice() else {
+            panic!("expected two entries, got {}", found.len());
+        };
+        assert_eq!((api.as_str(), web.as_str()), ("api", "web"));
+        assert_eq!(api_identity.as_ref().unwrap().installed.grant, case.grant);
+        let error = format!("{:#}", web_identity.as_ref().unwrap_err());
+        assert!(error.contains("applied state of web"), "{error}");
     }
 }
