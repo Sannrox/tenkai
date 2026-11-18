@@ -115,3 +115,65 @@ async fn compatible_migration_approves_executes_resumes_and_rolls_back() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+// #1294: approval holds the execution lease from read to write, so a held
+// lease refuses it and a write under a taken-over lease commits nothing.
+#[tokio::test]
+async fn approval_is_fenced_to_the_execution_lease() {
+    let root = temp_root("approve-fence");
+    let mut ctx = crate::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
+    crate::ontology::register(&mut ctx).await.unwrap();
+    crate::plan::env_add(&mut ctx, "local", "fixture")
+        .await
+        .unwrap();
+    let declaration = publish_pins(&mut ctx, &root).await;
+    deploy_source(&mut ctx).await;
+    create(&mut ctx, "cutover", "local", declaration, None)
+        .await
+        .unwrap();
+    let auth = MigrationAuthorization::LocalDevelopment {
+        reason: "approval fence",
+    };
+
+    let held = ctx
+        .acquire_lease(MIGRATION_EXEC_NAMESPACE, "cutover", "tester", 60_000)
+        .await
+        .unwrap();
+    let err = approve(&mut ctx, "cutover", auth).await.unwrap_err();
+    assert!(
+        err.to_string().contains("already has an execution"),
+        "{err}"
+    );
+    ctx.release_lease(MIGRATION_EXEC_NAMESPACE, "cutover", &held.fencing_token)
+        .await
+        .unwrap();
+
+    let stale = super::super::leases::acquire_execution_lease(&mut ctx, "cutover", None)
+        .await
+        .unwrap();
+    ctx.release_lease(MIGRATION_EXEC_NAMESPACE, "cutover", &stale)
+        .await
+        .unwrap();
+    let current = super::super::leases::acquire_execution_lease(&mut ctx, "cutover", None)
+        .await
+        .unwrap();
+    let mut record = load(&mut ctx, "cutover").await.unwrap();
+    record.approval_digest = "sha256:stale".into();
+    super::super::persist::persist_fenced(&mut ctx, &record, "cutover", &stale)
+        .await
+        .unwrap_err();
+    assert!(
+        load(&mut ctx, "cutover")
+            .await
+            .unwrap()
+            .approval_digest
+            .is_empty()
+    );
+    ctx.release_lease(MIGRATION_EXEC_NAMESPACE, "cutover", &current)
+        .await
+        .unwrap();
+
+    let approved = approve(&mut ctx, "cutover", auth).await.unwrap();
+    assert!(!approved.approval_digest.is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}

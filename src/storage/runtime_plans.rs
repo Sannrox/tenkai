@@ -202,11 +202,36 @@ impl SqliteStore {
         if changed == 1 {
             return Ok(());
         }
-        let stored: Option<String> = connection.query_row(
-            "SELECT completion_json FROM runtime_claims WHERE plan_id=?1",
-            [plan_id],
-            |row| row.get(0),
-        )?;
+        // A reclaim between the read and the update moved the claim on: the
+        // completion is ours only if this owner and generation recorded it
+        // (#1294).
+        let stored: Option<(String, u64, Option<String>)> = connection
+            .query_row(
+                "SELECT owner,generation,completion_json FROM runtime_claims WHERE plan_id=?1",
+                [plan_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((stored_owner, stored_generation, stored)) = stored else {
+            return Err(StoreError::NotFound {
+                kind: "runtime claim",
+                id: plan_id.into(),
+            });
+        };
+        if stored_owner != owner {
+            return Err(StoreError::LeaseOwnerMismatch {
+                environment: plan_id.into(),
+                expected: stored_owner,
+                actual: owner.into(),
+            });
+        }
+        if stored_generation != generation {
+            return Err(StoreError::StaleLease {
+                environment: plan_id.into(),
+                expected: stored_generation,
+                actual: generation,
+            });
+        }
         if stored.as_deref() == Some(completion_json) {
             Ok(())
         } else {

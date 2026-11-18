@@ -64,6 +64,25 @@ pub(super) async fn persist(ctx: &mut Ctx, record: &MigrationRecord) -> Result<(
     Ok(())
 }
 
+/// [`persist`] committed only while the migration execution lease
+/// `fencing_token` names is still held (#1294).
+pub(super) async fn persist_fenced(
+    ctx: &mut Ctx,
+    record: &MigrationRecord,
+    lease_name: &str,
+    fencing_token: &str,
+) -> Result<()> {
+    require_package_migration_schema(ctx).await?;
+    ctx.guarded_update(
+        record_object(record, crate::now_millis())?,
+        super::types::MIGRATION_EXEC_NAMESPACE,
+        lease_name,
+        fencing_token,
+    )
+    .await?;
+    Ok(())
+}
+
 fn record_object(record: &MigrationRecord, now: i64) -> Result<Object> {
     Ok(Object {
         id: record_catalog_id(record),

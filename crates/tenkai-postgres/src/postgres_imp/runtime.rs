@@ -227,7 +227,7 @@ impl Inner {
             let row = tx
                 .query_opt(
                     "SELECT owner,generation,expires_at,completion_json FROM runtime_claims
-                     WHERE plan_id = $1",
+                     WHERE plan_id = $1 FOR UPDATE",
                     &[&plan_id],
                 )
                 .map_err(pg)?
@@ -269,12 +269,22 @@ impl Inner {
                 });
             }
             let lease_gen = generation as i64;
-            tx.execute(
-                "UPDATE runtime_claims SET completion_json = $4
-                 WHERE plan_id = $1 AND owner = $2 AND generation = $3 AND completion_json IS NULL",
-                &[&plan_id, &owner, &lease_gen, &completion_json],
-            )
-            .map_err(pg)?;
+            // The row is locked since the read, so the update applies; a
+            // count other than one is a lost claim, never a success (#1294).
+            let changed = tx
+                .execute(
+                    "UPDATE runtime_claims SET completion_json = $4
+                     WHERE plan_id = $1 AND owner = $2 AND generation = $3 AND completion_json IS NULL",
+                    &[&plan_id, &owner, &lease_gen, &completion_json],
+                )
+                .map_err(pg)?;
+            if changed != 1 {
+                return Err(StoreError::StaleLease {
+                    environment: plan_id,
+                    expected: generation,
+                    actual: stored_gen as u64,
+                });
+            }
             Ok(())
         })
     }
