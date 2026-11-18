@@ -6,7 +6,10 @@ fn generations_fence_receipts_and_rollback_updates() {
     environment(&store);
     plan(&store);
     let now = crate::now_millis();
-    let first = OperationalStore::acquire_lease(&store, "prod", "worker-a", now + 50).unwrap();
+    // Long enough that worker-b's first acquire below runs before it expires,
+    // even on a loaded machine (#1343).
+    let first_expires = now + 1_000;
+    let first = OperationalStore::acquire_lease(&store, "prod", "worker-a", first_expires).unwrap();
     let rollback = RollbackRecord {
         id: "rollback-1".into(),
         environment_id: "prod".into(),
@@ -21,7 +24,10 @@ fn generations_fence_receipts_and_rollback_updates() {
         OperationalStore::acquire_lease(&store, "prod", "worker-b", now + 10_000),
         Err(StoreError::LeaseHeld { .. })
     ));
-    std::thread::sleep(std::time::Duration::from_millis(60));
+    // The store judges expiry by its own clock, so wait until it has passed.
+    while crate::now_millis() <= first_expires {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let second = OperationalStore::acquire_lease(&store, "prod", "worker-b", now + 10_000).unwrap();
     assert!(matches!(
         store.record_receipt(
