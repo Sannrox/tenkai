@@ -181,8 +181,15 @@ pub(crate) async fn overlay(ctx: &mut client::Ctx, command: OverlayCommand) -> R
                 .into_iter()
                 .filter(|(name, _)| product.as_deref().is_none_or(|product| product == name))
                 .collect();
-            if overlays.is_empty() && presets.is_empty() {
-                println!("{env} has no product overlays");
+            let values = match product {
+                Some(_) => Default::default(),
+                None => plan::list_environment_values(ctx, &env).await?,
+            };
+            if overlays.is_empty() && presets.is_empty() && values.is_empty() {
+                println!("{env} has no environment values or product overlays");
+            }
+            for (key, value) in values {
+                println!("environment {key}={value}");
             }
             for (product, preset) in presets {
                 println!("{product} preset {preset}");
@@ -191,20 +198,36 @@ pub(crate) async fn overlay(ctx: &mut client::Ctx, command: OverlayCommand) -> R
                 println!("{key}={value}");
             }
         }
-        OverlayCommand::Set { env, product, spec } => {
+        OverlayCommand::Set { env, subject, spec } => {
+            let (product, spec) = match spec {
+                Some(spec) => (Some(subject), spec),
+                None => (None, subject),
+            };
             let Some((key, value)) = spec.split_once('=') else {
                 bail!("expected <key>=<value>, got {spec:?}");
             };
-            println!(
-                "{}",
-                plan::set_environment_overlay(ctx, &env, &product, key, value).await?
-            );
+            let message = match product {
+                Some(product) => {
+                    plan::set_environment_overlay(ctx, &env, &product, key, value).await?
+                }
+                None => plan::set_environment_value(ctx, &env, key, value).await?,
+            };
+            println!("{message}");
         }
-        OverlayCommand::Clear { env, product, key } => {
-            println!(
-                "{}",
-                plan::clear_environment_overlay(ctx, &env, &product, key.as_deref()).await?
-            );
+        OverlayCommand::Clear {
+            env,
+            product,
+            key,
+            value,
+        } => {
+            let message = match (product, value) {
+                (_, Some(value)) => plan::clear_environment_value(ctx, &env, &value).await?,
+                (Some(product), None) => {
+                    plan::clear_environment_overlay(ctx, &env, &product, key.as_deref()).await?
+                }
+                (None, None) => bail!("name a product or --value <key>"),
+            };
+            println!("{message}");
         }
         OverlayCommand::Preset {
             env,

@@ -95,6 +95,38 @@ tenkaictl env overlay preset prod api --clear
 
 Presets and overrides are per product in an environment, like overlays.
 
+#### Environment values
+
+A value that belongs to the site, such as its domain or storage class, can be
+set once for the environment instead of once per product:
+
+```sh
+tenkaictl env overlay set prod domain=example.org     # no product: an environment value
+tenkaictl env overlay list prod                       # environment values, then product overlays
+tenkaictl env overlay clear prod --value domain
+```
+
+- **Only declared keys read it.** A release receives an environment value
+  only through a `[config]` overlay key of the same name. A release that
+  does not declare the key never sees it, and secrets stay per declared
+  secret name.
+- **Precedence.** A product override wins, then the selected preset, then
+  the environment value, then the release default. `env inspect` lists each
+  product's inherited `environment` values next to its `overlay` and
+  `defaults`.
+- **Checked like an overlay.** `set` refuses a value that a subscribed
+  channel head's declared type or allowed values reject, and a key a head
+  declares as a secret; the error names the product. Planning checks each
+  candidate again and refuses, naming the key.
+- **Only readers restart.** The config digest of an instance covers the
+  environment values it reads and no others, so the next plan restarts only
+  instances whose effective config changes. An environment without values
+  keeps its digests.
+
+Environment values are embedded commands like product overlays. A server
+that predates them ignores them and plans a different config digest, so set
+no environment value until every server reads them.
+
 ### Sealed secrets
 
 A value for a declared secret can be set sealed (ADR 0045). The client seals

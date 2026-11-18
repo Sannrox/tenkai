@@ -5,8 +5,26 @@ use tenkai::auth_context::{AuthenticatedRequestContextBuilder, PrincipalIdentity
 use tenkai::client::Ctx;
 use tenkai::offline_fleet_drill::{ROLLBACK_COUNT, SPOKE_COUNT, rehearse};
 
-#[tokio::test]
-async fn fifty_isolated_spokes_upgrade_and_partial_rollback_match_hub_status() {
+/// Debug builds poll the whole apply path on one stack, and it already sits
+/// near the 2 MiB test-thread default. The drill runs on an explicit 8 MiB
+/// thread (the main-thread default) so it measures behavior, not frame size.
+#[test]
+fn fifty_isolated_spokes_upgrade_and_partial_rollback_match_hub_status() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(drill())
+        })
+        .expect("drill thread")
+        .join()
+        .expect("drill panicked");
+}
+
+async fn drill() {
     unsafe {
         std::env::set_var("TENKAI_SOFTWARE_EXECUTOR", "fake");
     }

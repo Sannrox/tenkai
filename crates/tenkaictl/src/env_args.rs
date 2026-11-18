@@ -425,22 +425,33 @@ pub(crate) enum CriticalityCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum OverlayCommand {
-    /// List overlays, optionally for one product.
+    /// List environment values and overlays, optionally for one product.
     List {
         env: String,
         product: Option<String>,
     },
-    /// Set one overlay, e.g. `set prod api region=eu`.
+    /// Set one product overlay, e.g. `set prod api region=eu`, or with no
+    /// product an environment value every release declaring the key reads,
+    /// e.g. `set prod domain=example.org`. A product overlay wins over an
+    /// environment value.
     Set {
         env: String,
-        product: String,
-        spec: String,
+        /// The product, or `<key>=<value>` for an environment value.
+        #[arg(value_name = "PRODUCT")]
+        subject: String,
+        #[arg(value_name = "KEY=VALUE")]
+        spec: Option<String>,
     },
-    /// Clear one overlay key, or every overlay for the product.
+    /// Clear one overlay key, every overlay for the product, or with
+    /// `--value` one environment value.
     Clear {
         env: String,
-        product: String,
+        #[arg(required_unless_present = "value", conflicts_with = "value")]
+        product: Option<String>,
         key: Option<String>,
+        /// Clear this environment value instead of a product overlay.
+        #[arg(long, value_name = "KEY")]
+        value: Option<String>,
     },
     /// Select a preset the release declares, e.g. `preset prod api medium`;
     /// overrides apply on top. `--clear` removes the selection.
