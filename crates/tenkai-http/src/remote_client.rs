@@ -222,6 +222,27 @@ impl RemoteClient {
         self.request_json(reqwest::Method::GET, &path).await
     }
 
+    pub async fn delivery_report(
+        &self,
+        environment: &str,
+        query: &tenkai::delivery_report::DeliveryReportQuery,
+    ) -> anyhow::Result<tenkai::delivery_report::DeliveryReport> {
+        let mut pairs = url::form_urlencoded::Serializer::new(String::new());
+        if let Some(since_ms) = query.since_ms {
+            pairs.append_pair("since_ms", &since_ms.to_string());
+        }
+        if let Some(until_ms) = query.until_ms {
+            pairs.append_pair("until_ms", &until_ms.to_string());
+        }
+        let encoded = pairs.finish();
+        let path = if encoded.is_empty() {
+            format!("/v1/environments/{environment}/delivery-report")
+        } else {
+            format!("/v1/environments/{environment}/delivery-report?{encoded}")
+        };
+        self.request_json(reqwest::Method::GET, &path).await
+    }
+
     pub async fn environment_approval_policy(
         &self,
         environment: &str,

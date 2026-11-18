@@ -283,6 +283,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: EnvCommand,
     },
+    /// Read-only reports computed from recorded state.
+    Report {
+        #[command(subcommand)]
+        command: crate::report_args::ReportCommand,
+    },
     /// Fleet-wide delivery posture across all registered environments.
     Fleet {
         #[command(subcommand)]

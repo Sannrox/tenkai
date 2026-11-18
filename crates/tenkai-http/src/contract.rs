@@ -404,6 +404,15 @@ pub fn http_contract() -> Value {
         },
         Route {
             method: "GET",
+            path: "/v1/environments/{environment}/delivery-report",
+            auth: Auth::Read,
+            request: Some(schema::<tenkai::delivery_report::DeliveryReportQuery>(
+                &mut g,
+            )),
+            response: schema::<tenkai::delivery_report::DeliveryReport>(&mut g),
+        },
+        Route {
+            method: "GET",
             path: "/v1/environments/{environment}/approval-policy",
             auth: Auth::Read,
             request: None,

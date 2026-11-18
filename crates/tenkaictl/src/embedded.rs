@@ -225,6 +225,11 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
         Command::Remediate { command } => crate::embedded_remediate::run(&mut ctx, command).await,
         Command::Topology { command } => crate::embedded_topology::run(&mut ctx, command).await,
         Command::Env { command } => crate::embedded_env::run(&mut ctx, command, output).await,
+        Command::Report { command } => {
+            let (env, query) = command.delivery();
+            let report = tenkai::delivery_report::delivery_report(&mut ctx, env, &query).await?;
+            crate::report_args::print_delivery_report(&report, output)
+        }
         command @ (Command::Plan { .. }
         | Command::Apply { .. }
         | Command::Status { .. }

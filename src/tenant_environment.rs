@@ -189,6 +189,27 @@ impl TenantEnvironmentOperations {
         })
     }
 
+    /// A tenant partition records no deployment attempts, so every period
+    /// is missing data.
+    pub async fn delivery_report(
+        &self,
+        context: &AuthenticatedRequestContext,
+        environment: &str,
+        query: &crate::delivery_report::DeliveryReportQuery,
+    ) -> Result<crate::delivery_report::DeliveryReport, TenantEnvironmentError> {
+        self.visible_fixture(context, environment).await?;
+        let until_ms = query.until_ms.unwrap_or_else(crate::now_millis);
+        Ok(crate::delivery_report::DeliveryReport {
+            environment: environment.into(),
+            since_ms: query.since_ms.unwrap_or_else(|| {
+                until_ms.saturating_sub(crate::delivery_report::DEFAULT_PERIOD_MS)
+            }),
+            until_ms,
+            missing_data: true,
+            rows: Vec::new(),
+        })
+    }
+
     /// Tenant-scoped reconcile. A tenant partition holds no state the
     /// process-global reconciler executes, so this reconciles nothing and
     /// reports no environments. It never passes partition environment names

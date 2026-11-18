@@ -362,6 +362,24 @@ pub(super) async fn environment_history(
     )
 }
 
+pub(super) async fn delivery_report(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    Query(query): Query<tenkai::delivery_report::DeliveryReportQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .delivery_report(&credential, &environment, query)
+            .await,
+    )
+}
+
 pub(super) async fn observed_runtime(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,

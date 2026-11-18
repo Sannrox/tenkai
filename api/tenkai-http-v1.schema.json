@@ -2362,6 +2362,141 @@
       ],
       "type": "object"
     },
+    "DeliveryMetrics": {
+      "description": "Delivery metrics for one product and channel in one environment.",
+      "properties": {
+        "change_attempts": {
+          "description": "Install, upgrade and removal attempts that finished. Rollbacks and\nblocked attempts are not changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "change_failure_rate": {
+          "description": "`change_failures / change_attempts`; absent without change attempts.",
+          "format": "double",
+          "type": "number"
+        },
+        "change_failures": {
+          "description": "Change attempts that failed or were rolled back.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "channel": {
+          "description": "The channel the instances subscribe to now; absent for instances no\nlonger subscribed.",
+          "type": "string"
+        },
+        "deployments": {
+          "description": "Change attempts that succeeded.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lead_time_ms": {
+          "description": "Median time from the release's publication to its successful deployment.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "oldest_exposure_age_ms": {
+          "description": "Age at the end of the period of the oldest of those exposures.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "open_exposures": {
+          "description": "Advisory exposures open at the end of the period on the releases running then.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "product": {
+          "type": "string"
+        },
+        "restores": {
+          "description": "Failures in the period that a later attempt restored.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "time_to_restore_ms": {
+          "description": "Median time from a failure to its restore.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "unrestored": {
+          "description": "Failures in the period still not restored at its end.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "product",
+        "deployments",
+        "change_attempts",
+        "change_failures",
+        "restores",
+        "unrestored",
+        "open_exposures"
+      ],
+      "type": "object"
+    },
+    "DeliveryReport": {
+      "description": "Delivery performance of one environment over `[since_ms, until_ms)`.",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "missing_data": {
+          "description": "No attempt was recorded and no instance health was reported in the\nperiod. The rows then say nothing about how the environment ran.",
+          "type": "boolean"
+        },
+        "rows": {
+          "description": "One row per product and channel, ordered by product then channel.",
+          "items": {
+            "$ref": "#/$defs/DeliveryMetrics"
+          },
+          "type": "array"
+        },
+        "since_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "until_ms": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "environment",
+        "since_ms",
+        "until_ms",
+        "missing_data",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "DeliveryReportQuery": {
+      "description": "Query parameters for `GET /v1/environments/{environment}/delivery-report`.",
+      "properties": {
+        "since_ms": {
+          "description": "Inclusive start, Unix milliseconds. Default: 30 days before `until_ms`.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "until_ms": {
+          "description": "Exclusive end, Unix milliseconds. Default: now.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "DeliverySource": {
       "description": "Configuration that caused a delivery: an environment's or a product's\nendpoint list. A URL on both is one delivery with both sources.",
       "oneOf": [
@@ -9760,6 +9895,17 @@
       },
       "response": {
         "$ref": "#/$defs/DeploymentHistoryPage"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/environments/{environment}/delivery-report",
+      "request": {
+        "$ref": "#/$defs/DeliveryReportQuery"
+      },
+      "response": {
+        "$ref": "#/$defs/DeliveryReport"
       }
     },
     {

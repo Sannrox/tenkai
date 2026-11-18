@@ -195,6 +195,7 @@ When `ServerConfig.requirements.tenant_mode` is true and a
 | `GET /v1/environments/{environment}/status` | Same non-disclosing deny |
 | `GET /v1/environments/{environment}/dependencies` | Same non-disclosing deny |
 | `GET /v1/environments/{environment}/history` | Same non-disclosing deny |
+| `GET /v1/environments/{environment}/delivery-report` | Same non-disclosing deny |
 | `GET /v1/events` | Pages only the caller tenant's change events |
 | `POST /v1/environments/{environment}/retire` | Authenticated tenant management capability; retirement is isolated to that tenant |
 

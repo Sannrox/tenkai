@@ -773,6 +773,18 @@ async fn load_record(
     Ok(Some(parse_exposure_object(&object)?))
 }
 
+/// Every stored exposure record, open or closed, for reports over a past
+/// period.
+pub(crate) async fn all_records(ctx: &mut Ctx) -> Result<Vec<DeployedExposure>> {
+    let mut records = Vec::new();
+    for object in ctx.list_kind(KIND_DEPLOYED_EXPOSURE).await? {
+        if object.kind == KIND_DEPLOYED_EXPOSURE {
+            records.push(parse_exposure_object(&object)?);
+        }
+    }
+    Ok(records)
+}
+
 async fn list_open_records(ctx: &mut Ctx) -> Result<Vec<DeployedExposure>> {
     let mut records = Vec::new();
     for object in ctx.list_kind(KIND_DEPLOYED_EXPOSURE).await? {

@@ -1292,6 +1292,28 @@ impl ManagementOperations {
             .map_err(map_history_error)
     }
 
+    /// `GET /v1/environments/{environment}/delivery-report` (#1083).
+    pub async fn delivery_report(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        query: crate::delivery_report::DeliveryReportQuery,
+    ) -> Result<crate::delivery_report::DeliveryReport, ManagementError> {
+        let context = self.authenticate(credential)?;
+        Self::require_capability(&context, DeliveryCapability::Read)?;
+        if self.tenant_mode {
+            return self
+                .tenant_operations()?
+                .delivery_report(&context, environment, &query)
+                .await
+                .map_err(map_tenant_error);
+        }
+        let mut ctx = self.application_ctx()?;
+        crate::delivery_report::delivery_report(&mut ctx, environment, &query)
+            .await
+            .map_err(map_history_error)
+    }
+
     pub async fn observed_runtime(
         &self,
         credential: &CredentialMaterial,
@@ -4717,6 +4739,7 @@ fn map_history_error(error: anyhow::Error) -> ManagementError {
     let message = format!("{error:#}");
     if message.contains("limit must be")
         || message.contains("history cursor is invalid")
+        || message.contains("delivery report period is empty")
         || message.contains("must start with an ASCII letter")
     {
         ManagementError::BadRequest(message)

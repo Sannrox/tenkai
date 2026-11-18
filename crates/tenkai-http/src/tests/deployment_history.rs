@@ -121,3 +121,62 @@ async fn history_route_returns_newest_first_and_filters_product() {
     assert_eq!(bad_limit.status(), StatusCode::BAD_REQUEST);
     let _ = std::fs::remove_file(&database);
 }
+
+#[tokio::test]
+async fn delivery_report_route_reports_the_period_and_refuses_an_empty_one() {
+    let database = std::env::temp_dir().join(format!(
+        "tenkai-http-delivery-report-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut ctx = tenkai::client::Ctx::embedded(&database).unwrap();
+    tenkai::ontology::register(&mut ctx).await.unwrap();
+    tenkai::environment::env_add(&mut ctx, "prod", "prod")
+        .await
+        .unwrap();
+    ctx.put(attempt("prod", "api", 1_000, "failed", "probe failed"))
+        .await
+        .unwrap();
+    let (app, _store) = app_with_reconciler(FixedReconciler::with_ctx(ctx));
+    let get = |uri: &str| {
+        Request::get(uri)
+            .header("authorization", "Bearer management-secret")
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let response = app
+        .clone()
+        .oneshot(get(
+            "/v1/environments/prod/delivery-report?since_ms=0&until_ms=10000",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let report: tenkai::delivery_report::DeliveryReport = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!((report.since_ms, report.until_ms), (0, 10_000));
+    assert!(!report.missing_data);
+    assert_eq!(
+        report
+            .rows
+            .iter()
+            .map(|row| (row.product.as_str(), row.change_failures, row.unrestored))
+            .collect::<Vec<_>>(),
+        [("api", 1, 1)]
+    );
+
+    let empty = app
+        .clone()
+        .oneshot(get(
+            "/v1/environments/prod/delivery-report?since_ms=10&until_ms=10",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+    std::fs::remove_file(database).ok();
+}
