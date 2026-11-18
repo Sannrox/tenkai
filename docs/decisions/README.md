@@ -53,3 +53,4 @@
 - [0051 — Host operating system image updates across a reboot](0051-host-os-image-updates.md)
 - [0052 — Provisioning executor with approval bound to the saved plan](0052-provisioning-executor.md)
 - [0053 — Network policy derived from dependency bindings](0053-network-policy-from-bindings.md) (proposed)
+- [0054 — Subscription rules by selector](0054-subscription-rules-by-selector.md) (proposed)
