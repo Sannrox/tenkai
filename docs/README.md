@@ -10,7 +10,9 @@ A first unsigned local deploy is [Try it in five minutes](../README.md#try-it-in
 in the root README. A first governed deploy (signed, approved, rollback) is
 [Governed deploy in 15 minutes](../README.md#governed-deploy-in-15-minutes).
 Signing, approval, and what a runtime verifies are under
-[Trust and identity](#trust-and-identity).
+[Trust and identity](#trust-and-identity). What Tenkai protects against whom,
+how to verify a download, and how to report a vulnerability are in the
+[security overview](security.md).
 
 Operator, integrator, and contributor docs. Agents start at
 [llms.txt](llms.txt). Pick a section by what you need:
@@ -146,6 +148,8 @@ will be split over time. Contributor and agent workflow live in
 
 | Topic | Page |
 | --- | --- |
+| Security overview, release verification and vulnerability reporting | [security.md](security.md) |
+| System threat model | [threat-model.md](threat-model.md) |
 | Release signing | [release-signing.md](release-signing.md) |
 | Release provenance | [release-provenance.md](release-provenance.md) |
 | Family release manifests | [family-release-manifests.md](family-release-manifests.md) |
