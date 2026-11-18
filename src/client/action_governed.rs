@@ -104,10 +104,11 @@ pub(super) fn parameters_json(params: &HashMap<String, String>) -> Result<String
     Ok(serde_json::Value::Object(object).to_string())
 }
 
+/// Admission idempotency key: a digest of the action and every parameter,
+/// `correlation` included. A retry with the same parameters replays its
+/// admission; reusing a correlation with other parameters gets a distinct
+/// one instead of the earlier admission (#1298).
 pub(super) fn idempotency_key(action: &str, params: &HashMap<String, String>) -> String {
-    if let Some(correlation) = params.get("correlation") {
-        return format!("{action}:{correlation}");
-    }
     let mut digest = Sha256::new();
     digest.update(action.as_bytes());
     let mut keys = params.keys().cloned().collect::<Vec<_>>();
