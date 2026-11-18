@@ -1,10 +1,13 @@
 //! Certificate threshold crossings on `/v1/events` (#784), behind
 //! `TENKAI_TRUST_CHANGE_EVENTS`.
 
-use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
+
+mod support;
+
+use support::{DEADLINE, Spawned};
 
 use tenkai::storage::OperationalStore as _;
 
@@ -19,13 +22,8 @@ fn ca_bundle(path: &Path, days: i64) {
     std::fs::write(path, params.self_signed(&key).unwrap().pem()).unwrap();
 }
 
-/// A running server. Both pipes stay open until [`Server::stop`], so the
-/// server never writes into a closed pipe.
-struct Server {
-    child: Child,
-    _stdout: std::io::Lines<BufReader<ChildStdout>>,
-    stderr: std::io::Lines<BufReader<ChildStderr>>,
-}
+/// A running server; killed when stopped or dropped.
+struct Server(Spawned);
 
 impl Server {
     /// Starts the server and returns once it is ready.
@@ -43,42 +41,25 @@ impl Server {
             .env_remove("TENKAI_HOST_WEBHOOKS")
             .env_remove("TENKAI_SMTP_SINKS")
             .env_remove("TENKAI_IMPORT_STAGING_DIR")
-            .env_remove("TENKAI_CA_BUNDLE")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .env_remove("TENKAI_CA_BUNDLE");
         if let Some(bundle) = bundle {
             command.env("TENKAI_CA_BUNDLE", bundle);
         }
-        let mut child = command.spawn().unwrap();
-        let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
-        let ready = stdout
-            .by_ref()
-            .map_while(Result::ok)
-            .any(|line| line.starts_with("tenkai-server ready"));
-        assert!(ready, "server reported ready");
-        Self {
-            stderr: BufReader::new(child.stderr.take().unwrap()).lines(),
-            _stdout: stdout,
-            child,
-        }
+        let server = Spawned::spawn(&mut command);
+        server.ready();
+        Self(server)
     }
 
-    /// The first `tenkai.trust_event` line the server logs.
-    fn trust_log(&mut self) -> Option<String> {
-        self.stderr
-            .by_ref()
-            .map_while(Result::ok)
-            .find(|line| line.starts_with("tenkai.trust_event"))
+    /// The first `tenkai.trust_event` line the server logs, or `None` past
+    /// the deadline.
+    fn trust_log(&self) -> Option<String> {
+        self.0
+            .stderr_line(DEADLINE, |line| line.starts_with("tenkai.trust_event"))
     }
 
     /// Stops the server and returns the stderr it wrote and was not read.
-    fn stop(mut self) -> String {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        self.stderr
-            .map_while(Result::ok)
-            .collect::<Vec<_>>()
-            .join("\n")
+    fn stop(self) -> String {
+        self.0.stop()
     }
 }
 
@@ -116,7 +97,7 @@ fn a_crossing_appends_one_event_only_when_enabled_and_not_again_after_restart() 
     assert!(!logged.contains("tenkai.trust_event"), "{logged}");
     assert_eq!(trust_events(&database), Vec::<String>::new());
 
-    let mut server = Server::start(&database, Some(&bundle), true);
+    let server = Server::start(&database, Some(&bundle), true);
     let appended = server.trust_log();
     server.stop();
     let appended = appended.expect("the crossing is announced");
@@ -133,7 +114,7 @@ fn a_crossing_appends_one_event_only_when_enabled_and_not_again_after_restart() 
     assert_eq!(trust_events(&database), ["trust/warning"]);
 
     // The certificate is no longer configured: recovery is recorded once.
-    let mut server = Server::start(&database, None, true);
+    let server = Server::start(&database, None, true);
     let recovered = server.trust_log();
     server.stop();
     let recovered = recovered.expect("the recovery is recorded");

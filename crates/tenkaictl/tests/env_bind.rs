@@ -128,27 +128,38 @@ fn run_sequence(drill: &BindDrill) {
         .ok(&["env", "reconcile", "local", "db-b", "--deployed", "1.0.0"]);
 
     let unbound = drill.cli.fail(&["plan", "--env", "local"]);
-    assert!(unbound.contains("db-a"), "{unbound}");
-    assert!(unbound.contains("db-b"), "{unbound}");
+    assert!(unbound.contains("AmbiguousContract"), "{unbound}");
+    assert!(
+        unbound.contains(r#"candidates: ["db-a", "db-b"]"#),
+        "{unbound}"
+    );
 
     let deps = drill.cli.ok(&["env", "dependencies", "local"]);
-    assert!(deps.contains("db-a"), "{deps}");
-    assert!(deps.contains("db-b"), "{deps}");
+    assert!(
+        deps.contains("database >= 1.0.0  ambiguous (db-a, db-b)"),
+        "{deps}"
+    );
 
     let missing = drill
         .cli
         .fail(&["env", "bind", "local", "app", "database=missing"]);
-    assert!(missing.contains("app"), "{missing}");
-    assert!(missing.contains("database"), "{missing}");
-    assert!(missing.contains("missing"), "{missing}");
+    assert!(
+        missing.contains("missing does not provide a satisfying version of database for app"),
+        "{missing}"
+    );
 
     let bound = drill
         .cli
         .ok(&["env", "bind", "local", "app", "database=db-a"]);
-    assert!(bound.contains("db-a"), "{bound}");
+    assert!(bound.contains("bound local app database=db-a"), "{bound}");
+    // The binding names db-a, not the other provider of the contract.
+    let deps = drill.cli.ok(&["env", "dependencies", "local"]);
+    assert!(deps.contains("database >= 1.0.0  db-a@1.0.0"), "{deps}");
+    assert!(!deps.contains("ambiguous"), "{deps}");
 
     let planned = drill.cli.ok(&["plan", "--env", "local"]);
     assert!(planned.contains("plan id:"), "{planned}");
+    assert!(planned.contains("install   app"), "{planned}");
 
     drill
         .cli
@@ -156,8 +167,10 @@ fn run_sequence(drill: &BindDrill) {
     let unbind = drill
         .cli
         .fail(&["env", "unbind", "local", "app", "database"]);
-    assert!(unbind.contains("app"), "{unbind}");
-    assert!(unbind.contains("database"), "{unbind}");
+    assert!(
+        unbind.contains("unbind refused: installed dependent app requires database"),
+        "{unbind}"
+    );
 }
 
 #[test]

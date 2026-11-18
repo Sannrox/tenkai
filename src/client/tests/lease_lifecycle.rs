@@ -35,6 +35,9 @@ async fn assert_lease_lifecycle(mut ctx: Ctx) {
     assert_eq!(refreshed.fencing_token, acquired.fencing_token);
     assert!(refreshed.expires_at_ms >= acquired.expires_at_ms);
     assert_eq!(refreshed.status, "active");
+    ctx.refresh_lease(namespace, key, &acquired.fencing_token, 0)
+        .await
+        .expect_err("a non-positive TTL is refused");
 
     let released = ctx
         .release_lease(namespace, key, &acquired.fencing_token)
@@ -53,6 +56,9 @@ async fn assert_lease_lifecycle(mut ctx: Ctx) {
     assert!(reacquired.generation > acquired.generation);
 
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    ctx.refresh_lease(namespace, key, &reacquired.fencing_token, 5_000)
+        .await
+        .expect_err("an expired lease cannot be refreshed");
     let takeover = ctx
         .takeover_expired_lease(
             namespace,
