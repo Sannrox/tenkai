@@ -401,6 +401,16 @@ the candidate activates and the previous generation is retained for ordinary
 Tenkai rollback. A failed candidate is stopped and does not replace the
 active generation.
 
+Each release needs a port of its own: the candidate runs next to the active
+server until it passes its smoke. Apply refuses a new release on the active
+generation's port before starting anything, and the real launcher refuses
+any port already in use. Re-applying the serving generation changes nothing.
+The smoke passes only while the candidate process the launcher started is
+still running, so a candidate that exits is never recorded as serving.
+Stopping a server recorded by an earlier Tenkai process signals its PID only
+while that PID still has the recorded start time. A handle recorded before
+this check, which has only a PID, is not signalled: stop that server by hand.
+
 Default apply wiring uses `FakeMlxEngine`, so community CI never needs an
 Apple GPU or an MLX binary. Operators enable the real process via env.
 
