@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -68,9 +68,10 @@ impl HealthCheckState {
     }
 }
 
-/// One instance's latest health probe, as its runtime last saw it.
+/// One instance's latest health probe, as its runtime last saw it. Fields a
+/// newer version adds are ignored, so a rolling deploy does not make its
+/// records unreadable (#1307).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HealthObservation {
     pub schema: String,
     pub environment: String,
@@ -414,15 +415,27 @@ async fn load(
         let Some(json) = object.properties.get("report") else {
             continue;
         };
-        let report: HealthObservation = serde_json::from_str(json)
-            .with_context(|| format!("parsing the health observation {}", object.id))?;
+        // An unreadable record counts as no observation, so it never makes
+        // an instance look healthy, and is not cleaned up as superseded. It
+        // does not hide the rest of the environment's health (#1307).
+        let report: HealthObservation = match serde_json::from_str(json) {
+            Ok(report) => report,
+            Err(error) => {
+                eprintln!(
+                    "skipping the unreadable health observation {}: {error}",
+                    object.id
+                );
+                continue;
+            }
+        };
         if report.environment != environment
             || object.properties.get("instance") != Some(&report.instance)
         {
-            bail!(
-                "the health observation {} names another instance",
+            eprintln!(
+                "skipping the health observation {}: it names another instance",
                 object.id
             );
+            continue;
         }
         let key = (report.observed_at_ms, object.id.clone());
         match best.get(&report.instance) {
@@ -725,6 +738,51 @@ mod tests {
             reported(&mut ctx, "prod").await.unwrap()["api"].state,
             HealthCheckState::Failing
         );
+    }
+
+    /// #1307: a record with a field a newer version added still loads, and
+    /// one unreadable record does not hide the environment's other health.
+    #[tokio::test]
+    async fn health_loads_past_newer_fields_and_unreadable_records() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-instance-health-newer-{}-{}.db",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "prod", "runtime")
+            .await
+            .unwrap();
+        let mut web = observation(10, HealthCheckState::Failing);
+        web.instance = "web".into();
+        admit(
+            &mut ctx,
+            "prod",
+            &[observation(10, HealthCheckState::Healthy), web],
+        )
+        .await
+        .unwrap();
+        let stored = ctx
+            .find_by_property(crate::ontology::KIND_INSTANCE_HEALTH, "environment", "prod")
+            .await
+            .unwrap();
+        for mut object in stored {
+            let report = if object.properties.get("instance").map(String::as_str) == Some("api") {
+                let mut report: serde_json::Value =
+                    serde_json::from_str(&object.properties["report"]).unwrap();
+                report["added_by_a_newer_version"] = serde_json::json!(true);
+                report.to_string()
+            } else {
+                "{not json".to_string()
+            };
+            object.properties.insert("report".into(), report);
+            ctx.put(object).await.unwrap();
+        }
+        let reported = reported(&mut ctx, "prod").await.unwrap();
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        assert_eq!(reported["api"].state, HealthCheckState::Healthy);
+        let _ = std::fs::remove_file(&database);
     }
 
     #[tokio::test]
