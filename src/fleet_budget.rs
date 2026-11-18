@@ -131,18 +131,7 @@ pub async fn measure(
                 .min()
                 .unwrap_or(0),
         );
-    let mut limiting = None;
-    for sample in &samples {
-        if sample.wall_ms > budget.wall_ms {
-            limiting = Some("wall".into());
-        } else if sample.cpu_ms > budget.cpu_ms {
-            limiting = Some("cpu".into());
-        } else if sample.memory_bytes > budget.memory_bytes {
-            limiting = Some("memory".into());
-        } else if sample.storage_bytes > budget.storage_bytes {
-            limiting = Some("storage".into());
-        }
-    }
+    let limiting = limiting_resource(&samples, budget).map(String::from);
     let report = BudgetReport {
         profile: PROFILE.into(),
         command: COMMAND.into(),
@@ -162,6 +151,27 @@ pub async fn measure(
     Ok((plan, report))
 }
 
+/// The resource a sample exceeds, from the last sample that exceeds any;
+/// `None` when every sample fits the budget.
+fn limiting_resource(samples: &[BudgetSample], budget: &ResourceBudget) -> Option<&'static str> {
+    samples.iter().rev().find_map(|sample| {
+        if sample.wall_ms > budget.wall_ms {
+            Some("wall")
+        } else if sample.cpu_ms > budget.cpu_ms {
+            Some("cpu")
+        } else if sample.memory_bytes > budget.memory_bytes {
+            Some("memory")
+        } else if sample.storage_bytes > budget.storage_bytes {
+            Some("storage")
+        } else {
+            None
+        }
+    })
+}
+
+/// One tick's resources. CPU and peak memory are this process's, so the
+/// sample means the tick's own cost only when nothing else runs in the
+/// process, as in `tenkaictl fleet measure` (#1235).
 async fn sample_tick(reconciler: &Reconciler, database: &Path) -> Result<BudgetSample> {
     let before = resource_usage()?;
     let started = Instant::now();
@@ -238,12 +248,62 @@ mod tests {
         assert!(err.contains("greater than zero"), "{err}");
     }
 
+    #[test]
+    fn a_sample_over_budget_names_the_limiting_resource() {
+        let budget = ResourceBudget::ci_embedded_sqlite();
+        let within = BudgetSample {
+            wall_ms: 1,
+            cpu_ms: 1,
+            memory_bytes: 1,
+            storage_bytes: 1,
+            environments: 1,
+            tick_failures: 0,
+        };
+        assert_eq!(
+            limiting_resource(std::slice::from_ref(&within), &budget),
+            None
+        );
+        let over_cpu = BudgetSample {
+            cpu_ms: budget.cpu_ms + 1,
+            ..within.clone()
+        };
+        assert_eq!(
+            limiting_resource(&[within.clone(), over_cpu], &budget),
+            Some("cpu")
+        );
+        let over_memory = BudgetSample {
+            memory_bytes: budget.memory_bytes + 1,
+            ..within
+        };
+        assert_eq!(limiting_resource(&[over_memory], &budget), Some("memory"));
+    }
+
+    const MEASURE_ALONE: &str = "fleet_budget::tests::budget_measurement_in_its_own_process";
+
+    /// CPU and peak memory are read for the whole process, so the measurement
+    /// runs alone in a child process of this test binary. Tests running
+    /// beside this one cannot push it over the budget (#1235).
+    #[test]
+    fn two_ticks_stay_under_budget_without_skipping_gates() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", MEASURE_ALONE, "--ignored", "--nocapture"])
+            .args(["--test-threads", "1"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        // A filter that matched nothing also exits successfully.
+        assert!(stdout.contains("1 passed"), "{stdout}\n{stderr}");
+    }
+
     #[tokio::test]
-    async fn two_ticks_stay_under_budget_without_skipping_gates() {
+    #[ignore = "run alone by two_ticks_stay_under_budget_without_skipping_gates"]
+    async fn budget_measurement_in_its_own_process() {
         let root = std::env::temp_dir().join(format!(
             "tenkai-budget-{}-{}",
             std::process::id(),
-            crate::now_millis()
+            uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).unwrap();
         let database = root.join("tenkai.db");
