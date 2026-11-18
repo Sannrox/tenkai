@@ -7,6 +7,9 @@
   idempotent re-run) and §11 gate-flag range
 - Amended: 2026-11-12 ([#1198](https://github.com/Sannrox/tenkai/issues/1198)),
   §10.5 ancestry and §10.9 matching `release-*` maintenance lines
+- Amended: 2026-11-18 ([#1257](https://github.com/Sannrox/tenkai/issues/1257)),
+  §10.5 and §10.9: the newest release is always cut from main; a line only
+  patches a minor older than the newest final release
 - Issue: [#883](https://github.com/Sannrox/tenkai/issues/883)
 - Owner: Tenkai maintainers
 - Related: [software compatibility](../software-compatibility.md),
@@ -140,7 +143,9 @@ and Breaking note fails CI.
    tagged run that is not from main. It verifies the signed annotated tag with
    main's verifier and allowed keys against the tagged commit, requires that
    commit to be on main or on the matching `release-*` maintenance line
-   (`release-<major>.<minor>`, one per minor), and uses
+   (`release-<major>.<minor>`, one per minor). It accepts the line only when
+   origin carries a final tag of a newer minor, so the newest line releases
+   from main (section 10.9). It uses
    that commit for the CI gate, packaging, images, manifest `git_sha`, and
    GitHub Release. A GitHub Release on a previous line is never marked
    latest. A failed run is fixed on main and re-run for the same tag. A retry
@@ -161,12 +166,20 @@ and Breaking note fails CI.
    Every job that uploads, pushes, attests, or publishes refuses a release
    that is already published, so neither a new run nor "Re-run failed jobs"
    on an old one can change it. One run per tag at a time.
-9. **Hotfixes.** Fix on `main` first, then backport with `git cherry-pick -x`
-   onto the matching `release-*` line when a consumer pins that line. Create
-   the line from the last tag of that version when the first fix needs it,
-   never in advance. Keep at most the current line plus one previous line. A
-   tag whose commit lives only on a non-matching `release-*` branch, or on
-   any other branch, is not releasable. Pre-release patches are
+9. **Hotfixes.** The newest release is always cut from `main`. A
+   `release-X.Y` line exists only to patch a minor older than the newest
+   final release, and only when a consumer pins that line: fix on `main`
+   first, then backport with `git cherry-pick -x`. A fix that must ship while
+   `main` carries breaking changes goes out as the next minor from `main`,
+   through `vX.Y.0-rc.N`, not as a patch on the current minor's line. The
+   verifier refuses a tag that resolves only to its line unless origin has a
+   final `vA.B.C` with `A.B` above `X.Y`; a newer rc does not count, and it
+   fails closed when it cannot list origin's tags. Only releases from `main`
+   become latest, which is then correct by construction. Create a line from
+   the last tag of that version when the first fix needs it, never in
+   advance. Keep at most one previous line besides `main`. A tag whose
+   commit lives only on a non-matching `release-*` branch, or on any other
+   branch, is not releasable. Pre-release patches are
    `vX.Y.(Z+1)-rc.N` on the same line as the final tag they precede.
 
 ### 11. Images, channels, and trains
@@ -199,8 +212,11 @@ shape.
 - Coding stays unblocked: SHA pins remain valid until a tag exists.
 - A workflow bug no longer burns a final version: fix main and re-run the
   same tag. A bug in tagged sources still needs a new rc or patch.
-- A matching `release-*` line can ship a patch without taking `main`. The
-  next family release on `main` should still go through `vX.Y.Z-rc.1` first.
+- A line older than the newest final release can ship a patch without
+  taking `main`. A fix for the newest minor ships from `main`, as the next
+  minor through `-rc.N` when `main` already carries breaking changes, so the
+  latest release, its version bump, and its CHANGELOG section never live
+  only on a line.
 
 ## Alternatives considered
 

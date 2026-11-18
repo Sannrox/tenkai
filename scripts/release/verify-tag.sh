@@ -17,8 +17,9 @@
 #   scripts/release/verify-tag.sh maintenance-line <tag>
 #       The matching release-* branch for the tag's version.
 #   scripts/release/verify-tag.sh require-ancestry <tag> <commit-sha>
-#       The commit is on origin/main or the matching origin/release-* line.
-#       Prints that line name (main or release-*) to stdout.
+#       The commit is on origin/main, or on the matching origin/release-*
+#       line when origin has a final tag of a newer minor (the newest line
+#       releases from main). Prints that line name (main or release-*).
 #
 # Release tags are vX.Y.Z or the pre-release vX.Y.Z-rc.N (N >= 1). Numbers
 # carry no leading zeros; any other suffix is refused.
@@ -79,10 +80,32 @@ require_ancestry() {
   line_ref="refs/remotes/origin/${line}"
   if git rev-parse --verify -q "$line_ref" >/dev/null \
     && git merge-base --is-ancestor "$sha" "$line_ref"; then
+    require_newer_final_release "$tag" "$line"
     printf '%s\n' "$line"
     return
   fi
   fail "tag ${tag} commit ${sha} is not on main or ${line}"
+}
+
+# A release-X.Y line only patches a line older than the newest final
+# release (ADR 0040 §10.9): origin must carry a final vA.B.C with A.B above
+# X.Y. A newer rc does not count. Fails closed when the tags cannot be listed.
+require_newer_final_release() {
+  local tag="$1" line="$2" tags line_major line_minor ref name major minor
+  tags="$(git ls-remote --refs --tags origin 'v*')" || fail "could not list release tags on origin"
+  line_major="${line#release-}"
+  line_minor="${line_major#*.}"
+  line_major="${line_major%%.*}"
+  while read -r _ ref; do
+    name="${ref#refs/tags/}"
+    [[ "$name" =~ $RELEASE_TAG_PATTERN && -z "${BASH_REMATCH[4]}" ]] || continue
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    if ((major > line_major || (major == line_major && minor > line_minor))); then
+      return
+    fi
+  done <<<"$tags"
+  fail "tag ${tag} is only on ${line}, and no final release of a newer minor exists; the newest line releases from main"
 }
 
 # The root package version; workspace crates move in lockstep with it.
