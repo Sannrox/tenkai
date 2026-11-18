@@ -277,6 +277,15 @@ impl Rig {
     /// An approved plan that updates the image: stage, reboot, verify and
     /// confirm, each at the generation the one before it leaves.
     async fn image_plan(&mut self) -> plan::Plan {
+        let steps = self.image_steps().await;
+        let image = plan::create_from_steps(&mut self.ctx, "prod", steps)
+            .await
+            .unwrap();
+        self.approve(image).await
+    }
+
+    /// The four image steps, toward 2.0.0.
+    async fn image_steps(&mut self) -> Vec<plan::Step> {
         // No planner path makes the four image steps yet: they are made
         // from the bound host step of the release and planned as given.
         let base = plan::compute(&mut self.ctx, "prod")
@@ -285,7 +294,7 @@ impl Rig {
             .into_iter()
             .find(|step| step.product == "os")
             .expect("a host step for the image release");
-        let steps = [
+        [
             (HostAction::Stage, 0),
             (HostAction::Reboot, 1),
             (HostAction::Verify, 2),
@@ -300,10 +309,10 @@ impl Rig {
             });
             step
         })
-        .collect();
-        let image = plan::create_from_steps(&mut self.ctx, "prod", steps)
-            .await
-            .unwrap();
+        .collect()
+    }
+
+    async fn approve(&mut self, image: plan::Plan) -> plan::Plan {
         let approval = self.root.join(format!("approval-{}.json", image.id));
         let approvers = self.root.join("approvers.toml");
         tenkai::dev_sign::sign_plan_approval_for_digest(
@@ -344,6 +353,18 @@ impl Rig {
         std::fs::read_to_string(self.host.root.join(name))
             .map(|text| text.lines().count())
             .unwrap_or(0)
+    }
+
+    /// Move the recorded reboot back past any boot deadline.
+    fn age_reboot(&self) {
+        let aged = rusqlite::Connection::open(self.root.join("tenkai.db"))
+            .unwrap()
+            .execute(
+                "UPDATE runtime_claims SET progress_json = json_set(progress_json, '$.recorded_at', 1) WHERE progress_json IS NOT NULL",
+                [],
+            )
+            .unwrap();
+        assert_eq!(aged, 1);
     }
 
     /// Lapse every runtime claim, as the reboot outlasting the lease does.
@@ -436,4 +457,69 @@ async fn a_runtime_without_the_os_image_capability_fails_the_plan_closed() {
     assert_eq!(state, PlanState::Blocked, "{detail}");
     assert!(detail.contains("os_image capability"), "{detail}");
     assert_eq!(rig.ran("staged"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_that_never_returns_fails_at_its_deadline_after_a_server_restart() {
+    let mut rig = Rig::new().await;
+    let runtime = rig.runtime("runtime-secret", true);
+    runtime.report_host_records().await.unwrap();
+    let image = rig.image_plan().await;
+    assert!(runtime.run_once().await.unwrap());
+    assert_eq!(rig.state(&image).await.0, PlanState::Computed);
+
+    // The host stays down past its deadline, and the server restarts: a
+    // fresh process judges from the store alone, with no runtime polling.
+    rig.age_reboot();
+    rig.lapse_claims();
+    let database = rig.root.join("tenkai.db");
+    let mut ctx = Ctx::embedded(&database).unwrap();
+    tenkai::ontology::register(&mut ctx).await.unwrap();
+    let store = tenkai::storage::SqliteStore::open(&database).unwrap();
+    let report = Reconciler::new(ctx.clone(), ReconcilerConfig::default())
+        .unwrap()
+        .with_runtime_environments(["prod".into()].into())
+        .run_once()
+        .await
+        .unwrap();
+    let failed = tenkai::runtime_progress::judge_awaiting(&mut ctx, &store, &report).await;
+    assert_eq!(failed.len(), 1, "{report:?}");
+    let (state, detail) = rig.state(&image).await;
+    assert_eq!(state, PlanState::Failed);
+    assert!(detail.contains("no_return"), "{detail}");
+
+    // The host returning late does not settle the plan.
+    rig.boots(NEW, "pending", "boot-2");
+    rig.host.reboot();
+    assert!(
+        !rig.runtime("runtime-secret", true)
+            .run_once()
+            .await
+            .unwrap()
+    );
+    assert_eq!(rig.state(&image).await.0, PlanState::Failed);
+    assert_eq!(rig.ran("confirmed"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_plan_whose_reboot_outlasts_every_window_is_refused_at_planning() {
+    let mut rig = Rig::new().await;
+    rig.runtime("runtime-secret", true)
+        .report_host_records()
+        .await
+        .unwrap();
+    // Ten minutes a night, and the release's boot deadline is fifteen.
+    let short =
+        tenkai::maintenance::Window::new("nightly", "UTC", (1..=7).collect(), "02:00", 10).unwrap();
+    tenkai::maintenance::set(&mut rig.ctx, "prod", short)
+        .await
+        .unwrap();
+    let steps = rig.image_steps().await;
+    let refused = plan::create_from_steps(&mut rig.ctx, "prod", steps)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("unbroken maintenance window of 900s"),
+        "{refused:#}"
+    );
 }

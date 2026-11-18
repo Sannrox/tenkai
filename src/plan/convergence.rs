@@ -193,6 +193,46 @@ pub(crate) async fn stored_release_manifest(
     crate::manifest::parse_raw(raw).with_context(|| format!("parsing stored manifest of {release}"))
 }
 
+/// How far ahead planning looks for a window long enough for a reboot:
+/// two weeks covers every weekly window at least twice.
+const BOOT_WINDOW_HORIZON_MS: i64 = 14 * 24 * 60 * 60 * 1000;
+
+/// Refuse an OS image `reboot` step that no maintenance window of `env` and
+/// its product can hold (ADR 0051 §5): the boot deadline must elapse inside
+/// one unbroken window, or a host that never returns is judged outside it.
+async fn require_boot_fits_window(
+    ctx: &mut Ctx,
+    env: &str,
+    step: &Step,
+    boot_deadline_seconds: u64,
+) -> Result<()> {
+    let env_windows = crate::maintenance::list(ctx, env).await?;
+    let product_windows = crate::maintenance::list_product(ctx, &step.product).await?;
+    if env_windows.is_empty() && product_windows.is_empty() {
+        return Ok(());
+    }
+    let now = crate::now_millis();
+    let longest = crate::maintenance::longest_open_intersect_ms(
+        &env_windows,
+        &product_windows,
+        now,
+        now.saturating_add(BOOT_WINDOW_HORIZON_MS),
+    )?;
+    let needed = i64::try_from(boot_deadline_seconds)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1000);
+    if longest < needed {
+        bail!(
+            "the reboot of {} {} needs an unbroken maintenance window of {boot_deadline_seconds}s, its boot deadline, and the longest window of environment {env} and product {} in the next two weeks is {}s; lengthen the window or release the image with a shorter boot deadline",
+            step.product,
+            step.to,
+            step.product,
+            longest / 1000
+        );
+    }
+    Ok(())
+}
+
 /// The stored manifest of `release`, or `None` when the release is missing or
 /// its manifest does not parse; apply admission refuses such a release.
 pub(crate) async fn readable_manifest(
@@ -533,6 +573,12 @@ async fn bind_host_steps(
             Some(HostStep { action, .. })
                 if action.updates_os_image() && manifest.os_image.is_some() =>
             {
+                if action == HostAction::Reboot
+                    && let Some(os_image) = &manifest.os_image
+                {
+                    require_boot_fits_window(ctx, env, &step, os_image.boot_deadline_seconds)
+                        .await?;
+                }
                 step.restore = None;
                 step.restore_identity = None;
                 bound.push(step);
