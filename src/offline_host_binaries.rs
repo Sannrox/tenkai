@@ -25,7 +25,7 @@ pub const HOST_SUMS_PATH: &str = "hosts/SHA256SUMS";
 pub const HOST_SUMS_MEDIA: &str = "text/plain";
 pub const HOST_BINARY_MEDIA: &str = "application/octet-stream";
 
-const PLATFORMS: [&str; 2] = ["linux-x86_64", "darwin-aarch64"];
+const PLATFORMS: [&str; 3] = ["linux-x86_64", "linux-aarch64", "darwin-aarch64"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,9 +110,10 @@ pub struct InstalledHostBinary {
 pub fn detect_platform() -> Result<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Ok("linux-x86_64"),
+        ("linux", "aarch64") => Ok("linux-aarch64"),
         ("macos", "aarch64") => Ok("darwin-aarch64"),
         (os, arch) => bail!(
-            "host platform {os}-{arch} is not a packaged Tenkai host; pass --platform linux-x86_64 or darwin-aarch64"
+            "host platform {os}-{arch} is not a packaged Tenkai host; pass --platform linux-x86_64, linux-aarch64 or darwin-aarch64"
         ),
     }
 }
@@ -485,7 +486,7 @@ fn require_roles(platform: &str, entries: &[&HostBinaryEntry]) -> Result<()> {
 fn validate_platform(platform: &str) -> Result<()> {
     if !PLATFORMS.contains(&platform) {
         bail!(
-            "host platform {platform} is not a packaged Tenkai host (linux-x86_64 or darwin-aarch64)"
+            "host platform {platform} is not a packaged Tenkai host (linux-x86_64, linux-aarch64 or darwin-aarch64)"
         );
     }
     Ok(())
@@ -750,6 +751,42 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o755);
         }
+        std::fs::remove_dir_all(dest).unwrap();
+    }
+
+    #[test]
+    fn linux_aarch64_hosts_install_beside_other_platforms() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let (mut payloads, plan, approval) = payloads_with_plan();
+        let mut hosts = vec![
+            host(HostBinaryRole::Cli, "linux-x86_64", b"cli-x86"),
+            host(HostBinaryRole::Server, "linux-x86_64", b"server-x86"),
+            host(HostBinaryRole::Executor, "linux-x86_64", b"executor-x86"),
+        ];
+        hosts.extend([
+            host(HostBinaryRole::Cli, "linux-aarch64", b"cli-arm"),
+            host(HostBinaryRole::Server, "linux-aarch64", b"server-arm"),
+            host(HostBinaryRole::Executor, "linux-aarch64", b"executor-arm"),
+        ]);
+        insert(&mut payloads, hosts).unwrap();
+        let envelope = envelope_from(&key, payloads, &plan, &approval);
+        let dest = temp_dest();
+        let installed = verify_and_install(
+            &envelope,
+            &roots(&key),
+            "tenkai",
+            "airgap-1",
+            2_000,
+            &dest,
+            "linux-aarch64",
+        )
+        .unwrap();
+        assert!(
+            installed
+                .iter()
+                .all(|host| host.platform == "linux-aarch64")
+        );
+        assert_eq!(std::fs::read(dest.join("tenkaictl")).unwrap(), b"cli-arm");
         std::fs::remove_dir_all(dest).unwrap();
     }
 

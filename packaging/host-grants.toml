@@ -1,0 +1,14 @@
+# Host identity grants (ADR 0047). Root-owned; not writable by group or others.
+# OS group names map to the same capabilities as OIDC grant rules.
+
+[[grants.rules]]
+value = "tenkai-viewer"
+capabilities = ["read"]
+
+[[grants.rules]]
+value = "tenkai-operator"
+capabilities = ["management"]
+
+[[grants.rules]]
+value = "tenkai-admin"
+capabilities = ["management"]

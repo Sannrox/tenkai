@@ -23,10 +23,11 @@ Source `cargo build` remains valid.
 | `tenkai-runtime` | Pull-only environment runtime |
 | `tenkai-runtime-guard` | Runtime process fence |
 | `tenkai-executor-guard` | Local executor process fence |
-| `tenkai-host-applier` | Root side of [privileged host releases](host-releases.md); `linux-x86_64` only |
+| `tenkai-host-applier` | Root side of [privileged host releases](host-releases.md); Linux only |
 
-Platforms: `linux-x86_64`, `darwin-aarch64`; `tenkai-host-applier` runs
-under systemd and is published for `linux-x86_64` only. Community asset names
+Platforms: `linux-x86_64`, `linux-aarch64`, `darwin-aarch64`;
+`tenkai-host-applier` runs under systemd and is published for the two Linux
+platforms only. Community asset names
 are `<binary>-<platform>`. The hub host is `tenkai-server-postgres-<platform>`
 so it does not replace `tenkai-server-<platform>`. The release also attaches
 `SHA256SUMS`, `install.sh` (the [install script](#install-with-one-command)),
@@ -35,12 +36,16 @@ the applier's systemd unit `tenkai-host-apply.service` (installed as
 from `examples/host-applier-systemd/`,
 `tenkai-http-v1.schema.json` (the HTTP API contract clients generate types
 from, see `api/` in the repository), the `tenkai.cdx.json` SBOM, and the
-`tenkai-release.json` family release manifest.
+`tenkai-release.json` family release manifest, the
+[system packages](#install-with-a-package-manager) `tenkai-<platform>.deb` and
+`tenkai-<platform>.rpm` for each Linux platform, and the Homebrew formula
+`tenkai.rb`.
 The fixture and Postgres conformance harness stay source-built.
 
 ## Supported Linux
 
-`linux-x86_64` hosts need glibc 2.28 or newer on x86-64: RHEL 8 and 9 and
+`linux-x86_64` and `linux-aarch64` hosts need glibc 2.28 or newer on x86-64
+or AArch64 (arm64): RHEL 8 and 9 and
 their rebuilds, Debian 10 and newer, Ubuntu 20.04 and newer, Amazon Linux
 2023. Musl-only distributions are not supported. The hosts are built in a
 glibc 2.28 image (`scripts/build-linux-release-hosts.sh`) rather than on the
@@ -49,9 +54,10 @@ CI runner, and stay dynamically linked so `TENKAI_SIGNER_MODULE` and
 
 Every push to `main`, and every pull request that touches dependencies, the
 toolchain, build scripts, release packaging, or a direct native call, builds
-the Linux hosts that way, refuses any that needs a newer glibc (`scripts/package-release-binaries.sh check-glibc`), and runs
+the `linux-x86_64` hosts that way, refuses any that needs a newer glibc (`scripts/package-release-binaries.sh check-glibc`), and runs
 each one on RHEL 8, RHEL 9, Debian 12, and Ubuntu 22.04. The release
-workflow checks the floor again before it writes `SHA256SUMS`. v0.6.0 and
+workflow builds both Linux platforms in that image, each on a native runner,
+and checks the floor of both again before it writes `SHA256SUMS`. v0.6.0 and
 earlier Linux hosts need glibc 2.39; build those from source on older
 systems.
 
@@ -68,16 +74,16 @@ curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh
 curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh | sudo sh -s -- --role server
 # runtime host: tenkai-runtime and tenkai-runtime-guard
 curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh | sudo sh -s -- --role runtime
-# server host that runs privileged host releases (linux-x86_64, as root)
+# server host that runs privileged host releases (Linux, as root)
 curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh | sudo sh -s -- --role server --with-host-applier
 ```
 
 The script:
 
 - installs the version it is attached to; `--version X.Y.Z` picks another;
-- refuses an unsupported system: anything but `linux-x86_64` with glibc
-  2.28 or newer and `darwin-aarch64`, including musl distributions such as
-  Alpine;
+- refuses an unsupported system: anything but `linux-x86_64` or
+  `linux-aarch64` with glibc 2.28 or newer and `darwin-aarch64`, including
+  musl distributions such as Alpine;
 - downloads `SHA256SUMS` and the role's hosts and checks every file before
   installing any. A checksum mismatch or a host missing from `SHA256SUMS`
   installs nothing;
@@ -114,6 +120,65 @@ described in [run tenkai-server](run-tenkai-server.md#install-a-server-host).
 Re-running it replaces plain installs; upgrade a server installed into a
 self-upgrade home with `tenkaictl self-upgrade` instead.
 
+## Install with a package manager
+
+The package manager then owns the CLI and the server: it installs,
+upgrades, and removes them. Use one way per host: a package, the install
+script, or a [self-upgrade home](#upgrade-a-server-host).
+
+On Debian, Ubuntu, RHEL, and their rebuilds, one `tenkai` package installs
+`tenkaictl`, `tenkai-server`, and `tenkai-executor-guard` in `/usr/bin`, and
+a `tenkai-server.service` unit that runs the server as the `tenkai` user on
+`127.0.0.1:8080`. The unit is installed but not enabled:
+
+```bash
+curl -fsSL -O https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/tenkai-linux-x86_64.deb
+sudo apt install ./tenkai-linux-x86_64.deb       # or: sudo dnf install ./tenkai-linux-x86_64.rpm
+sudo systemctl enable --now tenkai-server
+sudo usermod -aG tenkai-viewer,tenkai-operator "$USER"   # then log in again
+tenkaictl env list
+```
+
+The package:
+
+- creates the `tenkai` user, the `tenkai-viewer`, `tenkai-operator` and
+  `tenkai-admin` [access groups](configure-server-authentication.md), and
+  `/run/tenkai`, where the server binds its local socket. On the host,
+  `tenkaictl` uses that socket as the calling user. The socket belongs to
+  `tenkai-viewer`, so a user in `tenkai-viewer` plus the group that grants
+  the access they need uses it without a token. Unlike `install.sh`, the
+  package adds no one to them;
+- writes a root-only `/etc/tenkai/management.token` and
+  `/etc/tenkai/server.env` with the same token once, and keeps both on
+  upgrade. `/etc/tenkai/client.toml` points `tenkaictl` at the server, and
+  `sudo tenkaictl --token-file /etc/tenkai/management.token` uses the token
+  over TCP. `client.toml` and `host-grants.toml` are configuration files the
+  package never overwrites once changed;
+- restarts a running server on upgrade and stops it on removal. The store in
+  `/var/lib/tenkai` stays; purging a `.deb` also deletes the token and
+  `server.env`.
+
+The `.rpm` and `.deb` are listed in `SHA256SUMS` and attested like a host.
+They do not install the runtime: a runtime host keeps its
+[self-upgrade home](run-tenkai-server.md#upgrading-the-runtime-agent), which
+Tenkai upgrades and rolls back. Install the host applier with
+`install.sh --role host-applier`.
+
+On macOS (Apple silicon) and Linux, Homebrew installs the same three hosts
+from the Release, each pinned by its `SHA256SUMS` digest. Final releases
+update the `sannrox/tap` tap; every Release also attaches the formula as
+`tenkai.rb`:
+
+```bash
+brew install sannrox/tap/tenkai
+brew services start tenkai          # local evaluation on 127.0.0.1:8080
+tenkaictl --target remote --server-url http://127.0.0.1:8080 \
+  --token-file "$(brew --prefix)/var/tenkai/management.token" env list
+```
+
+`brew upgrade tenkai` upgrades all three. For a runtime on macOS, see
+[run the runtime under launchd](run-tenkai-server.md#run-the-runtime-under-launchd).
+
 ## Verify and install by hand
 
 Replace `vX.Y.Z` with the published tag. Checksums must match before the
@@ -121,7 +186,7 @@ binary is executed.
 
 ```bash
 tag=vX.Y.Z
-platform=linux-x86_64   # or darwin-aarch64
+platform=linux-x86_64   # or linux-aarch64, darwin-aarch64
 base="https://github.com/Sannrox/tenkai/releases/download/${tag}"
 
 curl -fsSL -O "${base}/SHA256SUMS"
@@ -214,21 +279,25 @@ CHANGELOG section must exist and carry its
 `Gate flags:` line. Manifest `git_sha` is that tagged commit.
 
 The workflow then builds the five community hosts with `--workspace --features tenkai-server/ui`
-(Linux hosts inside the glibc 2.28 image, with `tenkai-host-applier`),
+(Linux hosts inside the glibc 2.28 image on an x86-64 and an arm64 runner,
+with `tenkai-host-applier`),
 rebuilds `tenkai-server` with `-p tenkai-server --features postgres,ui` and names it
 `tenkai-server-postgres-<platform>` with
 `scripts/package-release-binaries.sh package-hub`. It adds the HTTP API
 contract, and `install.sh` with the tag's version written in plus the
 applier's unit and polkit rule
-(`scripts/package-release-binaries.sh install-script`), refuses Linux hosts
-above the glibc floor, and writes `SHA256SUMS`. `scripts/release/metadata.py` writes
+(`scripts/package-release-binaries.sh install-script`), builds the `.deb`
+and `.rpm` from the Linux hosts (`system-packages`, from `packaging/`),
+refuses Linux hosts above the glibc floor, writes `SHA256SUMS`, and renders
+`tenkai.rb` from it (`scripts/release/metadata.py formula`). `scripts/release/metadata.py` writes
 `tenkai.cdx.json`, a CycloneDX 1.5 SBOM of the locked Cargo graph and the
 pinned web console. A separate job validates it against the CycloneDX schema
 and SPDX license expressions; the attest job regenerates it and requires the
 validated digest. The attest job then creates:
 
-- a provenance attestation for every host, the contract, `install.sh`, the
-  applier unit and rule, `SHA256SUMS`, and the SBOM;
+- a provenance attestation for every host and package, the contract,
+  `install.sh`, the applier unit and rule, `SHA256SUMS`, the formula, and the
+  SBOM;
 - an SBOM attestation for every file listed in `SHA256SUMS`;
 - `tenkai-release.json`, the [family release manifest](family-release-manifests.md),
   and a provenance attestation for it.
@@ -240,12 +309,20 @@ not marked latest for a tag that contains `-`, and never marked latest for a
 tag on a `release-*` maintenance line. A rerun
 resumes a draft. An already published Release, or one that cannot be read,
 is refused, not edited (`scripts/release/github-release.sh`). A tag
-mismatch fails closed before assets are uploaded. CI's release dry run builds
+mismatch fails closed before assets are uploaded. After the Release is
+public, a macOS job installs it with the formula and runs the runtime under
+launchd (`scripts/test-macos-install.sh`), then, for a final release, pushes
+`tenkai.rb` to the tap when the `HOMEBREW_TAP_TOKEN` secret is set. A failure
+there leaves the Release as published. CI's release dry run builds
 the Linux hosts the same way, run them on older distributions, and run
 `scripts/release-dry-run.sh --linux-hosts` instead, which writes the same
-notes, SBOM, and manifest (macOS hosts are stubs) and never attests or
-publishes. `workflow_dispatch` without a tag dry-runs that packaging path
-on the dispatched ref.
+notes, SBOM, packages, formula, and manifest (macOS and arm64 hosts are
+stubs) and never attests or publishes; `scripts/test-system-packages.sh`
+installs, starts, and purges the `.deb` on the CI runner and installs and
+removes the `.rpm` in an unprivileged RHEL 9 container.
+`workflow_dispatch` without a tag dry-runs that packaging path on the
+dispatched ref, and also builds the macOS hosts and runs the macOS install
+check against them.
 
 Verify the SBOM and manifest like a host:
 
@@ -365,7 +442,7 @@ never overwrites what the older server wrote since. One self-upgrade
 command at a time holds a home.
 
 `self-upgrade` does not install the host applier. After the server is
-ready, upgrade the applier, its unit and its rule as root (linux-x86_64):
+ready, upgrade the applier, its unit and its rule as root (Linux):
 
 ```bash
 curl -fsSL https://github.com/Sannrox/tenkai/releases/download/vX.Y.Z/install.sh \

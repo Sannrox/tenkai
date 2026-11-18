@@ -8,17 +8,22 @@
 #       [--platform ID] [--strip]
 #   scripts/package-release-binaries.sh install-script --out DIR --version X.Y.Z
 #   scripts/package-release-binaries.sh checksums --out DIR [--require-complete]
-#   scripts/package-release-binaries.sh check-glibc --out DIR
+#   scripts/package-release-binaries.sh check-glibc --out DIR [--platform ID]
+#   scripts/package-release-binaries.sh system-packages --out DIR --platform ID
+#       --version X.Y.Z
 #   scripts/package-release-binaries.sh names
 #   scripts/package-release-binaries.sh self-test
 #
 # Community hosts: tenkaictl, tenkai-server, tenkai-executor-guard,
-# tenkai-runtime, tenkai-runtime-guard, and on linux-x86_64 only
+# tenkai-runtime, tenkai-runtime-guard, and on Linux only
 # tenkai-host-applier. Hub host asset:
 # tenkai-server-postgres-<platform> (built with --features postgres,ui).
-# Platforms: linux-x86_64, darwin-aarch64. check-glibc refuses a Linux host
-# that needs a glibc newer than LINUX_GLIBC_FLOOR (built by
-# scripts/build-linux-release-hosts.sh).
+# Platforms: linux-x86_64, linux-aarch64, darwin-aarch64. check-glibc refuses
+# a Linux host that needs a glibc newer than LINUX_GLIBC_FLOOR (built by
+# scripts/build-linux-release-hosts.sh). system-packages builds the tenkai
+# .deb and .rpm of one Linux platform (tenkai-<platform>.deb and .rpm: the
+# CLI, the server and its guard, and a server unit that is not enabled) from
+# that platform's packaged hosts in --out, with the pinned nfpm.
 # The HTTP API contract (api/tenkai-http-v1.schema.json), install.sh
 # (scripts/install.sh with the release version baked in by install-script),
 # and the host applier's systemd unit and polkit rule (copied by
@@ -29,10 +34,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOSTS=(tenkaictl tenkai-server tenkai-executor-guard tenkai-runtime tenkai-runtime-guard)
-# Hosts published for linux-x86_64 only: the applier needs systemd (#949).
+# Hosts published for Linux only: the applier needs systemd (#949).
 LINUX_ONLY_HOSTS=(tenkai-host-applier)
 HUB_SERVER_ASSET=tenkai-server-postgres
-PLATFORMS=(linux-x86_64 darwin-aarch64)
+PLATFORMS=(linux-x86_64 linux-aarch64 darwin-aarch64)
+LINUX_PLATFORMS=(linux-x86_64 linux-aarch64)
+# The hosts in the tenkai .deb and .rpm, installed under /usr/bin.
+SYSTEM_PACKAGE_HOSTS=(tenkaictl tenkai-server tenkai-executor-guard)
+SYSTEM_PACKAGE_FORMATS=(deb rpm)
+# nfpm builds both formats from packaging/nfpm.yaml. Pinned by release
+# archive SHA-256 and cached like scripts/check-workflows.sh's tools.
+NFPM_VERSION=2.48.0
+NFPM_SHA256_X86_64=6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750
+NFPM_SHA256_ARM64=a9a75213763783b7669719e505474c748c5ad7dc66591a195619deb50f85c2f4
 CHECKSUMS_NAME=SHA256SUMS
 # Release asset names of the host applier unit and polkit rule. GitHub may
 # rename an asset with "@", so the unit's asset name drops it.
@@ -42,12 +56,13 @@ HOST_APPLY_UNIT_SRC=examples/host-applier-systemd/tenkai-host-apply@.service
 HOST_APPLY_RULES_SRC=examples/host-applier-systemd/tenkai-host-apply.rules
 ATTACHED_FILES=(tenkai-http-v1.schema.json install.sh "$HOST_APPLY_UNIT" "$HOST_APPLY_RULES")
 INSTALL_SCRIPT=install.sh
-# Oldest glibc a linux-x86_64 host may require (RHEL 8). Keep in step with the
-# build image in scripts/build-linux-release-hosts.sh.
+# Oldest glibc a Linux host may require (RHEL 8). Keep in step with the
+# build image in scripts/build-linux-release-hosts.sh and the package
+# dependency in packaging/nfpm.yaml.
 LINUX_GLIBC_FLOOR=2.28
 
 usage() {
-  sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
   exit "${1:-2}"
 }
 
@@ -62,6 +77,7 @@ detect_platform() {
   arch="$(uname -m)"
   case "$os:$arch" in
     Linux:x86_64) printf '%s\n' linux-x86_64 ;;
+    Linux:aarch64 | Linux:arm64) printf '%s\n' linux-aarch64 ;;
     Darwin:arm64) printf '%s\n' darwin-aarch64 ;;
     *) fail "unsupported host ${os} ${arch}" ;;
   esac
@@ -80,7 +96,7 @@ is_platform() {
 # Set PLATFORM_HOSTS to the hosts packaged for platform $1.
 set_platform_hosts() {
   PLATFORM_HOSTS=("${HOSTS[@]}")
-  if [[ "$1" == linux-x86_64 ]]; then
+  if [[ "$1" == linux-* ]]; then
     PLATFORM_HOSTS+=("${LINUX_ONLY_HOSTS[@]}")
   fi
 }
@@ -91,6 +107,20 @@ packaged_name() {
 
 packaged_hub_name() {
   printf '%s-%s\n' "$HUB_SERVER_ASSET" "$1"
+}
+
+# tenkai-<platform>.<format>: version-free, like every other asset name.
+system_package_name() {
+  printf 'tenkai-%s.%s\n' "$1" "$2"
+}
+
+system_package_names() {
+  local platform format
+  for platform in "${LINUX_PLATFORMS[@]}"; do
+    for format in "${SYSTEM_PACKAGE_FORMATS[@]}"; do
+      system_package_name "$platform" "$format"
+    done
+  done
 }
 
 is_packaged_name() {
@@ -113,7 +143,7 @@ is_packaged_name() {
       return 0
     fi
   done
-  return 1
+  grep -Fxq -- "$name" < <(system_package_names)
 }
 
 complete_names() {
@@ -128,15 +158,17 @@ complete_names() {
   for platform in "${PLATFORMS[@]}"; do
     packaged_hub_name "$platform"
   done
+  system_package_names
 }
 
+# The packaged host assets of Linux platform $1.
 linux_host_names() {
   local host
-  set_platform_hosts linux-x86_64
+  set_platform_hosts "$1"
   for host in "${PLATFORM_HOSTS[@]}"; do
-    packaged_name "$host" linux-x86_64
+    packaged_name "$host" "$1"
   done
-  packaged_hub_name linux-x86_64
+  packaged_hub_name "$1"
 }
 
 checksum_tool() {
@@ -386,16 +418,22 @@ cmd_checksums() {
   verify_checksums "$out" >/dev/null
 }
 
-# Fail unless every linux-x86_64 host asset in --out is an x86-64 ELF
-# executable linked to glibc whose versioned glibc symbols are all at or below
-# LINUX_GLIBC_FLOOR, so it starts on every supported distribution (#904).
+# Fail unless every Linux host asset in --out (of --platform, else of every
+# Linux platform) is an ELF executable for its CPU, linked to glibc, whose
+# versioned glibc symbols are all at or below LINUX_GLIBC_FLOOR, so it starts
+# on every supported distribution (#904).
 cmd_check_glibc() {
-  local out=""
+  local out="" only=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --out)
         [[ $# -ge 2 ]] || fail "--out requires a directory"
         out="$2"
+        shift 2
+        ;;
+      --platform)
+        [[ $# -ge 2 ]] || fail "--platform requires an id"
+        only="$2"
         shift 2
         ;;
       -h | --help) usage 0 ;;
@@ -404,21 +442,124 @@ cmd_check_glibc() {
   done
   [[ -n "$out" ]] || fail "check-glibc requires --out"
   command -v readelf >/dev/null 2>&1 || fail "readelf is required by check-glibc"
-
-  local name path header newest
-  while IFS= read -r name; do
-    path="${out}/${name}"
-    [[ -f "$path" ]] || fail "missing Linux host asset: ${name}"
-    header="$(readelf -hW "$path" 2>/dev/null)" || fail "${name} is not an ELF executable"
-    grep -Eq 'Type:[[:space:]]+(EXEC|DYN)' <<<"$header" || fail "${name} is not an ELF executable"
-    grep -Eq 'Machine:.*X86-64' <<<"$header" || fail "${name} is not an x86-64 executable"
-    newest="$(readelf -VW "$path" | { grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' || true; } | sed 's/^GLIBC_//' | sort -V | tail -n 1)"
-    # Hosts dlopen system PKCS#11 modules, so they must link glibc.
-    [[ -n "$newest" ]] || fail "${name} does not link glibc"
-    if [[ "$(printf '%s\n%s\n' "$LINUX_GLIBC_FLOOR" "$newest" | sort -V | tail -n 1)" != "$LINUX_GLIBC_FLOOR" ]]; then
-      fail "${name} requires glibc ${newest}, newer than the ${LINUX_GLIBC_FLOOR} floor"
+  local -a platforms=("${LINUX_PLATFORMS[@]}")
+  if [[ -n "$only" ]]; then
+    if [[ "$only" != linux-* ]] || ! is_platform "$only"; then
+      fail "not a Linux platform: ${only}"
     fi
-  done < <(linux_host_names)
+    platforms=("$only")
+  fi
+
+  local platform machine name path header newest
+  for platform in "${platforms[@]}"; do
+    case "$platform" in
+      linux-x86_64) machine=X86-64 ;;
+      linux-aarch64) machine=AArch64 ;;
+    esac
+    while IFS= read -r name; do
+      path="${out}/${name}"
+      [[ -f "$path" ]] || fail "missing Linux host asset: ${name}"
+      header="$(readelf -hW "$path" 2>/dev/null)" || fail "${name} is not an ELF executable"
+      grep -Eq 'Type:[[:space:]]+(EXEC|DYN)' <<<"$header" || fail "${name} is not an ELF executable"
+      grep -Eq "Machine:.*${machine}" <<<"$header" || fail "${name} is not an ${machine} executable"
+      newest="$(readelf -VW "$path" | { grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' || true; } | sed 's/^GLIBC_//' | sort -V | tail -n 1)"
+      # Hosts dlopen system PKCS#11 modules, so they must link glibc.
+      [[ -n "$newest" ]] || fail "${name} does not link glibc"
+      if [[ "$(printf '%s\n%s\n' "$LINUX_GLIBC_FLOOR" "$newest" | sort -V | tail -n 1)" != "$LINUX_GLIBC_FLOOR" ]]; then
+        fail "${name} requires glibc ${newest}, newer than the ${LINUX_GLIBC_FLOOR} floor"
+      fi
+    done < <(linux_host_names "$platform")
+  done
+}
+
+# The pinned nfpm, downloaded once per version and checked against its
+# release archive SHA-256.
+nfpm_bin() {
+  local asset sha cache archive
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64) asset=Linux_x86_64 sha="$NFPM_SHA256_X86_64" ;;
+    Linux-aarch64 | Linux-arm64) asset=Linux_arm64 sha="$NFPM_SHA256_ARM64" ;;
+    *) fail "system-packages runs on Linux x86_64 or aarch64" ;;
+  esac
+  cache="${XDG_CACHE_HOME:-$HOME/.cache}/tenkai-nfpm/${NFPM_VERSION}"
+  if [[ ! -x "${cache}/nfpm" ]]; then
+    mkdir -p "$cache"
+    archive="$(mktemp "${cache}/nfpm.$$.XXXXXX")"
+    curl -fsSL -o "$archive" \
+      "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${asset}.tar.gz" \
+      || { rm -f "$archive"; fail "cannot download nfpm ${NFPM_VERSION}"; }
+    if [[ "$(checksum_file "$archive" | awk '{print $1}')" != "$sha" ]]; then
+      rm -f "$archive"
+      fail "nfpm ${NFPM_VERSION} archive does not match its pinned SHA-256"
+    fi
+    tar -xzf "$archive" -C "$cache" nfpm
+    rm -f "$archive"
+  fi
+  printf '%s\n' "${cache}/nfpm"
+}
+
+# Build tenkai-<platform>.deb and .rpm into --out from the platform's packaged
+# hosts already there. A pre-release X.Y.Z-rc.N becomes X.Y.Z~rc.N, which both
+# formats sort before X.Y.Z.
+cmd_system_packages() {
+  local out="" platform="" version=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --out)
+        [[ $# -ge 2 ]] || fail "--out requires a directory"
+        out="$2"
+        shift 2
+        ;;
+      --platform)
+        [[ $# -ge 2 ]] || fail "--platform requires an id"
+        platform="$2"
+        shift 2
+        ;;
+      --version)
+        [[ $# -ge 2 ]] || fail "--version requires a version"
+        version="$2"
+        shift 2
+        ;;
+      -h | --help) usage 0 ;;
+      *) fail "unknown system-packages argument: $1" ;;
+    esac
+  done
+  [[ -n "$out" ]] || fail "system-packages requires --out"
+  if [[ "$platform" != linux-* ]] || ! is_platform "$platform"; then
+    fail "system-packages requires a Linux --platform, got '${platform}'"
+  fi
+  [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]] \
+    || fail "system-packages requires --version X.Y.Z or X.Y.Z-rc.N, got '${version}'"
+  local host
+  for host in "${SYSTEM_PACKAGE_HOSTS[@]}"; do
+    [[ -s "${out}/$(packaged_name "$host" "$platform")" ]] || fail "missing host asset: $(packaged_name "$host" "$platform")"
+  done
+  local nfpm arch format stage
+  nfpm="$(nfpm_bin)"
+  case "$platform" in
+    linux-x86_64) arch=amd64 ;;
+    linux-aarch64) arch=arm64 ;;
+  esac
+  out="$(cd "$out" && pwd)"
+  # nfpm reads fixed source paths, so stage the hosts under their installed
+  # names beside the packaging files.
+  stage="$(mktemp -d "${TMPDIR:-/tmp}/tenkai-system-packages.$$.XXXXXX")"
+  mkdir -p "${stage}/bin"
+  for host in "${SYSTEM_PACKAGE_HOSTS[@]}"; do
+    cp "${out}/$(packaged_name "$host" "$platform")" "${stage}/bin/${host}"
+  done
+  cp -R "${ROOT}/packaging" "${stage}/packaging"
+  cp "${ROOT}/LICENSE" "${stage}/LICENSE"
+  for format in "${SYSTEM_PACKAGE_FORMATS[@]}"; do
+    if ! (cd "$stage" && TENKAI_ARCH="$arch" TENKAI_VERSION="${version/-/\~}" \
+      TENKAI_GLIBC_FLOOR="$LINUX_GLIBC_FLOOR" \
+      "$nfpm" package --config packaging/nfpm.yaml --packager "$format" \
+      --target "${out}/$(system_package_name "$platform" "$format")" >/dev/null); then
+      rm -rf "$stage"
+      fail "nfpm could not build the ${format} for ${platform}"
+    fi
+  done
+  rm -rf "$stage"
 }
 
 expect_fail() {
@@ -443,7 +584,7 @@ cmd_self_test() {
   out="${tmp}/out"
   mkdir -p "$bin" "$out"
   platform="$(detect_platform)"
-  if [[ "$platform" == linux-x86_64 ]]; then
+  if [[ "$platform" == linux-* ]]; then
     other=darwin-aarch64
   else
     other=linux-x86_64
@@ -463,14 +604,28 @@ cmd_self_test() {
   [[ -f "${out}/$(packaged_name tenkai-server "$platform")" ]] || fail "self-test missing community tenkai-server asset"
   [[ ! -e "${out}/tenkai-worker-lifecycle-fixture-${platform}" ]] || fail "self-test packaged fixture host"
   [[ ! -e "${out}/tenkai-delivery-conformance-${platform}" ]] || fail "self-test packaged conformance harness"
-  if [[ "$platform" == linux-x86_64 ]]; then
+  if [[ "$platform" == linux-* ]]; then
     [[ -f "${out}/$(packaged_name tenkai-host-applier "$platform")" ]] || fail "self-test missing tenkai-host-applier asset"
   else
     [[ ! -e "${out}/$(packaged_name tenkai-host-applier "$platform")" ]] || fail "self-test packaged tenkai-host-applier for ${platform}"
   fi
   local names
   names="$(complete_names)"
-  grep -Fxq tenkai-host-applier-linux-x86_64 <<<"$names" || fail "self-test release set lacks the Linux applier"
+  local required
+  for required in tenkai-host-applier-linux-x86_64 tenkai-host-applier-linux-aarch64 \
+    tenkaictl-linux-aarch64 tenkai-linux-x86_64.deb tenkai-linux-x86_64.rpm \
+    tenkai-linux-aarch64.deb tenkai-linux-aarch64.rpm; do
+    grep -Fxq "$required" <<<"$names" || fail "self-test release set lacks ${required}"
+  done
+  if grep -Fxq tenkai-darwin-aarch64.deb <<<"$names"; then
+    fail "self-test release set requires a darwin system package"
+  fi
+  expect_fail "system-packages requires a Linux --platform" \
+    bash "$0" system-packages --out "$out" --platform darwin-aarch64 --version 1.2.3
+  expect_fail "system-packages requires --version X.Y.Z" \
+    bash "$0" system-packages --out "$out" --platform linux-x86_64 --version 1.2
+  expect_fail "missing host asset: tenkaictl-linux-aarch64" \
+    bash "$0" system-packages --out "${tmp}/empty-dist" --platform linux-aarch64 --version 1.2.3
   if grep -Fxq tenkai-host-applier-darwin-aarch64 <<<"$names"; then
     fail "self-test release set requires a darwin applier"
   fi
@@ -518,21 +673,36 @@ cmd_self_test() {
 
   # check-glibc: the passing case is the CI release dry run, which builds the
   # real hosts. Here, refuse a missing asset, a non-ELF stub, and (on Linux)
-  # this machine's shell when its glibc is newer than the floor.
+  # this machine's shell under the other CPU's names, and under its own
+  # names when its glibc is newer than the floor.
   if command -v readelf >/dev/null 2>&1; then
-    local linux="${tmp}/linux" name shell_glibc
+    local linux="${tmp}/linux" name shell_glibc own foreign machine
     mkdir -p "$linux"
     expect_fail "missing Linux host asset" bash "$0" check-glibc --out "$linux"
+    expect_fail "not a Linux platform: darwin-aarch64" \
+      bash "$0" check-glibc --out "$linux" --platform darwin-aarch64
     while IFS= read -r name; do
       printf 'stub\n' >"${linux}/${name}"
-    done < <(linux_host_names)
-    expect_fail "is not an ELF executable" bash "$0" check-glibc --out "$linux"
-    shell_glibc="$(readelf -VW /bin/sh 2>/dev/null | grep -oE 'GLIBC_2\.(29|[3-9][0-9])' | head -n 1 || true)"
-    if [[ "$platform" == linux-x86_64 && -n "$shell_glibc" ]]; then
+    done < <(linux_host_names linux-x86_64)
+    expect_fail "is not an ELF executable" bash "$0" check-glibc --out "$linux" --platform linux-x86_64
+    if [[ "$platform" == linux-* ]]; then
+      own="$platform"
+      if [[ "$own" == linux-x86_64 ]]; then
+        foreign=linux-aarch64 machine=AArch64
+      else
+        foreign=linux-x86_64 machine=X86-64
+      fi
       while IFS= read -r name; do
         cp /bin/sh "${linux}/${name}"
-      done < <(linux_host_names)
-      expect_fail "newer than the ${LINUX_GLIBC_FLOOR} floor" bash "$0" check-glibc --out "$linux"
+      done < <(linux_host_names "$foreign")
+      expect_fail "is not an ${machine} executable" bash "$0" check-glibc --out "$linux" --platform "$foreign"
+      shell_glibc="$(readelf -VW /bin/sh 2>/dev/null | grep -oE 'GLIBC_2\.(29|[3-9][0-9])' | head -n 1 || true)"
+      if [[ -n "$shell_glibc" ]]; then
+        while IFS= read -r name; do
+          cp /bin/sh "${linux}/${name}"
+        done < <(linux_host_names "$own")
+        expect_fail "newer than the ${LINUX_GLIBC_FLOOR} floor" bash "$0" check-glibc --out "$linux" --platform "$own"
+      fi
     fi
   fi
 
@@ -550,6 +720,7 @@ main() {
     checksums) cmd_checksums "$@" ;;
     check-glibc) cmd_check_glibc "$@" ;;
     install-script) cmd_install_script "$@" ;;
+    system-packages) cmd_system_packages "$@" ;;
     names) complete_names ;;
     self-test) cmd_self_test "$@" ;;
     -h | --help | "") usage 0 ;;

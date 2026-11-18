@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Release dry run for pull requests: the v* workflow's metadata steps against
 # stub host binaries. Writes the CHANGELOG notes for the workspace version, a
-# CycloneDX SBOM validated against its schema, and the family release
-# manifest. Never attests, tags, or publishes. Needs cargo, python3 and
-# network access for the pinned SBOM validator.
+# CycloneDX SBOM validated against its schema, the .deb and .rpm packages,
+# the Homebrew formula, and the family release manifest. Never attests, tags,
+# or publishes. Needs cargo, python3 and network access for the pinned SBOM
+# validator and package builder.
 #
 # --linux-hosts DIR takes the linux-x86_64 hosts from DIR (written by
 # scripts/build-linux-release-hosts.sh) instead of stubs and requires them to
@@ -44,18 +45,36 @@ python3 scripts/release/metadata.py notes "$version" >"${tmp}/notes.md"
 dist="${tmp}/dist"
 mkdir -p "$dist"
 while IFS= read -r name; do
+  case "$name" in
+    *.deb | *.rpm) continue ;; # built from the hosts below
+  esac
   if [[ -n "$linux_hosts" && "$name" == *-linux-x86_64 ]]; then
     cp "${linux_hosts}/${name}" "${dist}/${name}" || fail "missing ${name} in ${linux_hosts}"
   else
     printf 'dry-run %s\n' "$name" >"${dist}/${name}"
   fi
 done < <(bash scripts/package-release-binaries.sh names)
+for platform in linux-x86_64 linux-aarch64; do
+  bash scripts/package-release-binaries.sh system-packages --out "$dist" --platform "$platform" --version "$version"
+done
 if [[ -n "$linux_hosts" ]]; then
-  bash scripts/package-release-binaries.sh check-glibc --out "$dist"
+  bash scripts/package-release-binaries.sh check-glibc --out "$dist" --platform linux-x86_64
 fi
 cp api/tenkai-http-v1.schema.json "$dist/"
 bash scripts/package-release-binaries.sh install-script --out "$dist" --version "$version"
 bash scripts/package-release-binaries.sh checksums --out "$dist" --require-complete
+python3 scripts/release/metadata.py formula --version "$version" --dist "$dist" --out "${dist}/tenkai.rb"
+python3 - "${dist}/tenkai.rb" "${dist}/SHA256SUMS" "$version" <<'PY'
+import re, sys
+formula = open(sys.argv[1]).read()
+sums = dict(reversed(line.split("  ")) for line in open(sys.argv[2]).read().splitlines())
+pinned = dict(re.findall(r'url "[^"]*/v' + re.escape(sys.argv[3]) + r'/([^"/]+)"[^\n]*\n\s*sha256 "([0-9a-f]{64})"', formula))
+hosts = ("tenkaictl", "tenkai-server", "tenkai-executor-guard")
+platforms = ("darwin-aarch64", "linux-x86_64", "linux-aarch64")
+expected = {f"{host}-{platform}" for host in hosts for platform in platforms}
+assert set(pinned) == expected, sorted(pinned)
+assert all(sums[name] == digest for name, digest in pinned.items()), pinned
+PY
 
 python3 scripts/release/metadata.py sbom "${dist}/tenkai.cdx.json"
 python3 -m venv "${tmp}/venv"

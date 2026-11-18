@@ -934,6 +934,34 @@ when renewal fails, and reports one fixed-shape receipt per step without
 capturing command output. `tenkai-runtime --once` performs one deterministic
 pull for supervisors and tests.
 
+### Run the runtime under launchd
+
+On macOS, run the runtime as a LaunchDaemon from its home, so Tenkai
+upgrades and rolls it back as on Linux.
+[`examples/runtime-agent-launchd`](../examples/runtime-agent-launchd/com.github.sannrox.tenkai-runtime.plist)
+holds the daemon. Like the systemd unit, it runs `prestart` from a version
+known to run before every start, then `current/tenkai-runtime`, and starts it
+again whenever it exits, including after a switch. As root, with
+`tenkai-runtime-darwin-aarch64` and `tenkai-runtime-guard-darwin-aarch64`
+from a [verified Release](release-binaries.md#verify-and-install-by-hand)
+renamed to `tenkai-runtime` and `tenkai-runtime-guard` in one directory:
+
+```sh
+sudo ./tenkai-runtime install --home /var/db/tenkai-runtime
+sudo mkdir -p /etc/tenkai-runtime
+sudo install -m 0600 -o root -g wheel /dev/null /etc/tenkai-runtime/env
+# One shell assignment per line for TENKAI_SERVER_URL,
+# TENKAI_RUNTIME_ENVIRONMENT, TENKAI_RUNTIME_TOKEN and TENKAI_RUNTIME_EXECUTOR.
+sudo vi /etc/tenkai-runtime/env
+sudo cp com.github.sannrox.tenkai-runtime.plist /Library/LaunchDaemons/
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.github.sannrox.tenkai-runtime.plist
+```
+
+It logs to `/var/log/tenkai-runtime.log`. `sudo launchctl kickstart -k
+system/com.github.sannrox.tenkai-runtime` restarts it after the settings
+change; `sudo launchctl bootout system/com.github.sannrox.tenkai-runtime`
+stops it and keeps the home.
+
 ## Execution leases and fencing
 
 Environment execution uses short-lived, generation-fenced Tenkai leases. An

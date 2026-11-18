@@ -1,0 +1,70 @@
+# The tenkai .deb and .rpm (#917): tenkaictl, tenkai-server and
+# tenkai-executor-guard under /usr/bin, and a tenkai-server unit that the
+# package never enables or starts. Built by
+# `scripts/package-release-binaries.sh system-packages`, which sets the
+# TENKAI_* variables and runs nfpm in a staging directory holding bin/ (the
+# platform's three hosts), packaging/ and LICENSE. The runtime has no
+# package: Tenkai owns the runtime through its home (docs/release-binaries.md).
+name: tenkai
+arch: ${TENKAI_ARCH}
+platform: linux
+version: ${TENKAI_VERSION}
+version_schema: none
+release: "1"
+section: admin
+priority: optional
+maintainer: Sannrox <noreply@github.com>
+homepage: https://github.com/Sannrox/tenkai
+license: Apache-2.0
+description: |-
+  Local-first, constraint-based delivery control plane.
+  The tenkaictl CLI and a local tenkai-server with its executor guard. The
+  tenkai-server unit is installed but not enabled.
+depends:
+  - systemd
+overrides:
+  deb:
+    depends:
+      - libc6 (>= ${TENKAI_GLIBC_FLOOR})
+      - systemd
+  rpm:
+    depends:
+      - glibc >= ${TENKAI_GLIBC_FLOOR}
+      - systemd
+contents:
+  - src: bin/tenkaictl
+    dst: /usr/bin/tenkaictl
+    file_info: {mode: 0755}
+  - src: bin/tenkai-server
+    dst: /usr/bin/tenkai-server
+    file_info: {mode: 0755}
+  - src: bin/tenkai-executor-guard
+    dst: /usr/bin/tenkai-executor-guard
+    file_info: {mode: 0755}
+  - src: packaging/tenkai-server.service
+    dst: /usr/lib/systemd/system/tenkai-server.service
+    file_info: {mode: 0644}
+  - src: packaging/sysusers.conf
+    dst: /usr/lib/sysusers.d/tenkai.conf
+    file_info: {mode: 0644}
+  - src: packaging/tmpfiles.conf
+    dst: /usr/lib/tmpfiles.d/tenkai.conf
+    file_info: {mode: 0644}
+  - dst: /etc/tenkai
+    type: dir
+    file_info: {mode: 0755}
+  - src: packaging/client.toml
+    dst: /etc/tenkai/client.toml
+    type: config|noreplace
+    file_info: {mode: 0644}
+  - src: packaging/host-grants.toml
+    dst: /etc/tenkai/host-grants.toml
+    type: config|noreplace
+    file_info: {mode: 0644}
+  - src: LICENSE
+    dst: /usr/share/doc/tenkai/copyright
+    file_info: {mode: 0644}
+scripts:
+  postinstall: packaging/postinstall.sh
+  preremove: packaging/preremove.sh
+  postremove: packaging/postremove.sh

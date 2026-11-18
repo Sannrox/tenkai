@@ -131,7 +131,8 @@ class Release(unittest.TestCase):
 
     def test_only_the_dry_run_runs_without_a_tag(self):
         gates = {name: job.get("if") for name, job in self.jobs.items() if name != "verify-tag"}
-        self.assertEqual(gates.pop("dry-run"), "needs.verify-tag.outputs.tag == ''")
+        for dry_run in ("dry-run", "dry-run-macos"):
+            self.assertEqual(gates.pop(dry_run), "needs.verify-tag.outputs.tag == ''")
         self.assertEqual(set(gates.values()), {TAGGED})
 
     def test_never_uses_the_event_commit_or_ref_name(self):
@@ -168,7 +169,28 @@ class Release(unittest.TestCase):
         publish = self.jobs["publish"]
         self.assertIn("attest", needs(publish))
         self.assertLessEqual({"package", "package-linux", "sbom"}, needs(self.jobs["attest"]))
-        self.assertFalse(any("publish" in needs(job) for job in self.jobs.values()))
+        after_publish = {name for name, job in self.jobs.items() if "publish" in needs(job)}
+        self.assertEqual(after_publish, {"tap"})
+
+    def test_the_tap_gets_the_attested_formula_after_the_install_check(self):
+        steps = self.jobs["tap"]["steps"]
+        download = index(steps, lambda s: uses(s).startswith("actions/download-artifact"))
+        self.assertEqual(steps[download]["with"]["name"], "release-assets")
+        install = index(steps, lambda s: "test-macos-install.sh" in runs(s))
+        push = index(steps, lambda s: "git -C" in runs(s) and " push " in runs(s))
+        self.assertLess(download, install)
+        self.assertLess(install, push)
+        self.assertFalse(any("secrets." in v for s in steps[:push] for v in strings(s)))
+
+    def test_attest_writes_the_formula_from_the_final_checksums(self):
+        steps = self.jobs["attest"]["steps"]
+        packages = index(steps, lambda s: "system-packages" in runs(s))
+        checksums = index(steps, lambda s: "package-release-binaries.sh checksums" in runs(s))
+        formula = index(steps, lambda s: "metadata.py formula" in runs(s))
+        first_attest = index(steps, lambda s: uses(s).startswith("actions/attest"))
+        self.assertLess(packages, checksums)
+        self.assertLess(checksums, formula)
+        self.assertLess(formula, first_attest)
 
     def test_publishes_the_line_verify_tag_accepted(self):
         steps = self.jobs["publish"]["steps"]

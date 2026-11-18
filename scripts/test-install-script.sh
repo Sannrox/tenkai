@@ -21,7 +21,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGE="${ROOT}/scripts/package-release-binaries.sh"
 HOSTS=(tenkaictl tenkai-server tenkai-executor-guard tenkai-runtime tenkai-runtime-guard)
-APPLIER=tenkai-host-applier-linux-x86_64
 VERSION=1.2.3
 
 fail() {
@@ -79,11 +78,13 @@ write_fixture() {
   local release="$1/v${VERSION}" host platform
   mkdir -p "$release"
   for host in "${HOSTS[@]}"; do
-    for platform in linux-x86_64 darwin-aarch64; do
+    for platform in linux-x86_64 linux-aarch64 darwin-aarch64; do
       printf '#!/bin/sh\necho "%s %s"\n' "$host" "$VERSION" >"${release}/${host}-${platform}"
     done
   done
-  printf '#!/bin/sh\necho applier\n' >"${release}/${APPLIER}"
+  for platform in linux-x86_64 linux-aarch64; do
+    printf '#!/bin/sh\necho applier\n' >"${release}/tenkai-host-applier-${platform}"
+  done
   bash "$PACKAGE" install-script --out "$release" --version "$VERSION"
   bash "$PACKAGE" checksums --out "$release"
 }
@@ -186,11 +187,11 @@ self_test() {
   expect_files "${tmp}/dir" tenkai-executor-guard
   expect_files "${tmp}/dir/tenkai-executor-guard"
 
-  # The applier installs as root on linux-x86_64 only; anything else is
+  # The applier installs as root on Linux only; anything else is
   # refused before a download.
   local applier_refusal="--with-host-applier must run as root"
   if [[ "$(uname -s)" != Linux ]]; then
-    applier_refusal="published for linux-x86_64 only"
+    applier_refusal="published for Linux only"
   fi
   if [[ "$(id -u)" != 0 || "$(uname -s)" != Linux ]]; then
     expect_refused "$applier_refusal" "$script" --base-url "file://${tmp}/missing" --prefix "${tmp}/applier" --with-host-applier

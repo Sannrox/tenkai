@@ -404,7 +404,7 @@ tenkaictl upgrade install-hosts site-c \
   --platform linux-x86_64
 ```
 
-`--platform` is `linux-x86_64` or `darwin-aarch64`. Omit it to use this
+`--platform` is `linux-x86_64`, `linux-aarch64`, or `darwin-aarch64`. Omit it to use this
 process's packaged platform. The command writes unsuffixed
 `tenkaictl`, `tenkai-server`, and `tenkai-executor-guard` after verification,
 mode 0755. The installer sets that mode on the file before linking it. A
