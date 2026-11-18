@@ -2132,6 +2132,52 @@ impl ManagementOperations {
         ))
     }
 
+    /// `POST /v1/environments/{environment}/deployments/{product}/reconcile`:
+    /// record reconciled deployment state as `env reconcile` does (#1201),
+    /// without stopping the server.
+    pub async fn reconcile_deployment(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        product: &str,
+        request: management_lifecycle::ReconcileDeploymentRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "deployment.reconcile")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_reconcile_deployment(
+            &request,
+            environment,
+            product,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(&context, environment, request.expected_generation)
+            .await?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "deployment.reconcile.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let expected = request.expected_generation;
+        let message = crate::environment::reconcile_deployment_fenced(
+            &mut ctx,
+            environment,
+            product,
+            request.deployed.as_deref(),
+            |superseded| management_lifecycle::require_expected_generation(expected, superseded),
+        )
+        .await
+        .map_err(map_catalog_error)?;
+        self.audit(actor, "deployment.reconcile.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Reconcile,
+            message,
+            Some(environment.to_string()),
+        ))
+    }
+
     /// `POST /v1/environments`: register an environment as `env add` does.
     pub async fn register_environment(
         &self,
@@ -5665,6 +5711,87 @@ mod tests {
             ops.import_derived_with(&context, &envelope, &roots).await,
             Err(ManagementError::Forbidden(ref msg)) if msg.contains("product")
         ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #1201: remote `env reconcile` clears an unknown deployment through a
+    /// generation-fenced route; a stale generation or a held apply lease
+    /// refuses it and leaves the recorded state alone.
+    #[tokio::test]
+    async fn remote_reconcile_is_fenced_by_generation_and_the_apply_lease() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-remote-reconcile-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = catalog_ops(
+            &root,
+            grant_auth(
+                [DeliveryCapability::Read, DeliveryCapability::Management],
+                [],
+            ),
+        )
+        .await;
+        let credential = grant_credential();
+        let mut ctx = crate::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
+        let mut stage = crate::environment::environment(&mut ctx, "stage")
+            .await
+            .unwrap();
+        stage
+            .properties
+            .insert("deployment_health.api".into(), "unknown".into());
+        ctx.put(stage).await.unwrap();
+        async fn health(ctx: &mut crate::client::Ctx) -> Option<String> {
+            crate::environment::environment(ctx, "stage")
+                .await
+                .unwrap()
+                .properties
+                .get("deployment_health.api")
+                .cloned()
+        }
+        let request = |expected_generation| management_lifecycle::ReconcileDeploymentRequest {
+            version: 1,
+            operation: "reconcile".into(),
+            environment: "stage".into(),
+            expected_generation,
+            product: "api".into(),
+            deployed: None,
+        };
+        let generation = current_generation(&ops, &credential, "stage").await;
+
+        let stale = ops
+            .reconcile_deployment(&credential, "stage", "api", request(generation + 1))
+            .await
+            .unwrap_err();
+        assert!(format!("{stale:?}").contains("generation"), "{stale:?}");
+        assert_eq!(health(&mut ctx).await.as_deref(), Some("unknown"));
+
+        let lease = crate::apply::claim_environment(&mut ctx, "stage", "apply:test")
+            .await
+            .unwrap();
+        let held = current_generation(&ops, &credential, "stage").await;
+        assert!(
+            ops.reconcile_deployment(&credential, "stage", "api", request(held))
+                .await
+                .is_err()
+        );
+        assert_eq!(health(&mut ctx).await.as_deref(), Some("unknown"));
+        crate::apply::release_environment(&mut ctx, &lease)
+            .await
+            .unwrap();
+
+        let current = current_generation(&ops, &credential, "stage").await;
+        let result = ops
+            .reconcile_deployment(&credential, "stage", "api", request(current))
+            .await
+            .unwrap();
+        assert!(
+            result.message.contains("cleared unknown deployment state"),
+            "{}",
+            result.message
+        );
+        assert_ne!(health(&mut ctx).await.as_deref(), Some("unknown"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

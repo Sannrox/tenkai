@@ -302,6 +302,30 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn reconcile_deployment(
+        &self,
+        environment: &str,
+        product: &str,
+        expected_generation: u64,
+        deployed: Option<&str>,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{environment}/deployments/{product}/reconcile"),
+            Some(&tenkai::management_lifecycle::ReconcileDeploymentRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Reconcile
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                product: product.to_string(),
+                deployed: deployed.map(str::to_string),
+            }),
+        )
+        .await
+    }
+
     pub async fn plan_environment(
         &self,
         environment: &str,

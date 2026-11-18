@@ -7720,6 +7720,43 @@
       ],
       "type": "object"
     },
+    "ReconcileDeploymentRequest": {
+      "additionalProperties": false,
+      "description": "`POST /v1/environments/{environment}/deployments/{product}/reconcile`:\nrecord what an operator found deployed after a failed restore or a lost\ncompletion, as `env reconcile` does (#1201). Fenced by the generation\nand refused while an apply lease is held.",
+      "properties": {
+        "deployed": {
+          "description": "The version found deployed; omitted clears the recorded deployment\nafter cleanup.",
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation",
+        "product"
+      ],
+      "type": "object"
+    },
     "RegisterEnvironmentRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/environments`.",
@@ -10485,6 +10522,17 @@
       "path": "/v1/environments/{environment}/subscriptions/{product}",
       "request": {
         "$ref": "#/$defs/UnsubscribeRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/deployments/{product}/reconcile",
+      "request": {
+        "$ref": "#/$defs/ReconcileDeploymentRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"

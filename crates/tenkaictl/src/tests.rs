@@ -1387,6 +1387,33 @@ fn parses_env_subscribe_and_unsubscribe_instance() {
 }
 
 #[test]
+fn parses_env_reconcile_generation() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "reconcile",
+        "prod",
+        "api",
+        "--deployed",
+        "1.2.0",
+        "--generation",
+        "7",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Env {
+            command: EnvCommand::Reconcile {
+                ref env,
+                ref product,
+                ref deployed,
+                generation: Some(7),
+            }
+        } if env == "prod" && product == "api" && deployed.as_deref() == Some("1.2.0")
+    ));
+}
+
+#[test]
 fn parses_one_shot_reconciler_settings() {
     let cli = Cli::try_parse_from([
         "tenkaictl",

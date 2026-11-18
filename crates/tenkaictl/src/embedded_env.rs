@@ -189,6 +189,7 @@ pub(crate) async fn run(
             env,
             product,
             deployed,
+            ..
         } => {
             println!(
                 "{}",

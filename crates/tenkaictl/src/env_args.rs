@@ -116,6 +116,9 @@ pub(crate) enum EnvCommand {
         product: String,
         #[arg(long)]
         deployed: Option<String>,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
     },
     /// Manage recurring maintenance windows.
     Maintenance {

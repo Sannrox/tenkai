@@ -203,6 +203,23 @@ pub(crate) async fn run(
         }
         Command::Env {
             command:
+                EnvCommand::Reconcile {
+                    env,
+                    product,
+                    deployed,
+                    generation,
+                },
+        } => {
+            let generation = generation
+                .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;
+            let result = client
+                .reconcile_deployment(&env, &product, generation, deployed.as_deref())
+                .await?;
+            println!("{}", result.message);
+            Ok(())
+        }
+        Command::Env {
+            command:
                 EnvCommand::Subscribe {
                     env,
                     spec,
