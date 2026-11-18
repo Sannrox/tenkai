@@ -3162,11 +3162,14 @@ name = "tenkai-host-applier"
 version = "0.9.1"
 dependencies = [
  "anyhow",
+ "axum",
  "base64 0.22.1",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",
  "tenkai",
+ "tenkai-http",
  "tokio",
  "toml",
  "uuid",

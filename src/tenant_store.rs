@@ -894,6 +894,19 @@ impl OperationalStore for TenantPartition {
     ) -> Result<Option<RuntimeClaim>> {
         self.store.durable_runtime_completion(plan_id, owner)
     }
+    fn record_runtime_progress(
+        &self,
+        plan_id: &str,
+        owner: &str,
+        generation: u64,
+        progress_json: &str,
+    ) -> Result<bool> {
+        self.store
+            .record_runtime_progress(plan_id, owner, generation, progress_json)
+    }
+    fn runtime_progress(&self, plan_id: &str) -> Result<Option<String>> {
+        self.store.runtime_progress(plan_id)
+    }
     fn lapsed_runtime_completion(
         &self,
         environment: &str,

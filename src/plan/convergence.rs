@@ -527,6 +527,17 @@ async fn bind_host_steps(
                 bound.push(step);
                 continue;
             }
+            // An OS image update's steps come bound to the generations of
+            // the host-wide image record (ADR 0051 §2), which the applier
+            // checks; only a release that declares `[os_image]` takes them.
+            Some(HostStep { action, .. })
+                if action.updates_os_image() && manifest.os_image.is_some() =>
+            {
+                step.restore = None;
+                step.restore_identity = None;
+                bound.push(step);
+                continue;
+            }
             Some(_) => bail!("step for host release {} is already bound", step.release_id),
             None if step.action == Action::Restart => bail!(
                 "host release {} is never restarted; plan a new install instead",

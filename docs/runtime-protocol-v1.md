@@ -9,6 +9,7 @@ There is no served gRPC `RuntimeService`.
 | `GET /v1/runtime/environments/{environment}/work` | Bearer token and `x-tenkai-runtime-instance`; optional `x-tenkai-runtime-capabilities`. No body. | JSON `RuntimeWork` (`environment`, optional `plan`, optional `claim`, optional `approvals`, optional `issuer_candidate`, optional `health_observations`) |
 | `POST /v1/runtime/environments/{environment}/identity-issuer/candidate` | JSON `IssuerKey` (`generation`, `fingerprint`, `certificate`, `sealed_key`) | JSON `IssuerKey`: the candidate the server keeps ([below](#identity-issuer)); `409` when none was asked for |
 | `POST /v1/runtime/environments/{environment}/complete` | JSON `RuntimeCompletion` (`plan_id`, `generation`, `succeeded`, `detail`, `receipts`) | `204` |
+| `POST /v1/runtime/environments/{environment}/progress` | `x-tenkai-runtime-capabilities` naming `os_image`. JSON `RuntimeProgressReport` (`plan_id`, `generation`, `awaiting_boot`, `receipts`) | `204` ([below](#os-image-reboots)); `409` when the claim is not live or another runner recorded it |
 | `POST /v1/runtime/environments/{environment}/heartbeat` | JSON `RuntimeHeartbeat` (`plan_id`, `generation`) | JSON claim |
 | `POST /v1/runtime/environments/{environment}/release` | JSON `RuntimeReleaseRequest` (`plan_id`, `generation`, `step_id`, optional `restore`). Renews the claim. | JSON `RuntimeRelease` (`manifest`, `signature`, `request`, `entries`) for a built-in runtime ([below](#release-package)); `412` naming why the step has none |
 | `POST /v1/runtime/environments/{environment}/host-records` | JSON `RuntimeHostRecordsReport` (`records`: the host applier's applied-state records for the environment) | JSON `RuntimeHostRecordsResponse` (`stored`: products whose record was new) ([below](#host-records)) |
@@ -118,8 +119,8 @@ send `x-tenkai-runtime-version`, which the
 
 Work pull does not accept supported versions and does not negotiate. The
 capabilities are `workload_identity`, `peer_grants`, `issuer_rotation`,
-`issuer_take_up`, `issuer_removal`, and `instance_health`, named comma-separated in `x-tenkai-runtime-capabilities`
-([below](#identity-issuer), [instance health](#instance-health)). Completion covers the claimed plan in one request, not one proto
+`issuer_take_up`, `issuer_removal`, `instance_health`, and `os_image`, named comma-separated in `x-tenkai-runtime-capabilities`
+([below](#identity-issuer), [instance health](#instance-health), [OS image reboots](#os-image-reboots)). Completion covers the claimed plan in one request, not one proto
 `CompleteStep` per step. Inventory is an admitted facts map, not a proto
 `Observation`.
 
@@ -390,6 +391,31 @@ artifact digest still matches the deployed release. A report older than
 (`repairing`, `warning`, `failing`) of a fresh report. Reports of another
 environment, or two of one instance, refuse the report (`400`). An
 older server answers `404`; the runtime logs it and continues with apply-time health.
+
+### OS image reboots
+
+A plan that updates the host OS image runs `stage`, `reboot`, `verify` and
+`confirm` ([ADR 0051](decisions/0051-host-os-image-updates.md)). Only a
+runtime that names `os_image` in `x-tenkai-runtime-capabilities` is handed
+it; a built-in runtime with a host applier names it. A runtime without it
+sees the plan blocked, with a detail naming the capability, and nothing runs.
+
+Before it starts `reboot`, the runtime posts a `RuntimeProgressReport`: the
+reboot step as `awaiting_boot` and the succeeded receipts of every step
+before it, in plan order. The server checks that the step is a host reboot
+followed by a verify of the same product and that the receipts match the
+plan, then keeps the report on the claim with the runner's registry id and
+the time it first recorded that step (`recorded_at`, milliseconds). A repeat
+of the same step keeps the first time. Without a `204` the runtime does not
+reboot.
+
+After the boot, a fresh runtime instance of the same runner claims the plan
+again once the old lease lapses, and receives the record as the claim's
+`progress_json`. It skips the recorded steps, runs `verify`, which settles
+the reboot's receipt, then `confirm`. While the host applier still reports
+the boot awaited, a failed reboot or verify leaves the plan unfinished
+rather than failed. A claim by another runner is answered with idle work, so
+only the host that rebooted verifies it.
 
 ## Typed proto contract
 

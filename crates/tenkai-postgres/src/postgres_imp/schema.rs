@@ -116,6 +116,8 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS runtime_claims_environment
             ON runtime_claims(environment_id, expires_at);
+        ALTER TABLE runtime_claims
+            ADD COLUMN IF NOT EXISTS progress_json TEXT;
         CREATE TABLE IF NOT EXISTS runtime_enrollments (
             token_digest TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
             expires_at BIGINT NOT NULL, created_by TEXT NOT NULL,

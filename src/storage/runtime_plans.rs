@@ -57,6 +57,7 @@ impl SqliteStore {
                     generation,
                     expires_at: stored_expiry,
                     completion_json: completion,
+                    progress_json: None,
                 }));
             }
             Some((_, _, _, _, Some(_))) => return Ok(None),
@@ -75,6 +76,7 @@ impl SqliteStore {
                     generation,
                     expires_at,
                     completion_json: None,
+                    progress_json: None,
                 }));
             }
             Some((_, _, _, stored_expiry, _)) if stored_expiry > now => return Ok(None),
@@ -96,6 +98,7 @@ impl SqliteStore {
             generation,
             expires_at,
             completion_json: None,
+            progress_json: None,
         }))
     }
 
@@ -135,6 +138,7 @@ impl SqliteStore {
                     generation: row.get(3)?,
                     expires_at: row.get(4)?,
                     completion_json: row.get(5)?,
+                    progress_json: None,
                 })
             },
         )?;

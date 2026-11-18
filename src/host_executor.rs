@@ -316,6 +316,19 @@ impl HostExecutor {
         Ok(record)
     }
 
+    /// The `awaiting_boot` intent of the host-wide OS image record, when a
+    /// `reboot` started and no `verify` settled it yet (ADR 0051 §2). The
+    /// runtime only uses it to tell whether to wait; the applier judges.
+    pub fn awaiting_boot(&self) -> Result<Option<crate::host_apply::os_image::AwaitingBoot>> {
+        let path = crate::host_apply::os_image::os_image_record_path(&self.state_dir);
+        let Some(bytes) = read_record(&path)? else {
+            return Ok(None);
+        };
+        let record: AppliedStateRecord = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing the OS image record {}", path.display()))?;
+        Ok(record.awaiting_boot)
+    }
+
     /// Every applied-state record the applier keeps for `environment`.
     /// Planning reads them to remove host products the environment no
     /// longer subscribes to. A record that does not parse or is not where

@@ -61,7 +61,7 @@ use super::runtime::{
     list_runtime_runners, revoke_runtime_credential, revoke_runtime_credential_legacy,
     runtime_certificate, runtime_certificates, runtime_complete, runtime_enroll, runtime_health,
     runtime_heartbeat, runtime_host_records, runtime_inventory, runtime_issuer_candidate,
-    runtime_release, runtime_self_release, runtime_work,
+    runtime_progress, runtime_release, runtime_self_release, runtime_work,
 };
 
 pub(super) struct AppState {
@@ -521,6 +521,10 @@ pub fn router(
         .route(
             "/v1/runtime/environments/{environment}/heartbeat",
             post(runtime_heartbeat),
+        )
+        .route(
+            "/v1/runtime/environments/{environment}/progress",
+            post(runtime_progress),
         )
         .route(
             "/v1/runtime/environments/{environment}/inventory",

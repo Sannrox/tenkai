@@ -244,6 +244,21 @@ struct Takeover<'a> {
 
 /// Evidence of each fenced takeover, written in the takeover's transaction.
 /// Additive: older binaries ignore the table.
+/// Add `runtime_claims.progress_json` (ADR 0051 §3) to a store made before
+/// it. Nullable, so a rolled-back binary at the same schema version ignores it.
+pub(super) fn ensure_runtime_progress_column(connection: &Connection) -> Result<()> {
+    let has_column = connection
+        .prepare("SELECT 1 FROM pragma_table_info('runtime_claims') WHERE name='progress_json'")?
+        .exists([])?;
+    if !has_column {
+        connection.execute(
+            "ALTER TABLE runtime_claims ADD COLUMN progress_json TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn ensure_lease_takeover_table(connection: &Connection) -> Result<()> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS lease_takeovers (

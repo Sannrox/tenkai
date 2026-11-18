@@ -69,6 +69,7 @@ impl Inner {
                             generation: generation as u64,
                             expires_at: stored_expiry,
                             completion_json: completion,
+                            progress_json: None,
                         }));
                     }
                     if completion.is_some() {
@@ -87,6 +88,7 @@ impl Inner {
                             generation: generation as u64,
                             expires_at,
                             completion_json: None,
+                            progress_json: None,
                         }));
                     }
                     if stored_expiry > now {
@@ -112,7 +114,52 @@ impl Inner {
                 generation,
                 expires_at,
                 completion_json: None,
+                progress_json: None,
             }))
+        })
+    }
+
+    pub fn record_runtime_progress(
+        &self,
+        schema: &str,
+        plan_id: &str,
+        owner: &str,
+        generation: u64,
+        progress_json: &str,
+    ) -> Result<bool> {
+        let plan_id = plan_id.to_owned();
+        let owner = owner.to_owned();
+        let progress_json = progress_json.to_owned();
+        self.with_writer_schema(schema, move |tx| {
+            let generation = generation as i64;
+            let changed = tx
+                .execute(
+                    "UPDATE runtime_claims SET progress_json = $4
+                     WHERE plan_id = $1 AND owner = $2 AND generation = $3
+                       AND expires_at > $5 AND completion_json IS NULL",
+                    &[
+                        &plan_id,
+                        &owner,
+                        &generation,
+                        &progress_json,
+                        &tenkai::now_millis(),
+                    ],
+                )
+                .map_err(pg)?;
+            Ok(changed == 1)
+        })
+    }
+
+    pub fn runtime_progress(&self, schema: &str, plan_id: &str) -> Result<Option<String>> {
+        let plan_id = plan_id.to_owned();
+        self.with_writer_schema(schema, move |tx| {
+            Ok(tx
+                .query_opt(
+                    "SELECT progress_json FROM runtime_claims WHERE plan_id = $1",
+                    &[&plan_id],
+                )
+                .map_err(pg)?
+                .and_then(|row| row.get::<_, Option<String>>(0)))
         })
     }
 
@@ -160,6 +207,7 @@ impl Inner {
                 generation: row.get::<_, i64>(3) as u64,
                 expires_at: row.get(4),
                 completion_json: row.get(5),
+                progress_json: None,
             }))
         })
     }
