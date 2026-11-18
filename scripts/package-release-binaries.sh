@@ -330,14 +330,17 @@ cmd_package_hub() {
   community="${out}/$(packaged_name tenkai-server "$platform")"
   [[ -f "$src" ]] || fail "missing host binary: ${src}"
   [[ -s "$src" ]] || fail "empty host binary: ${src}"
-  if [[ -e "$community" ]] && cmp -s "$src" "$community"; then
-    fail "hub tenkai-server matches community asset; rebuild with --features postgres,ui after packaging community hosts"
-  fi
   cp "$src" "$dest"
   chmod 0755 "$dest"
   if $do_strip; then
     command -v strip >/dev/null 2>&1 || fail "strip is required with --strip"
     strip "$dest"
+  fi
+  # Compare the finished assets: the community asset may already be stripped,
+  # so comparing it with the unstripped source would never match.
+  if [[ -e "$community" ]] && cmp -s "$dest" "$community"; then
+    rm -f "$dest"
+    fail "hub tenkai-server matches community asset; rebuild with --features postgres,ui after packaging community hosts"
   fi
 }
 
@@ -632,6 +635,21 @@ cmd_self_test() {
 
   expect_fail "hub tenkai-server matches community asset" \
     bash "$0" package-hub --out "$out" --bin-dir "$bin" --platform "$platform"
+  [[ ! -e "${out}/$(packaged_hub_name "$platform")" ]] || fail "self-test kept a refused hub asset"
+  # The release strips both assets; the guard must still see the duplicate.
+  # Needs an unstripped binary, so it runs where a C compiler is present.
+  if command -v strip >/dev/null 2>&1 && command -v cc >/dev/null 2>&1; then
+    local stripped="${tmp}/stripped" stripped_bin="${tmp}/stripped-bin"
+    mkdir -p "$stripped_bin"
+    printf 'int main(void) { return 0; }\n' >"${tmp}/host.c"
+    cc -g -o "${tmp}/host" "${tmp}/host.c"
+    for host in "${HOSTS[@]}" "${LINUX_ONLY_HOSTS[@]}"; do
+      cp "${tmp}/host" "${stripped_bin}/${host}"
+    done
+    bash "$0" package --out "$stripped" --bin-dir "$stripped_bin" --platform "$platform" --strip
+    expect_fail "hub tenkai-server matches community asset" \
+      bash "$0" package-hub --out "$stripped" --bin-dir "$stripped_bin" --platform "$platform" --strip
+  fi
   printf 'hub-postgres-ui\n' >"${bin}/tenkai-server"
   chmod 0755 "${bin}/tenkai-server"
   bash "$0" package-hub --out "$out" --bin-dir "$bin" --platform "$platform"

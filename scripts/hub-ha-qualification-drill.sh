@@ -33,7 +33,9 @@ fi
 
 out="${TENKAI_HA_DRILL_OUT:-}"
 if [[ -z "$out" ]]; then
-  out="$(mktemp "${TMPDIR:-/tmp}/tenkai-hub-ha-XXXXXX.json")"
+  # BSD mktemp randomizes only trailing X's, so the suffix lives on a file
+  # inside a unique directory.
+  out="$(mktemp -d "${TMPDIR:-/tmp}/tenkai-hub-ha.XXXXXX")/evidence.json"
   export TENKAI_HA_DRILL_OUT="$out"
 fi
 

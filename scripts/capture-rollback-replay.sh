@@ -6,7 +6,9 @@ TENKAI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 export TENKAI_MANAGEMENT_TOKEN="${TENKAI_MANAGEMENT_TOKEN:-tenkai-local-management}"
 SEKAI_DIR="${SEKAI_CHISEI_DIR:-$(cd "$TENKAI_DIR/../sekai-chisei" && pwd)}"
 OUTPUT_DIR="${REPLAY_OUTPUT_DIR:-$TENKAI_DIR/artifacts/replay}"
-GRPC_PORT="${REPLAY_GRPC_PORT:-50061}"
+# A free ephemeral port by default, so readiness cannot reach a leftover
+# server from an earlier run.
+GRPC_PORT="${REPLAY_GRPC_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tenkai-replay.XXXXXX")"
 TRANSCRIPT="$RUN_DIR/terminal.log"
 SERVER_LOG="$RUN_DIR/sekai-chisei.log"
@@ -75,6 +77,10 @@ export TENKAI_SEKAI_URL="http://127.0.0.1:$GRPC_PORT"
 export TENKAI_STATE_DIR="$RUN_DIR/tenkai-state"
 export CHISEI_GRPC_URL="$TENKAI_SEKAI_URL"
 
+if (exec 3<>"/dev/tcp/127.0.0.1/$GRPC_PORT") 2>/dev/null; then
+  printf 'port %s is already in use; stop that server or set REPLAY_GRPC_PORT\n' "$GRPC_PORT" >&2
+  exit 1
+fi
 "$SEKAI_BIN" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
@@ -93,6 +99,8 @@ if ! grep -q 'registered schema types\|schema already registered' "$TRANSCRIPT";
   printf 'sekai-chisei did not become ready; see %s\n' "$SERVER_LOG" >&2
   exit 1
 fi
+kill -0 "$SERVER_PID" 2>/dev/null \
+  || { printf 'sekai-chisei exited; readiness came from another server\n' >&2; exit 1; }
 
 HEALTHY="$TENKAI_DIR/examples/replay-incident/healthy/tenkai.toml"
 UNHEALTHY="$TENKAI_DIR/examples/replay-incident/unhealthy/tenkai.toml"
@@ -116,9 +124,15 @@ record_capture INCIDENT_PLAN_OUTPUT "tenkaictl plan --env local" \
 INCIDENT_PLAN_ID="$(printf '%s\n' "$INCIDENT_PLAN_OUTPUT" | sed -n 's/^plan id: //p' | tail -n 1)"
 [[ -n "$INCIDENT_PLAN_ID" ]] || { printf 'incident plan id was not reported\n' >&2; exit 1; }
 
-if record "tenkaictl apply incident (expected rollback)" \
+# The apply must fail and report the restore; any other failure is not the
+# incident this replay records.
+if record_capture INCIDENT_APPLY_OUTPUT "tenkaictl apply incident (expected rollback)" \
   "$TENKAICTL" apply "$INCIDENT_PLAN_ID"; then
   printf 'expected unhealthy release to trigger rollback\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'restored 0.1.0' <<<"$INCIDENT_APPLY_OUTPUT"; then
+  printf 'incident apply failed without restoring 0.1.0\n' >&2
   exit 1
 fi
 record "tenkaictl status --env local" "$TENKAICTL" status --env local
