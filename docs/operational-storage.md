@@ -262,7 +262,11 @@ cutover is operational rather than a data reinterpretation:
 
 Do not run the embedded CLI and server as concurrent mutation controllers for
 the same environments. SQLite prevents database corruption, but it cannot make
-two hosts a highly available control plane. Development-only unsigned release
+two hosts a highly available control plane. A read-only command next to a
+running server is fine: each store transaction takes the write lock when it
+begins and waits up to five seconds for the other process, so occasional
+writes from both serialize instead of failing with `database is locked`.
+Development-only unsigned release
 permission is a per-publish CLI choice and is never enabled implicitly by
 server startup.
 

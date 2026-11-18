@@ -199,14 +199,10 @@ impl SqliteStore {
             .map(|object| self.get_object(&object.id))
             .collect::<AnyResult<Vec<_>>>()?;
         let mut connection = self.connection()?;
-        // Immediate under a lease, like `guarded_put`: the lease is read before
-        // the objects are written, so a concurrent writer waits on the busy
+        // Immediate (the store's default): the lease is read before the
+        // objects are written, so a concurrent writer waits on the busy
         // timeout instead of failing the lock upgrade.
-        let tx = if lease.is_some() {
-            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?
-        } else {
-            connection.transaction()?
-        };
+        let tx = connection.transaction()?;
         if let Some((namespace, key, token)) = lease {
             require_active_lease_in(&tx, namespace, key, token)?;
         }
