@@ -475,10 +475,10 @@ fn plan_pins_wave(plan: &Plan, record: &WaveRecord) -> Result<()> {
         .inputs
         .iter()
         .find(|input| input.product == record.product);
+    // A plan without a pin for the wave product is refused even when it has
+    // steps for that product, such as removals of a held target (#1296):
+    // only a matching pin scopes a plan to the wave.
     let Some(input) = input else {
-        if plan.steps.iter().any(|step| step.product == record.product) {
-            return Ok(());
-        }
         bail!(
             "plan {} does not pin product {} required by wave {}",
             plan.id,
@@ -1515,4 +1515,72 @@ pub fn format_wave(record: &WaveRecord) -> String {
             .into(),
     );
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn record() -> WaveRecord {
+        serde_json::from_value(json!({
+            "format_version": 1, "name": "w", "id": "wave-1", "identity_digest": "d",
+            "product": "web", "version": "1.0.0", "channel": "stable",
+            "release_id": "r1", "release_digest": "rd", "artifact_digest": "ad",
+            "fail_policy": "stop_on_failure", "status": "running", "environments": [],
+            "current_order": 0, "operator_decision": null, "created_at": 0, "updated_at": 0,
+        }))
+        .unwrap()
+    }
+
+    fn input(product: &str, version: &str) -> serde_json::Value {
+        json!({
+            "product": product, "channel": "stable", "channel_id": "c",
+            "desired_version": version, "release_id": "r1", "release_digest": "rd",
+            "artifact_digest": "ad", "deployed_version": null,
+        })
+    }
+
+    fn step(product: &str) -> serde_json::Value {
+        json!({
+            "id": format!("s-{product}"), "order": 0, "product": product,
+            "action": "remove", "from": "1.0.0", "to": "", "release_id": "r1",
+            "release_digest": "rd", "artifact_digest": "ad", "workdir": "", "restore": null,
+        })
+    }
+
+    fn plan(inputs: Vec<serde_json::Value>, steps: Vec<serde_json::Value>) -> Plan {
+        serde_json::from_value(json!({
+            "format_version": 1, "id": "plan-1", "content_id": "c", "environment": "prod",
+            "created_at": 0, "inputs": inputs, "steps": steps, "state": "computed",
+            "gates_skipped": null, "status_detail": "",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_plan_is_refused_unless_it_pins_the_wave_release_and_only_its_product() {
+        let refused = [
+            (plan(vec![], vec![step("web")]), "does not pin product web"),
+            (plan(vec![], vec![step("db")]), "does not pin product web"),
+            (
+                plan(vec![input("web", "2.0.0")], vec![step("web")]),
+                "does not pin wave w",
+            ),
+            (
+                plan(vec![input("web", "1.0.0")], vec![step("web"), step("db")]),
+                "also mutates product db",
+            ),
+        ];
+        for (plan, refusal) in refused {
+            let error = plan_pins_wave(&plan, &record()).unwrap_err().to_string();
+            assert!(error.contains(refusal), "{error}");
+        }
+        plan_pins_wave(
+            &plan(vec![input("web", "1.0.0")], vec![step("web")]),
+            &record(),
+        )
+        .unwrap();
+    }
 }
