@@ -6,7 +6,7 @@ use crate::client::Ctx;
 use crate::ontology::{require_package_migration_schema, validate_identifier};
 
 use super::approval::require_approval;
-use super::compensate::{compensate_accepted, require_rollback_target};
+use super::compensate::{Compensation, compensate_accepted, require_rollback_target};
 use super::leases::{
     acquire_environment_lock, acquire_execution_lease, release_environment_lock,
     release_execution_lease,
@@ -71,7 +71,11 @@ async fn rollback_locked(
         release_environment_lock(ctx, &record).await?;
         return Err(error);
     }
-    record.fence_generation += 1;
+    // A rollback resumed after its plan approval was filed already took its
+    // generation on the first run.
+    if record.pending_rollback_plan_id.is_none() {
+        record.fence_generation += 1;
+    }
     for receipt in record.receipts.iter().rev() {
         if receipt.class == CheckpointClass::Irreversible && receipt.result == "accepted" {
             record.status = MigrationStatus::RecoveryRequired;
@@ -99,11 +103,22 @@ async fn rollback_locked(
             );
         }
     }
-    if let Err(error) = compensate_accepted(ctx, &mut record, authorization, exec_lease).await {
-        record.status = MigrationStatus::RecoveryRequired;
-        persist(ctx, &record).await?;
-        release_environment_lock(ctx, &record).await?;
-        return Err(error);
+    match compensate_accepted(ctx, &mut record, authorization, exec_lease).await {
+        Ok(Compensation::Done) => {}
+        // Like a forward checkpoint awaiting its plan approval: the record
+        // keeps its status and the environment lock, names the pending
+        // rollback plan, and the next rollback run continues (#1309).
+        Ok(Compensation::AwaitingPlanApproval { plan_id }) => {
+            record.pending_rollback_plan_id = Some(plan_id);
+            persist(ctx, &record).await?;
+            return Ok(record);
+        }
+        Err(error) => {
+            record.status = MigrationStatus::RecoveryRequired;
+            persist(ctx, &record).await?;
+            release_environment_lock(ctx, &record).await?;
+            return Err(error);
+        }
     }
     for receipt in &mut record.receipts {
         if receipt.result == "accepted" {

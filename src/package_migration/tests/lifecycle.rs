@@ -177,3 +177,110 @@ async fn approval_is_fenced_to_the_execution_lease() {
     assert!(!approved.approval_digest.is_empty());
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A signed migration approval for `record`, with the trust roots that admit
+/// it, both written under `root`.
+fn signed_migration_approval(
+    root: &std::path::Path,
+    record: &MigrationRecord,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    use base64::Engine as _;
+    use ed25519_dalek::Signer as _;
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let public = key.verifying_key();
+    let key_id = crate::signature_verification::key_id(&public.to_bytes());
+    let statement = MigrationApprovalStatement {
+        identity_digest: record.identity_digest.clone(),
+        environment: record.environment.clone(),
+        purpose: super::super::types::APPROVAL_PURPOSE.into(),
+        issued_at: 1,
+        expires_at: i64::MAX / 4,
+    };
+    let signature = base64::engine::general_purpose::STANDARD.encode(
+        key.sign(&crate::plan_approval::SignedApproval::canonical_bytes(&statement).unwrap())
+            .to_bytes(),
+    );
+    let dir = root.join("approvals");
+    std::fs::create_dir_all(&dir).unwrap();
+    let approval = dir.join("migration.json");
+    std::fs::write(
+        &approval,
+        serde_json::to_vec(&MigrationApprovalEnvelope {
+            schema: super::super::types::APPROVAL_SCHEMA.into(),
+            key_id: key_id.clone(),
+            statement,
+            signature,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let trust = root.join("migration-trust.toml");
+    std::fs::write(
+        &trust,
+        format!(
+            "version = 1\n[[signers]]\nkey_id = \"{key_id}\"\nidentity = \"approver\"\npublic_key = \"{}\"\n",
+            base64::engine::general_purpose::STANDARD.encode(public.to_bytes())
+        ),
+    )
+    .unwrap();
+    (approval, trust)
+}
+
+// #1309: a signed rollback whose source-restore plan has no approval yet is
+// waiting, not failed: the record keeps its status, names the pending plan,
+// refuses forward execution, and a second run takes no new generation.
+#[tokio::test]
+async fn signed_rollback_awaiting_plan_approval_stays_resumable() {
+    let root = temp_root("rollback-await");
+    let mut ctx = crate::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
+    crate::ontology::register(&mut ctx).await.unwrap();
+    crate::plan::env_add(&mut ctx, "local", "fixture")
+        .await
+        .unwrap();
+    let declaration = publish_pins(&mut ctx, &root).await;
+    deploy_source(&mut ctx).await;
+    let local = MigrationAuthorization::LocalDevelopment {
+        reason: "rollback await",
+    };
+    create(&mut ctx, "cutover", "local", declaration, None)
+        .await
+        .unwrap();
+    approve(&mut ctx, "cutover", local).await.unwrap();
+    execute(&mut ctx, "cutover", local, None).await.unwrap();
+    let done = execute(&mut ctx, "cutover", local, None).await.unwrap();
+    assert_eq!(done.status, MigrationStatus::Succeeded);
+
+    // The same executed migration, as if it had been approved by signature.
+    let (approval, trust_roots) = signed_migration_approval(&root, &done);
+    let signed = MigrationAuthorization::Signed {
+        approval: &approval,
+        trust_roots: &trust_roots,
+    };
+    let mut record = load(&mut ctx, "cutover").await.unwrap();
+    record.approval_digest = super::super::approval::approval_digest(&record, signed).unwrap();
+    super::super::persist::persist(&mut ctx, &record)
+        .await
+        .unwrap();
+
+    let waiting = rollback(&mut ctx, "cutover", signed, None).await.unwrap();
+    assert_eq!(waiting.status, MigrationStatus::Succeeded);
+    let plan_id = waiting.pending_rollback_plan_id.clone().unwrap();
+    assert_eq!(load(&mut ctx, "cutover").await.unwrap(), waiting);
+
+    let err = resume(&mut ctx, "cutover", signed, None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("rolling back") && err.contains(&plan_id),
+        "{err}"
+    );
+
+    let again = rollback(&mut ctx, "cutover", signed, None).await.unwrap();
+    assert_eq!(
+        again.pending_rollback_plan_id.as_deref(),
+        Some(plan_id.as_str())
+    );
+    assert_eq!(again.fence_generation, waiting.fence_generation);
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -139,6 +139,12 @@ async fn step_locked(
     resume: bool,
     exec_lease: &str,
 ) -> Result<MigrationRecord> {
+    if let Some(plan_id) = &record.pending_rollback_plan_id {
+        bail!(
+            "package migration {} is rolling back (plan {plan_id} awaits approval); continue with rollback",
+            record.name
+        );
+    }
     match record.status {
         MigrationStatus::Admitted if !resume => {
             record.fence_generation += 1;
