@@ -196,7 +196,7 @@ pub(crate) async fn execute_bridged_plan_under(
         }),
         BridgeObservation::Completion(completion) => {
             if !completion.succeeded {
-                complete_under_optional_lease(ctx, &plan.environment, &completion, lease).await?;
+                complete_under_optional_lease(ctx, plan, &completion, lease).await?;
                 let (rollback_triggered, recovery_required, detail) =
                     rollback_after_health_failure(ctx, adapter, plan, lease).await?;
                 return Ok(BridgeReport {
@@ -208,7 +208,7 @@ pub(crate) async fn execute_bridged_plan_under(
                     correlation,
                 });
             }
-            complete_under_optional_lease(ctx, &plan.environment, &completion, lease).await?;
+            complete_under_optional_lease(ctx, plan, &completion, lease).await?;
             Ok(BridgeReport {
                 state: plan::load(ctx, &plan.id).await?.state,
                 receipts: completion.receipts.clone(),
@@ -387,10 +387,19 @@ async fn record_recovery_required(
 /// completion. The completion is validated either way.
 async fn complete_under_optional_lease(
     ctx: &mut Ctx,
-    environment: &str,
+    delegated: &Plan,
     completion: &RuntimeCompletion,
     lease: Option<&EnvironmentLease>,
 ) -> Result<()> {
+    // An adapter answers for the plan it was handed; a completion naming any
+    // other plan is not evidence about this delivery (#1328).
+    anyhow::ensure!(
+        completion.plan_id == delegated.id,
+        "adapter completion names plan {}, not the delegated plan {}",
+        completion.plan_id,
+        delegated.id
+    );
+    let environment = delegated.environment.as_str();
     let Some(lease) = lease else {
         return crate::delivery_manifest::admit_runtime_completion(ctx, environment, completion)
             .await;
@@ -404,6 +413,12 @@ async fn complete_under_optional_lease(
         observations: &[],
     };
     let mut stored = plan::load(ctx, &completion.plan_id).await?;
+    // Validation refused a conflicting terminal state, so a terminal plan
+    // here is a replay of the recorded outcome: environment state was
+    // already written for it and must not be rewritten (#1328).
+    if matches!(stored.state, PlanState::Succeeded | PlanState::Failed) {
+        return Ok(());
+    }
     if stored.state == PlanState::Computed {
         plan::transition(
             ctx,
@@ -433,15 +448,13 @@ async fn complete_under_optional_lease(
     } else {
         PlanState::Failed
     };
-    if !matches!(stored.state, PlanState::Succeeded | PlanState::Failed) {
-        plan::transition(
-            ctx,
-            &mut stored,
-            plan::Transition::new(terminal, completion.detail.clone()),
-            guarded(),
-        )
-        .await?;
-    }
+    plan::transition(
+        ctx,
+        &mut stored,
+        plan::Transition::new(terminal, completion.detail.clone()),
+        guarded(),
+    )
+    .await?;
     if completion.succeeded
         && !stored.steps.is_empty()
         && stored
@@ -964,7 +977,7 @@ exclude_requester = true
         let before = environment::environment(ctx, "prod").await.unwrap();
         let done = completion(&fixture.plan, true);
 
-        complete_under_optional_lease(ctx, "prod", &done, Some(&stale))
+        complete_under_optional_lease(ctx, &fixture.plan, &done, Some(&stale))
             .await
             .unwrap_err();
         let stored = plan::load(ctx, &fixture.plan.id).await.unwrap();
@@ -972,7 +985,7 @@ exclude_requester = true
         let after = environment::environment(ctx, "prod").await.unwrap();
         assert_eq!(after.properties, before.properties);
 
-        complete_under_optional_lease(ctx, "prod", &done, Some(&current))
+        complete_under_optional_lease(ctx, &fixture.plan, &done, Some(&current))
             .await
             .unwrap();
         let stored = plan::load(ctx, &fixture.plan.id).await.unwrap();
@@ -990,12 +1003,50 @@ exclude_requester = true
             .unwrap();
         let mut partial = completion(&fixture.plan, true);
         partial.receipts.clear();
-        let error = complete_under_optional_lease(ctx, "prod", &partial, Some(&lease))
+        let error = complete_under_optional_lease(ctx, &fixture.plan, &partial, Some(&lease))
             .await
             .unwrap_err();
         assert!(error.to_string().contains("every plan step"), "{error:#}");
         let stored = plan::load(ctx, &fixture.plan.id).await.unwrap();
         assert_eq!(stored.state, fixture.plan.state);
+        let _ = std::fs::remove_dir_all(fixture.root);
+    }
+
+    // #1328: under a lease, a completion that contradicts the recorded
+    // terminal state is refused, a replay rewrites nothing, and a completion
+    // for another plan is not accepted for the delegated one.
+    #[tokio::test]
+    async fn completion_under_a_lease_never_overrides_a_terminal_plan() {
+        let mut fixture = signed_upgrade("lease-terminal").await;
+        let ctx = &mut fixture.ctx;
+        let lease = crate::apply::claim_environment(ctx, "prod", "apply")
+            .await
+            .unwrap();
+        let failed = completion(&fixture.plan, false);
+        complete_under_optional_lease(ctx, &fixture.plan, &failed, Some(&lease))
+            .await
+            .unwrap();
+        let before = environment::environment(ctx, "prod").await.unwrap();
+
+        let late_success = completion(&fixture.plan, true);
+        let error = complete_under_optional_lease(ctx, &fixture.plan, &late_success, Some(&lease))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("conflicts"), "{error:#}");
+        complete_under_optional_lease(ctx, &fixture.plan, &failed, Some(&lease))
+            .await
+            .unwrap();
+        let after = environment::environment(ctx, "prod").await.unwrap();
+        assert_eq!(after.properties, before.properties);
+        let stored = plan::load(ctx, &fixture.plan.id).await.unwrap();
+        assert_eq!(stored.state, PlanState::Failed);
+
+        let mut foreign = late_success.clone();
+        foreign.plan_id = "plan-other".into();
+        let error = complete_under_optional_lease(ctx, &fixture.plan, &foreign, Some(&lease))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("delegated plan"), "{error:#}");
         let _ = std::fs::remove_dir_all(fixture.root);
     }
 
