@@ -206,7 +206,16 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
             .output()
             .with_context(|| format!("starting helm status via {}", self.helm_binary.display()))?;
         if !output.status.success() {
-            return Ok(SoftwareObserveStatus::Absent);
+            // Only a definite "release: not found" is Absent. An unreachable
+            // API server, expired credentials, or an RBAC denial says nothing
+            // about the release, so convergence must not reinstall on it.
+            return Ok(
+                if String::from_utf8_lossy(&output.stderr).contains("release: not found") {
+                    SoftwareObserveStatus::Absent
+                } else {
+                    SoftwareObserveStatus::Unknown
+                },
+            );
         }
         let values = self
             .helm(request)
@@ -422,6 +431,35 @@ mod tests {
         assert!(err.contains("helm"), "{err}");
         assert!(!err.contains("super-secret-token"), "{err}");
         assert!(err.contains("[redacted]"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Regression for #1308: only a definite not-found is Absent.
+    #[test]
+    fn helm_observe_failure_is_absent_only_when_release_not_found() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("tenkai-helm-obs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let request = sample_request(&root.join("chart"));
+        for (stderr, expected) in [
+            (
+                "Error: Kubernetes cluster unreachable: connection refused",
+                SoftwareObserveStatus::Unknown,
+            ),
+            (
+                "Error: secrets is forbidden: User cannot list resource",
+                SoftwareObserveStatus::Unknown,
+            ),
+            ("Error: release: not found", SoftwareObserveStatus::Absent),
+        ] {
+            let script = root.join(format!("fake-helm-{}", stderr.len()));
+            std::fs::write(&script, format!("#!/bin/sh\necho '{stderr}' >&2\nexit 1\n")).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let executor = HelmSoftwareExecutor {
+                helm_binary: script,
+            };
+            assert_eq!(executor.observe(&request).unwrap(), expected, "{stderr}");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

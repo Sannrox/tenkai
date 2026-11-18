@@ -320,7 +320,15 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
                     format!("starting kubectl get via {}", self.kubectl_binary.display())
                 })?;
             if !output.status.success() {
-                return Ok(SoftwareObserveStatus::Absent);
+                // Only a definite NotFound is Absent; an unreachable API
+                // server or a denied request must not read as "redeploy".
+                return Ok(
+                    if String::from_utf8_lossy(&output.stderr).contains("(NotFound)") {
+                        SoftwareObserveStatus::Absent
+                    } else {
+                        SoftwareObserveStatus::Unknown
+                    },
+                );
             }
         }
         if kubernetes_labels_mismatch(self, request) {
@@ -762,6 +770,40 @@ mod tests {
             executor.observe(&request).unwrap(),
             SoftwareObserveStatus::Unknown
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Regression for #1308: only a definite NotFound is Absent.
+    #[test]
+    fn kubectl_observe_failure_is_absent_only_when_not_found() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("tenkai-k8s-obs-{}", uuid::Uuid::new_v4()));
+        let manifests = root.join(KUBERNETES_MANIFESTS_DIR);
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::write(manifests.join("cm.yaml"), "kind: ConfigMap\n").unwrap();
+        let request = sample_request(&root);
+        for (stderr, expected) in [
+            (
+                "The connection to the server was refused",
+                SoftwareObserveStatus::Unknown,
+            ),
+            (
+                "Error from server (Forbidden): configmaps is forbidden",
+                SoftwareObserveStatus::Unknown,
+            ),
+            (
+                "Error from server (NotFound): configmaps \"x\" not found",
+                SoftwareObserveStatus::Absent,
+            ),
+        ] {
+            let script = root.join(format!("fake-kubectl-{}", stderr.len()));
+            std::fs::write(&script, format!("#!/bin/sh\necho '{stderr}' >&2\nexit 1\n")).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let executor = KubernetesSoftwareExecutor {
+                kubectl_binary: script,
+            };
+            assert_eq!(executor.observe(&request).unwrap(), expected, "{stderr}");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
