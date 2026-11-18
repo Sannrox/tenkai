@@ -93,6 +93,9 @@ pub struct Evidence<'a> {
     pub trust_roots: &'a Path,
 }
 
+/// Far above any real train profile (a list of component pins).
+const MAX_TRAIN_PROFILE_BYTES: u64 = 1 << 20;
+
 /// Verify and store a train profile in the `candidate` channel. Admitting the
 /// same document again is a no-op; a different document under the same name
 /// is refused.
@@ -102,8 +105,11 @@ pub async fn admit(
     evidence: &Evidence<'_>,
 ) -> Result<Train> {
     require_publish(actor)?;
-    let raw = std::fs::read_to_string(evidence.profile)
-        .with_context(|| format!("reading release train {}", evidence.profile.display()))?;
+    let raw = crate::signature_verification::read_bounded_regular_file(
+        evidence.profile,
+        MAX_TRAIN_PROFILE_BYTES,
+        "release train",
+    )?;
     let profile: Profile = serde_json::from_str(&raw).context("parsing the release train")?;
     validate(&profile)?;
     let digest = crate::manifest::digest(&raw);

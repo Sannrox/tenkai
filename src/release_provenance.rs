@@ -4,7 +4,6 @@
 //! are not release signatures, plan approvals, gate decisions, or execution
 //! authorization.
 
-use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{Result, bail};
@@ -114,16 +113,12 @@ fn validate_schema_id(label: &str, value: &str) -> Result<()> {
 
 impl ProvenanceEnvelope {
     pub fn load(path: &Path) -> Result<Self> {
-        let file = std::fs::File::open(path)?;
-        if !file.metadata()?.is_file() {
-            bail!("release provenance envelope must be a regular file");
-        }
-        let mut raw = Vec::new();
-        file.take(MAX_ENVELOPE_BYTES + 1).read_to_end(&mut raw)?;
-        if raw.len() as u64 > MAX_ENVELOPE_BYTES {
-            bail!("release provenance envelope exceeds {MAX_ENVELOPE_BYTES} bytes");
-        }
-        let envelope: Self = serde_json::from_slice(&raw)?;
+        let raw = crate::signature_verification::read_bounded_regular_file(
+            path,
+            MAX_ENVELOPE_BYTES,
+            "release provenance envelope",
+        )?;
+        let envelope: Self = serde_json::from_str(&raw)?;
         envelope.validate_structure()?;
         Ok(envelope)
     }

@@ -63,10 +63,17 @@ pub struct VerificationEvidence {
     pub provenance: Provenance,
 }
 
+/// A signature envelope is one statement and one signature; this is far above
+/// any real one.
+const MAX_SIGNATURE_ENVELOPE_BYTES: u64 = 64 * 1024;
+
 impl SignatureEnvelope {
     pub fn load(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading release signature {}", path.display()))?;
+        let raw = crate::signature_verification::read_bounded_regular_file(
+            path,
+            MAX_SIGNATURE_ENVELOPE_BYTES,
+            "release signature",
+        )?;
         let envelope: Self = serde_json::from_str(&raw)
             .with_context(|| format!("parsing release signature {}", path.display()))?;
         envelope.validate()?;
@@ -334,6 +341,16 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD;
     use ed25519_dalek::Signer as _;
+
+    /// #1322: loading a signature envelope refuses an oversized file.
+    #[test]
+    fn signature_envelope_load_refuses_an_oversized_file() {
+        let path = std::env::temp_dir().join(format!("tenkai-sig-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, vec![b' '; MAX_SIGNATURE_ENVELOPE_BYTES as usize + 1]).unwrap();
+        let err = SignatureEnvelope::load(&path).unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err:#}");
+        let _ = std::fs::remove_file(path);
+    }
 
     fn provenance() -> Provenance {
         Provenance {
