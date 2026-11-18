@@ -31,6 +31,7 @@ fn mock_plan_object(env: &str, created_at: i64) -> Object {
         recalled_recovery_reason: None,
         credential_runway: None,
         artifact_availability: Vec::new(),
+        config_presets: Vec::new(),
         approval_brief: None,
     }
     .to_object()

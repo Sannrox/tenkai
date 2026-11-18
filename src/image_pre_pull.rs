@@ -166,7 +166,7 @@ pub(crate) async fn prepare_waiting_plan(
                 continue;
             }
         };
-        let request = match step_request(&env_obj, plan, step, &manifest.product.version) {
+        let request = match step_request(&env_obj, plan, step, &manifest) {
             Ok(request) => request,
             Err(error) => {
                 images.push(PrePullImage {
@@ -251,19 +251,21 @@ fn step_request(
     env_obj: &Object,
     plan: &Plan,
     step: &plan::Step,
-    version: &str,
+    manifest: &crate::manifest::Manifest,
 ) -> Result<crate::software_executor::SoftwareApplyRequest> {
-    let overlays = crate::environment::product_overlays(env_obj, &step.product)?;
+    let (overlays, selection) =
+        crate::environment::product_config(env_obj, &step.product, manifest.config.as_ref())?;
     let mut request = with_overlays(
         request_from_parts(
             step.product.clone(),
-            version,
+            &manifest.product.version,
             plan.environment.clone(),
             &step.workdir,
             step.release_id.clone(),
         ),
         overlays,
     );
+    request.config_digest = selection;
     request.instance = step.instance.clone();
     request.cluster_config_path =
         crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;

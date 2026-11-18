@@ -455,6 +455,7 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
         recalled_recovery_reason: None,
         credential_runway: None,
         artifact_availability: Vec::new(),
+        config_presets: Vec::new(),
         approval_brief: None,
     }
 }

@@ -442,6 +442,20 @@ pub(crate) enum OverlayCommand {
         product: String,
         key: Option<String>,
     },
+    /// Select a preset the release declares, e.g. `preset prod api medium`;
+    /// overrides apply on top. `--clear` removes the selection.
+    Preset {
+        env: String,
+        product: String,
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        name: Option<String>,
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Propose the overrides that remain against the subscribed channel
+    /// head: keys it no longer declares and keys equal to the preset value
+    /// are dropped. Prints commands; changes nothing.
+    Rebase { env: String, product: String },
 }
 
 #[derive(Subcommand)]

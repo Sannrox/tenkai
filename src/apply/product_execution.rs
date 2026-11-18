@@ -562,7 +562,11 @@ pub(super) async fn removal_request(
     apply_attempt: String,
 ) -> Result<crate::software_executor::SoftwareApplyRequest> {
     let env_obj = crate::environment::environment(ctx, &content.environment).await?;
-    let overlays = crate::environment::product_overlays(&env_obj, &content.product)?;
+    let (overlays, selection) = crate::environment::product_config(
+        &env_obj,
+        &content.product,
+        content.manifest.config.as_ref(),
+    )?;
     let mut request = crate::software_executor::with_overlays(
         crate::software_executor::request_from_parts(
             content.product.clone(),
@@ -577,8 +581,7 @@ pub(super) async fn removal_request(
         overlays,
     );
     request.instance = content.instance.clone();
-    request.config_digest =
-        crate::sealed_secret::config_digest(&request.config_digest, &content.sealed);
+    request.config_digest = crate::sealed_secret::config_digest(&selection, &content.sealed);
     request.artifact_pulls = content.artifact_pulls.clone();
     request.cluster_config_path =
         crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;

@@ -1911,6 +1911,9 @@ pub struct EnvironmentPlanSummary {
     /// Artifact digests checked at planning (#1062); advice, not proof.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_availability: Vec<crate::plan::ArtifactAvailability>,
+    /// Preset sources and conflicts per product (#1095).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_presets: Vec<ConfigPresetView>,
     /// Bounded operator-facing lifecycle detail; never contains executable payloads.
     #[serde(default)]
     pub status_detail: String,
@@ -3438,11 +3441,191 @@ pub fn product_overlays(env_obj: &Object, product: &str) -> Result<BTreeMap<Stri
     parse_overlay_map(env_obj.properties.get(&format!("overlay.{product}")))
 }
 
-fn overlay_digest_for(env_obj: &Object, product: &str) -> String {
+/// The preset one product selects in an environment (#1095), if any.
+pub fn product_preset<'a>(env_obj: &'a Object, product: &str) -> Option<&'a str> {
+    env_obj
+        .properties
+        .get(&format!("preset.{product}"))
+        .map(String::as_str)
+        .filter(|name| !name.is_empty())
+}
+
+/// Digest of what an environment selects for one product: its overrides
+/// and, when one is selected, the preset name. Preset values are fixed by the
+/// release version, so the name is enough. Without a preset this is exactly
+/// [`overlay_digest`], so environments that select none keep their digests.
+pub fn config_selection_digest(
+    preset: Option<&str>,
+    overrides: &BTreeMap<String, String>,
+) -> String {
+    let overrides = overlay_digest(overrides);
+    let Some(preset) = preset else {
+        return overrides;
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"tenkai.preset\0");
+    hasher.update(preset.as_bytes());
+    hasher.update([0]);
+    hasher.update(overrides.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// The config digest one product's selection yields (see
+/// [`config_selection_digest`]); empty when it selects nothing.
+pub(crate) fn overlay_digest_for(env_obj: &Object, product: &str) -> String {
     product_overlays(env_obj, product)
         .ok()
-        .map(|values| overlay_digest(&values))
+        .map(|values| config_selection_digest(product_preset(env_obj, product), &values))
         .unwrap_or_default()
+}
+
+/// Overlay values one product receives from `schema`, the release being
+/// deployed: the selected preset's values, then the environment's overrides
+/// on top. Preset values always come from that release, never from stored
+/// state, so a release that changes a preset changes what is delivered.
+/// Refuses a selected preset the release does not declare.
+pub fn effective_overlays(
+    env_obj: &Object,
+    product: &str,
+    schema: Option<&crate::manifest::ConfigSection>,
+) -> Result<BTreeMap<String, String>> {
+    let overrides = product_overlays(env_obj, product)?;
+    let Some(preset) = product_preset(env_obj, product) else {
+        return Ok(overrides);
+    };
+    let Some(values) = schema.and_then(|schema| schema.presets.get(preset)) else {
+        bail!("preset {preset} selected for {product} is not declared by the release");
+    };
+    let mut effective = values.clone();
+    effective.extend(overrides);
+    Ok(effective)
+}
+
+/// Overlay values and config digest for one product's executor request
+/// against `schema`, the release being run.
+pub(crate) fn product_config(
+    env_obj: &Object,
+    product: &str,
+    schema: Option<&crate::manifest::ConfigSection>,
+) -> Result<(BTreeMap<String, String>, String)> {
+    Ok((
+        effective_overlays(env_obj, product, schema)?,
+        overlay_digest_for(env_obj, product),
+    ))
+}
+
+/// Where one product's config comes from in a plan (#1095): the selected
+/// preset, the keys it supplies, the keys an override sets, and each override
+/// that hides a preset value the candidate release changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConfigPresetView {
+    pub product: String,
+    pub preset: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_preset: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overridden: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
+}
+
+/// Plan lines for preset sources and conflicts, one block per product.
+pub fn render_config_presets(views: &[ConfigPresetView]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for view in views {
+        lines.push(format!("config {}: preset {}", view.product, view.preset));
+        if !view.from_preset.is_empty() {
+            lines.push(format!("  from preset: {}", view.from_preset.join(", ")));
+        }
+        if !view.overridden.is_empty() {
+            lines.push(format!("  overridden: {}", view.overridden.join(", ")));
+        }
+        for conflict in &view.conflicts {
+            lines.push(format!("  conflict: {conflict}"));
+        }
+    }
+    lines
+}
+
+/// Report one product's preset use against `candidate`, comparing preset
+/// values with `installed` (the running release's schema) when there is one.
+/// `None` when the product selects no preset.
+pub fn preset_view(
+    env_obj: &Object,
+    product: &str,
+    installed: Option<&crate::manifest::ConfigSection>,
+    candidate: &crate::manifest::ConfigSection,
+) -> Result<Option<ConfigPresetView>> {
+    let Some(preset) = product_preset(env_obj, product) else {
+        return Ok(None);
+    };
+    let overrides = product_overlays(env_obj, product)?;
+    let values = candidate.presets.get(preset).cloned().unwrap_or_default();
+    let before = installed.and_then(|schema| schema.presets.get(preset));
+    let mut conflicts = Vec::new();
+    for (key, value) in &overrides {
+        let old = before.and_then(|values| values.get(key));
+        let new = values.get(key);
+        if before.is_some() && old != new {
+            conflicts.push(format!(
+                "{key}: override {value} hides preset {preset} change {} -> {}",
+                old.map_or("unset", String::as_str),
+                new.map_or("unset", String::as_str),
+            ));
+        }
+    }
+    Ok(Some(ConfigPresetView {
+        product: product.to_string(),
+        preset: preset.to_string(),
+        from_preset: values
+            .keys()
+            .filter(|key| !overrides.contains_key(*key))
+            .cloned()
+            .collect(),
+        overridden: overrides.keys().cloned().collect(),
+        conflicts,
+    }))
+}
+
+/// What `env overlay rebase` proposes for one product (#1095).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OverlayRebase {
+    /// Overrides that stay.
+    pub kept: BTreeMap<String, String>,
+    /// Overrides to clear, each with the reason.
+    pub dropped: BTreeMap<String, String>,
+    /// The selected preset, when the candidate no longer declares it.
+    pub dropped_preset: Option<String>,
+}
+
+/// The overrides that remain once `candidate` is adopted: keys it no longer
+/// declares and keys whose override equals the candidate's preset value are
+/// dropped, and so is a selected preset the candidate does not declare.
+pub fn rebase_overrides(
+    env_obj: &Object,
+    product: &str,
+    candidate: &crate::manifest::ConfigSection,
+) -> Result<OverlayRebase> {
+    let preset = product_preset(env_obj, product);
+    let values = preset.and_then(|name| candidate.presets.get(name));
+    let mut rebase = OverlayRebase {
+        dropped_preset: preset.filter(|_| values.is_none()).map(str::to_string),
+        ..OverlayRebase::default()
+    };
+    for (key, value) in product_overlays(env_obj, product)? {
+        if !candidate.overlay.contains_key(&key) {
+            rebase
+                .dropped
+                .insert(key, "not declared by the release".into());
+        } else if let Some(name) = preset
+            && values.and_then(|values| values.get(&key)) == Some(&value)
+        {
+            rebase.dropped.insert(key, format!("equals preset {name}"));
+        } else {
+            rebase.kept.insert(key, value);
+        }
+    }
+    Ok(rebase)
 }
 
 fn spec_drift_from_object(env_obj: &Object, key: &str) -> Option<crate::spec_drift::SpecDriftView> {
@@ -3683,21 +3866,77 @@ fn persist_product_overlays(
     product: &str,
     values: &BTreeMap<String, String>,
 ) {
-    let digest = overlay_digest(values);
     if values.is_empty() {
         env_obj.properties.remove(&format!("overlay.{product}"));
-        env_obj
-            .properties
-            .remove(&format!("config_digest.{product}"));
     } else {
         env_obj.properties.insert(
             format!("overlay.{product}"),
             serde_json::to_string(values).expect("overlay map is JSON-serializable"),
         );
+    }
+    let digest = config_selection_digest(product_preset(env_obj, product), values);
+    if digest.is_empty() {
+        env_obj
+            .properties
+            .remove(&format!("config_digest.{product}"));
+    } else {
         env_obj
             .properties
             .insert(format!("config_digest.{product}"), digest);
     }
+}
+
+/// Select a preset for one product, or clear the selection with `None`
+/// (#1095). The subscribed channel head must declare the preset; planning
+/// checks the candidate release again.
+pub async fn set_environment_preset(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    preset: Option<&str>,
+) -> Result<String> {
+    validate_identifier("environment", env)?;
+    validate_identifier("product", product)?;
+    let mut env_obj = environment(ctx, env).await?;
+    let property = format!("preset.{product}");
+    let message = match preset {
+        Some(name) => {
+            validate_identifier("preset", name)?;
+            let schema = subscribed_config_schema(ctx, &env_obj, product).await?;
+            if !schema.is_some_and(|schema| schema.presets.contains_key(name)) {
+                bail!("the release {product} is subscribed to declares no preset {name}");
+            }
+            env_obj.properties.insert(property, name.to_string());
+            format!("set {env} preset {product}={name}")
+        }
+        None => {
+            if env_obj.properties.remove(&property).is_none() {
+                bail!("environment {env} selects no preset for {product}");
+            }
+            format!("cleared {env} preset for {product}")
+        }
+    };
+    let overrides = product_overlays(&env_obj, product)?;
+    persist_product_overlays(&mut env_obj, product, &overrides);
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(message)
+}
+
+/// Propose the overrides for one product against its subscribed channel
+/// head (#1095). Read-only: prints what to clear, changes nothing.
+pub async fn rebase_environment_overlay(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+) -> Result<OverlayRebase> {
+    validate_identifier("environment", env)?;
+    validate_identifier("product", product)?;
+    let env_obj = environment(ctx, env).await?;
+    let Some(schema) = subscribed_config_schema(ctx, &env_obj, product).await? else {
+        bail!("the release {product} is subscribed to declares no [config]");
+    };
+    rebase_overrides(&env_obj, product, &schema)
 }
 
 /// Set a non-secret overlay for one product in an environment.
@@ -3756,6 +3995,22 @@ pub async fn clear_environment_overlay(
             Ok(format!("cleared {env} overlays for {product}"))
         }
     }
+}
+
+/// Selected presets by product (#1095).
+pub async fn list_environment_presets(
+    ctx: &mut Ctx,
+    env: &str,
+) -> Result<BTreeMap<String, String>> {
+    let env_obj = environment(ctx, env).await?;
+    Ok(env_obj
+        .properties
+        .iter()
+        .filter_map(|(key, name)| {
+            let product = key.strip_prefix("preset.")?;
+            (!name.is_empty()).then(|| (product.to_string(), name.clone()))
+        })
+        .collect())
 }
 
 /// List overlays for one product, or every product when `product` is `None`.
@@ -3946,6 +4201,7 @@ fn summarize_environment_plan(plan: Plan, cap_steps: bool) -> Result<Environment
         digest: Some(digest),
         approval_brief: plan.approval_brief,
         artifact_availability: plan.artifact_availability,
+        config_presets: plan.config_presets,
         status_detail,
         steps_truncated: steps.len() < step_count,
         steps,
@@ -3976,6 +4232,108 @@ fn operator_safe_status_detail(plan: &Plan) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    fn preset_schema() -> crate::manifest::ConfigSection {
+        let mut schema = crate::manifest::ConfigSection::default();
+        for key in ["replicas", "region"] {
+            schema.overlay.insert(
+                key.into(),
+                crate::manifest::OverlayKeySchema {
+                    value_type: crate::manifest::OverlayValueType::String,
+                    required: false,
+                    default: None,
+                    values: Vec::new(),
+                },
+            );
+        }
+        schema.presets.insert(
+            "large".into(),
+            BTreeMap::from([
+                ("replicas".into(), "5".into()),
+                ("region".into(), "us".into()),
+            ]),
+        );
+        schema
+    }
+
+    fn env_with(preset: Option<&str>, overrides: &[(&str, &str)]) -> Object {
+        let mut env = Object::default();
+        if let Some(preset) = preset {
+            env.properties.insert("preset.api".into(), preset.into());
+        }
+        let overrides: BTreeMap<String, String> = overrides
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        persist_product_overlays(&mut env, "api", &overrides);
+        env
+    }
+
+    #[test]
+    fn an_override_wins_over_the_selected_preset() {
+        let schema = preset_schema();
+        let env = env_with(Some("large"), &[("replicas", "3")]);
+        let (values, digest) = product_config(&env, "api", Some(&schema)).unwrap();
+        assert_eq!(
+            values,
+            BTreeMap::from([
+                ("replicas".into(), "3".into()),
+                ("region".into(), "us".into()),
+            ])
+        );
+        // Selecting a preset changes the digest, so the instance restarts.
+        let without = env_with(None, &[("replicas", "3")]);
+        let (_, plain) = product_config(&without, "api", Some(&schema)).unwrap();
+        assert_ne!(digest, plain);
+        assert_eq!(
+            env.properties.get("config_digest.api"),
+            Some(&digest),
+            "the stored digest is the one requests carry"
+        );
+        // Without a preset the digest is the overlay digest it always was.
+        assert_eq!(plain, overlay_digest(&without_overrides(&without)));
+        // A release that no longer declares the preset is refused.
+        let mut gone = schema.clone();
+        gone.presets.clear();
+        let error = product_config(&env, "api", Some(&gone)).unwrap_err();
+        assert!(error.to_string().contains("preset large"), "{error}");
+    }
+
+    fn without_overrides(env: &Object) -> BTreeMap<String, String> {
+        product_overlays(env, "api").unwrap()
+    }
+
+    #[test]
+    fn a_preset_change_under_an_override_is_reported_and_rebased() {
+        let installed = preset_schema();
+        let mut candidate = installed.clone();
+        candidate
+            .presets
+            .get_mut("large")
+            .unwrap()
+            .insert("replicas".into(), "3".into());
+        candidate.presets.get_mut("large").unwrap().remove("region");
+        candidate.overlay.remove("region");
+        let env = env_with(Some("large"), &[("replicas", "3"), ("region", "eu")]);
+
+        let view = preset_view(&env, "api", Some(&installed), &candidate)
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.overridden, ["region", "replicas"]);
+        assert_eq!(
+            view.conflicts,
+            [
+                "region: override eu hides preset large change us -> unset",
+                "replicas: override 3 hides preset large change 5 -> 3",
+            ]
+        );
+
+        let rebase = rebase_overrides(&env, "api", &candidate).unwrap();
+        assert!(rebase.kept.is_empty(), "{rebase:?}");
+        assert_eq!(rebase.dropped["region"], "not declared by the release");
+        assert_eq!(rebase.dropped["replicas"], "equals preset large");
+        assert_eq!(rebase.dropped_preset, None);
+    }
     use super::*;
 
     #[test]
@@ -4822,6 +5180,7 @@ mod tests {
             recalled_recovery_reason: None,
             credential_runway: None,
             artifact_availability: Vec::new(),
+            config_presets: Vec::new(),
             approval_brief: None,
         };
         install.bind_content_identity().unwrap();
@@ -5068,6 +5427,7 @@ mod tests {
             recalled_recovery_reason: None,
             credential_runway: None,
             artifact_availability: Vec::new(),
+            config_presets: Vec::new(),
             approval_brief: None,
         };
         install.bind_content_identity().unwrap();
@@ -5201,6 +5561,7 @@ mod tests {
             recalled_recovery_reason: None,
             credential_runway: None,
             artifact_availability: Vec::new(),
+            config_presets: Vec::new(),
             approval_brief: None,
         };
         install.bind_content_identity().unwrap();

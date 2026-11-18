@@ -176,12 +176,19 @@ pub(crate) async fn overlay(ctx: &mut client::Ctx, command: OverlayCommand) -> R
     match command {
         OverlayCommand::List { env, product } => {
             let overlays = plan::list_environment_overlays(ctx, &env, product.as_deref()).await?;
-            if overlays.is_empty() {
+            let presets = plan::list_environment_presets(ctx, &env).await?;
+            let presets: Vec<_> = presets
+                .into_iter()
+                .filter(|(name, _)| product.as_deref().is_none_or(|product| product == name))
+                .collect();
+            if overlays.is_empty() && presets.is_empty() {
                 println!("{env} has no product overlays");
-            } else {
-                for (key, value) in overlays {
-                    println!("{key}={value}");
-                }
+            }
+            for (product, preset) in presets {
+                println!("{product} preset {preset}");
+            }
+            for (key, value) in overlays {
+                println!("{key}={value}");
             }
         }
         OverlayCommand::Set { env, product, spec } => {
@@ -198,6 +205,38 @@ pub(crate) async fn overlay(ctx: &mut client::Ctx, command: OverlayCommand) -> R
                 "{}",
                 plan::clear_environment_overlay(ctx, &env, &product, key.as_deref()).await?
             );
+        }
+        OverlayCommand::Preset {
+            env,
+            product,
+            name,
+            clear: _,
+        } => {
+            println!(
+                "{}",
+                plan::set_environment_preset(ctx, &env, &product, name.as_deref()).await?
+            );
+        }
+        OverlayCommand::Rebase { env, product } => {
+            let rebase = plan::rebase_environment_overlay(ctx, &env, &product).await?;
+            if rebase.dropped.is_empty() && rebase.dropped_preset.is_none() {
+                println!("{env} overlays for {product} need no rebase");
+            }
+            if let Some(preset) = &rebase.dropped_preset {
+                println!("drop preset {preset}: not declared by the release");
+            }
+            for (key, reason) in &rebase.dropped {
+                println!("drop {product}.{key}: {reason}");
+            }
+            for (key, value) in &rebase.kept {
+                println!("keep {product}.{key}={value}");
+            }
+            if rebase.dropped_preset.is_some() {
+                println!("run: tenkaictl env overlay preset {env} {product} --clear");
+            }
+            for key in rebase.dropped.keys() {
+                println!("run: tenkaictl env overlay clear {env} {product} {key}");
+            }
         }
     }
     Ok(())

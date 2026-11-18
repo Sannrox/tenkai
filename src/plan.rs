@@ -28,19 +28,20 @@ pub use release_selection::{
 };
 
 pub use crate::environment::{
-    ENVIRONMENT_FACT_KEYS, EnvironmentInspectReport, EnvironmentListEntry,
+    ConfigPresetView, ENVIRONMENT_FACT_KEYS, EnvironmentInspectReport, EnvironmentListEntry,
     EnvironmentPlanStepSummary, EnvironmentPlanSummary, EnvironmentProductConfig,
-    EnvironmentSubscriptionView, StatusDependencyHold, StatusRow, UnmetContract,
+    EnvironmentSubscriptionView, OverlayRebase, StatusDependencyHold, StatusRow, UnmetContract,
     apply_runtime_inventory_facts, clear_artifact_mirror, clear_cluster_config_path,
     clear_docker_secret_dir, clear_environment_constraint, clear_environment_fact,
     clear_environment_overlay, clear_plan_approval_policy, cluster_config_path, docker_secret_dir,
     env_add, fleet_status, inspect_environment, inspect_environment_with_outcomes,
     list_artifact_mirrors, list_environment_constraints, list_environment_facts,
-    list_environment_overlays, list_environments, overlay_digest, plan_approval_policy,
-    product_overlays, reconcile_deployment, require_environment_fact, set_artifact_mirror,
-    set_cluster_config_path, set_docker_secret_dir, set_environment_constraint,
-    set_environment_fact, set_environment_overlay, set_plan_approval_policy, status, status_state,
-    subscribe, subscribe_instance, subscription_state,
+    list_environment_overlays, list_environment_presets, list_environments, overlay_digest,
+    plan_approval_policy, product_overlays, rebase_environment_overlay, reconcile_deployment,
+    render_config_presets, require_environment_fact, set_artifact_mirror, set_cluster_config_path,
+    set_docker_secret_dir, set_environment_constraint, set_environment_fact,
+    set_environment_overlay, set_environment_preset, set_plan_approval_policy, status,
+    status_state, subscribe, subscribe_instance, subscription_state,
 };
 pub(crate) use crate::environment::{
     inspect_environment_for_policy, update_runtime_deployments_object,
@@ -431,6 +432,11 @@ pub struct Plan {
     /// address; apply keeps its own check. Empty when no step names one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_availability: Vec<ArtifactAvailability>,
+    /// Where each product's config comes from when it selects a preset,
+    /// and overrides that hide a changed preset value (#1095). Advice for
+    /// the approver, outside the content address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_presets: Vec<crate::environment::ConfigPresetView>,
 }
 
 #[derive(Serialize)]
@@ -944,6 +950,7 @@ mod tests {
             recalled_recovery_reason: None,
             credential_runway: None,
             artifact_availability: Vec::new(),
+            config_presets: Vec::new(),
             approval_brief: None,
         };
         plan.content_id = content_address(
