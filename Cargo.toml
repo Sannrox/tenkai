@@ -87,3 +87,19 @@ debug = false
 # ~55s each; optimized, they take 5-10s. Dev and test builds only.
 [profile.dev.package.sha2]
 opt-level = 3
+
+# The thousand-environment fleet tests spend most of their CPU in SQLite's
+# parser and VM (C, built at the profile's opt-level), Ed25519 release
+# verification, and JSON decoding. Optimized, those tests use about 40% less
+# CPU (#1394). Dev and test builds only.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.serde_json]
+opt-level = 3
