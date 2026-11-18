@@ -116,6 +116,11 @@ When a compensating checkpoint is waiting for plan approval, `migrate status`
 prints `pending-plan <plan-id>`. Place the signed plan envelope next to the
 migration approval as `<plan-id>.json`.
 
+A signed rollback works the same way. It creates the source-restore plan, and
+`migrate status` prints `pending-rollback-plan <plan-id>`. The migration keeps
+its status and lock, and refuses apply and resume. Place the plan envelope as
+`<plan-id>.json` and run `migrate rollback` again to continue.
+
 ## Remote
 
 Authenticated management API (ADR 0026), sibling to `/v1/reconcile`:

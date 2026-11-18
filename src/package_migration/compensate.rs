@@ -44,21 +44,31 @@ pub(super) async fn require_rollback_target(ctx: &mut Ctx, record: &MigrationRec
     Ok(())
 }
 
+/// Where compensation stands after one attempt.
+pub(super) enum Compensation {
+    /// Every accepted effect was compensated.
+    Done,
+    /// The source-restore plan exists but its signed approval does not yet.
+    /// Not a failure: the next rollback run continues once it is filed
+    /// (#1309).
+    AwaitingPlanApproval { plan_id: String },
+}
+
 pub(super) async fn compensate_accepted(
     ctx: &mut Ctx,
     record: &mut MigrationRecord,
     authorization: MigrationAuthorization<'_>,
     exec_lease: &str,
-) -> Result<()> {
+) -> Result<Compensation> {
     let attempted_apply = pending_plan_started(ctx, record).await?
         || record
             .receipts
             .iter()
             .any(|receipt| receipt.result == "accepted" && receipt.effect == "apply_target");
-    if attempted_apply {
-        restore_source(ctx, record, authorization, exec_lease).await?;
+    if !attempted_apply {
+        return Ok(Compensation::Done);
     }
-    Ok(())
+    restore_source(ctx, record, authorization, exec_lease).await
 }
 
 async fn restore_source(
@@ -66,7 +76,7 @@ async fn restore_source(
     record: &mut MigrationRecord,
     authorization: MigrationAuthorization<'_>,
     exec_lease: &str,
-) -> Result<()> {
+) -> Result<Compensation> {
     refresh_execution_lease(ctx, &record.name, record.partition.as_deref(), exec_lease).await?;
     let pin = record.declaration.source.clone();
     let plan_id = match record.pending_rollback_plan_id.clone() {
@@ -87,7 +97,7 @@ async fn apply_pin_plan(
     plan_id: &str,
     authorization: MigrationAuthorization<'_>,
     exec_lease: &str,
-) -> Result<()> {
+) -> Result<Compensation> {
     let approval_path;
     let exec = match authorization {
         MigrationAuthorization::LocalDevelopment { reason } => {
@@ -102,10 +112,9 @@ async fn apply_pin_plan(
                 .context("package migration approval path has no parent")?;
             approval_path = dir.join(format!("{plan_id}.json"));
             if !approval_path.is_file() {
-                bail!(
-                    "package migration rollback plan {plan_id} is waiting for a signed plan approval at {}",
-                    approval_path.display()
-                );
+                return Ok(Compensation::AwaitingPlanApproval {
+                    plan_id: plan_id.into(),
+                });
             }
             ExecutionAuthorization::Signed {
                 approval: &approval_path,
@@ -138,5 +147,5 @@ async fn apply_pin_plan(
     if plan.state != PlanState::Succeeded {
         bail!("package migration plan {plan_id} ended in {}", plan.state);
     }
-    Ok(())
+    Ok(Compensation::Done)
 }

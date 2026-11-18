@@ -317,53 +317,56 @@ async fn put_environment(
     Ok(())
 }
 
+/// Roll back every step of a plan whose health failed. Each step is handled
+/// on its own: one with no previous release, or whose rollback fails on the
+/// adapter, is recorded recovery-required and the remaining steps are still
+/// rolled back (#1309). Returns (rollback triggered, recovery required,
+/// detail naming the products in each group).
 async fn rollback_after_health_failure(
     ctx: &mut Ctx,
     adapter: &dyn DeliveryAdapter,
     plan: &Plan,
     lease: Option<&EnvironmentLease>,
 ) -> Result<(bool, bool, String)> {
-    let mut rollback_triggered = false;
+    let mut rolled_back = Vec::new();
+    let mut recovery = Vec::new();
+    let mut triggered = false;
     for step in &plan.steps {
+        let product = step.instance_name();
         let Some(previous) = step.from.as_deref() else {
-            record_recovery_required(ctx, &plan.environment, step.instance_name(), lease).await?;
-            return Ok((
-                false,
-                true,
-                "health failure with no previous release is recovery-required".into(),
-            ));
+            record_recovery_required(ctx, &plan.environment, product, lease).await?;
+            recovery.push(format!("{product} (no previous release)"));
+            continue;
         };
         let mut object = environment::environment(ctx, &plan.environment).await?;
-        object.properties.insert(
-            format!("deployed.{}", step.instance_name()),
-            step.to.clone(),
-        );
-        object.properties.insert(
-            format!("deployed_prev.{}", step.instance_name()),
-            previous.into(),
-        );
+        object
+            .properties
+            .insert(format!("deployed.{product}"), step.to.clone());
+        object
+            .properties
+            .insert(format!("deployed_prev.{product}"), previous.into());
         object.updated = crate::now_millis();
         put_environment(ctx, object, lease).await?;
-        let rollback = plan::rollback_step(ctx, &plan.environment, step.instance_name()).await?;
-        rollback_triggered = true;
+        let rollback = plan::rollback_step(ctx, &plan.environment, product).await?;
+        triggered = true;
         if adapter.rollback_fails() {
-            record_recovery_required(ctx, &plan.environment, step.instance_name(), lease).await?;
-            return Ok((
-                true,
-                true,
-                format!(
-                    "Tenkai rollback plan {} failed on the adapter; recovery-required",
-                    rollback.id
-                ),
+            record_recovery_required(ctx, &plan.environment, product, lease).await?;
+            recovery.push(format!(
+                "{product} (rollback plan {} failed on the adapter)",
+                rollback.id
             ));
+            continue;
         }
-        let _ = rollback;
+        rolled_back.push(format!("{product} (rollback plan {})", rollback.id));
     }
-    Ok((
-        rollback_triggered,
-        false,
-        "health failure triggered the Tenkai rollback plan".into(),
-    ))
+    let mut detail = String::from("health failure");
+    if !rolled_back.is_empty() {
+        detail.push_str(&format!("; Tenkai rolled back {}", rolled_back.join(", ")));
+    }
+    if !recovery.is_empty() {
+        detail.push_str(&format!("; recovery-required: {}", recovery.join(", ")));
+    }
+    Ok((triggered, !recovery.is_empty(), detail))
 }
 
 async fn record_recovery_required(
@@ -889,6 +892,44 @@ exclude_requester = true
                 .map(String::as_str),
             Some("recovery_required")
         );
+        let _ = std::fs::remove_dir_all(fixture.root);
+    }
+
+    // #1309: a step with no previous release does not stop the rollback of
+    // the steps after it, and the report names both outcomes.
+    #[tokio::test]
+    async fn health_failure_rolls_back_every_step_past_a_fresh_install() {
+        let mut fixture = signed_upgrade("health-every-step").await;
+        let mut plan = fixture.plan.clone();
+        let mut fresh = plan.steps[0].clone();
+        fresh.id = format!("{}-fresh", fresh.id);
+        fresh.instance = "bridge-app-fresh".into();
+        fresh.from = None;
+        plan.steps.insert(0, fresh);
+        let adapter = PollingAdapter::new(FakeMode::Succeed);
+
+        let (triggered, recovery, detail) =
+            rollback_after_health_failure(&mut fixture.ctx, &adapter, &plan, None)
+                .await
+                .unwrap();
+
+        assert!(triggered, "{detail}");
+        assert!(recovery, "{detail}");
+        assert!(detail.contains("rolled back bridge-app"), "{detail}");
+        assert!(
+            detail.contains("bridge-app-fresh (no previous release)"),
+            "{detail}"
+        );
+        let env = environment::environment(&mut fixture.ctx, "prod")
+            .await
+            .unwrap();
+        assert_eq!(
+            env.properties
+                .get("deployment_recovery.bridge-app-fresh")
+                .map(String::as_str),
+            Some("recovery_required")
+        );
+        assert_eq!(env.properties.get("deployment_recovery.bridge-app"), None);
         let _ = std::fs::remove_dir_all(fixture.root);
     }
 

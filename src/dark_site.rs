@@ -271,16 +271,23 @@ pub fn activate(
     if !jwks.is_file() {
         bail!("local JWKS {} is missing", jwks.display());
     }
-    let previous = load_activation(runtime_dir)?
-        .map(|prior| prior.profile.pins())
-        .filter(|pins| pins != &profile.pins());
+    // Re-activating the same pins keeps the stored predecessor and refusal
+    // audit, so rollback still has a target (#1309). New pins make the
+    // prior pins the predecessor and start a fresh audit.
+    let (previous, cloud_route_refusals) = match load_activation(runtime_dir)? {
+        Some(prior) if prior.profile.pins() == profile.pins() => {
+            (prior.previous, prior.cloud_route_refusals)
+        }
+        Some(prior) => (Some(prior.profile.pins()), Vec::new()),
+        None => (None, Vec::new()),
+    };
     let activation = DarkSiteActivation {
         schema: ACTIVATION_SCHEMA.into(),
         profile_digest: profile.digest()?,
         profile: profile.clone(),
         previous,
         activated_at_ms: now_ms,
-        cloud_route_refusals: Vec::new(),
+        cloud_route_refusals,
     };
     store_activation(runtime_dir, &activation)?;
     Ok(activation)
@@ -636,6 +643,40 @@ jwks = "jwks.json"
         ];
         let decision = rollback_decision(&activation, &drained, Some(2_000), 2_100).unwrap();
         assert_eq!(decision, WorkerPoolDecision::Apply { replicas: 2 });
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // #1309: re-activating the same pins keeps the predecessor and the
+    // refusal audit, so rollback still has its target.
+    #[test]
+    fn reactivating_the_same_pins_keeps_predecessor_and_audit() {
+        let root = tmp();
+        let runtime = root.join("runtime");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("jwks.json"), "{\"keys\":[]}").unwrap();
+        let mut first = profile();
+        first.site_agent.image_digest = PREV_WORKER.into();
+        let mut first_stack = stack();
+        first_stack.images = vec![PREV_WORKER.into()];
+        activate(&first, &first_stack, &runtime, &root, 1_000).unwrap();
+        activate(&profile(), &stack(), &runtime, &root, 2_000).unwrap();
+        let cloud = RoutingConfig {
+            version: 1,
+            routes: vec![Route {
+                name: "chat".into(),
+                model: "qwen-coder".into(),
+                provider: "openai".into(),
+                weight: 100,
+            }],
+        };
+        admit_applied_routing_at(&runtime, &cloud, 2_100).unwrap_err();
+
+        let again = activate(&profile(), &stack(), &runtime, &root, 3_000).unwrap();
+
+        assert_eq!(again.previous.as_ref().unwrap().worker_digest, PREV_WORKER);
+        assert_eq!(again.cloud_route_refusals.len(), 1);
+        assert_eq!(load_activation(&runtime).unwrap().unwrap(), again);
+        rollback_decision(&again, &[], None, 3_100).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

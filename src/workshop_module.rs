@@ -475,20 +475,26 @@ pub async fn activate(
         }
     }
 
+    let staged = crate::staged_artifact::state_path_for(
+        crate::manifest::ProductKind::WorkshopModule,
+        state_root,
+        product,
+    );
+    let prior = crate::atomic_state::read_optional(&staged)?;
     crate::staged_artifact::activate(manifest, workdir, state_root, product)?;
     env_obj = crate::environment::environment(ctx, env).await?;
     let after = observed_from_object(&env_obj)?.with_context(|| {
         format!("environment {env} lost observed type and runtime digests during module activation")
     })?;
     if after != observed {
-        let _ = crate::staged_artifact::deactivate(
-            crate::manifest::ProductKind::WorkshopModule,
+        return Err(restore_staged(
             state_root,
             product,
-        );
-        bail!(
-            "workshop_module activation changed observed type or runtime digests; module-only delivery must preserve them"
-        );
+            prior.as_deref(),
+            anyhow::anyhow!(
+                "workshop_module activation changed observed type or runtime digests; module-only delivery must preserve them"
+            ),
+        ));
     }
     env_obj.properties.insert(
         format!("{ACTIVATION_PREFIX}{product}"),
@@ -496,14 +502,42 @@ pub async fn activate(
     );
     env_obj.updated = crate::now_millis();
     if let Err(error) = ctx.put(env_obj).await {
-        let _ = crate::staged_artifact::deactivate(
+        return Err(restore_staged(state_root, product, prior.as_deref(), error));
+    }
+    Ok(())
+}
+
+/// Put back the staged module an activation replaced (#1309): the prior
+/// bytes when a module was staged before, otherwise nothing staged. A
+/// restore that fails is named in the returned error beside the cause.
+fn restore_staged(
+    state_root: &Path,
+    product: &str,
+    prior: Option<&[u8]>,
+    cause: anyhow::Error,
+) -> anyhow::Error {
+    let restored = match prior {
+        Some(bytes) => crate::atomic_state::write_bytes_verified(
+            &crate::staged_artifact::state_path_for(
+                crate::manifest::ProductKind::WorkshopModule,
+                state_root,
+                product,
+            ),
+            bytes,
+            |_| Ok(()),
+        ),
+        None => crate::staged_artifact::deactivate(
             crate::manifest::ProductKind::WorkshopModule,
             state_root,
             product,
-        );
-        return Err(error);
+        ),
+    };
+    match restored {
+        Ok(()) => cause,
+        Err(restore) => cause.context(format!(
+            "restoring the previously staged workshop module {product} failed: {restore}"
+        )),
     }
-    Ok(())
 }
 
 fn staged_profile_matches(
@@ -1121,6 +1155,36 @@ document = "module.json"
             )
             .exists()
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // #1309: a failed activation puts back the module staged before it, or
+    // leaves nothing staged when there was none.
+    #[test]
+    fn failed_activation_restores_the_prior_staged_module() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-workshop-undo-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let path = crate::staged_artifact::state_path_for(
+            crate::manifest::ProductKind::WorkshopModule,
+            &root,
+            "hello-workshop",
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{\"v\":2}").unwrap();
+        let error = restore_staged(
+            &root,
+            "hello-workshop",
+            Some(b"{\"v\":1}"),
+            anyhow::anyhow!("drift"),
+        );
+        assert_eq!(error.to_string(), "drift");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"v\":1}");
+
+        restore_staged(&root, "hello-workshop", None, anyhow::anyhow!("drift"));
+        assert!(!path.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
