@@ -292,7 +292,7 @@ impl Inner {
                 tx.commit().map_err(pg)?;
                 Ok(())
             },
-            StoreError::Postgres("postgres worker thread panicked".into()),
+            StoreError::Postgres("postgres operation panicked or the worker stopped".into()),
         )?;
         self.ensured_tenant_schemas.insert(schema);
         Ok(())
@@ -329,7 +329,7 @@ impl Inner {
                             .map_err(pg)?;
                         Ok(row.get(0))
                     },
-                    StoreError::Postgres("postgres worker thread panicked".into()),
+                    StoreError::Postgres("postgres operation panicked or the worker stopped".into()),
                 )?;
                 self.tenant_schema_owners
                     .record(schema.clone(), owner.clone());
