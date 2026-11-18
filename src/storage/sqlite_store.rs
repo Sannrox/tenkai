@@ -5,12 +5,22 @@ pub struct SqliteStore {
     pub(super) principal: String,
 }
 
+/// Make every `transaction()` on `connection` take the write lock when it
+/// begins. Store transactions read, then write; a deferred one that loses the
+/// read-to-write upgrade to another handle on the same file (the CLI next to a
+/// server) fails with `SQLITE_BUSY` without waiting. An immediate one waits on
+/// the busy timeout instead (#1303).
+pub(crate) fn immediate_transactions(connection: &mut Connection) {
+    connection.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
+}
+
 /// Open the SQLite file at `path` and migrate it. With `copy`, a schema
 /// upgrade first leaves a verified copy of the store beside it, taken before
 /// anything (even the WAL switch) touches the store.
 fn open_file(path: &Path, copy: bool) -> Result<Connection> {
     let mut connection = Connection::open(path)?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    immediate_transactions(&mut connection);
     if copy {
         let exe = std::env::current_exe().and_then(std::fs::canonicalize).ok();
         copy_before_migrate(&connection, path, exe.as_deref())?;
@@ -74,6 +84,7 @@ impl SqliteStore {
 
     pub fn open_in_memory() -> Result<Self> {
         let mut connection = Connection::open_in_memory()?;
+        immediate_transactions(&mut connection);
         connection.pragma_update(None, "foreign_keys", "ON")?;
         migrate(&mut connection)?;
         Ok(Self {

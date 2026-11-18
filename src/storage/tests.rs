@@ -1,5 +1,6 @@
 use super::*;
 
+mod contention;
 mod feedback;
 mod fencing;
 mod lifecycle;

@@ -73,6 +73,7 @@ impl EmbeddedStore {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        crate::storage::immediate_transactions(&mut connection);
         migrate(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -133,6 +134,7 @@ impl EmbeddedStore {
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let mut connection = Connection::open_in_memory()?;
+        crate::storage::immediate_transactions(&mut connection);
         connection.pragma_update(None, "foreign_keys", "ON")?;
         migrate(&mut connection)?;
         Ok(Self {
