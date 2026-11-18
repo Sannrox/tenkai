@@ -54,3 +54,4 @@
 - [0052 — Provisioning executor with approval bound to the saved plan](0052-provisioning-executor.md)
 - [0053 — Network policy derived from dependency bindings](0053-network-policy-from-bindings.md) (proposed)
 - [0054 — Subscription rules by selector](0054-subscription-rules-by-selector.md) (proposed)
+- [0055 — Signer quorum for promotion and policy changes](0055-signer-quorum-for-promotion-and-policy.md) (proposed)
