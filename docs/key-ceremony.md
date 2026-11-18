@@ -27,8 +27,13 @@ kind = "pkcs11"
 
 The PKCS#11 adapter implements wrap, unwrap, KEK rotate, describe, and revoke
 against a customer HSM. The KMIP adapter implements the same operations against
-a KMIP endpoint. Describe returns provider kind, key ids, and the algorithm
-name. It never returns key material. CI runs the PKCS#11 contract against a
+a KMIP endpoint. Both keep the KEK state with the keys, so every process sees
+the same KEKs: a reopen restores the current KEK and any rotation still in
+overlap instead of minting a new one, and a revoked KEK refuses every later
+open. KMIP KEKs carry the name `tenkai-kek`; their KMIP state is their role
+(Active is current, Deactivated is a previous KEK still in overlap, Compromised
+is revoked). The KMIP DEK denylist is still process-local. Describe returns
+provider kind, key ids, and the algorithm name. It never returns key material. CI runs the PKCS#11 contract against a
 software token and the KMIP contract against a loopback lab endpoint. A cloud
 KMS adapter remains a follow-up slice. Ceremony against on-site adapters remains
 a later slice.
