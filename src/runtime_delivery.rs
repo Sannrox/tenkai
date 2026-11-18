@@ -1164,6 +1164,10 @@ pub struct RuntimeCaller<'a> {
     /// The agent named the `instance_health` capability: it re-runs
     /// `deploy.health` on idle work and POSTs observations (#1057).
     pub instance_health: bool,
+    /// The agent named the `os_image` capability: it reports a started
+    /// `reboot` as awaiting the boot and resumes at `verify` after it (ADR
+    /// 0051 §3). Only such a runtime is handed an OS image plan.
+    pub os_image: bool,
 }
 
 /// The capability a runtime names to be offered identity issuer work.
@@ -1185,6 +1189,9 @@ pub const CERTIFICATE_OBSERVATIONS_CAPABILITY: &str = "certificate_observations"
 /// The capability a runtime names to be offered health-observation duties
 /// and to POST `/health` (#1057).
 pub const INSTANCE_HEALTH_CAPABILITY: &str = "instance_health";
+/// The capability a runtime names to be handed OS image plans and to POST
+/// `/progress` (ADR 0051 §3).
+pub const OS_IMAGE_CAPABILITY: &str = "os_image";
 /// What this server admits on runtime work, comma-separated so an agent
 /// keeps to the shape an older server decodes.
 pub const SERVER_RUNTIME_CAPABILITIES: &str = "certificate_observations,instance_health";
@@ -1492,6 +1499,35 @@ impl RuntimeDeliveryOperations {
                 .retire_unrunnable(&mut ctx, environment, plan, &identity.owner, reason)
                 .await;
         }
+        // An OS image plan fails closed for a runtime that cannot resume it
+        // after the reboot, rather than waiting for one that can (ADR 0051 §3).
+        // A live claim elsewhere already makes the retirement wait; a plan
+        // whose reboot is under way outlives its lease while the host boots,
+        // so it belongs to the runner that recorded it and this one waits.
+        if !caller.os_image
+            && plan
+                .steps
+                .iter()
+                .any(crate::runtime_progress::updates_os_image)
+        {
+            let rebooting = self
+                .store
+                .runtime_progress(&plan.id)
+                .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?
+                .is_some();
+            if rebooting {
+                return self.idle_after_lapsed(environment, &plan.id).await;
+            }
+            return self
+                .retire_unrunnable(
+                    &mut ctx,
+                    environment,
+                    plan,
+                    &identity.owner,
+                    "this plan updates the host OS image, and the runtime does not name the os_image capability; upgrade the runtime and plan again",
+                )
+                .await;
+        }
         if !caller.workload_identity && plan.steps.iter().any(needs_workload_identity) {
             return self.idle_after_lapsed(environment, &plan.id).await;
         }
@@ -1589,13 +1625,29 @@ impl RuntimeDeliveryOperations {
                 _ => Err(RuntimeDeliveryError::Unavailable(refusal.to_string())),
             };
         }
+        // A plan awaiting a boot belongs to the runner whose host rebooted:
+        // another runner neither claims it nor keeps its lease alive.
+        if self
+            .progress_of_another_runner(&plan.id, &identity)?
+            .is_err()
+        {
+            return self.idle_after_lapsed(environment, &plan.id).await;
+        }
         let expires_at = crate::now_millis().saturating_add(2 * 60 * 1000);
         let claim = self
             .store
             .claim_runtime_plan(environment, &plan.id, &identity.owner, expires_at)
             .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
         match claim {
-            Some(claim) => {
+            Some(mut claim) => {
+                // Read again under the claim: recorded since the check above,
+                // it is another runner's, and this claim lapses unused.
+                if claim.completion_json.is_none() {
+                    match self.progress_of_another_runner(&plan.id, &identity)? {
+                        Ok(progress) => claim.progress_json = progress,
+                        Err(()) => return Ok(idle_work(environment)),
+                    }
+                }
                 // A runtime's plan stays Computed until its completion is
                 // durable, so a fresh claim on a Running plan means the server
                 // began it, before a runtime enrolled (#630). No server lease
@@ -1871,6 +1923,97 @@ impl RuntimeDeliveryOperations {
                     .map(|key| key.fingerprint())
             })
             .collect())
+    }
+
+    /// `plan_id`'s recorded progress when it is `identity`'s runner's or
+    /// there is none; `Err(())` when another runner recorded it.
+    fn progress_of_another_runner(
+        &self,
+        plan_id: &str,
+        identity: &RuntimeIdentity,
+    ) -> Result<Result<Option<String>, ()>, RuntimeDeliveryError> {
+        let Some(json) = self
+            .store
+            .runtime_progress(plan_id)
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?
+        else {
+            return Ok(Ok(None));
+        };
+        let progress: crate::runtime_progress::RuntimeProgress = serde_json::from_str(&json)
+            .map_err(|error| RuntimeDeliveryError::Internal(error.to_string()))?;
+        Ok(if progress.runner == identity.runner_id {
+            Ok(Some(json))
+        } else {
+            Err(())
+        })
+    }
+
+    /// Record that the claimed plan's `reboot` step is about to start, with
+    /// the receipts of the steps before it (ADR 0051 §3). Only the live
+    /// claim's holder records, and only for a runtime that names `os_image`.
+    /// A repeated report of the same step keeps the time first recorded, so
+    /// the boot deadline is counted once.
+    pub async fn report_progress(
+        &self,
+        token: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
+        environment: &str,
+        report: crate::runtime_progress::RuntimeProgressReport,
+    ) -> Result<(), RuntimeDeliveryError> {
+        let caller = caller.into();
+        let identity = self.admit_work(token, &caller, environment).await?;
+        if !caller.os_image {
+            return Err(RuntimeDeliveryError::InvalidRequest(
+                "progress is reported only by a runtime that names the os_image capability".into(),
+            ));
+        }
+        crate::clock_guard::require_trusted_time("runtime progress")
+            .map_err(|refusal| RuntimeDeliveryError::Unavailable(refusal.to_string()))?;
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "application core is not available on this host".into(),
+            ));
+        };
+        let plan = crate::plan::load(&mut ctx, &report.plan_id)
+            .await
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+        if plan.environment != environment {
+            return Err(RuntimeDeliveryError::ForeignEnvironment);
+        }
+        crate::runtime_progress::awaiting_index(&plan, &report.awaiting_boot, &report.receipts)
+            .map_err(|error| RuntimeDeliveryError::InvalidRequest(format!("{error:#}")))?;
+        let recorded_at = match self.progress_of_another_runner(&plan.id, &identity)? {
+            Err(()) => {
+                return Err(RuntimeDeliveryError::Conflict(
+                    "another runner's reboot awaits its boot in this plan".into(),
+                ));
+            }
+            Ok(Some(json)) => {
+                let earlier: crate::runtime_progress::RuntimeProgress = serde_json::from_str(&json)
+                    .map_err(|error| RuntimeDeliveryError::Internal(error.to_string()))?;
+                (earlier.awaiting_boot == report.awaiting_boot).then_some(earlier.recorded_at)
+            }
+            Ok(None) => None,
+        }
+        .unwrap_or_else(crate::now_millis);
+        let progress = crate::runtime_progress::RuntimeProgress {
+            awaiting_boot: report.awaiting_boot,
+            receipts: report.receipts,
+            runner: identity.runner_id.clone(),
+            recorded_at,
+        };
+        let json = serde_json::to_string(&progress)
+            .map_err(|error| RuntimeDeliveryError::Internal(error.to_string()))?;
+        let recorded = self
+            .store
+            .record_runtime_progress(&plan.id, &identity.owner, report.generation, &json)
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?;
+        if !recorded {
+            return Err(RuntimeDeliveryError::Conflict(
+                "runtime claim is no longer active".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub async fn renew(
@@ -3697,6 +3840,7 @@ health = "curl -f http://127.0.0.1:9/health"
                 issuer_take_up: false,
                 issuer_removal: false,
                 instance_health: false,
+                os_image: false,
             };
             operations.admit(None, &caller, environment)
         };
@@ -3748,6 +3892,7 @@ health = "curl -f http://127.0.0.1:9/health"
                         issuer_take_up: false,
                         issuer_removal: false,
                         instance_health: false,
+                        os_image: false,
                     },
                     "prod",
                     &request,
@@ -3932,6 +4077,7 @@ health = "curl -f http://127.0.0.1:9/health"
                             issuer_take_up: false,
                             issuer_removal: false,
                             instance_health: false,
+                            os_image: false,
                         },
                         "prod",
                         &request,
@@ -4019,6 +4165,7 @@ health = "curl -f http://127.0.0.1:9/health"
                         issuer_take_up: false,
                         issuer_removal: false,
                         instance_health: false,
+                        os_image: false,
                     },
                     "prod",
                     RuntimeInventoryReport {
@@ -4992,6 +5139,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     issuer_take_up: false,
                     issuer_removal: false,
                     instance_health: false,
+                    os_image: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -5111,6 +5259,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     issuer_take_up: false,
                     issuer_removal: false,
                     instance_health: false,
+                    os_image: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -5151,6 +5300,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     issuer_take_up: false,
                     issuer_removal: false,
                     instance_health: false,
+                    os_image: false,
                 },
                 "prod",
                 &RuntimeCertificateRequest {

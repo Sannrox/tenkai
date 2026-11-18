@@ -326,6 +326,7 @@ impl OperationalStore for SqliteStore {
                         generation: row.get(1)?,
                         expires_at: row.get(2)?,
                         completion_json: row.get(3)?,
+                        progress_json: None,
                     })
                 },
             )
@@ -359,6 +360,39 @@ impl OperationalStore for SqliteStore {
         now: i64,
     ) -> Result<Option<String>> {
         self.lapsed_runtime_completion_sqlite(environment, plan_id, now)
+    }
+
+    fn record_runtime_progress(
+        &self,
+        plan_id: &str,
+        owner: &str,
+        generation: u64,
+        progress_json: &str,
+    ) -> Result<bool> {
+        Ok(self.connection()?.execute(
+            "UPDATE runtime_claims SET progress_json=?4
+             WHERE plan_id=?1 AND owner=?2 AND generation=?3
+               AND expires_at>?5 AND completion_json IS NULL",
+            params![
+                plan_id,
+                owner,
+                generation,
+                progress_json,
+                crate::now_millis()
+            ],
+        )? == 1)
+    }
+
+    fn runtime_progress(&self, plan_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection()?
+            .query_row(
+                "SELECT progress_json FROM runtime_claims WHERE plan_id=?1",
+                [plan_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     fn create_runtime_enrollment(&self, enrollment: &RuntimeEnrollmentRecord) -> Result<()> {

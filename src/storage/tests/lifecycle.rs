@@ -178,6 +178,57 @@ fn runtime_plan_claims_are_durable_and_exclusive() {
 }
 
 #[test]
+fn runtime_progress_is_written_only_by_the_live_claim_holder() {
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-progress-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let store = SqliteStore::open(&path).unwrap();
+    let expiry = crate::now_millis() + 10_000;
+    let claim = store
+        .claim_runtime_plan("prod", "plan-1", "runtime-a", expiry)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.progress_json, None);
+    assert!(
+        !store
+            .record_runtime_progress("plan-1", "runtime-b", claim.generation, "{\"b\":1}")
+            .unwrap()
+    );
+    assert!(
+        !store
+            .record_runtime_progress("plan-1", "runtime-a", claim.generation + 1, "{\"b\":1}")
+            .unwrap()
+    );
+    assert!(
+        store
+            .record_runtime_progress("plan-1", "runtime-a", claim.generation, "{\"a\":1}")
+            .unwrap()
+    );
+    // The record outlives the process and survives a lease renewal.
+    let reopened = SqliteStore::open(&path).unwrap();
+    reopened
+        .renew_runtime_plan("plan-1", "runtime-a", claim.generation, expiry + 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reopened.runtime_progress("plan-1").unwrap().as_deref(),
+        Some("{\"a\":1}")
+    );
+    reopened
+        .complete_runtime_plan("plan-1", "runtime-a", claim.generation, "{\"ok\":true}")
+        .unwrap();
+    assert!(
+        !reopened
+            .record_runtime_progress("plan-1", "runtime-a", claim.generation, "{\"a\":2}")
+            .unwrap()
+    );
+    assert_eq!(reopened.runtime_progress("plan-2").unwrap(), None);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn offline_imports_are_durable_idempotent_and_conflict_safe() {
     let path = std::env::temp_dir().join(format!("tenkai-offline-{}.db", uuid::Uuid::new_v4()));
     let record = OfflineImportRecord {

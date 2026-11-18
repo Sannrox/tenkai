@@ -82,6 +82,30 @@ pub(super) async fn runtime_heartbeat(
     }
 }
 
+/// Record that the claimed plan's `reboot` step is about to start (ADR 0051
+/// §3). `204` once durable.
+pub(super) async fn runtime_progress(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
+    Json(report): Json<tenkai::runtime_progress::RuntimeProgressReport>,
+) -> Response {
+    match state
+        .runtime_delivery
+        .report_progress(
+            bearer(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
+            &environment,
+            report,
+        )
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => runtime_delivery_error(error),
+    }
+}
+
 /// One binary of the runtime agent's own release, for the claimed runtime
 /// (#685). The body is the file; `x-tenkai-file-mode` its octal mode.
 pub(super) async fn runtime_self_release(
@@ -316,6 +340,7 @@ fn runtime_caller<'a>(
             headers,
             tenkai::runtime_delivery::INSTANCE_HEALTH_CAPABILITY,
         ),
+        os_image: names_capability(headers, tenkai::runtime_delivery::OS_IMAGE_CAPABILITY),
     }
 }
 

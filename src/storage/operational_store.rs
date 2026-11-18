@@ -222,6 +222,24 @@ pub trait OperationalStore: Send + Sync {
     ) -> Result<Option<String>> {
         Ok(None)
     }
+    /// Store `progress_json` on `plan_id`'s claim while `owner` holds it
+    /// live at `generation` and it holds no completion (ADR 0051 §3). False
+    /// when it does not. The record outlives the lease and later claims.
+    fn record_runtime_progress(
+        &self,
+        _plan_id: &str,
+        _owner: &str,
+        _generation: u64,
+        _progress_json: &str,
+    ) -> Result<bool> {
+        Err(StoreError::AdapterUnavailable(
+            "runtime progress is not implemented by this store".into(),
+        ))
+    }
+    /// The progress last recorded on `plan_id`'s claim, if any.
+    fn runtime_progress(&self, _plan_id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
     /// Record a single-use runtime enrollment (#630).
     fn create_runtime_enrollment(&self, _enrollment: &RuntimeEnrollmentRecord) -> Result<()> {
         Err(StoreError::AdapterUnavailable(

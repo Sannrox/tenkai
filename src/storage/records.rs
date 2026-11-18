@@ -221,6 +221,12 @@ pub struct RuntimeClaim {
     pub generation: u64,
     pub expires_at: i64,
     pub completion_json: Option<String>,
+    /// A `RuntimeProgress` the claim's runner recorded before a step that
+    /// loses the runtime, such as an OS image `reboot` (ADR 0051 §3). The
+    /// server fills it in for the runner that recorded it; omitted otherwise,
+    /// so a runtime that predates it decodes every other claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_json: Option<String>,
 }
 
 /// A single-use enrollment for a runtime agent (#630). Only the digest of

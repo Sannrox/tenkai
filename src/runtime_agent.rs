@@ -620,6 +620,13 @@ impl RuntimeClient {
             return Ok(true);
         }
         validate_plan(&plan, &self.environment)?;
+        // A plan whose reboot this runner started continues at the verify
+        // that settles it, once the host booted again (ADR 0051 §3).
+        let resumed = claim
+            .progress_json
+            .as_deref()
+            .map(|json| resume_point(&plan, json))
+            .transpose()?;
 
         if !self.heartbeat(&plan.id, claim.generation).await? {
             bail!("runtime claim was fenced before local approval");
@@ -674,13 +681,46 @@ impl RuntimeClient {
             crate::runtime_builtin::fence_host_units(self, config, &plan.id, claim.generation)
                 .await?;
         }
-        let mut receipts = Vec::with_capacity(plan.steps.len());
+        let (start, mut receipts) = match resumed {
+            Some((verify, receipts)) => (verify, receipts),
+            None => (0, Vec::with_capacity(plan.steps.len())),
+        };
         let mut succeeded = true;
-        for (index, step) in plan.steps.iter().enumerate() {
+        for (index, step) in plan.steps.iter().enumerate().skip(start) {
             if !self.heartbeat(&plan.id, claim.generation).await? {
                 bail!("runtime claim was fenced before step {}", step.id);
             }
-            let receipt = if step.product == crate::runtime_self_upgrade::SELF_PRODUCT {
+            let reboots = step
+                .host
+                .is_some_and(|host| host.action == crate::plan::HostAction::Reboot);
+            let receipt = if reboots {
+                match self
+                    .record_progress(&plan.id, claim.generation, step, &receipts)
+                    .await?
+                {
+                    Ok(()) => {
+                        let receipt = self
+                            .execute_step(&plan, claim.generation, step, &approvals)
+                            .await?;
+                        // The applier left the boot to verify: the host is
+                        // going down, and this plan continues after it.
+                        if !receipt.succeeded && self.awaits_boot(&plan, step)? {
+                            eprintln!(
+                                "runtime step {} awaits the boot: {}",
+                                step.id, receipt.detail
+                            );
+                            return Ok(true);
+                        }
+                        receipt
+                    }
+                    Err(detail) => RuntimeStepReceipt {
+                        step_id: step.id.clone(),
+                        succeeded: false,
+                        detail,
+                        wraps: Vec::new(),
+                    },
+                }
+            } else if step.product == crate::runtime_self_upgrade::SELF_PRODUCT {
                 let last = index + 1 == plan.steps.len();
                 match self
                     .switch_self(&plan.id, claim.generation, step, last, &receipts)
@@ -691,8 +731,24 @@ impl RuntimeClient {
                     None => return Ok(true),
                 }
             } else {
-                self.execute_step(&plan, claim.generation, step, &approvals)
-                    .await?
+                let receipt = self
+                    .execute_step(&plan, claim.generation, step, &approvals)
+                    .await?;
+                // A verify that left the reboot unsettled, such as one the
+                // applier refused because the host has not rebooted yet,
+                // runs again on the next claim.
+                if start > 0
+                    && index == start
+                    && !receipt.succeeded
+                    && self.awaits_boot(&plan, &plan.steps[index - 1])?
+                {
+                    eprintln!(
+                        "runtime step {} waits for the boot: {}",
+                        step.id, receipt.detail
+                    );
+                    return Ok(true);
+                }
+                receipt
             };
             if !receipt.succeeded {
                 eprintln!(
@@ -701,6 +757,13 @@ impl RuntimeClient {
                 );
             }
             succeeded &= receipt.succeeded;
+            // The resumed verify settles the reboot before it.
+            if start > 0 && index == start {
+                receipts.push(crate::runtime_progress::settled_reboot(
+                    &plan.steps[index - 1],
+                    &receipt,
+                ));
+            }
             receipts.push(receipt);
             if !succeeded {
                 break;
@@ -985,6 +1048,9 @@ impl RuntimeClient {
                 crate::runtime_delivery::ISSUER_TAKE_UP_CAPABILITY,
                 crate::runtime_delivery::ISSUER_REMOVAL_CAPABILITY,
             ]);
+        }
+        if self.runs_os_images() {
+            capabilities.push(crate::runtime_delivery::OS_IMAGE_CAPABILITY);
         }
         request = request.header("x-tenkai-runtime-capabilities", capabilities.join(","));
         let response = request.send().await?;
@@ -1320,6 +1386,90 @@ async fn probe_health(
 impl RuntimeClient {
     /// Whether this runtime runs identity issuer steps (ADR 0046 §2): only
     /// the built-in executor with a sealing key opens the issuer key.
+    /// Whether this runtime runs OS image plans: a built-in runtime with a
+    /// host applier, which can tell a started reboot from a failed one.
+    fn runs_os_images(&self) -> bool {
+        matches!(&self.executor, StepExecutor::Builtin(config) if config.executors.host().is_ok())
+    }
+
+    /// Whether the host's OS image record still awaits the boot of `plan`'s
+    /// `reboot` step: started, and no `verify` settled it. Unreadable counts
+    /// as not awaiting, so the step ends as it reported, failed.
+    fn awaits_boot(&self, plan: &Plan, reboot: &Step) -> Result<bool> {
+        let StepExecutor::Builtin(config) = &self.executor else {
+            return Ok(false);
+        };
+        let Ok(host) = config.executors.host() else {
+            return Ok(false);
+        };
+        let instance = crate::host_apply::instance_key(
+            &format!("sha256:{}", plan.executable_digest()?),
+            &reboot.id,
+            crate::plan::HostAction::Reboot,
+        );
+        Ok(match host.awaiting_boot() {
+            Ok(awaiting) => awaiting.is_some_and(|awaiting| awaiting.instance == instance),
+            Err(error) => {
+                eprintln!("reading the host's OS image record failed: {error:#}");
+                false
+            }
+        })
+    }
+
+    /// Have the server record that `step`, a `reboot`, starts after
+    /// `receipts` (ADR 0051 §3), before anything of it runs. `Err` is why
+    /// the server refused, which fails the step unrun; the outer error is
+    /// a fenced claim or a transport failure, which retries the plan.
+    async fn record_progress(
+        &self,
+        plan_id: &str,
+        generation: u64,
+        step: &Step,
+        receipts: &[RuntimeStepReceipt],
+    ) -> Result<Result<(), String>> {
+        let response = self
+            .client()?
+            .post(format!(
+                "{}/v1/runtime/environments/{}/progress",
+                self.base_url, self.environment
+            ))
+            .bearer_auth(&self.token)
+            .header("x-tenkai-runtime-instance", &self.instance_id)
+            .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
+            .header(
+                "x-tenkai-runtime-capabilities",
+                crate::runtime_delivery::OS_IMAGE_CAPABILITY,
+            )
+            .json(&crate::runtime_progress::RuntimeProgressReport {
+                plan_id: plan_id.into(),
+                generation,
+                awaiting_boot: step.id.clone(),
+                receipts: receipts.to_vec(),
+            })
+            .send()
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(Ok(()));
+        }
+        if status == StatusCode::CONFLICT {
+            bail!("runtime claim was fenced before step {}", step.id);
+        }
+        let body = response.text().await.unwrap_or_default();
+        if status.is_client_error() {
+            return Ok(Err(format!(
+                "host reboot step {} did not run: the server did not record that it awaits the boot ({status}): {}",
+                step.id,
+                body.trim()
+            )));
+        }
+        bail!(
+            "recording that step {} awaits the boot failed ({status}): {}",
+            step.id,
+            body.trim()
+        )
+    }
+
     fn workload_identity(&self) -> bool {
         matches!(&self.executor, StepExecutor::Builtin(config) if config.sealing_dir.is_some())
     }
@@ -1897,6 +2047,17 @@ async fn decode_response<T: serde::de::DeserializeOwned>(
         .json()
         .await
         .with_context(|| format!("decoding response while {operation}"))
+}
+
+/// Where a plan resumes from the progress its claim carries: the index of
+/// the `verify` after the awaited `reboot`, and the receipts before it.
+fn resume_point(plan: &Plan, progress_json: &str) -> Result<(usize, Vec<RuntimeStepReceipt>)> {
+    let progress: crate::runtime_progress::RuntimeProgress =
+        serde_json::from_str(progress_json).context("decoding the plan's recorded progress")?;
+    let reboot =
+        crate::runtime_progress::awaiting_index(plan, &progress.awaiting_boot, &progress.receipts)
+            .context("the plan's recorded progress does not match it")?;
+    Ok((reboot + 1, progress.receipts))
 }
 
 fn validate_plan(plan: &Plan, environment: &str) -> Result<()> {

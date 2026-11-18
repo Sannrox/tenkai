@@ -314,6 +314,21 @@ impl OperationalStore for PostgresTenantPartition {
             .complete_runtime_plan(&self.schema, plan_id, owner, generation, completion_json)
     }
 
+    fn record_runtime_progress(
+        &self,
+        plan_id: &str,
+        owner: &str,
+        generation: u64,
+        progress_json: &str,
+    ) -> Result<bool> {
+        self.inner
+            .record_runtime_progress(&self.schema, plan_id, owner, generation, progress_json)
+    }
+
+    fn runtime_progress(&self, plan_id: &str) -> Result<Option<String>> {
+        self.inner.runtime_progress(&self.schema, plan_id)
+    }
+
     fn lapsed_runtime_completion(
         &self,
         environment: &str,
