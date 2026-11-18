@@ -1494,6 +1494,15 @@ impl RuntimeDeliveryOperations {
                 "software compatibility preflight unavailable".into(),
             ));
         };
+        // A reboot past its boot deadline fails the plan before anyone may
+        // resume it (ADR 0051 §4).
+        if crate::runtime_progress::judge_boot_deadline(&mut ctx, &*self.store, &plan.id)
+            .await
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?
+            .is_some()
+        {
+            return Ok(idle_work(environment));
+        }
         if let Some(reason) = self.issuer_unrunnable(&mut ctx, &plan, environment).await? {
             return self
                 .retire_unrunnable(&mut ctx, environment, plan, &identity.owner, reason)
@@ -1814,6 +1823,19 @@ impl RuntimeDeliveryOperations {
         let identity = self.admit_work(token, &caller, environment).await?;
         let completion_json = serde_json::to_string(&completion)
             .map_err(|error| RuntimeDeliveryError::InvalidRequest(error.to_string()))?;
+        // A verify that reports after the boot deadline does not settle the
+        // plan: the deadline failed it (ADR 0051 §4).
+        if let Some(mut ctx) = self.reconciler.application_ctx()
+            && let Some(detail) = crate::runtime_progress::judge_boot_deadline(
+                &mut ctx,
+                &*self.store,
+                &completion.plan_id,
+            )
+            .await
+            .map_err(|error| RuntimeDeliveryError::Unavailable(error.to_string()))?
+        {
+            return Err(RuntimeDeliveryError::Conflict(detail));
+        }
         self.reconciler
             .validate_completion(environment.to_string(), completion.clone())
             .await

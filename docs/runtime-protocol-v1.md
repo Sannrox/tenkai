@@ -417,6 +417,12 @@ the boot awaited, a failed reboot or verify leaves the plan unfinished
 rather than failed. A claim by another runner is answered with idle work, so
 only the host that rebooted verifies it.
 
+The server fails the plan with `no_return` once the release's
+`boot_deadline_seconds` has passed since `recorded_at` with no completion.
+Its reconcile tick judges every plan awaiting a runtime from the store, and
+a claim or completion of the plan judges first, so a runtime that returns
+late gets idle work, and its completion is refused (`409`).
+
 ## Typed proto contract
 
 `proto/tenkai/runtime/v1/runtime.proto` is a separate typed contract. Helpers

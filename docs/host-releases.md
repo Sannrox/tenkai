@@ -268,6 +268,29 @@ A supported host also:
 - lets a rollback release's `deploy.install` re-arm the previous image,
   which also disarms a boot that a `stage` armed and no `reboot` used.
 
+### Running an OS image update
+
+An environment runtime runs the four steps
+([runtime protocol](runtime-protocol-v1.md#os-image-reboots)):
+
+1. Publish the release with `[os_image]`; `boot_deadline_seconds` is part of
+   what it signs.
+2. Plan it. Planning refuses the plan when no maintenance window of the
+   environment and the product, in the next two weeks, is one unbroken
+   stretch at least as long as the boot deadline, so a host that never
+   returns is judged inside the window. With no windows, any time fits.
+3. Approve and let the runtime claim it. Only a built-in runtime with a host
+   applier names the `os_image` capability; any other blocks the plan with a
+   detail naming it.
+4. Before `reboot`, the runtime records its progress on the server. After the
+   boot, the same runner continues at `verify` and `confirm`.
+5. The server fails the plan with `no_return` once the boot deadline passes
+   with no `verify`, counted from when it recorded the reboot. Its tick judges
+   from its store, so the judgement holds across a server restart or
+   takeover, and a host that comes back later does not settle the plan.
+   Continue with a new plan at the host's current record. The server must not
+   run on the host it updates: it would be down for the whole boot.
+
 ## Known limit: recall
 
 Catalog recall is server state the root side cannot see. A recalled host

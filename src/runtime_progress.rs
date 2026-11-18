@@ -107,6 +107,136 @@ pub fn settled_reboot(reboot: &Step, verify: &RuntimeStepReceipt) -> RuntimeStep
     }
 }
 
+/// The step id that missed its boot deadline and the detail to fail the
+/// plan with, when `progress` is past the deadline of `plan`'s awaited
+/// reboot at `now` (ADR 0051 §4). The deadline is the signed release's
+/// `boot_deadline_seconds` counted from when the server first recorded the
+/// reboot, so any replica judges the same from durable state.
+pub fn missed_boot(
+    plan: &Plan,
+    progress: &RuntimeProgress,
+    boot_deadline_seconds: u64,
+    now: i64,
+) -> Option<String> {
+    let deadline = progress.recorded_at.saturating_add(
+        i64::try_from(boot_deadline_seconds)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1000),
+    );
+    if now <= deadline {
+        return None;
+    }
+    let product = plan
+        .steps
+        .iter()
+        .find(|step| step.id == progress.awaiting_boot)
+        .map_or("the host", |step| step.product.as_str());
+    Some(format!(
+        "step {} failed no_return: {product} did not report its verify within the {boot_deadline_seconds}s boot deadline of its reboot; the image record stays dirty, and continuing takes a new plan",
+        progress.awaiting_boot
+    ))
+}
+
+/// Fail `plan_id` when its awaited reboot missed the boot deadline (ADR
+/// 0051 §4), and say so. Called by the server's tick, and before a claim or
+/// completion of the plan, so a host that returns late never settles it. A
+/// clock the server does not trust judges nothing; the next tick retries.
+pub async fn judge_boot_deadline(
+    ctx: &mut crate::client::Ctx,
+    store: &dyn crate::storage::OperationalStore,
+    plan_id: &str,
+) -> Result<Option<String>> {
+    let Some(json) = store.runtime_progress(plan_id)? else {
+        return Ok(None);
+    };
+    if crate::clock_guard::require_trusted_time("boot deadline").is_err() {
+        return Ok(None);
+    }
+    let progress: RuntimeProgress = serde_json::from_str(&json)?;
+    let mut plan = crate::plan::load(ctx, plan_id).await?;
+    if !matches!(
+        plan.state,
+        crate::plan::PlanState::Computed | crate::plan::PlanState::Running
+    ) {
+        return Ok(None);
+    }
+    let Some(reboot) = plan
+        .steps
+        .iter()
+        .find(|step| step.id == progress.awaiting_boot)
+    else {
+        bail!(
+            "plan {plan_id} has no step {} its progress awaits",
+            progress.awaiting_boot
+        );
+    };
+    let Some(os_image) = crate::plan::readable_manifest(ctx, &reboot.release_id)
+        .await?
+        .and_then(|manifest| manifest.os_image)
+    else {
+        bail!(
+            "release {} of the awaited reboot of plan {plan_id} names no boot deadline",
+            reboot.release_id
+        );
+    };
+    let Some(detail) = missed_boot(
+        &plan,
+        &progress,
+        os_image.boot_deadline_seconds,
+        crate::now_millis(),
+    ) else {
+        return Ok(None);
+    };
+    // A runtime's plan stays Computed until it completes; it ends as a
+    // runtime completion does, through Running.
+    if plan.state == crate::plan::PlanState::Computed {
+        crate::plan::transition(
+            ctx,
+            &mut plan,
+            crate::plan::Transition::new(
+                crate::plan::PlanState::Running,
+                "claimed by assigned environment runtime",
+            ),
+            crate::plan::Persistence::Standard,
+        )
+        .await?;
+    }
+    crate::plan::transition(
+        ctx,
+        &mut plan,
+        crate::plan::Transition::new(crate::plan::PlanState::Failed, &detail),
+        crate::plan::Persistence::Standard,
+    )
+    .await?;
+    Ok(Some(detail))
+}
+
+/// Judge the boot deadline of every plan `report` found awaiting a runtime,
+/// returning the plans it failed with why. The server runs it after each
+/// reconcile tick, so a host that never returns is reported failed with no
+/// runtime polling; a plan it cannot judge is logged and judged next tick.
+pub async fn judge_awaiting(
+    ctx: &mut crate::client::Ctx,
+    store: &dyn crate::storage::OperationalStore,
+    report: &crate::reconciler::TickReport,
+) -> Vec<(String, String)> {
+    let mut failed = Vec::new();
+    for result in &report.environments {
+        let crate::reconciler::EnvironmentStatus::AwaitingRuntime { plan_id, .. } = &result.status
+        else {
+            continue;
+        };
+        match judge_boot_deadline(ctx, store, plan_id).await {
+            Ok(Some(detail)) => failed.push((plan_id.clone(), detail)),
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("tenkai.boot_deadline plan={plan_id} outcome=unjudged detail={error:#}")
+            }
+        }
+    }
+    failed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +321,22 @@ mod tests {
         let settled = settled_reboot(&plan.steps[1], &receipt("s2", false));
         assert_eq!((settled.step_id.as_str(), settled.succeeded), ("s1", false));
         assert!(settled.detail.starts_with("settled by s2"));
+    }
+
+    #[test]
+    fn the_boot_deadline_counts_from_the_first_record() {
+        let plan = image_plan();
+        let progress = RuntimeProgress {
+            awaiting_boot: "s1".into(),
+            receipts: vec![receipt("s0", true)],
+            runner: "runner".into(),
+            recorded_at: 10_000,
+        };
+        assert_eq!(missed_boot(&plan, &progress, 900, 910_000), None);
+        let missed = missed_boot(&plan, &progress, 900, 910_001).unwrap();
+        assert!(
+            missed.starts_with("step s1 failed no_return: os"),
+            "{missed}"
+        );
     }
 }

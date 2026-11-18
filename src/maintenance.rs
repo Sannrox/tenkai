@@ -881,6 +881,32 @@ pub fn elapsed_open_intersect_ms(
     Ok(intersect_elapsed(&a, &b))
 }
 
+/// The longest unbroken stretch in `[from_ms, to_ms)` when both window
+/// sets are open: what one step that must not outlast a window can use. An
+/// empty set is unrestricted. Invalid window definitions fail closed.
+pub fn longest_open_intersect_ms(
+    left: &[Window],
+    right: &[Window],
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<i64> {
+    if to_ms <= from_ms {
+        return Ok(0);
+    }
+    let open = |windows: &[Window]| -> Result<Vec<(i64, i64)>> {
+        if windows.is_empty() {
+            Ok(vec![(from_ms, to_ms)])
+        } else {
+            merged_open_intervals(windows, from_ms, to_ms)
+        }
+    };
+    Ok(intersect_intervals(&open(left)?, &open(right)?)
+        .into_iter()
+        .map(|(start, end)| end - start)
+        .max()
+        .unwrap_or(0))
+}
+
 fn merged_open_intervals(windows: &[Window], from_ms: i64, to_ms: i64) -> Result<Vec<(i64, i64)>> {
     for window in windows {
         window.validate()?;
@@ -948,14 +974,23 @@ fn merge_intervals(raw: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
 }
 
 fn intersect_elapsed(left: &[(i64, i64)], right: &[(i64, i64)]) -> i64 {
-    let mut total = 0_i64;
+    intersect_intervals(left, right)
+        .into_iter()
+        .map(|(start, end)| end - start)
+        .fold(0_i64, i64::saturating_add)
+}
+
+/// The stretches of `[from, to)` when both sorted, merged interval lists
+/// are open.
+fn intersect_intervals(left: &[(i64, i64)], right: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    let mut both = Vec::new();
     let mut i = 0;
     let mut j = 0;
     while i < left.len() && j < right.len() {
         let start = left[i].0.max(right[j].0);
         let end = left[i].1.min(right[j].1);
         if end > start {
-            total = total.saturating_add(end - start);
+            both.push((start, end));
         }
         if left[i].1 < right[j].1 {
             i += 1;
@@ -963,7 +998,7 @@ fn intersect_elapsed(left: &[(i64, i64)], right: &[(i64, i64)]) -> i64 {
             j += 1;
         }
     }
-    total
+    both
 }
 
 pub fn weekday_values(value: &str) -> Result<Vec<u32>> {
@@ -1152,6 +1187,30 @@ async fn update_product(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_longest_stretch_is_where_both_window_sets_are_open() {
+        let monday = chrono::DateTime::parse_from_rfc3339("2026-11-16T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let week = monday + 7 * 24 * 60 * 60 * 1000;
+        let env =
+            vec![Window::new("night", "UTC", vec![1, 2, 3, 4, 5, 6, 7], "01:00", 120).unwrap()];
+        let product =
+            vec![Window::new("late", "UTC", vec![1, 2, 3, 4, 5, 6, 7], "02:00", 90).unwrap()];
+        assert_eq!(
+            longest_open_intersect_ms(&env, &product, monday, week).unwrap(),
+            60 * 60 * 1000
+        );
+        assert_eq!(
+            longest_open_intersect_ms(&env, &[], monday, week).unwrap(),
+            120 * 60 * 1000
+        );
+        assert_eq!(
+            longest_open_intersect_ms(&[], &[], monday, week).unwrap(),
+            week - monday
+        );
+    }
 
     fn at(value: &str) -> DateTime<Utc> {
         value.parse().unwrap()

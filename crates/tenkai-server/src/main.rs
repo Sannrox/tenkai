@@ -1615,6 +1615,17 @@ async fn main() -> Result<()> {
                                 tenkai::now_millis(),
                             )
                             .await;
+                            // A host that never returns from its reboot fails
+                            // here, from durable state (ADR 0051 §4).
+                            for (plan, detail) in tenkai::runtime_progress::judge_awaiting(
+                                &mut ctx,
+                                &*tick_store,
+                                &report,
+                            )
+                            .await
+                            {
+                                eprintln!("tenkai.boot_deadline plan={plan} outcome=failed detail={detail}");
+                            }
                             let diag = report.diagnostics();
                             // Structured diagnostics: stable field names, no secrets.
                             eprintln!(
