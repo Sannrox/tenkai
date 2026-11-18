@@ -700,17 +700,21 @@ pub fn current_trace() -> Option<TraceContext> {
 
 /// Run `fut` so that spans it opens are children of `context`: an open
 /// span's [`SpanGuard::context`], or a caller's parsed `traceparent`.
+///
+/// `fut` is boxed: it wraps whole ticks and applies, and holding those inline
+/// grows every enclosing future past a default 2 MiB worker stack (#1443).
 pub async fn in_trace<F: std::future::Future>(context: TraceContext, fut: F) -> F::Output {
-    TASK_TRACE.scope(context, fut).await
+    TASK_TRACE.scope(context, Box::pin(fut)).await
 }
 
 /// Wrap `fut` for `tokio::spawn` so the spawned task keeps this task's
 /// telemetry, operation id and trace context. Task-locals do not cross a
-/// spawn on their own.
+/// spawn on their own. `fut` is boxed once so the wrappers stay small.
 pub fn carry<F: std::future::Future>(fut: F) -> impl std::future::Future<Output = F::Output> {
     let telemetry = TASK_TELEMETRY.try_with(Clone::clone).ok();
     let operation = TASK_OPERATION.try_with(Clone::clone).ok();
     let trace = current_trace();
+    let fut = Box::pin(fut);
     async move {
         let fut = async move {
             match trace {
