@@ -71,6 +71,11 @@ pub(crate) async fn run(
         Command::Reconcile { once: false, .. } => {
             bail!("remote servers reconcile continuously; use --once to request an immediate tick")
         }
+        Command::Report { command } => {
+            let (env, query) = command.delivery();
+            let report = client.delivery_report(env, &query).await?;
+            crate::report_args::print_delivery_report(&report, output)
+        }
         Command::Fleet {
             command: FleetCommand::Status,
         } => {

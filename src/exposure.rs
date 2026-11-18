@@ -60,6 +60,7 @@ pub const KIND_EXPOSURE_ASSESSMENT: &str = "tenkai.exposure_assessment";
 mod deployed;
 mod waiver;
 
+pub(crate) use deployed::all_records as all_deployed_exposures;
 #[cfg(test)]
 use deployed::reassess_loaded;
 use deployed::{

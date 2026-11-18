@@ -1555,3 +1555,23 @@ fn failed_runner_ca_init_leaves_nothing_and_a_retry_succeeds() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn parses_a_delivery_report_period() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "report",
+        "delivery",
+        "--env",
+        "prod",
+        "--since-ms",
+        "1000",
+    ])
+    .unwrap();
+    let Command::Report { command } = cli.command else {
+        panic!("report command");
+    };
+    let (env, query) = command.delivery();
+    assert_eq!(env, "prod");
+    assert_eq!((query.since_ms, query.until_ms), (Some(1_000), None));
+}

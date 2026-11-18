@@ -27,7 +27,7 @@ structured `cause` and `restore` fields when present. `env inspect` includes
 `latest_failures` (the latest failed or rolled back attempt per instance) and
 points at `env history` for the rest. `status` shows the cause summary when
 one was recorded and still cuts the held-target `detail` to 1,000 characters.
-Remote mode reads `GET /v1/environments/{environment}/history`.
+Remote mode reads `GET /v1/environments/{environment}/history`. The [delivery report](delivery-report.md) summarizes the same attempts over a period.
 Retired environments leave the list and fleet status while `env inspect <name>`
 continues to show their history and retirement reason, actor, and timestamp.
 Retirement refuses an active apply lease; first verify the apply has stopped and

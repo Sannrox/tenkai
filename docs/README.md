@@ -58,6 +58,7 @@ will be split over time. Contributor and agent workflow live in
 | Configure server authentication (bearer tokens, enterprise JWT, OIDC) | [configure-server-authentication.md](configure-server-authentication.md) |
 | Sign in against a customer directory (site-local OIDC, no LDAP bind) | [directory-sign-in.md](directory-sign-in.md) |
 | Manage environments and maintenance windows | [manage-environments.md](manage-environments.md) |
+| Report deployment frequency, lead time, failure rate and time to restore | [delivery-report.md](delivery-report.md) |
 | Notify an external system after apply | [deploy-webhooks.md](deploy-webhooks.md) |
 | Upgrade, roll back, and recover a product | [upgrade-and-rollback.md](upgrade-and-rollback.md) |
 | Deliver Tenkai's own server and console | [deliver-tenkai.md](deliver-tenkai.md) |

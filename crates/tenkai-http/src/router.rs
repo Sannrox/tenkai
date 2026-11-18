@@ -26,7 +26,7 @@ use super::imports::{
     trust_runway,
 };
 use super::inspect::{
-    auth_session, backup_status, change_events, environment_approval_policy,
+    auth_session, backup_status, change_events, delivery_report, environment_approval_policy,
     environment_dependencies, environment_history, environment_status, fleet_status, health,
     inspect_advisory_feed, inspect_environment, inspect_plan, inspect_product_criticality,
     inspect_product_owner, inspect_recall, instance_explain, list_channels, list_environments,
@@ -264,6 +264,10 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/history",
             get(environment_history),
+        )
+        .route(
+            "/v1/environments/{environment}/delivery-report",
+            get(delivery_report),
         )
         .route(
             "/v1/environments/{environment}/approval-policy",
