@@ -223,7 +223,7 @@ async fn execute_locked(
                 .await?;
             return Err(error);
         }
-        let report = crate::delivery_bridge::execute_bridged_plan(
+        let report = crate::delivery_bridge::execute_bridged_plan_under(
             ctx,
             adapter.as_ref(),
             &stored_plan,
@@ -237,6 +237,7 @@ async fn execute_locked(
                 skip_gates,
                 now: crate::now_millis(),
             },
+            Some(lease),
         )
         .await?;
         let status = if report.recovery_required {

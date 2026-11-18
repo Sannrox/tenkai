@@ -462,8 +462,22 @@ pub async fn unlock_promotion(
 }
 
 /// Release `lock`: the pre-lease link while the lease is still ours, then
-/// the lease. A lapsed or taken-over lease leaves nothing to release.
+/// the lease. A lapsed or taken-over lease leaves nothing to release. The
+/// lease is released even when the link cleanup fails (#1294): the next
+/// holder adopts a link left behind, but a held lease would block it.
 pub(crate) async fn release_promotion_lock(ctx: &mut Ctx, lock: &PromotionLock) -> Result<()> {
+    let unlinked = unlink_promotion_lock(ctx, lock).await;
+    let released = release_promotion_lease(ctx, lock).await;
+    match (unlinked, released) {
+        (Ok(()), released) => released,
+        (Err(error), Ok(())) => Err(error.context("removing the promotion lock link")),
+        (Err(error), Err(release)) => Err(release.context(format!(
+            "removing the promotion lock link also failed: {error:#}"
+        ))),
+    }
+}
+
+async fn unlink_promotion_lock(ctx: &mut Ctx, lock: &PromotionLock) -> Result<()> {
     // A lapsed holder leaves the link: the next holder adopts it. The
     // owner is read after the refresh, so only a holder that stalls longer
     // than a lease between these two calls and the unlink could remove a
@@ -482,6 +496,10 @@ pub(crate) async fn release_promotion_lock(ctx: &mut Ctx, lock: &PromotionLock) 
         )
         .await?;
     }
+    Ok(())
+}
+
+async fn release_promotion_lease(ctx: &mut Ctx, lock: &PromotionLock) -> Result<()> {
     match ctx
         .release_lease(PROMOTION_LEASE_NAMESPACE, &lock.key, &lock.fencing_token)
         .await

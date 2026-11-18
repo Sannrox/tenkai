@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
 
+use crate::apply::EnvironmentLease;
 use crate::client::Ctx;
 use crate::delivery_manifest;
 use crate::environment;
@@ -149,8 +150,22 @@ pub async fn execute_bridged_plan(
     plan: &Plan,
     options: BridgeExecution<'_>,
 ) -> Result<BridgeReport> {
-    admit_before_delegation(ctx, adapter, plan, &options).await?;
-    let correlation = persist_correlation(ctx, adapter, plan).await?;
+    execute_bridged_plan_under(ctx, adapter, plan, options, None).await
+}
+
+/// [`execute_bridged_plan`] for an apply that holds the environment lease
+/// (#1294): every write is fenced to `lease`, so a takeover meanwhile refuses
+/// it. Without a lease the completion is admitted as a runtime completion,
+/// which takes its own.
+pub(crate) async fn execute_bridged_plan_under(
+    ctx: &mut Ctx,
+    adapter: &dyn DeliveryAdapter,
+    plan: &Plan,
+    options: BridgeExecution<'_>,
+    lease: Option<&EnvironmentLease>,
+) -> Result<BridgeReport> {
+    admit_before_delegation(ctx, adapter, plan, &options, lease.is_some()).await?;
+    let correlation = persist_correlation(ctx, adapter, plan, lease).await?;
     if plan.state == PlanState::Succeeded {
         return Ok(BridgeReport {
             state: PlanState::Succeeded,
@@ -181,9 +196,9 @@ pub async fn execute_bridged_plan(
         }),
         BridgeObservation::Completion(completion) => {
             if !completion.succeeded {
-                complete_under_optional_lease(ctx, &plan.environment, &completion).await?;
+                complete_under_optional_lease(ctx, &plan.environment, &completion, lease).await?;
                 let (rollback_triggered, recovery_required, detail) =
-                    rollback_after_health_failure(ctx, adapter, plan).await?;
+                    rollback_after_health_failure(ctx, adapter, plan, lease).await?;
                 return Ok(BridgeReport {
                     state: plan::load(ctx, &plan.id).await?.state,
                     receipts: completion.receipts.clone(),
@@ -193,7 +208,7 @@ pub async fn execute_bridged_plan(
                     correlation,
                 });
             }
-            complete_under_optional_lease(ctx, &plan.environment, &completion).await?;
+            complete_under_optional_lease(ctx, &plan.environment, &completion, lease).await?;
             Ok(BridgeReport {
                 state: plan::load(ctx, &plan.id).await?.state,
                 receipts: completion.receipts.clone(),
@@ -211,6 +226,7 @@ async fn admit_before_delegation(
     adapter: &dyn DeliveryAdapter,
     plan: &Plan,
     options: &BridgeExecution<'_>,
+    apply_already_admitted_gates: bool,
 ) -> Result<()> {
     if plan.environment != options.expected_environment {
         bail!(
@@ -234,10 +250,6 @@ async fn admit_before_delegation(
             options.requester,
         )
         .await?;
-        let apply_already_admitted_gates =
-            crate::apply::environment_lease_status(ctx, &plan.environment)
-                .await?
-                .is_some();
         if !options.skip_gates && !apply_already_admitted_gates {
             for step in &plan.steps {
                 let gate = ctx
@@ -270,6 +282,7 @@ async fn persist_correlation(
     ctx: &mut Ctx,
     adapter: &dyn DeliveryAdapter,
     plan: &Plan,
+    lease: Option<&EnvironmentLease>,
 ) -> Result<String> {
     let correlation = format!("{}:{}:1", plan.id, adapter.name());
     let mut object = environment::environment(ctx, &plan.environment).await?;
@@ -277,19 +290,43 @@ async fn persist_correlation(
         .properties
         .insert(PROPERTY_CORRELATION.into(), correlation.clone());
     object.updated = crate::now_millis();
-    ctx.put(object).await?;
+    put_environment(ctx, object, lease).await?;
     Ok(correlation)
+}
+
+/// Write an environment object, fenced to `lease` when the caller holds one.
+async fn put_environment(
+    ctx: &mut Ctx,
+    object: crate::pb::sekai::Object,
+    lease: Option<&EnvironmentLease>,
+) -> Result<()> {
+    match lease {
+        Some(lease) => {
+            ctx.guarded_update(
+                object,
+                crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+                &lease.environment,
+                &lease.fencing_token,
+            )
+            .await?;
+        }
+        None => {
+            ctx.put(object).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn rollback_after_health_failure(
     ctx: &mut Ctx,
     adapter: &dyn DeliveryAdapter,
     plan: &Plan,
+    lease: Option<&EnvironmentLease>,
 ) -> Result<(bool, bool, String)> {
     let mut rollback_triggered = false;
     for step in &plan.steps {
         let Some(previous) = step.from.as_deref() else {
-            record_recovery_required(ctx, &plan.environment, step.instance_name()).await?;
+            record_recovery_required(ctx, &plan.environment, step.instance_name(), lease).await?;
             return Ok((
                 false,
                 true,
@@ -306,11 +343,11 @@ async fn rollback_after_health_failure(
             previous.into(),
         );
         object.updated = crate::now_millis();
-        ctx.put(object).await?;
+        put_environment(ctx, object, lease).await?;
         let rollback = plan::rollback_step(ctx, &plan.environment, step.instance_name()).await?;
         rollback_triggered = true;
         if adapter.rollback_fails() {
-            record_recovery_required(ctx, &plan.environment, step.instance_name()).await?;
+            record_recovery_required(ctx, &plan.environment, step.instance_name(), lease).await?;
             return Ok((
                 true,
                 true,
@@ -329,87 +366,99 @@ async fn rollback_after_health_failure(
     ))
 }
 
-async fn record_recovery_required(ctx: &mut Ctx, environment: &str, product: &str) -> Result<()> {
+async fn record_recovery_required(
+    ctx: &mut Ctx,
+    environment: &str,
+    product: &str,
+    lease: Option<&EnvironmentLease>,
+) -> Result<()> {
     let mut object = environment::environment(ctx, environment).await?;
     object.properties.insert(
         format!("{PROPERTY_RECOVERY}.{product}"),
         "recovery_required".into(),
     );
     object.updated = crate::now_millis();
-    ctx.put(object).await?;
-    Ok(())
+    put_environment(ctx, object, lease).await
 }
 
+/// Admit an adapter's terminal completion. Under the caller's apply lease
+/// the plan and deployment writes are fenced to it, so a stale apply whose
+/// lease was taken over commits nothing (#1294); without one it is a runtime
+/// completion. The completion is validated either way.
 async fn complete_under_optional_lease(
     ctx: &mut Ctx,
     environment: &str,
     completion: &RuntimeCompletion,
+    lease: Option<&EnvironmentLease>,
 ) -> Result<()> {
-    if crate::apply::environment_lease_status(ctx, environment)
-        .await?
-        .is_some()
-    {
-        let mut stored = plan::load(ctx, &completion.plan_id).await?;
-        if stored.state == PlanState::Computed {
-            plan::transition(
-                ctx,
-                &mut stored,
-                plan::Transition::new(PlanState::Running, "bridged adapter claimed the plan"),
-                plan::Persistence::Standard,
-            )
-            .await?;
-        }
-        if completion.succeeded {
-            for step in &stored.steps {
-                let mut object = environment::environment(ctx, environment).await?;
-                object.properties.insert(
-                    format!("deployed.{}", step.instance_name()),
-                    step.to.clone(),
-                );
-                object.properties.insert(
-                    format!("deployment_health.{}", step.instance_name()),
-                    "healthy".into(),
-                );
-                object.updated = crate::now_millis();
-                ctx.put(object).await?;
-            }
-        }
-        let terminal = if completion.succeeded {
-            PlanState::Succeeded
-        } else {
-            PlanState::Failed
-        };
-        if !matches!(stored.state, PlanState::Succeeded | PlanState::Failed) {
-            plan::transition(
-                ctx,
-                &mut stored,
-                plan::Transition::new(terminal, completion.detail.clone()),
-                plan::Persistence::Standard,
-            )
-            .await?;
-        }
-        if completion.succeeded
-            && !stored.steps.is_empty()
-            && stored
-                .steps
-                .iter()
-                .all(|step| step.action == crate::plan::Action::Rollback)
-            && let Some(lease) = ctx
-                .get_lease(crate::apply::ENVIRONMENT_LEASE_NAMESPACE, environment)
-                .await?
-        {
-            crate::apply::hold_after_rollback(
-                ctx,
-                environment,
-                "apply",
-                lease.generation,
-                &lease.fencing_token,
-            )
-            .await?;
-        }
-        return Ok(());
+    let Some(lease) = lease else {
+        return crate::delivery_manifest::admit_runtime_completion(ctx, environment, completion)
+            .await;
+    };
+    crate::runtime_delivery::validate_runtime_completion(ctx, environment, completion).await?;
+    let guarded = || plan::Persistence::Guarded {
+        namespace: crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+        key: &lease.environment,
+        fencing_token: &lease.fencing_token,
+        confirm_ambiguous: false,
+        observations: &[],
+    };
+    let mut stored = plan::load(ctx, &completion.plan_id).await?;
+    if stored.state == PlanState::Computed {
+        plan::transition(
+            ctx,
+            &mut stored,
+            plan::Transition::new(PlanState::Running, "bridged adapter claimed the plan"),
+            guarded(),
+        )
+        .await?;
     }
-    crate::delivery_manifest::admit_runtime_completion(ctx, environment, completion).await
+    if completion.succeeded {
+        for step in &stored.steps {
+            let mut object = environment::environment(ctx, environment).await?;
+            object.properties.insert(
+                format!("deployed.{}", step.instance_name()),
+                step.to.clone(),
+            );
+            object.properties.insert(
+                format!("deployment_health.{}", step.instance_name()),
+                "healthy".into(),
+            );
+            object.updated = crate::now_millis();
+            put_environment(ctx, object, Some(lease)).await?;
+        }
+    }
+    let terminal = if completion.succeeded {
+        PlanState::Succeeded
+    } else {
+        PlanState::Failed
+    };
+    if !matches!(stored.state, PlanState::Succeeded | PlanState::Failed) {
+        plan::transition(
+            ctx,
+            &mut stored,
+            plan::Transition::new(terminal, completion.detail.clone()),
+            guarded(),
+        )
+        .await?;
+    }
+    if completion.succeeded
+        && !stored.steps.is_empty()
+        && stored
+            .steps
+            .iter()
+            .all(|step| step.action == crate::plan::Action::Rollback)
+    {
+        crate::apply::hold_after_rollback(
+            ctx,
+            environment,
+            "apply",
+            lease.generation,
+            &lease.fencing_token,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 fn existing_success_receipts(plan: &Plan) -> Vec<RuntimeStepReceipt> {
@@ -894,6 +943,59 @@ exclude_requester = true
             correlation.contains(&plan_id) && correlation.contains("polling-fake"),
             "{correlation}"
         );
+        let _ = std::fs::remove_dir_all(fixture.root);
+    }
+
+    // #1294: an apply whose lease was taken over commits no completion.
+    #[tokio::test]
+    async fn completion_under_a_taken_over_lease_writes_nothing() {
+        let mut fixture = signed_upgrade("stale-lease").await;
+        let ctx = &mut fixture.ctx;
+        let stale = crate::apply::claim_environment(ctx, "prod", "apply")
+            .await
+            .unwrap();
+        crate::apply::release_environment(ctx, &stale)
+            .await
+            .unwrap();
+        let current = crate::apply::claim_environment(ctx, "prod", "apply")
+            .await
+            .unwrap();
+        assert!(current.generation > stale.generation);
+        let before = environment::environment(ctx, "prod").await.unwrap();
+        let done = completion(&fixture.plan, true);
+
+        complete_under_optional_lease(ctx, "prod", &done, Some(&stale))
+            .await
+            .unwrap_err();
+        let stored = plan::load(ctx, &fixture.plan.id).await.unwrap();
+        assert_eq!(stored.state, fixture.plan.state);
+        let after = environment::environment(ctx, "prod").await.unwrap();
+        assert_eq!(after.properties, before.properties);
+
+        complete_under_optional_lease(ctx, "prod", &done, Some(&current))
+            .await
+            .unwrap();
+        let stored = plan::load(ctx, &fixture.plan.id).await.unwrap();
+        assert_eq!(stored.state, PlanState::Succeeded);
+        let _ = std::fs::remove_dir_all(fixture.root);
+    }
+
+    // #1294: the apply path validates a completion like a runtime one.
+    #[tokio::test]
+    async fn completion_under_a_lease_is_still_validated() {
+        let mut fixture = signed_upgrade("lease-validate").await;
+        let ctx = &mut fixture.ctx;
+        let lease = crate::apply::claim_environment(ctx, "prod", "apply")
+            .await
+            .unwrap();
+        let mut partial = completion(&fixture.plan, true);
+        partial.receipts.clear();
+        let error = complete_under_optional_lease(ctx, "prod", &partial, Some(&lease))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("every plan step"), "{error:#}");
+        let stored = plan::load(ctx, &fixture.plan.id).await.unwrap();
+        assert_eq!(stored.state, fixture.plan.state);
         let _ = std::fs::remove_dir_all(fixture.root);
     }
 

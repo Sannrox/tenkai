@@ -13,9 +13,11 @@ use super::leases::{
     acquire_environment_lock, acquire_execution_lease, release_environment_lock,
     release_execution_lease,
 };
-use super::persist::persist;
+use super::persist::{persist, persist_fenced};
 use super::rollback::load_in;
-use super::types::{CheckpointReceipt, MigrationAuthorization, MigrationRecord, MigrationStatus};
+use super::types::{
+    CheckpointReceipt, MigrationAuthorization, MigrationRecord, MigrationStatus, exec_lease_name,
+};
 
 pub async fn approve(
     ctx: &mut Ctx,
@@ -31,16 +33,24 @@ pub(super) async fn approve_in(
     authorization: MigrationAuthorization<'_>,
     partition: Option<&str>,
 ) -> Result<MigrationRecord> {
-    let mut record = load_in(ctx, name, partition).await?;
-    if record.status != MigrationStatus::Admitted {
-        bail!(
-            "package migration {name} is {}, not admitted",
-            record.status.as_str()
-        );
+    // Approval holds the execution lease from its read to its fenced write,
+    // so it never overwrites a record an execution has moved on (#1294).
+    let exec_lease = acquire_execution_lease(ctx, name, partition).await?;
+    let approved = async {
+        let mut record = load_in(ctx, name, partition).await?;
+        if record.status != MigrationStatus::Admitted {
+            bail!(
+                "package migration {name} is {}, not admitted",
+                record.status.as_str()
+            );
+        }
+        record.approval_digest = super::approval::approval_digest(&record, authorization)?;
+        persist_fenced(ctx, &record, &exec_lease_name(partition, name), &exec_lease).await?;
+        Ok(record)
     }
-    record.approval_digest = super::approval::approval_digest(&record, authorization)?;
-    persist(ctx, &record).await?;
-    Ok(record)
+    .await;
+    release_execution_lease(ctx, name, partition, &exec_lease).await;
+    approved
 }
 
 pub async fn execute(

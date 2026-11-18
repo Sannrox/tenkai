@@ -175,6 +175,47 @@ impl Ctx {
         .await
     }
 
+    /// [`Self::put_with_provider_events`] for an existing object, committed
+    /// only while the lease `fencing_token` names is still held (#1294).
+    /// Remote application state keeps dropping observations, but refuses
+    /// events it cannot enqueue with the write.
+    pub(crate) async fn guarded_put_with_provider_events(
+        &mut self,
+        object: Object,
+        lease_namespace: &str,
+        lease_key: &str,
+        fencing_token: &str,
+        events: &[crate::storage::ProviderEventRecord],
+        observations: &[crate::feedback_observation::FeedbackObservation],
+    ) -> Result<()> {
+        let atomic = self.is_embedded()
+            || self
+                .catalog_binding()
+                .is_some_and(|(_, tenant)| tenant.is_some());
+        if atomic {
+            return self
+                .guarded_update_objects_with_provider_events(
+                    &[object],
+                    lease_namespace,
+                    lease_key,
+                    fencing_token,
+                    events,
+                    observations,
+                )
+                .await;
+        }
+        let events = self
+            .with_observation_delivery_events(events, observations)
+            .await;
+        ensure!(
+            events.is_empty(),
+            "remote application state cannot atomically enqueue Tenkai provider events"
+        );
+        self.guarded_update(object, lease_namespace, lease_key, fencing_token)
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn guarded_create(
         &mut self,
         object: Object,

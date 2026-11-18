@@ -159,7 +159,9 @@ pub async fn retire_environment(
     if let Some(retirement) = retirement_from_object(&object) {
         return Ok(retirement);
     }
-
+    // Advisory: the store refuses the retirement write itself while an
+    // apply lease or runtime claim is active, in the same transaction, so a
+    // lease taken after this check still refuses it (#1294).
     if crate::apply::inspect_environment_lease(ctx, name)
         .await?
         .held
@@ -266,7 +268,7 @@ pub async fn reconcile_deployment(
     {
         bail!("environment {env} has an apply in progress");
     }
-    reconcile_held(ctx, env, product, deployed).await
+    reconcile_deployment_fenced(ctx, env, product, deployed, |_| Ok(())).await
 }
 
 /// [`reconcile_deployment`] for a remote caller (#1201): it claims the
@@ -284,7 +286,7 @@ pub async fn reconcile_deployment_fenced(
     validate_identifier("product", product)?;
     let lease = crate::apply::claim_environment(ctx, env, &format!("reconcile:{product}")).await?;
     let reconciled = match fence(lease.generation.saturating_sub(1)) {
-        Ok(()) => reconcile_held(ctx, env, product, deployed).await,
+        Ok(()) => reconcile_held(ctx, &lease, product, deployed).await,
         Err(error) => Err(error),
     };
     let released = crate::apply::release_environment(ctx, &lease).await;
@@ -295,12 +297,15 @@ pub async fn reconcile_deployment_fenced(
     }
 }
 
+/// Record the operator's deployment fact while `lease` is held; the write
+/// is fenced to it, so a takeover meanwhile refuses it (#1294).
 async fn reconcile_held(
     ctx: &mut Ctx,
-    env: &str,
+    lease: &crate::apply::EnvironmentLease,
     product: &str,
     deployed: Option<&str>,
 ) -> Result<String> {
+    let env = lease.environment.as_str();
     let mut object = environment(ctx, env).await?;
     let was_unknown = object
         .properties
@@ -410,8 +415,15 @@ async fn reconcile_held(
     )
     .await?;
     crate::dependency_document::stamp(ctx, &mut object, product, kept_peers.as_ref()).await?;
-    ctx.put_with_provider_events(object, &provider_events, &feedback)
-        .await?;
+    ctx.guarded_put_with_provider_events(
+        object,
+        crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
+        env,
+        &lease.fencing_token,
+        &provider_events,
+        &feedback,
+    )
+    .await?;
     Ok(match deployed {
         Some(version) => format!("recorded {product}@{version} as deployed in {env}"),
         None => format!("cleared unknown deployment state for {product} in {env}"),
@@ -5093,6 +5105,72 @@ mod tests {
                 .environments
                 .iter()
                 .all(|row| row.posture == "empty" && row.latest_plan_state.is_none())
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    // #1294: a lease taken after retire's or reconcile's check refuses their
+    // write: the store refuses a retirement under any active apply lease, and
+    // reconcile writes through the lease it holds.
+    #[tokio::test]
+    async fn retire_and_reconcile_under_a_taken_over_lease_write_nothing() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-stale-env-lease-{}-{}.db",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "prod", "Prod").await.unwrap();
+        let mut seeded = environment(&mut ctx, "prod").await.unwrap();
+        seeded
+            .properties
+            .insert("deployment_health.app".into(), "unknown".into());
+        ctx.put(seeded).await.unwrap();
+        let stale = crate::apply::claim_environment(&mut ctx, "prod", "reconcile:app")
+            .await
+            .unwrap();
+        crate::apply::release_environment(&mut ctx, &stale)
+            .await
+            .unwrap();
+        let current = crate::apply::claim_environment(&mut ctx, "prod", "apply")
+            .await
+            .unwrap();
+        let before = environment(&mut ctx, "prod").await.unwrap().properties;
+
+        let mut retired = environment(&mut ctx, "prod").await.unwrap();
+        retired
+            .properties
+            .insert(RETIREMENT_REASON.into(), "decommissioned".into());
+        retired
+            .properties
+            .insert(RETIREMENT_ACTOR.into(), "operator".into());
+        retired
+            .properties
+            .insert(RETIREMENT_AT.into(), crate::now_millis().to_string());
+        let refused = ctx.put(retired).await.unwrap_err();
+        assert!(
+            refused.to_string().contains("active delivery work"),
+            "{refused:#}"
+        );
+        reconcile_held(&mut ctx, &stale, "app", None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            environment(&mut ctx, "prod").await.unwrap().properties,
+            before
+        );
+
+        reconcile_held(&mut ctx, &current, "app", None)
+            .await
+            .unwrap();
+        let after = environment(&mut ctx, "prod").await.unwrap();
+        assert_eq!(
+            after
+                .properties
+                .get("deployment_health.app")
+                .map(String::as_str),
+            Some("healthy")
         );
         let _ = std::fs::remove_file(&database);
     }
