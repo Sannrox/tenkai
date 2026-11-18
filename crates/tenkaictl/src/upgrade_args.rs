@@ -43,7 +43,7 @@ pub(crate) enum UpgradeCommand {
         /// Directory that receives unsuffixed tenkaictl, tenkai-server, and tenkai-executor-guard.
         #[arg(long)]
         dest: PathBuf,
-        /// Packaged host platform: linux-x86_64 or darwin-aarch64. Defaults to this process.
+        /// Packaged host platform: linux-x86_64, linux-aarch64 or darwin-aarch64. Defaults to this process.
         #[arg(long)]
         platform: Option<String>,
     },

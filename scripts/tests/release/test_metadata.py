@@ -120,5 +120,42 @@ class BuildManifest(unittest.TestCase):
                 self.build(tag=tag)
 
 
+class Formula(unittest.TestCase):
+    """Formula/tenkai.rb pins every download to the release's SHA256SUMS."""
+
+    def setUp(self):
+        self.sums = {
+            f"{host}-{platform}": hashlib.sha256(f"{host}-{platform}".encode()).hexdigest()
+            for host in metadata.FORMULA_HOSTS
+            for platform in metadata.FORMULA_PLATFORMS.values()
+        }
+
+    def test_downloads_each_host_of_each_platform_at_its_digest(self):
+        text = metadata.formula("0.9.2", self.sums)
+        base = "https://github.com/Sannrox/tenkai/releases/download/v0.9.2/"
+        for name, digest in self.sums.items():
+            with self.subTest(name=name):
+                self.assertRegex(text, f'url "{base}{name}", using: :nounzip\\n +sha256 "{digest}"\\n')
+        self.assertEqual(text.count('url "'), len(self.sums))
+        self.assertIn('version "0.9.2"', text)
+
+    def test_refuses_a_missing_asset_or_a_bad_version(self):
+        del self.sums["tenkai-executor-guard-linux-aarch64"]
+        with self.assertRaisesRegex(SystemExit, "no tenkai-executor-guard-linux-aarch64"):
+            metadata.formula("0.9.2", self.sums)
+        with self.assertRaisesRegex(SystemExit, "not a release version"):
+            metadata.formula("v0.9.2", self.sums)
+
+    def test_reads_sha256sums_strictly(self):
+        tmp = tempfile.TemporaryDirectory(prefix=f"meta{os.getpid()}-")
+        self.addCleanup(tmp.cleanup)
+        path = pathlib.Path(tmp.name) / "SHA256SUMS"
+        path.write_text(f"{'a' * 64}  tenkaictl-linux-x86_64\n")
+        self.assertEqual(metadata.checksums(path), {"tenkaictl-linux-x86_64": "a" * 64})
+        path.write_text(f"{'a' * 63}  tenkaictl-linux-x86_64\n")
+        with self.assertRaisesRegex(SystemExit, "not a SHA256SUMS line"):
+            metadata.checksums(path)
+
+
 if __name__ == "__main__":
     unittest.main()

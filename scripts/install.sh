@@ -45,10 +45,10 @@ Options:
                              server: tenkaictl, tenkai-server, tenkai-executor-guard
                              runtime: tenkai-runtime, tenkai-runtime-guard
                              host-applier: only the privileged host release
-                             applier (linux-x86_64, as root); never writes
+                             applier (Linux, as root); never writes
                              --prefix or client.toml
   --with-host-applier        also install the privileged host release applier
-                             (linux-x86_64, as root): ${APPLIER_DIR}/tenkai-host-applier,
+                             (Linux, as root): ${APPLIER_DIR}/tenkai-host-applier,
                              ${UNIT_DIR}/tenkai-host-apply@.service and
                              ${RULES_DIR}/50-tenkai-host-apply.rules.
                              Starts nothing. Implied by --role host-applier.
@@ -61,7 +61,8 @@ Options:
   --base-url URL             release download root
                              (default: https://github.com/${REPO}/releases/download)
 
-Supported: linux-x86_64 with glibc ${GLIBC_FLOOR} or newer, darwin-aarch64.
+Supported: linux-x86_64 and linux-aarch64 with glibc ${GLIBC_FLOOR} or newer,
+darwin-aarch64.
 EOF
   exit "${1:-0}"
 }
@@ -154,8 +155,12 @@ case "${os}:${arch}" in
     platform=linux-x86_64
     check_glibc
     ;;
+  Linux:aarch64 | Linux:arm64)
+    platform=linux-aarch64
+    check_glibc
+    ;;
   Darwin:arm64 | Darwin:aarch64) platform=darwin-aarch64 ;;
-  *) die "no Tenkai hosts are published for ${os} ${arch}; supported: linux-x86_64, darwin-aarch64. Build from source instead." ;;
+  *) die "no Tenkai hosts are published for ${os} ${arch}; supported: linux-x86_64, linux-aarch64, darwin-aarch64. Build from source instead." ;;
 esac
 
 # Refuse unless absolute directory $1 and every directory above it are owned
@@ -192,7 +197,10 @@ existing_parent() {
 }
 
 if $with_applier; then
-  [ "$platform" = linux-x86_64 ] || die "the host applier is published for linux-x86_64 only (it runs under systemd)"
+  case "$platform" in
+    linux-*) ;;
+    *) die "the host applier is published for Linux only (it runs under systemd)" ;;
+  esac
   [ "$(id -u)" = 0 ] || die "--with-host-applier must run as root"
   for dir in "$APPLIER_DIR" "$UNIT_DIR" "$RULES_DIR"; do
     require_root_only "$(existing_parent "$dir")"

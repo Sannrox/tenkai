@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The Tenkai runtime agent as a macOS LaunchDaemon, the launchd counterpart
+  of examples/runtime-agent-systemd/tenkai-runtime.service. It runs the agent
+  from its home, so Tenkai can upgrade and roll it back as releases of
+  `tenkai-runtime`. Install it as root, as described in
+  docs/run-tenkai-server.md#run-the-runtime-under-launchd: install the home at
+  /var/db/tenkai-runtime, copy this file to /Library/LaunchDaemons, and
+  bootstrap it into the system domain.
+  The agent's settings are shell assignments in /etc/tenkai-runtime/env
+  (root-owned, mode 0600), as the systemd unit's EnvironmentFile.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.github.sannrox.tenkai-runtime</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TENKAI_RUNTIME_HOME</key>
+    <string>/var/db/tenkai-runtime</string>
+  </dict>
+  <!--
+    Before every start, a version known to run (previous, else current)
+    counts the starts of a switch not yet reported and reverts it after
+    three, however slowly the new version fails. Then current runs.
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>set -a; . /etc/tenkai-runtime/env; set +a
+for version in previous current; do
+  agent="$TENKAI_RUNTIME_HOME/$version/tenkai-runtime"
+  if [ -x "$agent" ]; then "$agent" prestart || exit 1; break; fi
+done
+exec "$TENKAI_RUNTIME_HOME/current/tenkai-runtime"</string>
+  </array>
+  <!-- Start at boot, and start whatever is current after a switch exits. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>/var/log/tenkai-runtime.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/tenkai-runtime.log</string>
+</dict>
+</plist>

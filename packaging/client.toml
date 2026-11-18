@@ -1,0 +1,5 @@
+# tenkaictl talks to the local tenkai-server. Flags and environment variables
+# override this file.
+target = "remote"
+server_url = "http://127.0.0.1:8080"
+token_file = "/etc/tenkai/management.token"

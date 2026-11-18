@@ -151,7 +151,7 @@ jobs:
           fi
           files="$(git diff --name-only "$BASE"...HEAD)"
           rust="$(git diff -U0 "$BASE"...HEAD -- '*.rs')"
-          if grep -E '^(Cargo\.(toml|lock)|crates/[^/]+/Cargo\.toml|rust-toolchain\.toml|build\.rs|crates/[^/]+/build\.rs|ui/console\.pin|CHANGELOG\.md|examples/host-applier-systemd/|scripts/(build-linux-release-hosts|release-dry-run|test-install-script|install|package-release-binaries|pack-tenkai-release|apt-install)\.sh|scripts/release/|scripts/release-sbom-requirements\.txt|\.github/workflows/)' <<<"$files" >/dev/null \
+          if grep -E '^(Cargo\.(toml|lock)|crates/[^/]+/Cargo\.toml|rust-toolchain\.toml|build\.rs|crates/[^/]+/build\.rs|ui/console\.pin|CHANGELOG\.md|examples/(host-applier-systemd|runtime-agent-launchd)/|packaging/|scripts/(build-linux-release-hosts|release-dry-run|test-install-script|test-system-packages|test-macos-install|install|package-release-binaries|pack-tenkai-release|apt-install)\.sh|scripts/release/|scripts/release-sbom-requirements\.txt|\.github/workflows/)' <<<"$files" >/dev/null \
             || grep -E '^\+.*(libc::|extern "C")' <<<"$rust" >/dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
@@ -187,6 +187,9 @@ jobs:
       - name: Install script on Ubuntu 22.04, Debian 12, RHEL 8 and 9; refused on Alpine
         if: steps.scope.outputs.run == 'true'
         run: bash scripts/test-install-script.sh --linux-hosts linux-hosts
+      - name: Install, start, and purge the .deb on the runner; install and remove the .rpm on RHEL 9
+        if: steps.scope.outputs.run == 'true'
+        run: bash scripts/test-system-packages.sh --linux-hosts linux-hosts
       - if: steps.scope.outputs.run == 'true'
         run: bash scripts/release-dry-run.sh --linux-hosts linux-hosts
 

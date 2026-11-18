@@ -280,7 +280,7 @@ policy to cap it on the root side.
 Every file below is owned by root and not writable by group or others; the
 applier refuses configuration or trust it reads from anything else.
 
-On `linux-x86_64`, the [install script](release-binaries.md#install-with-one-command)
+On Linux, the [install script](release-binaries.md#install-with-one-command)
 does steps 1 and 5 from a GitHub Release, every file checked against its
 `SHA256SUMS` first. A first install:
 

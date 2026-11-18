@@ -1,0 +1,31 @@
+# tenkai-server from the tenkai .deb or .rpm. The package installs this unit
+# and does not enable it. Its postinstall writes /etc/tenkai/server.env with a
+# fresh management token, and the same token to /etc/tenkai/management.token
+# for `sudo tenkaictl`. Start it with
+#   systemctl enable --now tenkai-server
+# The server listens on loopback; put authenticated TLS in front of it before
+# exposing it (docs/run-tenkai-server.md).
+[Unit]
+Description=Tenkai control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=tenkai
+Group=tenkai
+# Root-owned, mode 0600; systemd reads it and injects the values.
+EnvironmentFile=/etc/tenkai/server.env
+StateDirectory=tenkai
+ExecStart=/usr/bin/tenkai-server \
+  --listen 127.0.0.1:8080 \
+  --database /var/lib/tenkai/tenkai.db \
+  --require-executor
+# SIGTERM is the default stop signal and shuts down gracefully.
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

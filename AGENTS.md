@@ -17,7 +17,7 @@ are `tenkaictl` (embedded and remote CLI), `tenkai-server` (network service,
 plus the `tenkai-server-postgres` hub build), `tenkai-executor-guard` (local
 process fencing), `tenkai-runtime` and `tenkai-runtime-guard` (pull-only
 environment runtime), and `tenkai-host-applier` (root-side applier for
-[privileged host releases](docs/host-releases.md), `linux-x86_64` only).
+[privileged host releases](docs/host-releases.md), Linux only).
 `tenkai-worker-lifecycle-fixture` (live worker-lifecycle observation host) is
 source-built.
 The Postgres delivery-effect harness is the `tenkai-delivery-conformance`
