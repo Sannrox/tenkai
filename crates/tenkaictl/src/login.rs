@@ -571,12 +571,24 @@ async fn post_token(
     Ok(token)
 }
 
-async fn read_json<T: for<'de> Deserialize<'de>>(response: reqwest::Response) -> Result<T> {
-    let bytes = response.bytes().await?;
-    if bytes.len() as u64 > MAX_METADATA_BYTES {
+/// Reads a JSON body of at most `MAX_METADATA_BYTES`: refused on a declared
+/// `Content-Length` over the limit, otherwise as soon as the streamed body
+/// passes it, so a hostile endpoint cannot make the login buffer without bound.
+async fn read_json<T: for<'de> Deserialize<'de>>(mut response: reqwest::Response) -> Result<T> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_METADATA_BYTES)
+    {
         bail!("response exceeded {MAX_METADATA_BYTES} bytes");
     }
-    Ok(serde_json::from_slice(&bytes)?)
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if (body.len() + chunk.len()) as u64 > MAX_METADATA_BYTES {
+            bail!("response exceeded {MAX_METADATA_BYTES} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&body)?)
 }
 
 async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<String> {
@@ -733,6 +745,39 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// #1322: a body that streams past the limit with no `Content-Length` is
+    /// refused once it crosses it. The server then holds the connection open,
+    /// so a reader that waits for the end of the body would hang.
+    #[tokio::test]
+    async fn read_json_refuses_a_streamed_body_over_the_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .await;
+            let block = vec![b' '; 64 * 1024];
+            for _ in 0..=(MAX_METADATA_BYTES / block.len() as u64) {
+                if stream.write_all(&block).await.is_err() {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        let response = reqwest::get(&url).await.unwrap();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            read_json::<serde_json::Value>(response),
+        )
+        .await
+        .expect("the oversized body must be refused without waiting for its end");
+        let err = read.unwrap_err();
+        assert!(err.to_string().contains("exceeded"), "{err:#}");
+    }
 
     struct FakeAuth {
         url: String,

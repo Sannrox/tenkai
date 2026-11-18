@@ -11,6 +11,38 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest as _, Sha256};
 
+/// Read a UTF-8 evidence file of at most `max_bytes`. The path is checked with
+/// `stat` before it is opened, so a FIFO or device is refused instead of
+/// blocking `open`, and the read stops one byte past the limit so an oversized
+/// or growing file is never buffered whole. `what` names the file in errors.
+pub(crate) fn read_bounded_regular_file(
+    path: &std::path::Path,
+    max_bytes: u64,
+    what: &str,
+) -> Result<String> {
+    use std::io::Read as _;
+    let not_regular = || format!("{what} {} must be a regular file", path.display());
+    if !std::fs::metadata(path)
+        .with_context(|| format!("reading {what} {}", path.display()))?
+        .is_file()
+    {
+        bail!("{}", not_regular());
+    }
+    let file =
+        std::fs::File::open(path).with_context(|| format!("reading {what} {}", path.display()))?;
+    if !file.metadata()?.is_file() {
+        bail!("{}", not_regular());
+    }
+    let mut raw = Vec::new();
+    file.take(max_bytes + 1)
+        .read_to_end(&mut raw)
+        .with_context(|| format!("reading {what} {}", path.display()))?;
+    if raw.len() as u64 > max_bytes {
+        bail!("{what} {} exceeds {max_bytes} bytes", path.display());
+    }
+    String::from_utf8(raw).with_context(|| format!("{what} {} is not valid UTF-8", path.display()))
+}
+
 /// Append a big-endian u64 length prefix and the raw bytes that follow.
 ///
 /// Every content-bound Tenkai signature domain uses this framing so signed
@@ -398,6 +430,38 @@ pub(crate) fn verify_strict(
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer as _, SigningKey};
+
+    /// #1322: an oversized file and a FIFO are refused before they are read
+    /// whole or block `open`; a file at the limit still loads.
+    #[test]
+    fn bounded_read_refuses_oversized_and_non_regular_files() {
+        let dir = std::env::temp_dir().join(format!("tenkai-bounded-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let at_limit = dir.join("at-limit");
+        std::fs::write(&at_limit, "x".repeat(8)).unwrap();
+        assert_eq!(
+            read_bounded_regular_file(&at_limit, 8, "evidence").unwrap(),
+            "xxxxxxxx"
+        );
+        let over = dir.join("over");
+        std::fs::write(&over, "x".repeat(9)).unwrap();
+        let err = read_bounded_regular_file(&over, 8, "evidence").unwrap_err();
+        assert!(err.to_string().contains("exceeds 8 bytes"), "{err:#}");
+        let fifo = dir.join("fifo");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let err = read_bounded_regular_file(&fifo, 8, "evidence").unwrap_err();
+        assert!(
+            err.to_string().contains("must be a regular file"),
+            "{err:#}"
+        );
+        let err = read_bounded_regular_file(&dir, 8, "evidence").unwrap_err();
+        assert!(
+            err.to_string().contains("must be a regular file"),
+            "{err:#}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn validates_key_identity_and_strict_signature() {
