@@ -51,6 +51,11 @@ class GateFlags(unittest.TestCase):
             metadata.gate_flags("- fix: two")
         self.assertEqual(metadata.gate_flags("- fix: two", required=False), [])
 
+    def test_an_empty_line_fails_even_when_the_line_is_optional(self):
+        for line in ("Gate flags:", "Gate flags:   ", "Gate flags: ,"):
+            with self.assertRaisesRegex(SystemExit, "line is empty"):
+                metadata.gate_flags(line, required=False)
+
     def test_refuses_an_unknown_flag(self):
         with self.assertRaisesRegex(SystemExit, "unknown gate flags"):
             metadata.gate_flags("Gate flags: risky")

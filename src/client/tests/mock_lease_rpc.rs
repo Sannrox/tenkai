@@ -94,15 +94,23 @@ impl tonic::server::UnaryService<RefreshLeaseRequest> for RefreshLeaseRpc {
         let state = self.0.clone();
         Box::pin(async move {
             let request = request.into_inner();
+            // Same refusals as the real stores: a non-positive TTL, and a
+            // lease that is not active, fenced by another token, or expired.
+            if request.ttl_ms <= 0 {
+                return Err(tonic::Status::invalid_argument("ttl_ms must be positive"));
+            }
             let key = mock_lease_key(&request.namespace, &request.key);
             let mut leases = state.leases.lock().unwrap();
             let Some(lease) = leases.get_mut(&key) else {
                 return Err(tonic::Status::not_found("lease not found"));
             };
-            if lease.status != "active" || lease.fencing_token != request.fencing_token {
+            let now = mock_now_ms();
+            if lease.status != "active"
+                || lease.fencing_token != request.fencing_token
+                || lease.expires_at_ms <= now
+            {
                 return Err(tonic::Status::failed_precondition("lease refresh rejected"));
             }
-            let now = mock_now_ms();
             lease.refreshed_at_ms = now;
             lease.expires_at_ms = now.saturating_add(request.ttl_ms);
             Ok(tonic::Response::new(RefreshLeaseResponse {

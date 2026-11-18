@@ -82,7 +82,8 @@ def changelog_section(text: str, version: str) -> str:
 def gate_flags(section: str, *, required: bool = True) -> list[str]:
     """Flags from the section's `Gate flags: a, b` (or `none`) line.
 
-    A missing line fails: an empty list would release without a channel hold.
+    A missing or empty line fails: an empty list would release without a
+    channel hold. Only an explicit `none` means no flags.
     """
     lines = _GATE_LINE.findall(section)
     if len(lines) > 1:
@@ -92,6 +93,8 @@ def gate_flags(section: str, *, required: bool = True) -> list[str]:
     if not lines or lines[0].strip().lower() == "none":
         return []
     flags = {flag.strip().lower() for flag in lines[0].split(",") if flag.strip()}
+    if not flags:
+        raise SystemExit("CHANGELOG 'Gate flags:' line is empty (list flags or 'none')")
     unknown = sorted(flags - set(GATE_FLAGS))
     if unknown:
         raise SystemExit(f"unknown gate flags {unknown}; allowed: {', '.join(GATE_FLAGS)}")

@@ -235,6 +235,34 @@ fn only_configured_asymmetric_algorithms_are_accepted() {
     assert!(ext.verify(&no_kid, NOW).is_err());
 }
 
+/// HMAC key confusion: an HS256 token MACed with public key material, which
+/// anyone can read from the JWKS, is refused. A verifier that keyed HMAC with
+/// the configured key would accept these.
+#[test]
+fn an_hs256_token_keyed_with_the_public_key_is_refused() {
+    let signer = Signer::new("k1");
+    let ext = extension(&[&signer], false);
+    let body = claims(serde_json::json!(["tenkai-admins"]));
+    let input = format!(
+        "{}.{}",
+        b64(br#"{"alg":"HS256","kid":"k1"}"#),
+        b64(body.to_string().as_bytes())
+    );
+    let point = signer.public_key();
+    let jwk = signer.jwk().to_string();
+    for secret in [
+        point,
+        &point[1..],
+        jwk.as_bytes(),
+        jwks(&[&signer]).as_bytes(),
+    ] {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret);
+        let tag = ring::hmac::sign(&key, input.as_bytes());
+        let token = format!("{input}.{}", b64(tag.as_ref()));
+        assert!(ext.verify(token.as_bytes(), NOW).is_err());
+    }
+}
+
 #[test]
 fn tampered_payload_and_foreign_keys_are_refused() {
     let signer = Signer::new("k1");

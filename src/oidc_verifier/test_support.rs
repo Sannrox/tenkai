@@ -34,6 +34,12 @@ impl Signer {
         })
     }
 
+    /// The uncompressed SEC1 public point, as an attacker could read it from
+    /// the JWKS.
+    pub fn public_key(&self) -> &[u8] {
+        self.key.public_key().as_ref()
+    }
+
     pub fn sign_with_header(
         &self,
         header: serde_json::Value,

@@ -21,7 +21,7 @@ DIND_IMAGE="docker:28-dind"
 TARGET_VOLUME="tenkai-seed-target-$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12])' "$ROOT")"
 
 cleanup() {
-  docker rm -f "$RUN-registry" "$RUN-host" >/dev/null 2>&1 || true
+  docker rm -fv "$RUN-registry" "$RUN-host" >/dev/null 2>&1 || true
   docker network rm "$RUN" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }

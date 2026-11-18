@@ -2,6 +2,8 @@
 
 use std::process::Command;
 
+mod support;
+
 /// The server exits before binding and says why.
 fn refused(args: &[&str]) -> String {
     let state = std::env::temp_dir().join(format!(
@@ -9,17 +11,17 @@ fn refused(args: &[&str]) -> String {
         std::process::id(),
         args.len()
     ));
-    let output = Command::new(env!("CARGO_BIN_EXE_tenkai-server"))
-        .args(args)
-        .arg("--database")
-        .arg(state.join("tenkai.db"))
-        .env(
-            "TENKAI_MANAGEMENT_TOKEN",
-            "listener-test-management-token-0123456789",
-        )
-        .env_remove("TENKAI_TLS_CERT")
-        .output()
-        .unwrap();
+    let output = support::output(
+        Command::new(env!("CARGO_BIN_EXE_tenkai-server"))
+            .args(args)
+            .arg("--database")
+            .arg(state.join("tenkai.db"))
+            .env(
+                "TENKAI_MANAGEMENT_TOKEN",
+                "listener-test-management-token-0123456789",
+            )
+            .env_remove("TENKAI_TLS_CERT"),
+    );
     let _ = std::fs::remove_dir_all(&state);
     assert!(!output.status.success(), "the server must refuse {args:?}");
     String::from_utf8_lossy(&output.stderr).into_owned()

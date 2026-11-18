@@ -140,6 +140,16 @@ impl Host {
         .unwrap()
     }
 
+    /// No certificate was written: the installed file and the identity
+    /// record still hold `current`.
+    fn unchanged(&self, current: &IssuedIdentity) {
+        assert_eq!(self.installed_certificate(), current.certificate);
+        let recorded = store::identity_record(&self.paths, ENVIRONMENT, "api")
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.certificate, current.certificate);
+    }
+
     fn refused(&self, instance: &str) -> String {
         match renew::renew(&self.paths, instance).unwrap() {
             Renewal::Refused(reason) => reason,
@@ -213,13 +223,16 @@ fn a_renewal_never_widens_or_revives_a_certificate() {
 
     // A restart-reload workload renews with a restart, not in place.
     let restart = host.grant(Reload::Restart, &["api.edge.internal"]);
-    let record = host.installed(&host.issue(&restart));
+    let current = host.issue(&restart);
+    let record = host.installed(&current);
     let instance = host.spool_renewal(&record, &host.issue(&restart));
     let reason = host.refused(&instance);
     assert!(reason.contains("restart"), "{reason}");
+    host.unchanged(&current);
 
     // An uninstalled product's certificate stays gone.
-    let record = host.installed(&host.issue(&grant));
+    let current = host.issue(&grant);
+    let record = host.installed(&current);
     let product = AppliedStateRecord::empty(ENVIRONMENT, "api");
     std::fs::write(
         record_path(&host.paths.state_dir, ENVIRONMENT, "api"),
@@ -229,6 +242,7 @@ fn a_renewal_never_widens_or_revives_a_certificate() {
     let instance = host.spool_renewal(&record, &host.issue(&grant));
     let reason = host.refused(&instance);
     assert!(reason.contains("not installed"), "{reason}");
+    host.unchanged(&current);
     // Each refusal is recorded for the runtime to report.
     assert!(store::refusal(&host.paths, &instance).unwrap().is_some());
 }
