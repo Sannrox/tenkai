@@ -72,7 +72,18 @@ impl<C: Send + 'static> Worker<C> {
                     {
                         client = fresh;
                     }
-                    work(&mut client);
+                    // A panic fails only this operation (#1305): its caller
+                    // sees the dropped result channel as `worker_failure`.
+                    // The unwind dropped any open transaction, but the
+                    // client's state is unknown, so it is replaced. A failed
+                    // reconnect keeps it; `closed` retries before the next.
+                    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        work(&mut client)
+                    }))
+                    .is_err();
+                    if panicked && let Ok(fresh) = initialize() {
+                        client = fresh;
+                    }
                 }
             })
             .map_err(|error| {
@@ -210,7 +221,7 @@ impl Inner {
                 tx.commit().map_err(pg)?;
                 Ok(out)
             },
-            StoreError::Postgres("postgres worker thread panicked".into()),
+            StoreError::Postgres("postgres operation panicked or the worker stopped".into()),
         )
     }
 }
@@ -222,7 +233,7 @@ impl Inner {
                 client.query_one("SELECT 1", &[]).map_err(pg)?;
                 Ok(())
             },
-            StoreError::Postgres("postgres worker thread panicked".into()),
+            StoreError::Postgres("postgres operation panicked or the worker stopped".into()),
         )
     }
 }
@@ -264,5 +275,26 @@ mod tests {
 
         assert_ne!(worker_thread, caller);
         assert_eq!(later_worker_thread, worker_thread);
+    }
+
+    /// #1305: a panicking operation fails alone. The worker keeps serving
+    /// and runs the next operation on a fresh client.
+    #[test]
+    fn a_panicking_operation_fails_alone_and_the_next_gets_a_fresh_client() {
+        let connects = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter = std::sync::Arc::clone(&connects);
+        let worker = Worker::start(move || {
+            Ok::<_, StoreError>(counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+        })
+        .unwrap();
+        let failed = worker.run(
+            |_| -> Result<(), StoreError> { panic!("a bad request") },
+            StoreError::Poisoned,
+        );
+        assert!(matches!(failed, Err(StoreError::Poisoned)), "{failed:?}");
+        let client = worker
+            .run(|client| Ok::<_, StoreError>(*client), StoreError::Poisoned)
+            .unwrap();
+        assert_eq!(client, 1, "the client a panic left behind is replaced");
     }
 }
