@@ -43,7 +43,7 @@ use super::lifecycle::{
     designate_canaries, environment_hold, import_derived_criticality,
     install_model_evaluation_trust, list_release_labels, pause_channel_policy, plan_environment,
     plan_identity_issuer, prepare_identity_issuer, promote_release, publish_release,
-    recall_release, record_model_evaluation_evidence, record_recall_range,
+    recall_release, reconcile_deployment, record_model_evaluation_evidence, record_recall_range,
     record_software_compatibility_evidence, release_channel_hold, release_environment_hold,
     release_label_history, remove_channel_head, resume_channel_policy, retire_environment,
     retry_failed_target, rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment,
@@ -421,6 +421,10 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/subscriptions/{product}",
             delete(unsubscribe_environment),
+        )
+        .route(
+            "/v1/environments/{environment}/deployments/{product}/reconcile",
+            post(reconcile_deployment),
         )
         .route(
             "/v1/environments/{environment}/retire",

@@ -47,6 +47,22 @@ If failed cleanup leaves deployment state unknown, reconcile the external
 target manually, then run `tenkaictl env reconcile <env> <product>` after
 cleanup or add `--deployed <version>` to record the verified live version.
 
+Against a running server, pass the environment's current generation (the
+`generation` that `tenkaictl env inspect <env>` reports) instead of stopping
+the server:
+
+```bash
+tenkaictl --target remote env reconcile <env> <product> \
+  --deployed <version> --generation <generation>
+```
+
+The server records the state as the embedded command does and audits it with
+the caller. It refuses a stale generation and refuses while an apply holds the
+environment; neither changes anything. An environment-scoped management token
+may reconcile only its own environment. The call claims the apply lease for
+the write, so the generation advances: read it again before the next fenced
+call.
+
 For stateful products whose upgrades need data migration, see
 [package migrations](package-migrations.md). To restore Tenkai's own state, see
 [backup and restore](backup-restore.md). To deliver Tenkai's own server and

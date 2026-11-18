@@ -131,6 +131,7 @@ pub enum ManagementLifecycleOperation {
     Register,
     Configure,
     Cancel,
+    Reconcile,
 }
 
 impl ManagementLifecycleOperation {
@@ -169,6 +170,7 @@ impl ManagementLifecycleOperation {
             Self::Register => "register",
             Self::Configure => "configure",
             Self::Cancel => "cancel",
+            Self::Reconcile => "reconcile",
         }
     }
 
@@ -221,6 +223,7 @@ impl ManagementLifecycleOperation {
                 | Self::Configure
                 | Self::Cancel
                 | Self::ExposureGrace
+                | Self::Reconcile
         )
     }
 }
@@ -289,6 +292,7 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "register" => Ok(ManagementLifecycleOperation::Register),
         "configure" => Ok(ManagementLifecycleOperation::Configure),
         "cancel" => Ok(ManagementLifecycleOperation::Cancel),
+        "reconcile" => Ok(ManagementLifecycleOperation::Reconcile),
         other => bail!("unknown management lifecycle operation {other:?}"),
     }
 }
@@ -698,6 +702,25 @@ pub struct UnsubscribeRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub expected_version: Option<String>,
+}
+
+/// `POST /v1/environments/{environment}/deployments/{product}/reconcile`:
+/// record what an operator found deployed after a failed restore or a lost
+/// completion, as `env reconcile` does (#1201). Fenced by the generation
+/// and refused while an apply lease is held.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReconcileDeploymentRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    pub product: String,
+    /// The version found deployed; omitted clears the recorded deployment
+    /// after cleanup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub deployed: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1284,6 +1307,34 @@ pub fn admit_subscribe(
     if request.spec.split_once('=').is_none() {
         bail!("subscribe requires <product>=<channel>");
     }
+    Ok(admitted)
+}
+
+pub fn admit_reconcile_deployment(
+    request: &ReconcileDeploymentRequest,
+    path_environment: &str,
+    path_product: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    if request.environment != path_environment || request.product != path_product {
+        bail!(
+            "reconcile of {} in {} does not match path {path_product} in {path_environment}",
+            request.product,
+            request.environment
+        );
+    }
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: Some(request.environment.clone()),
+            expected_generation: Some(request.expected_generation),
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(admitted.operation, ManagementLifecycleOperation::Reconcile)?;
     Ok(admitted)
 }
 

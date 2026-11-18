@@ -244,7 +244,9 @@ release, returns to it with the rollback or downgrade approvals the host
 policy requires. Reconcile neither observes nor restarts host releases. If the
 server died after the applier finished a step but before recording it, the
 next plan names the release the applier applied and asks you to record it
-with `tenkaictl env reconcile <environment> <product> --deployed <version>`.
+with `tenkaictl --target remote env reconcile <environment> <product>
+--deployed <version> --generation <generation>`, without stopping the server
+(see [recover unknown deployment state](upgrade-and-rollback.md#recover-unknown-deployment-state)).
 
 To authenticate with enterprise JWT assertions or with an identity provider
 (OIDC) instead of shared bearer tokens, see

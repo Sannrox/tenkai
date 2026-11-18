@@ -266,6 +266,41 @@ pub async fn reconcile_deployment(
     {
         bail!("environment {env} has an apply in progress");
     }
+    reconcile_held(ctx, env, product, deployed).await
+}
+
+/// [`reconcile_deployment`] for a remote caller (#1201): it claims the
+/// environment apply lease, so a held lease refuses it and no apply starts
+/// during the write, and `fence` checks the caller's generation against the
+/// one current before the claim.
+pub async fn reconcile_deployment_fenced(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    deployed: Option<&str>,
+    fence: impl FnOnce(u64) -> Result<()>,
+) -> Result<String> {
+    validate_identifier("environment", env)?;
+    validate_identifier("product", product)?;
+    let lease = crate::apply::claim_environment(ctx, env, &format!("reconcile:{product}")).await?;
+    let reconciled = match fence(lease.generation.saturating_sub(1)) {
+        Ok(()) => reconcile_held(ctx, env, product, deployed).await,
+        Err(error) => Err(error),
+    };
+    let released = crate::apply::release_environment(ctx, &lease).await;
+    match (reconciled, released) {
+        (Ok(message), Ok(())) => Ok(message),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.context("releasing the environment apply lease")),
+    }
+}
+
+async fn reconcile_held(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    deployed: Option<&str>,
+) -> Result<String> {
     let mut object = environment(ctx, env).await?;
     let was_unknown = object
         .properties
