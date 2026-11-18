@@ -703,7 +703,7 @@ impl WorkerLifecyclePort for LocalProcessWorkerLifecycle {
         std::fs::create_dir_all(&dir)?;
         let files = Self::paths(&dir, &request.worker_id);
         if files.generation.exists() {
-            require_generation(&files, request.scope.expected_generation)?;
+            require_reclaimable(&files, request.scope.expected_generation)?;
         }
         let _ = std::fs::remove_file(&files.live);
         let _ = std::fs::remove_file(&files.control);
@@ -849,6 +849,30 @@ fn process_identity_matches(files: &WorkerFiles) -> bool {
     expected.trim() == observed.trim()
         && !expected.trim().is_empty()
         && cookie_lock_is_held(&files.cookie_live)
+}
+
+/// Whether `start_replica` may (re)start the slot under `expected` (#1293).
+/// A slot recorded under a newer generation belongs to a newer controller.
+/// A live worker under another generation is rebound by `bind_fence`, not
+/// replaced. A slot whose process is gone is reclaimed: its files are
+/// overwritten under `expected`, so recovery after a takeover needs no
+/// manual cleanup.
+fn require_reclaimable(files: &WorkerFiles, expected: u64) -> Result<()> {
+    let recorded = std::fs::read_to_string(&files.generation)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .ok_or_else(|| anyhow::anyhow!("worker has no recorded fencing generation"))?;
+    if recorded > expected {
+        bail!(
+            "stale fencing generation {expected} cannot start worker; it is recorded under newer generation {recorded}"
+        );
+    }
+    if recorded != expected && process_identity_matches(files) {
+        bail!(
+            "stale fencing generation {recorded} recorded for a running worker; rebind it under {expected} before starting"
+        );
+    }
+    Ok(())
 }
 
 fn require_generation(files: &WorkerFiles, expected: u64) -> Result<()> {
