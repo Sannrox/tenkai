@@ -4228,6 +4228,13 @@
         "digest": {
           "type": "string"
         },
+        "environment": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment values (#1186) the subscribed head reads: declared keys\nthat no override sets. Precedence: `overlay`, then these, then\n`defaults`.",
+          "type": "object"
+        },
         "overlay": {
           "additionalProperties": {
             "type": "string"

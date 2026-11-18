@@ -1069,9 +1069,10 @@ async fn compute_snapshot_with_policy(
                 } else {
                     &instance
                 };
+                let schema = crate::environment::digest_schema(ctx, &env_obj, &release).await?;
                 let config_digest = crate::sealed_secret::instance_config_digest(
                     &env_obj,
-                    &crate::environment::overlay_digest_for(&env_obj, &product),
+                    &crate::environment::overlay_digest_for(&env_obj, &product, schema.as_ref()),
                     applied_key,
                 );
                 let applied = env_obj
@@ -6438,6 +6439,107 @@ type = "integer"
         let refused = crate::plan::create(&mut ctx, "local").await.unwrap_err();
         assert!(
             format!("{refused:#}").contains("overlay region is not declared"),
+            "{refused:#}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    async fn published_config(ctx: &mut Ctx, root: &std::path::Path, product: &str, config: &str) {
+        let dir = root.join(product);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tenkai.toml"),
+            format!(
+                "[product]\nname = \"{product}\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\n\n{config}"
+            ),
+        )
+        .unwrap();
+        crate::catalog::publish(
+            ctx,
+            &dir.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("value-promote");
+        crate::catalog::promote(ctx, &actor, &format!("{product}@1.0.0"), "stable")
+            .await
+            .unwrap();
+    }
+
+    /// An environment value restarts only the instance that declares its
+    /// key, and a value of the wrong type for a declaring product is refused
+    /// naming the product and key (#1186).
+    #[tokio::test]
+    async fn an_environment_value_restarts_only_products_that_read_it() {
+        let root = std::env::temp_dir().join(format!("tenkai-env-value-{}", uuid::Uuid::new_v4()));
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        published_config(
+            &mut ctx,
+            &root,
+            "api",
+            "[config.overlay.domain]\ntype = \"string\"\n",
+        )
+        .await;
+        published_config(
+            &mut ctx,
+            &root,
+            "web",
+            "[config.overlay.size]\ntype = \"integer\"\n",
+        )
+        .await;
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        for product in ["api", "web"] {
+            subscribe(&mut ctx, "local", product, "stable")
+                .await
+                .unwrap();
+            env.properties
+                .insert(format!("deployed.{product}"), "1.0.0".into());
+            env.properties.insert(
+                format!("deployed_release.{product}"),
+                release_id(product, "1.0.0"),
+            );
+        }
+        ctx.put(env).await.unwrap();
+
+        let refused = crate::environment::set_environment_value(&mut ctx, "local", "size", "big")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            format!("{refused:#}"),
+            "web declares size: overlay size must be an integer"
+        );
+        crate::environment::set_environment_value(&mut ctx, "local", "domain", "a.test")
+            .await
+            .unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        let restarted: Vec<_> = plan
+            .steps
+            .iter()
+            .map(|step| (step.product.as_str(), step.action))
+            .collect();
+        assert_eq!(restarted, [("api", Action::Restart)]);
+
+        // A stored value a candidate rejects refuses the plan, naming the key.
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.insert(
+            "config_values".into(),
+            r#"{"domain":"a.test","size":"big"}"#.into(),
+        );
+        ctx.put(env).await.unwrap();
+        let refused = crate::plan::create(&mut ctx, "local").await.unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("overlay size must be an integer"),
             "{refused:#}"
         );
 

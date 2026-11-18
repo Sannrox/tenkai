@@ -61,12 +61,68 @@ fn parses_overlay_and_recalled_recovery() {
             command: EnvCommand::Overlay {
                 command: OverlayCommand::Set {
                     ref env,
-                    ref product,
-                    ref spec,
+                    ref subject,
+                    spec: Some(ref spec),
                 }
             }
-        } if env == "prod" && product == "api" && spec == "region=eu"
+        } if env == "prod" && subject == "api" && spec == "region=eu"
     ));
+    let value = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "overlay",
+        "set",
+        "prod",
+        "domain=a.test",
+    ])
+    .unwrap();
+    assert!(matches!(
+        value.command,
+        Command::Env {
+            command: EnvCommand::Overlay {
+                command: OverlayCommand::Set {
+                    ref subject,
+                    spec: None,
+                    ..
+                }
+            }
+        } if subject == "domain=a.test"
+    ));
+    let cleared = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "overlay",
+        "clear",
+        "prod",
+        "--value",
+        "domain",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cleared.command,
+        Command::Env {
+            command: EnvCommand::Overlay {
+                command: OverlayCommand::Clear {
+                    product: None,
+                    value: Some(ref value),
+                    ..
+                }
+            }
+        } if value == "domain"
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "tenkaictl",
+            "env",
+            "overlay",
+            "clear",
+            "prod",
+            "api",
+            "--value",
+            "domain",
+        ])
+        .is_err()
+    );
     let rollback = Cli::try_parse_from([
         "tenkaictl",
         "rollback",

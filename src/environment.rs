@@ -422,7 +422,8 @@ async fn update_reconciled_deployment_object(
         .properties
         .insert(format!("deployment_health.{key}"), "healthy".into());
     object.properties.remove(&format!("deployment_error.{key}"));
-    stamp_applied_overlays(object, product, instance, sealed);
+    let schema = deployed_digest_schema(ctx, object, key).await?;
+    stamp_applied_overlays(object, product, instance, sealed, schema.as_ref());
     object.properties.remove(&format!("deployed_prev.{key}"));
     for prefix in [
         "deployment_unknown_plan.",
@@ -450,6 +451,7 @@ pub(crate) async fn update_runtime_deployments_object(
                 object,
                 &step.product,
                 step.instance_name(),
+                None,
                 None,
                 &DeploymentTransition::Removed {
                     version: step.to.clone(),
@@ -510,6 +512,7 @@ pub(crate) fn record_removal_unknown(
         &step.product,
         step.instance_name(),
         None,
+        None,
         &DeploymentTransition::Unknown,
         detail,
         observed_at,
@@ -545,7 +548,14 @@ pub(crate) async fn record_deployed(
         .properties
         .insert(format!("deployment_health.{key}"), "healthy".into());
     object.properties.remove(&format!("deployment_error.{key}"));
-    stamp_applied_overlays(&mut object, product, instance, Some(&step.sealed));
+    let schema = deployed_digest_schema(ctx, &object, key).await?;
+    stamp_applied_overlays(
+        &mut object,
+        product,
+        instance,
+        Some(&step.sealed),
+        schema.as_ref(),
+    );
     if step.delivers_dependencies() {
         crate::dependency_document::stamp(ctx, &mut object, key, step.granted_peers()).await?;
     }
@@ -566,6 +576,7 @@ pub(crate) async fn record_unknown(
         &mut object,
         product,
         instance,
+        None,
         None,
         &DeploymentTransition::Unknown,
         detail,
@@ -678,12 +689,17 @@ pub(crate) async fn record_deployment_observation(
             .get(&failed_target_key(instance))
             .cloned()
     });
+    let schema = match environment.as_ref() {
+        Some(environment) => digest_schema(ctx, environment, &observation.step.release_id).await?,
+        None => None,
+    };
     if let Some(environment) = environment.as_mut() {
         transition_deployment(
             environment,
             &observation.step.product,
             instance,
             Some(&observation.step.sealed),
+            schema.as_ref(),
             &observation.transition,
             observation.detail,
             deployment.updated,
@@ -969,11 +985,13 @@ fn clear_unknown_origin(environment: &mut Object, product: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transition_deployment(
     environment: &mut Object,
     product: &str,
     instance: &str,
     sealed: Option<&[crate::plan::SealedStep]>,
+    schema: Option<&crate::manifest::ConfigSection>,
     transition: &DeploymentTransition,
     detail: &str,
     observed_at: i64,
@@ -992,7 +1010,7 @@ fn transition_deployment(
             environment
                 .properties
                 .remove(&format!("deployment_error.{key}"));
-            stamp_applied_overlays(environment, product, instance, sealed);
+            stamp_applied_overlays(environment, product, instance, sealed, schema);
             environment.properties.remove(&format!("spec_drift.{key}"));
             clear_unknown_origin(environment, key);
         }
@@ -1016,7 +1034,7 @@ fn transition_deployment(
             environment
                 .properties
                 .remove(&format!("deployment_error.{key}"));
-            stamp_applied_overlays(environment, product, instance, sealed);
+            stamp_applied_overlays(environment, product, instance, sealed, schema);
             environment.properties.remove(&format!("spec_drift.{key}"));
             clear_unknown_origin(environment, key);
         }
@@ -1952,6 +1970,11 @@ pub struct EnvironmentProductConfig {
     pub product: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub defaults: BTreeMap<String, String>,
+    /// Environment values (#1186) the subscribed head reads: declared keys
+    /// that no override sets. Precedence: `overlay`, then these, then
+    /// `defaults`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overlay: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2067,9 +2090,10 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
         } else {
             instance.clone()
         };
+        let schema = deployed_digest_schema(ctx, env_obj, &applied_key).await?;
         let overlay_digest = crate::sealed_secret::instance_config_digest(
             env_obj,
-            &overlay_digest_for(env_obj, &product),
+            &overlay_digest_for(env_obj, &product, schema.as_ref()),
             &applied_key,
         );
         let applied = env_obj
@@ -2187,20 +2211,23 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
     Ok(rows)
 }
 
-fn subscription_views_from_status(
+async fn subscription_views_from_status(
+    ctx: &mut Ctx,
     env_obj: &Object,
     rows: Vec<StatusRow>,
-) -> Vec<EnvironmentSubscriptionView> {
-    rows.into_iter()
-        .map(|row| {
+) -> Result<Vec<EnvironmentSubscriptionView>> {
+    let mut views = Vec::with_capacity(rows.len());
+    for row in rows {
+        views.push({
             let applied_key = if row.instance.is_empty() {
                 &row.product
             } else {
                 &row.instance
             };
+            let schema = deployed_digest_schema(ctx, env_obj, applied_key).await?;
             let overlay_digest = crate::sealed_secret::instance_config_digest(
                 env_obj,
-                &overlay_digest_for(env_obj, &row.product),
+                &overlay_digest_for(env_obj, &row.product, schema.as_ref()),
                 applied_key,
             );
             let applied_overlay = env_obj
@@ -2227,8 +2254,9 @@ fn subscription_views_from_status(
                 delivery_hold: row.delivery_hold,
                 spec_drift: row.spec_drift,
             }
-        })
-        .collect()
+        });
+    }
+    Ok(views)
 }
 
 /// List registered environments with compact delivery summaries.
@@ -2312,7 +2340,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             continue;
         }
         let rows = status_from_object(ctx, &env_obj).await?;
-        let subscriptions = subscription_views_from_status(&env_obj, rows);
+        let subscriptions = subscription_views_from_status(ctx, &env_obj, rows).await?;
         let lease = crate::apply::inspect_environment_lease(ctx, &env_obj.name).await?;
         let retirement = retirement_from_object(&env_obj);
         let delivery_hold = crate::delivery_hold::get(
@@ -2413,7 +2441,7 @@ async fn inspect_environment_base(
 ) -> Result<EnvironmentInspectReport> {
     let env_obj = environment(ctx, env).await?;
     let rows = status_from_object(ctx, &env_obj).await?;
-    let subscriptions = subscription_views_from_status(&env_obj, rows);
+    let subscriptions = subscription_views_from_status(ctx, &env_obj, rows).await?;
     let facts = environment_facts_from_object(&env_obj);
     let overlays = environment_overlays_from_object(&env_obj);
     let config = product_config_views(ctx, &env_obj).await?;
@@ -3470,18 +3498,96 @@ pub fn config_selection_digest(
     format!("{:x}", hasher.finalize())
 }
 
-/// The config digest one product's selection yields (see
-/// [`config_selection_digest`]); empty when it selects nothing.
-pub(crate) fn overlay_digest_for(env_obj: &Object, product: &str) -> String {
-    product_overlays(env_obj, product)
-        .ok()
-        .map(|values| config_selection_digest(product_preset(env_obj, product), &values))
-        .unwrap_or_default()
+/// Environment property holding values every release may read (#1186).
+const ENVIRONMENT_VALUES: &str = "config_values";
+
+/// Environment-wide config values (#1186), keyed by overlay key.
+pub fn environment_values(env_obj: &Object) -> Result<BTreeMap<String, String>> {
+    parse_overlay_map(env_obj.properties.get(ENVIRONMENT_VALUES))
+}
+
+/// The environment values one product receives from `schema`: only keys it
+/// declares as overlay keys, and only where neither its selected preset nor
+/// an override already sets the key. Masked values are left out so changing
+/// them restarts nothing.
+fn inherited_values(
+    env_obj: &Object,
+    product: &str,
+    schema: Option<&crate::manifest::ConfigSection>,
+) -> Result<BTreeMap<String, String>> {
+    let Some(schema) = schema else {
+        return Ok(BTreeMap::new());
+    };
+    let overrides = product_overlays(env_obj, product)?;
+    let preset = product_preset(env_obj, product).and_then(|name| schema.presets.get(name));
+    Ok(environment_values(env_obj)?
+        .into_iter()
+        .filter(|(key, _)| {
+            schema.overlay.contains_key(key)
+                && !overrides.contains_key(key)
+                && !preset.is_some_and(|values| values.contains_key(key))
+        })
+        .collect())
+}
+
+/// The config digest of one product against `schema`, the release it runs:
+/// its selection (see [`config_selection_digest`]) and the environment
+/// values it inherits. Without inherited values this is exactly the
+/// selection digest, so environments with no environment values keep their
+/// digests; empty when nothing is selected or inherited.
+pub(crate) fn overlay_digest_for(
+    env_obj: &Object,
+    product: &str,
+    schema: Option<&crate::manifest::ConfigSection>,
+) -> String {
+    let Ok(overrides) = product_overlays(env_obj, product) else {
+        return String::new();
+    };
+    let selection = config_selection_digest(product_preset(env_obj, product), &overrides);
+    let inherited = inherited_values(env_obj, product, schema).unwrap_or_default();
+    if inherited.is_empty() {
+        return selection;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"tenkai.environment-values\0");
+    hasher.update(overlay_digest(&inherited).as_bytes());
+    hasher.update([0]);
+    hasher.update(selection.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// The config schema of `release` when it can affect one instance's digest:
+/// `None` without a lookup while the environment holds no environment
+/// values, so digests then cost what they did before #1186.
+pub(crate) async fn digest_schema(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+    release: &str,
+) -> Result<Option<crate::manifest::ConfigSection>> {
+    if environment_values(env_obj)?.is_empty() || release.is_empty() {
+        return Ok(None);
+    }
+    release_config_schema(ctx, release).await
+}
+
+/// [`digest_schema`] for the release an instance has deployed.
+async fn deployed_digest_schema(
+    ctx: &mut Ctx,
+    env_obj: &Object,
+    instance: &str,
+) -> Result<Option<crate::manifest::ConfigSection>> {
+    let release = env_obj
+        .properties
+        .get(&format!("deployed_release.{instance}"))
+        .cloned()
+        .unwrap_or_default();
+    digest_schema(ctx, env_obj, &release).await
 }
 
 /// Overlay values one product receives from `schema`, the release being
-/// deployed: the selected preset's values, then the environment's overrides
-/// on top. Preset values always come from that release, never from stored
+/// deployed: environment values for keys it declares (#1186), the selected
+/// preset's values over them, then the product's overrides on top. Release
+/// defaults apply below all three. Preset values always come from that release, never from stored
 /// state, so a release that changes a preset changes what is delivered.
 /// Refuses a selected preset the release does not declare.
 pub fn effective_overlays(
@@ -3490,13 +3596,13 @@ pub fn effective_overlays(
     schema: Option<&crate::manifest::ConfigSection>,
 ) -> Result<BTreeMap<String, String>> {
     let overrides = product_overlays(env_obj, product)?;
-    let Some(preset) = product_preset(env_obj, product) else {
-        return Ok(overrides);
-    };
-    let Some(values) = schema.and_then(|schema| schema.presets.get(preset)) else {
-        bail!("preset {preset} selected for {product} is not declared by the release");
-    };
-    let mut effective = values.clone();
+    let mut effective = inherited_values(env_obj, product, schema)?;
+    if let Some(preset) = product_preset(env_obj, product) {
+        let Some(values) = schema.and_then(|schema| schema.presets.get(preset)) else {
+            bail!("preset {preset} selected for {product} is not declared by the release");
+        };
+        effective.extend(values.clone());
+    }
     effective.extend(overrides);
     Ok(effective)
 }
@@ -3510,7 +3616,7 @@ pub(crate) fn product_config(
 ) -> Result<(BTreeMap<String, String>, String)> {
     Ok((
         effective_overlays(env_obj, product, schema)?,
-        overlay_digest_for(env_obj, product),
+        overlay_digest_for(env_obj, product, schema),
     ))
 }
 
@@ -3672,13 +3778,14 @@ fn stamp_applied_overlays(
     product: &str,
     instance: &str,
     sealed: Option<&[crate::plan::SealedStep]>,
+    schema: Option<&crate::manifest::ConfigSection>,
 ) {
     let key = if instance.is_empty() {
         product
     } else {
         instance
     };
-    let digest = overlay_digest_for(environment, product);
+    let digest = overlay_digest_for(environment, product, schema);
     let applied = match sealed {
         Some(sealed) => crate::sealed_secret::config_digest(&digest, sealed),
         None => crate::sealed_secret::instance_config_digest(environment, &digest, key),
@@ -3834,6 +3941,7 @@ async fn product_config_views(
             views.push(EnvironmentProductConfig {
                 product: sub.product,
                 defaults: BTreeMap::new(),
+                environment: BTreeMap::new(),
                 digest: overlay_digest(&overlay),
                 overlay,
                 secrets: Vec::new(),
@@ -3841,10 +3949,12 @@ async fn product_config_views(
             });
             continue;
         };
+        let environment = inherited_values(env_obj, &sub.product, Some(&schema))?;
         let mut defaults = BTreeMap::new();
         for (key, spec) in &schema.overlay {
             if let Some(value) = spec.default.as_ref()
                 && !overlay.contains_key(key)
+                && !environment.contains_key(key)
             {
                 defaults.insert(key.clone(), value.clone());
             }
@@ -3853,6 +3963,7 @@ async fn product_config_views(
             product: sub.product,
             digest: overlay_digest(&overlay),
             overlay,
+            environment,
             defaults,
             secrets: schema.secrets,
             rotate_after: schema.rotate_after,
@@ -4029,6 +4140,79 @@ pub async fn list_environment_overlays(
                 .collect())
         }
         None => Ok(environment_overlays_from_object(&env_obj)),
+    }
+}
+
+/// Set an environment value (#1186). Every release that declares `key` as
+/// an overlay key reads it unless its preset or an override sets the key.
+/// Refuses a value a subscribed head's schema rejects, naming the product,
+/// and a key a subscribed head declares as a secret; planning checks each
+/// candidate again.
+pub async fn set_environment_value(
+    ctx: &mut Ctx,
+    env: &str,
+    key: &str,
+    value: &str,
+) -> Result<String> {
+    validate_identifier("environment", env)?;
+    validate_identifier("overlay key", key)?;
+    reject_credential_material("environment value", key, value)?;
+    let mut env_obj = environment(ctx, env).await?;
+    for sub in list_subscriptions(ctx, &env_obj).await? {
+        let Some(release) = sub.channel.properties.get("current_release").cloned() else {
+            continue;
+        };
+        let Some(schema) = release_config_schema(ctx, &release).await? else {
+            continue;
+        };
+        if schema.secrets.iter().any(|name| name == key) {
+            bail!(
+                "{key} is a secret name {} declares; secret values are not environment values",
+                sub.product
+            );
+        }
+        if let Some(spec) = schema.overlay.get(key) {
+            admit_overlay_value(spec, key, value)
+                .with_context(|| format!("{} declares {key}", sub.product))?;
+        }
+    }
+    let mut values = environment_values(&env_obj)?;
+    values.insert(key.to_string(), value.to_string());
+    persist_environment_values(&mut env_obj, &values);
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("set {env} environment value {key}={value}"))
+}
+
+/// Clear one environment value (#1186).
+pub async fn clear_environment_value(ctx: &mut Ctx, env: &str, key: &str) -> Result<String> {
+    validate_identifier("environment", env)?;
+    validate_identifier("overlay key", key)?;
+    let mut env_obj = environment(ctx, env).await?;
+    let mut values = environment_values(&env_obj)?;
+    if values.remove(key).is_none() {
+        bail!("environment {env} has no environment value {key}");
+    }
+    persist_environment_values(&mut env_obj, &values);
+    env_obj.updated = crate::now_millis();
+    ctx.put(env_obj).await?;
+    Ok(format!("cleared {env} environment value {key}"))
+}
+
+/// Environment values (#1186) of one environment.
+pub async fn list_environment_values(ctx: &mut Ctx, env: &str) -> Result<BTreeMap<String, String>> {
+    validate_identifier("environment", env)?;
+    environment_values(&environment(ctx, env).await?)
+}
+
+fn persist_environment_values(env_obj: &mut Object, values: &BTreeMap<String, String>) {
+    if values.is_empty() {
+        env_obj.properties.remove(ENVIRONMENT_VALUES);
+    } else {
+        env_obj.properties.insert(
+            ENVIRONMENT_VALUES.into(),
+            serde_json::to_string(values).expect("value map is JSON-serializable"),
+        );
     }
 }
 
@@ -4299,6 +4483,41 @@ mod tests {
         assert!(error.to_string().contains("preset large"), "{error}");
     }
 
+    /// Environment values reach only declared keys, below the preset and the
+    /// overrides, and enter the digest only where they are read (#1186).
+    #[test]
+    fn environment_values_fill_declared_keys_below_preset_and_overrides() {
+        let schema = preset_schema();
+        let mut env = env_with(None, &[("replicas", "3")]);
+        let before = overlay_digest_for(&env, "api", Some(&schema));
+        persist_environment_values(
+            &mut env,
+            &BTreeMap::from([
+                ("region".into(), "eu".into()),
+                ("replicas".into(), "9".into()),
+                ("domain".into(), "a.test".into()),
+            ]),
+        );
+        let (values, digest) = product_config(&env, "api", Some(&schema)).unwrap();
+        // The override wins; the undeclared key is never passed.
+        assert_eq!(
+            values,
+            BTreeMap::from([
+                ("replicas".into(), "3".into()),
+                ("region".into(), "eu".into()),
+            ])
+        );
+        assert_ne!(digest, before);
+        // A value the release does not read leaves its digest as it was.
+        let mut unread = schema.clone();
+        unread.overlay.remove("region");
+        assert_eq!(overlay_digest_for(&env, "api", Some(&unread)), before);
+        // The selected preset wins over an environment value.
+        env.properties.insert("preset.api".into(), "large".into());
+        let (values, _) = product_config(&env, "api", Some(&schema)).unwrap();
+        assert_eq!(values.get("region").map(String::as_str), Some("us"));
+    }
+
     fn without_overrides(env: &Object) -> BTreeMap<String, String> {
         product_overlays(env, "api").unwrap()
     }
@@ -4444,6 +4663,7 @@ mod tests {
             "api",
             "api",
             None,
+            None,
             &DeploymentTransition::Deployed {
                 version: "2.0.0".into(),
                 previous: Some("1.0.0".into()),
@@ -4489,6 +4709,7 @@ mod tests {
             "api",
             "api",
             Some(&ran),
+            None,
             &DeploymentTransition::Refreshed,
             "",
             42,
@@ -4513,6 +4734,7 @@ mod tests {
             &mut environment,
             "api",
             "api",
+            None,
             None,
             &DeploymentTransition::Unknown,
             "cleanup failed",
