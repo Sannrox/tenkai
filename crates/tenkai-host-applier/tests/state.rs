@@ -379,6 +379,11 @@ fn a_release_that_does_not_compare_keeps_the_high_water_release() {
     assert!(refusal(host.admit(&install_two)).contains("high-water release 3.0.0"));
 }
 
+/// Lifetime of the approval that expires while a step waits. Long enough that
+/// intake on a loaded machine still sees it valid; expiry itself is decided by
+/// an explicit admission time, not a sleep (#1343).
+const SHORT_APPROVAL_MS: i64 = 60_000;
+
 #[test]
 fn approvals_that_expire_while_waiting_for_the_lock_do_not_start_the_step() {
     let host = Host::new(Vec::new());
@@ -400,14 +405,17 @@ fn approvals_that_expire_while_waiting_for_the_lock_do_not_start_the_step() {
         &plan,
         "external-review",
         now - 1_000,
-        now + 500,
+        now + SHORT_APPROVAL_MS,
     );
     let request = host.fixture.request(&plan, 0, &a.release, vec![short]);
     let instance = host.spool_request(&request, &a.dir);
     let intake = host.intake(&instance).unwrap();
-    // The lock wait outlasts the approval.
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    let refused = refusal(store::admit(&host.paths, &intake.verified));
+    // The lock wait outlasts the approval: admit just after it expires.
+    let refused = refusal(store::admit_at(
+        &host.paths,
+        &intake.verified,
+        now + SHORT_APPROVAL_MS + 1,
+    ));
     assert!(refused.contains("stopped being valid"), "{refused}");
     assert_eq!(host.record().generation, 0);
 }
@@ -433,7 +441,7 @@ fn a_redundant_approval_that_expires_while_waiting_does_not_refuse_the_step() {
         &plan,
         "external-review",
         now - 1_000,
-        now + 500,
+        now + SHORT_APPROVAL_MS,
     );
     let long = host.fixture.approve(&plan, 0, now);
     let request = host
@@ -441,9 +449,8 @@ fn a_redundant_approval_that_expires_while_waiting_does_not_refuse_the_step() {
         .request(&plan, 0, &a.release, vec![short, long]);
     let instance = host.spool_request(&request, &a.dir);
     let intake = host.intake(&instance).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(600));
     assert!(matches!(
-        store::admit(&host.paths, &intake.verified).unwrap(),
+        store::admit_at(&host.paths, &intake.verified, now + SHORT_APPROVAL_MS + 1).unwrap(),
         Admission::Run(_)
     ));
 }

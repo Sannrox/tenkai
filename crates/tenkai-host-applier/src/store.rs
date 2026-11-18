@@ -245,13 +245,18 @@ impl Running {
 /// settles the awaiting `reboot` from the image booted now and returns its
 /// own result, with no command to run.
 pub fn admit(paths: &ApplierPaths, step: &VerifiedHostStep) -> Result<Admission> {
+    admit_at(paths, step, tenkai::now_millis())
+}
+
+/// [`admit`] as of `now_ms`, the time approvals and settled starts are
+/// judged against. Tests pass a fixed time to decide expiry without a sleep.
+pub fn admit_at(paths: &ApplierPaths, step: &VerifiedHostStep, now_ms: i64) -> Result<Admission> {
     let scope = Scope::of_step(step);
     let os_image = match scope {
         Scope::OsImage => Some(crate::ApplierConfig::load(paths)?.os_image()?.clone()),
         Scope::Product { .. } => None,
     };
     let lock = lock(paths, &scope)?;
-    let now_ms = tenkai::now_millis();
     let mut record = read_record_in(paths, &scope, &step.environment, &step.product)?;
     settle_last(paths, &scope, &mut record, now_ms)?;
     if let Some(result) = recorded_result(paths, &step.instance)? {
