@@ -19,9 +19,18 @@ pub(crate) async fn run(ctx: &mut Ctx, command: TopologyCommand) -> Result<()> {
                 .create_new(true)
                 .open(&out)
                 .map_err(|error| anyhow::anyhow!("writing {}: {error}", out.display()))?;
-            let drill = tenkai::topology_drill::run(ctx, &release, &replica, &signing_key).await?;
-            file.write_all(&serde_json::to_vec_pretty(&drill.evidence)?)
-                .map_err(|error| anyhow::anyhow!("writing {}: {error}", out.display()))?;
+            let written = async {
+                let drill =
+                    tenkai::topology_drill::run(ctx, &release, &replica, &signing_key).await?;
+                file.write_all(&serde_json::to_vec_pretty(&drill.evidence)?)
+                    .map_err(|error| anyhow::anyhow!("writing {}: {error}", out.display()))?;
+                anyhow::Ok(drill)
+            }
+            .await;
+            // A failed drill leaves no partial file, so a retry can write it.
+            let drill = written.inspect_err(|_| {
+                let _ = std::fs::remove_file(&out);
+            })?;
             let statement = &drill.statement;
             println!(
                 "loss: {} at {}",

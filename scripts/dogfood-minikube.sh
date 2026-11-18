@@ -14,12 +14,16 @@
 #   TENKAI_DEV_KEYS       Dev keys dir (default: .tenkai-dev-keys)
 #   TENKAI_KUBECTL_BIN    kubectl binary
 #   TENKAI_SOFTWARE_EXECUTOR  forced to kubernetes
+#   MINIKUBE_PROFILE      minikube profile and kubectl context (default: minikube);
+#                         every kubectl call is pinned to it, and the script
+#                         refuses to run when the kubeconfig lacks it
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 MODE="${TENKAI_DOGFOOD_MODE:-local}"
+PROFILE="${MINIKUBE_PROFILE:-minikube}"
 export TENKAI_SOFTWARE_EXECUTOR=kubernetes
 export TENKAI_KUBECTL_BIN="${TENKAI_KUBECTL_BIN:-$(command -v kubectl || true)}"
 
@@ -39,12 +43,27 @@ if [[ -z "${TENKAI_KUBECTL_BIN}" ]] || [[ ! -x "${TENKAI_KUBECTL_BIN}" ]]; then
     die "kubectl not found; install kubectl or set TENKAI_KUBECTL_BIN"
   fi
 fi
-if ! minikube status >/dev/null 2>&1; then
+if ! minikube -p "$PROFILE" status >/dev/null 2>&1; then
   echo "starting minikube (docker driver)…"
-  minikube start --driver=docker
+  minikube -p "$PROFILE" start --driver=docker
 fi
+
+# Pin every kubectl call, the executor's included, to the minikube context:
+# a kubeconfig holding only that context, so the ambient current context
+# (possibly a real cluster) is never used.
+KUBE_PIN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tenkai-dogfood-kube.XXXXXX")"
+trap 'rm -rf "$KUBE_PIN_DIR"' EXIT
+"${TENKAI_KUBECTL_BIN}" config view --minify --flatten --context "$PROFILE" \
+  >"$KUBE_PIN_DIR/config" 2>/dev/null \
+  || die "kubeconfig has no context \"$PROFILE\"; refusing to run against another cluster"
+chmod 600 "$KUBE_PIN_DIR/config"
+export KUBECONFIG="$KUBE_PIN_DIR/config"
+"${TENKAI_KUBECTL_BIN}" config use-context "$PROFILE" >/dev/null
+current="$("${TENKAI_KUBECTL_BIN}" config current-context)"
+[[ "$current" == "$PROFILE" ]] \
+  || die "kubectl context is \"$current\", not \"$PROFILE\"; refusing to run"
 "${TENKAI_KUBECTL_BIN}" get nodes >/dev/null \
-  || die "kubectl cannot reach a cluster; is minikube running?"
+  || die "kubectl cannot reach the $PROFILE cluster; is minikube running?"
 
 if [[ ! -x "$ROOT/target/debug/tenkaictl" ]]; then
   cargo build --bin tenkaictl
@@ -165,7 +184,7 @@ run_signed_multi_env() {
   echo "dogfood ok (signed multi-env): $PRODUCT_VERSION on local + stage (db=$DB)"
   echo "Optional: force a bad image upgrade to see phase=health|restore diagnostics (#150)."
   echo "Next: TENKAI_DOGFOOD_MODE=canary ./scripts/dogfood-minikube.sh (fresh DB recommended)"
-  echo "Tear down: kubectl delete ns local stage --ignore-not-found; rm -rf .tenkai-dogfood-minikube .tenkai-dev-keys"
+  echo "Tear down: kubectl --context $PROFILE delete ns local stage --ignore-not-found; rm -rf .tenkai-dogfood-minikube .tenkai-dev-keys"
 }
 
 # Software canary cohort on the built-in `local` env (unsigned development).
@@ -240,7 +259,7 @@ run_software_canary() {
   echo "dogfood ok (software canary): $PRODUCT_VERSION canary → $channel_stable via cohort $env_name (db=$DB)"
   echo "Note: wave run only observed posture; promote used canary evidence gates (#7)."
   echo "Cross-link: model_runtime canary is documented in docs/model-runtime.md (#108)."
-  echo "Tear down: kubectl delete ns $env_name --ignore-not-found; rm -rf .tenkai-dogfood-minikube"
+  echo "Tear down: kubectl --context $PROFILE delete ns $env_name --ignore-not-found; rm -rf .tenkai-dogfood-minikube"
 }
 
 case "$MODE" in

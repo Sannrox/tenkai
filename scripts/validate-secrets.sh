@@ -129,18 +129,24 @@ if [[ -z "$base" ]]; then
 fi
 if [[ "$(git rev-parse "$base")" == "$(git rev-parse HEAD)" ]]; then
   if [[ -n "${GITHUB_EVENT_BEFORE:-}" && "${GITHUB_EVENT_BEFORE}" != 0000000000000000000000000000000000000000 ]]; then
-    if git rev-parse --verify "${GITHUB_EVENT_BEFORE}^{commit}" >/dev/null 2>&1; then
-      base="$GITHUB_EVENT_BEFORE"
-    elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
-      base="HEAD^"
-    else
-      fail "push comparison revision ${GITHUB_EVENT_BEFORE} is not in this checkout"
+    # The pushed range starts at the old tip. Scanning only HEAD^ would miss
+    # every earlier commit in the push, so fetch the old tip or fail.
+    if ! git rev-parse --verify "${GITHUB_EVENT_BEFORE}^{commit}" >/dev/null 2>&1; then
+      git fetch --quiet --no-tags origin "${GITHUB_EVENT_BEFORE}" >/dev/null 2>&1 || true
     fi
+    git rev-parse --verify "${GITHUB_EVENT_BEFORE}^{commit}" >/dev/null 2>&1 \
+      || fail "push comparison revision ${GITHUB_EVENT_BEFORE} is not in this checkout and cannot be fetched"
+    base="$GITHUB_EVENT_BEFORE"
   elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
     base="HEAD^"
   fi
 fi
-committed="$(git diff -U0 "${base}...HEAD")" || fail "cannot diff ${base}...HEAD"
+if [[ "$base" == "${GITHUB_EVENT_BEFORE:-}" ]]; then
+  # A force-push's old tip need not be an ancestor; diff the two trees.
+  committed="$(git diff -U0 "${base}" HEAD)" || fail "cannot diff ${base} HEAD"
+else
+  committed="$(git diff -U0 "${base}...HEAD")" || fail "cannot diff ${base}...HEAD"
+fi
 worktree="$(git diff -U0)" || fail "cannot diff the working tree"
 cached="$(git diff --cached -U0)" || fail "cannot diff the index"
 scan_diff "${committed}"$'\n'"${worktree}"$'\n'"${cached}"

@@ -248,7 +248,17 @@ fi
 if command -v curl >/dev/null 2>&1; then
   fetch() { curl -fsSL --proto-redir =https -o "$2" "$1"; }
 elif command -v wget >/dev/null 2>&1; then
-  fetch() { wget -q -O "$2" "$1"; }
+  # wget has no redirect protocol filter like curl's --proto-redir, so read
+  # the redirects it followed and refuse a download that left HTTPS.
+  fetch() {
+    wget -S -o "$2.log" -O "$2" "$1" || { rm -f "$2.log"; return 1; }
+    if grep -iq '^ *location: *http://' "$2.log"; then
+      rm -f "$2" "$2.log"
+      say "refused ${1}: a redirect left HTTPS"
+      return 1
+    fi
+    rm -f "$2.log"
+  }
 else
   die "curl or wget is required"
 fi
