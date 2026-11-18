@@ -61,6 +61,40 @@ environment overlays do not satisfy. `env inspect` shows defaults, overlays,
 the digest, secret names, and any `[config.rotate_after]` durations. A release
 that omits `[config]` behaves as today.
 
+#### Presets
+
+A release may also declare named presets (`[config.presets.<name>]`, see
+[the manifest](manifest.md#config-schema)). An environment selects one per
+product, and its overrides apply on top:
+
+```sh
+tenkaictl env overlay preset prod api large     # select; the channel head must declare it
+tenkaictl env overlay set prod api replicas=3   # an override wins over the preset
+tenkaictl env overlay list prod api             # shows the selection and the overrides
+tenkaictl env overlay preset prod api --clear
+```
+
+- **Values come from the release being deployed.** Tenkai stores only the
+  preset name and the overrides, never the preset values. A release that
+  changes `large` changes what `large` delivers with that release.
+- **Selecting or clearing restarts.** The config digest covers the selection,
+  so the next plan carries a same-version Restart. Without a selection the
+  digest is unchanged.
+- **The plan names the source.** For each product that selects a preset, the
+  plan lists the keys that come from the preset and the keys an override
+  sets.
+- **Upgrade conflicts.** When the candidate changes a preset value that an
+  override hides, the plan reports a `conflict` line naming the key and both
+  values; the plan still runs. A candidate that no longer declares the
+  selected preset, or a key an override sets, is refused, naming it.
+- **Rebase.** `tenkaictl env overlay rebase prod api` compares the overrides
+  with the subscribed channel head. It lists the keys to drop: keys the head
+  no longer declares, and overrides equal to the head's preset value. It
+  prints the commands that drop them and changes nothing; the change still
+  arrives as a plan.
+
+Presets and overrides are per product in an environment, like overlays.
+
 ### Sealed secrets
 
 A value for a declared secret can be set sealed (ADR 0045). The client seals

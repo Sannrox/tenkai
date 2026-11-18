@@ -292,6 +292,11 @@ pub struct ConfigSection {
     /// Tenkai never changes a value on a timer (#1078).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub rotate_after: std::collections::BTreeMap<String, String>,
+    /// Named sets of overlay values an environment may select (#1095), such
+    /// as `small` or `large`. Signed with the release; each value is checked
+    /// against `overlay` at publish.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub presets: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 /// Milliseconds of a `rotate_after` duration (`90d`, `12h`, `30m`, `45s`).
@@ -327,6 +332,14 @@ fn validate_config(config: &ConfigSection) -> Result<()> {
             bail!("[config.rotate_after] {name} is not a declared secret");
         }
         parse_rotate_after(raw).with_context(|| format!("[config.rotate_after.{name}]"))?;
+    }
+    for (name, values) in &config.presets {
+        crate::ontology::validate_identifier("preset", name)
+            .with_context(|| format!("[config.presets.{name}]"))?;
+        for (key, value) in values {
+            crate::environment::admit_overlay_key(config, key, value)
+                .with_context(|| format!("[config.presets.{name}]"))?;
+        }
     }
     Ok(())
 }
@@ -2044,6 +2057,44 @@ default = "1"
         assert_eq!(replicas.value_type, OverlayValueType::Integer);
         assert!(replicas.required);
         assert_eq!(replicas.default.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn presets_are_checked_against_the_overlay_schema() {
+        let manifest = |preset: &str| {
+            parse_raw(&format!(
+                r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+
+[config]
+secrets = ["db-password"]
+
+[config.overlay.replicas]
+type = "integer"
+
+[config.presets.large]
+{preset}
+"#
+            ))
+        };
+        let large = manifest(r#"replicas = "5""#).unwrap().config.unwrap();
+        assert_eq!(large.presets["large"]["replicas"], "5");
+        for (preset, refusal) in [
+            (r#"replicas = "many""#, "must be an integer"),
+            (r#"region = "eu""#, "not declared"),
+            (r#"db-password = "x""#, "declared secret"),
+        ] {
+            let error = format!("{:#}", manifest(preset).unwrap_err());
+            assert!(
+                error.contains("[config.presets.large]") && error.contains(refusal),
+                "{error}"
+            );
+        }
     }
 
     #[test]

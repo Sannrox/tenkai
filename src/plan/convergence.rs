@@ -1010,11 +1010,14 @@ async fn compute_snapshot_with_policy(
                         &target.workdir,
                         release.clone(),
                     );
-                    let mut request = crate::software_executor::with_overlays(
-                        request,
-                        crate::environment::product_overlays(&env_obj, &product)
-                            .unwrap_or_default(),
-                    );
+                    let (overlays, selection) = crate::environment::product_config(
+                        &env_obj,
+                        &product,
+                        manifest.config.as_ref(),
+                    )
+                    .unwrap_or_default();
+                    let mut request = crate::software_executor::with_overlays(request, overlays);
+                    request.config_digest = selection;
                     request.instance = if instance == product {
                         String::new()
                     } else {
@@ -1068,10 +1071,7 @@ async fn compute_snapshot_with_policy(
                 };
                 let config_digest = crate::sealed_secret::instance_config_digest(
                     &env_obj,
-                    &crate::environment::overlay_digest(
-                        &crate::environment::product_overlays(&env_obj, &product)
-                            .unwrap_or_default(),
-                    ),
+                    &crate::environment::overlay_digest_for(&env_obj, &product),
                     applied_key,
                 );
                 let applied = env_obj
@@ -1629,10 +1629,11 @@ async fn attach_target_changes(
             &step.workdir,
             step.release_id.clone(),
         );
-        let mut request = crate::software_executor::with_overlays(
-            request,
-            crate::environment::product_overlays(env_obj, &step.product).unwrap_or_default(),
-        );
+        let (overlays, selection) =
+            crate::environment::product_config(env_obj, &step.product, manifest.config.as_ref())
+                .unwrap_or_default();
+        let mut request = crate::software_executor::with_overlays(request, overlays);
+        request.config_digest = selection;
         request.instance = step.instance.clone();
         request.config_digest = crate::sealed_secret::instance_config_digest(
             env_obj,
@@ -2683,18 +2684,62 @@ fn assemble_plan(
         recalled_recovery_reason,
         credential_runway: None,
         artifact_availability: Vec::new(),
+        config_presets: Vec::new(),
         approval_brief,
     })
 }
 
 async fn admit_step_overlay_schema(ctx: &mut Ctx, env: &str, step: &Step) -> Result<()> {
-    let Some(schema) = crate::environment::release_config_schema(ctx, &step.release_id).await?
-    else {
-        return Ok(());
-    };
+    let schema = crate::environment::release_config_schema(ctx, &step.release_id).await?;
     let env_obj = crate::environment::environment(ctx, env).await?;
-    let overlays = crate::environment::product_overlays(&env_obj, &step.product)?;
-    crate::environment::admit_product_overlays(&schema, &overlays)
+    let overlays =
+        crate::environment::effective_overlays(&env_obj, &step.product, schema.as_ref())?;
+    match schema {
+        Some(schema) => crate::environment::admit_product_overlays(&schema, &overlays),
+        None => Ok(()),
+    }
+}
+
+/// Preset sources and conflicts for each product a plan's steps deploy
+/// (#1095), comparing the candidate release with the one running.
+async fn config_presets(
+    ctx: &mut Ctx,
+    env_obj: &crate::pb::sekai::Object,
+    steps: &[Step],
+) -> Result<Vec<crate::environment::ConfigPresetView>> {
+    let mut views: Vec<crate::environment::ConfigPresetView> = Vec::new();
+    for step in steps.iter().filter(|step| step.issuer.is_none()) {
+        if views.iter().any(|view| view.product == step.product)
+            || crate::environment::product_preset(env_obj, &step.product).is_none()
+        {
+            continue;
+        }
+        let Some(candidate) =
+            crate::environment::release_config_schema(ctx, &step.release_id).await?
+        else {
+            continue;
+        };
+        let installed = match env_obj
+            .properties
+            .get(&format!("deployed_release.{}", step.instance_name()))
+        {
+            // Advice only: an unreadable running release omits the comparison.
+            Some(release) if *release != step.release_id => {
+                crate::environment::release_config_schema(ctx, release)
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            _ => None,
+        };
+        views.extend(crate::environment::preset_view(
+            env_obj,
+            &step.product,
+            installed.as_ref(),
+            &candidate,
+        )?);
+    }
+    Ok(views)
 }
 
 async fn create_with_content(
@@ -2730,6 +2775,7 @@ async fn create_with_content(
         approval_brief,
     )?;
     plan.artifact_availability = artifact_availability;
+    plan.config_presets = config_presets(ctx, &env_obj, &steps).await?;
     // Optional advisory priors (default off). Never hard-block or change steps.
     if let Ok(inspect) = inspect_environment(ctx, env).await {
         let _ = crate::plan_priors::annotate_plan_with_priors(
@@ -6269,6 +6315,131 @@ allowed_providers = ["local"]
         assert_eq!(plan.steps[0].action, Action::Restart);
         assert_eq!(plan.steps[0].from.as_deref(), Some("1.0.0"));
         assert_eq!(plan.steps[0].to, "1.0.0");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    async fn published_with_presets(
+        ctx: &mut Ctx,
+        root: &std::path::Path,
+        version: &str,
+        extra: &str,
+    ) {
+        let dir = root.join(version);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tenkai.toml"),
+            format!(
+                r#"
+[product]
+name = "api"
+version = "{version}"
+
+[deploy]
+install = "true"
+
+[config.overlay.replicas]
+type = "integer"
+{extra}
+"#
+            ),
+        )
+        .unwrap();
+        crate::catalog::publish(
+            ctx,
+            &dir.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("preset-promote");
+        crate::catalog::promote(ctx, &actor, &format!("api@{version}"), "stable")
+            .await
+            .unwrap();
+    }
+
+    /// Selecting a preset restarts the instance with the plan naming its
+    /// source; an upgrade that changes the preset under an override reports
+    /// the key, and one that drops an overridden key is refused (#1095).
+    #[tokio::test]
+    async fn a_preset_is_planned_with_its_sources_and_upgrade_conflicts() {
+        let root = std::env::temp_dir().join(format!("tenkai-preset-{}", uuid::Uuid::new_v4()));
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let region = "[config.overlay.region]\ntype = \"string\"\n";
+        published_with_presets(
+            &mut ctx,
+            &root,
+            "1.0.0",
+            &format!("{region}[config.presets.large]\nreplicas = \"5\"\nregion = \"us\"\n"),
+        )
+        .await;
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.insert("deployed.api".into(), "1.0.0".into());
+        env.properties
+            .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
+        ctx.put(env).await.unwrap();
+
+        let missing =
+            crate::environment::set_environment_preset(&mut ctx, "local", "api", Some("huge"))
+                .await
+                .unwrap_err();
+        assert!(missing.to_string().contains("no preset huge"), "{missing}");
+        crate::environment::set_environment_preset(&mut ctx, "local", "api", Some("large"))
+            .await
+            .unwrap();
+        set_environment_overlay(&mut ctx, "local", "api", "replicas", "3")
+            .await
+            .unwrap();
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert_eq!(plan.steps.len(), 1, "{plan:?}");
+        assert_eq!(plan.steps[0].action, Action::Restart);
+        assert_eq!(
+            plan.config_presets,
+            [crate::environment::ConfigPresetView {
+                product: "api".into(),
+                preset: "large".into(),
+                from_preset: vec!["region".into()],
+                overridden: vec!["replicas".into()],
+                conflicts: Vec::new(),
+            }]
+        );
+
+        published_with_presets(
+            &mut ctx,
+            &root,
+            "1.1.0",
+            &format!("{region}[config.presets.large]\nreplicas = \"8\"\nregion = \"us\"\n"),
+        )
+        .await;
+        let plan = crate::plan::create(&mut ctx, "local").await.unwrap();
+        assert_eq!(
+            plan.config_presets[0].conflicts,
+            ["replicas: override 3 hides preset large change 5 -> 8"]
+        );
+
+        set_environment_overlay(&mut ctx, "local", "api", "region", "eu")
+            .await
+            .unwrap();
+        published_with_presets(
+            &mut ctx,
+            &root,
+            "1.2.0",
+            "[config.presets.large]\nreplicas = \"8\"\n",
+        )
+        .await;
+        let refused = crate::plan::create(&mut ctx, "local").await.unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("overlay region is not declared"),
+            "{refused:#}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

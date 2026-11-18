@@ -3235,6 +3235,7 @@ mod tests {
             recalled_recovery_reason: None,
             credential_runway: None,
             artifact_availability: Vec::new(),
+            config_presets: Vec::new(),
             approval_brief: None,
         };
         plan.bind_content_identity().unwrap();
@@ -3373,6 +3374,7 @@ mod tests {
             recalled_recovery_reason: None,
             credential_runway: None,
             artifact_availability: Vec::new(),
+            config_presets: Vec::new(),
             approval_brief: None,
         };
         let recovered = plan(step(vec![crate::sealed_secret::RecipientWrap {
@@ -3599,6 +3601,7 @@ mod tests {
                         recalled_recovery_reason: None,
                         credential_runway: None,
                         artifact_availability: Vec::new(),
+                        config_presets: Vec::new(),
                         approval_brief: None,
                     }
                 };

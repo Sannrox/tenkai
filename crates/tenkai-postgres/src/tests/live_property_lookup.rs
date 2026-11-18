@@ -46,6 +46,7 @@ pub(super) fn plan_with_steps(id: &str, environment: &str, steps: u32) -> Plan {
         recalled_recovery_reason: None,
         credential_runway: None,
         artifact_availability: Vec::new(),
+        config_presets: Vec::new(),
         approval_brief: None,
     }
 }

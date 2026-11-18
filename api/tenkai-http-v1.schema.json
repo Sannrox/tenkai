@@ -1924,6 +1924,40 @@
         }
       ]
     },
+    "ConfigPresetView": {
+      "description": "Where one product's config comes from in a plan (#1095): the selected\npreset, the keys it supplies, the keys an override sets, and each override\nthat hides a preset value the candidate release changed.",
+      "properties": {
+        "conflicts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "from_preset": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "overridden": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "preset": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "product",
+        "preset"
+      ],
+      "type": "object"
+    },
     "ConnectivityClass": {
       "enum": [
         "connected",
@@ -4126,6 +4160,13 @@
           "description": "Artifact digests checked at planning (#1062); advice, not proof.",
           "items": {
             "$ref": "#/$defs/ArtifactAvailability"
+          },
+          "type": "array"
+        },
+        "config_presets": {
+          "description": "Preset sources and conflicts per product (#1095).",
+          "items": {
+            "$ref": "#/$defs/ConfigPresetView"
           },
           "type": "array"
         },

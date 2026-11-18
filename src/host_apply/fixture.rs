@@ -282,6 +282,7 @@ impl HostFixture {
             recalled_recovery_reason: None,
             credential_runway: None,
             artifact_availability: Vec::new(),
+            config_presets: Vec::new(),
             approval_brief: None,
         }
     }

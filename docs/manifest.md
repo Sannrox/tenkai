@@ -191,13 +191,23 @@ default = "1"
 [config.overlay.region]
 type = "enum"
 values = ["eu", "us"]
+
+[config.presets.large]   # optional named sets of overlay values
+replicas = "5"
+region = "us"
 ```
+
+Each preset value is checked against `[config.overlay]` at publish: an
+undeclared key, a secret name, or a value of the wrong type is refused. An
+environment selects a preset and overrides keys on top; see
+[presets](manage-environments.md#presets).
 
 `tenkaictl env overlay set` checks each key against the subscribed channel
 head. Planning checks the candidate release. A release that omits `[config]`
 keeps today's free overlay keys. Servers older than this field refuse a
 manifest that declares it (`tenkai.toml` denies unknown tables), so omit it
-until every server that reads the catalog understands it. See
+until every server that reads the catalog understands it; the same holds
+for `[config.presets]`. See
 [manage environments](manage-environments.md).
 
 ## Delivery signals
