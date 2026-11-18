@@ -369,10 +369,10 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         "--trust-roots",
         drill.cli.release_trust.to_str().unwrap(),
     ]);
+    // Refused while parsing the signature, before anything is published.
     assert!(
-        unsigned.contains("signature")
-            || unsigned.contains("schema")
-            || unsigned.contains("verify"),
+        unsigned.contains("parsing release signature")
+            && unsigned.contains("missing field `key_id`"),
         "{unsigned}"
     );
     assert_eq!(drill.current_version().as_deref(), Some(SOURCE_VERSION));
@@ -440,8 +440,16 @@ fn signed_stateful_upgrade_survives_executor_loss() {
             "--approval-trust-roots",
             drill.cli.approval_trust.to_str().unwrap(),
         ]);
+        // The step rolled back to the source version; the apply reports failure.
         assert!(
-            failed.contains("ROLLBACK") || failed.contains("FAILED") || failed.contains("health"),
+            failed.contains("restored pkg to 1.0.0")
+                && failed.contains("error: one or more delivery steps did not succeed"),
+            "{failed}"
+        );
+        assert!(
+            failed
+                .lines()
+                .any(|line| line.trim_start().starts_with("ROLLBACK  pkg")),
             "{failed}"
         );
         plan_id
@@ -533,7 +541,14 @@ fn signed_stateful_upgrade_survives_executor_loss() {
     // operator override `env reconcile --deployed` is never used here.
     let unlocked = drill.ok(&["env", "unlock", ENV]);
     assert!(unlocked.contains("removed apply lease"), "{unlocked}");
-    drill.ok(&["reconcile", "--once"]);
+    let reconciled = drill.ok(&["reconcile", "--once"]);
+    assert!(
+        reconciled.lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next() == Some(ENV) && fields.next() == Some("current")
+        }),
+        "{reconciled}"
+    );
     let resume_stdout = drill.ok(&["plan", "--env", ENV]);
     assert!(
         !resume_stdout.contains("up to date"),

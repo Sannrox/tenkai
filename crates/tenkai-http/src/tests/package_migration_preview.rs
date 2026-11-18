@@ -117,27 +117,33 @@ async fn package_migration_preview_hides_cross_tenant_environment() {
 
     let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
     let tenant_app = router(config, Arc::new(FixedReconciler::default()), store).unwrap();
-    let cross = tenant_app
-        .oneshot(
-            Request::post("/v1/migrations/cutover/preview")
-                .header(
-                    "x-tenkai-assertion",
-                    r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+    let preview = |environment: &'static str| {
+        let app = tenant_app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::post("/v1/migrations/cutover/preview")
+                        .header(
+                            "x-tenkai-assertion",
+                            r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#,
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(migration_preview_body(environment, 1)))
+                        .unwrap(),
                 )
-                .header("content-type", "application/json")
-                .body(Body::from(migration_preview_body("env-b", 1)))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(cross.status(), StatusCode::NOT_FOUND);
-    let body = String::from_utf8(
-        axum::body::to_bytes(cross.into_body(), usize::MAX)
-            .await
-            .unwrap()
-            .to_vec(),
-    )
-    .unwrap();
-    assert!(body.contains(NON_DISCLOSING_DENY));
-    assert!(!body.contains("tenant-b"));
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, String::from_utf8(body.to_vec()).unwrap())
+        }
+    };
+    let (status, body) = preview("env-b").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains(NON_DISCLOSING_DENY), "{body}");
+    assert!(!body.contains("tenant-b"), "{body}");
+    // Another tenant's environment answers exactly like one that does not exist.
+    assert_eq!(preview("env-missing").await, (status, body));
 }

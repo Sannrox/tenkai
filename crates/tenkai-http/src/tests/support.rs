@@ -256,3 +256,26 @@ pub(super) async fn router_generation(app: &Router, environment: &str) -> u64 {
     let report: tenkai::plan::EnvironmentInspectReport = serde_json::from_slice(&bytes).unwrap();
     report.lease.generation.unwrap_or(0)
 }
+
+/// The status and detail of a request the server answered with an error.
+/// Panics on any other failure, so a refusal check cannot pass on an outage.
+pub(super) fn rejected(error: anyhow::Error) -> (u16, String) {
+    use crate::RemoteFailure;
+    match error.downcast::<RemoteFailure>() {
+        Ok(RemoteFailure::Rejected { status, detail }) => (status, detail),
+        Ok(other) => panic!("expected a server rejection, got {other:?}"),
+        Err(error) => panic!("expected a server rejection, got {error:#}"),
+    }
+}
+
+pub(super) const RUNTIME_DENIED: &str = "insufficient delivery capability";
+pub(super) const CATALOG_WIDE_DENIED: &str =
+    "environment-scoped credentials cannot call catalog-wide management operation";
+
+/// A 403 whose detail names `reason`: the request was refused for that
+/// cause, not for a validation error or an outage.
+pub(super) fn assert_forbidden(error: anyhow::Error, reason: &str) {
+    let (status, detail) = rejected(error);
+    assert_eq!(status, 403, "{detail}");
+    assert!(detail.contains(reason), "{detail}");
+}

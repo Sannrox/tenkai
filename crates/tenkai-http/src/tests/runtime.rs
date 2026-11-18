@@ -184,6 +184,8 @@ async fn runtime_credentials_are_environment_scoped() {
         )
         .await
         .unwrap();
+    // A 200: an error body could also deserialize to empty work.
+    assert_eq!(overlapping.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(overlapping.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -224,6 +226,7 @@ async fn runtime_credentials_are_environment_scoped() {
         )
         .await
         .unwrap();
+    assert_eq!(repeated.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(repeated.into_body(), usize::MAX)
         .await
         .unwrap();

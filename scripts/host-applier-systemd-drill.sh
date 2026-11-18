@@ -73,18 +73,24 @@ as_tenkai systemctl start "tenkai-host-apply@$INSTALL.service"
 [ "$(sudo cat "$evidence/runs")" = run ] || fail "the install ran twice"
 
 echo "== polkit allows start and stop of the template only"
-if as_tenkai systemctl restart "tenkai-host-apply@$INSTALL.service" 2>/dev/null; then
-  fail "tenkai may restart the unit"
-fi
-if as_tenkai systemctl start tenkai-drill-other.service 2>/dev/null; then
-  fail "tenkai may start another unit"
-fi
-if as_tenkai systemctl start "tenkai-host-apply@not-an-instance.service" 2>/dev/null; then
-  fail "tenkai may start an instance that is not an instance key"
-fi
-if as_tenkai systemctl daemon-reload 2>/dev/null; then
-  fail "tenkai may reload systemd"
-fi
+# Refused by authorization, not by any other failure: a missing unit or a
+# failing command also exits non-zero.
+expect_denied() {
+  local what="$1" err
+  shift
+  if err=$("$@" 2>&1); then
+    fail "tenkai may $what"
+  fi
+  case "$err" in
+    *"Access denied"* | *"Interactive authentication required"*) ;;
+    *) fail "$what failed for a reason other than authorization: $err" ;;
+  esac
+}
+expect_denied "restart the unit" as_tenkai systemctl restart "tenkai-host-apply@$INSTALL.service"
+expect_denied "start another unit" as_tenkai systemctl start tenkai-drill-other.service
+expect_denied "start an instance that is not an instance key" \
+  as_tenkai systemctl start "tenkai-host-apply@not-an-instance.service"
+expect_denied "reload systemd" as_tenkai systemctl daemon-reload
 
 echo "== stop kills the command's process group"
 as_tenkai systemctl start --no-block "tenkai-host-apply@$SLOW.service"

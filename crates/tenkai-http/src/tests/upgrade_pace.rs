@@ -1,5 +1,6 @@
 use super::lifecycle_support::{lifecycle_router, signed_catalog_fixture};
 use super::support::current_generation;
+use super::support::{CATALOG_WIDE_DENIED, RUNTIME_DENIED, assert_forbidden};
 use super::*;
 
 #[tokio::test]
@@ -30,28 +31,22 @@ async fn remote_channel_pace_and_admit_require_management() {
     let runtime_err = runtime
         .configure_channel_pace("api", "stable", "3h")
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        runtime_err.contains("403") || runtime_err.contains("runtime"),
-        "{runtime_err}"
-    );
+        .unwrap_err();
+    assert_forbidden(runtime_err, RUNTIME_DENIED);
     let scoped_err = scoped
         .configure_channel_pace("api", "stable", "3h")
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        scoped_err.contains("catalog-wide") || scoped_err.contains("403"),
-        "{scoped_err}"
-    );
+        .unwrap_err();
+    assert_forbidden(scoped_err, CATALOG_WIDE_DENIED);
 
     let configured = management
         .configure_channel_pace("api", "stable", "3h")
         .await
         .unwrap();
     assert!(
-        configured.message.contains("10800000") || configured.message.contains("upgrade pace"),
+        configured
+            .message
+            .starts_with("upgrade pace 10800000ms for "),
         "{}",
         configured.message
     );

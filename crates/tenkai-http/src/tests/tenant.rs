@@ -337,8 +337,11 @@ async fn tenant_mode_management_apis_isolate_environments() {
             .to_vec(),
     )
     .unwrap();
-    assert!(!fleet_body.contains("env-b"));
-    assert!(!fleet_body.contains("tenant-b"));
+    // Tenant A's own environment is listed, so the absence below is a filter,
+    // not an empty answer.
+    assert!(fleet_body.contains("env-a"), "{fleet_body}");
+    assert!(!fleet_body.contains("env-b"), "{fleet_body}");
+    assert!(!fleet_body.contains("tenant-b"), "{fleet_body}");
 
     tenant_store
         .append_change_event_for(&ctx_a, 1, "plan_created", "plan-a", "env-a")

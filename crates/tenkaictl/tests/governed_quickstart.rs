@@ -154,7 +154,7 @@ fn governed_quickstart_requires_approval_and_rolls_back() {
     let plan_id = common::plan_id_from(&plan_out);
     let unapproved = journey.cli.fail(&["apply", &plan_id]);
     assert!(
-        unapproved.to_lowercase().contains("approval"),
+        unapproved.contains("plan execution requires --approval and --approval-trust-roots"),
         "apply without approval must fail closed:\n{unapproved}"
     );
     let bypass = journey.cli.fail(&[

@@ -273,9 +273,17 @@ fn live_drill(engine: ServingEngine, prefix: &str) {
         executor.observe().unwrap().as_deref(),
         Some(digest2.as_str())
     );
+    // The candidate reached the launch gate and failed there, not in
+    // descriptor validation of the 1 s budget.
+    let failed = format!(
+        "{:#}",
+        executor
+            .apply(&v3)
+            .expect_err("forced short startup must fail smoke/readiness")
+    );
     assert!(
-        executor.apply(&v3).is_err(),
-        "forced short startup must fail smoke/readiness and leave traffic unchanged"
+        failed.contains("generation failed launch, readiness, or smoke; traffic left unchanged"),
+        "{failed}"
     );
     assert_eq!(
         selected_generation(&kubeconfig, &namespace, &product),

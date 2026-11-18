@@ -77,9 +77,19 @@ async fn environment_scoped_management_cannot_reconcile_or_migrate_other_environ
     apply["environment"] = "local".into();
     apply["expected_generation"] = 0.into();
     apply["declaration"] = serde_json::to_value(&declaration).unwrap();
-    let (code, body) = post(&app, "/v1/migrations/cutover/apply", "prod-secret", apply).await;
+    let (code, body) = post(
+        &app,
+        "/v1/migrations/cutover/apply",
+        "prod-secret",
+        apply.clone(),
+    )
+    .await;
     assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
     assert!(body.contains("another environment"), "{body}");
+    // The bound environment passes the grant and reaches approval evidence.
+    let (code, body) = post(&app, "/v1/migrations/cutover/apply", "local-secret", apply).await;
+    assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("trust roots are not configured"), "{body}");
 
     let mut mutate = approval_body("local");
     mutate["version"] = 1.into();
