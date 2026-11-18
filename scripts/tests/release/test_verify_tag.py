@@ -90,6 +90,24 @@ class Ancestry(unittest.TestCase):
         repo("update-ref", "refs/remotes/origin/main", cls.main)
         for branch, sha in cls.tips.items():
             repo("update-ref", f"refs/remotes/origin/{branch}", sha)
+        # Only origin's tags decide whether a line may still release.
+        cls.origin = pathlib.Path(tmp.name) / "o.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(cls.origin)], check=True)
+        repo("remote", "add", "origin", str(cls.origin))
+        repo("push", "-q", str(cls.origin), f"{cls.main}:refs/heads/main")
+
+    def setUp(self):
+        self.origin_tags("v1.3.0")
+
+    def origin_tags(self, *tags: str):
+        """Replace origin's tags with `tags`, all on main."""
+        listed = subprocess.run(
+            ["git", "-C", str(self.origin), "tag", "--list"], check=True, capture_output=True, text=True,
+        ).stdout.split()
+        if listed:
+            subprocess.run(["git", "-C", str(self.origin), "tag", "-d", *listed], check=True, capture_output=True)
+        for tag in tags:
+            subprocess.run(["git", "-C", str(self.origin), "tag", tag, self.main], check=True)
 
     def ancestry(self, tag: str, sha: str) -> subprocess.CompletedProcess:
         return run("require-ancestry", tag, sha, cwd=self.repo.path, env=os.environ)
@@ -114,6 +132,32 @@ class Ancestry(unittest.TestCase):
                 result = self.ancestry(tag, self.tips[branch])
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(f"is not on main or {line}", result.stderr)
+
+    def test_refuses_the_newest_line_until_a_newer_minor_is_final(self):
+        for tags in ((), ("v1.3.0-rc.1", "v1.2.9", "v0.9.0"), ("v2.0.0-rc.2",)):
+            with self.subTest(tags=tags):
+                self.origin_tags(*tags)
+                result = self.ancestry("v1.2.3", self.tips["release-1.2"])
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("the newest line releases from main", result.stderr)
+
+    def test_accepts_an_older_line_once_a_newer_minor_is_final(self):
+        for tags, tag, branch in (
+            (("v1.2.9",), "v0.5.2", "release-0.5"), (("v0.6.0",), "v0.5.2-rc.1", "release-0.5"),
+            (("v2.0.0",), "v1.2.3", "release-1.2"),
+        ):
+            with self.subTest(tags=tags, tag=tag):
+                self.origin_tags(*tags)
+                result = self.ancestry(tag, self.tips[branch])
+                self.assertEqual(result.stdout.strip(), branch, result.stderr)
+
+    def test_fails_closed_when_origin_tags_cannot_be_listed(self):
+        self.repo("remote", "set-url", "origin", str(self.origin) + "-missing")
+        self.addCleanup(self.repo, "remote", "set-url", "origin", str(self.origin))
+        result = self.ancestry("v1.2.3", self.tips["release-1.2"])
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("could not list release tags", result.stderr)
+        self.assertEqual(self.ancestry("v1.2.3", self.main).stdout.strip(), "main")
 
 
 class RemoteTag(unittest.TestCase):

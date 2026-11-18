@@ -48,8 +48,10 @@ vX.Y.Z
 
 A tag is never moved, deleted, or reused. The tagged commit must be on
 `main` or on the `release-*` branch that matches the tag's version
-(`v0.5.1` → `release-0.5`, `v1.2.3` → `release-1.2`). The
-workflow refuses any other commit. The release run still starts from
+(`v0.5.1` → `release-0.5`, `v1.2.3` → `release-1.2`). A tag only on its
+line is accepted only when origin already has a final tag of a newer minor:
+the newest release is always cut from `main`. The workflow refuses any
+other commit. The release run still starts from
 main's workflow and verifier.
 
 ## Release candidates
@@ -81,7 +83,8 @@ tagged commit.
 - refuses a tagged run that does not start from `main`
 - fetches the annotated tag object and verifies the signed tag with main's
   allowed keys against the tagged commit's `Cargo.toml`
-- requires the tagged commit to be on `main` or the matching `release-*` line
+- requires the tagged commit to be on `main`, or on the matching `release-*`
+  line when a final tag of a newer minor exists
 
 The workflow then:
 
@@ -132,8 +135,13 @@ To trust a new tag signing key, add its public key to
 
 ## Maintenance lines
 
-Use a line only when a consumer pins an older Tenkai tag and needs a fix
-without taking `main`. Do not create one in advance.
+Use a line only when a consumer pins a minor older than the newest final
+release and needs a fix without taking `main`. Do not create one in advance.
+The newest minor always releases from `main`: when `main` already carries
+breaking changes, ship the fix as the next minor (`vX.Y.0-rc.N`, then the
+final tag), not as a patch on the current minor's line. The verifier
+refuses a line tag until a final tag of a newer minor exists; a newer rc
+does not count.
 
 Name it `release-<major>.<minor>`, one per minor, before and after 1.0
 (`release-0.5`, `release-1.2`). Create it from the last tag of that line
@@ -153,7 +161,7 @@ update.
 3. **Record every backport.** Name the source and destination commits and
    any adaptation.
 
-The current line plus at most one previous line. An older line retires
+`main` plus at most one previous line. An older line retires
 unless the maintainer decides otherwise. A GitHub Release on a previous
 line is never marked latest.
 
