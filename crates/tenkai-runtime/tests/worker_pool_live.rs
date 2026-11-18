@@ -274,6 +274,96 @@ fn stale_generation_cannot_mutate_live_process() {
     .unwrap();
 }
 
+fn worker_files(root: &TestRoot) -> PathBuf {
+    root.0.join("runtime").join(ENV).join(PRODUCT)
+}
+
+fn recorded_generation(root: &TestRoot, worker_id: &str) -> u64 {
+    std::fs::read_to_string(worker_files(root).join(format!("{worker_id}.generation")))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// Kills and reaps the fixture this test process spawned for `worker_id`.
+fn kill_worker(root: &TestRoot, worker_id: &str) {
+    let pid: i32 = std::fs::read_to_string(worker_files(root).join(format!("{worker_id}.pid")))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut status = 0;
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+        libc::waitpid(pid, &mut status, 0);
+    }
+}
+
+/// #1293: a worker that died under generation N is restarted by reconcile
+/// under N+1 instead of failing the fence on every tick.
+#[test]
+fn dead_worker_from_an_older_generation_restarts_under_the_current_one() {
+    let root = TestRoot::new("tenkai-worker-live-reclaim");
+    let port = LocalProcessWorkerLifecycle::new(root.0.join("runtime"), fixture_bin());
+    port.start_replica(&WorkerReplicaRequest {
+        scope: scope("1.0.0", 1),
+        worker_id: "w1".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    kill_worker(&root, "w1");
+    assert!(port.observe(&scope("1.0.0", 2)).unwrap().is_empty());
+
+    let (decision, _, _, _) = admit_live_pool(LivePoolAdmission {
+        spec: &spec("1.0.0"),
+        port: &port,
+        environment: ENV,
+        expected_generation: 2,
+        previous_replicas: 1,
+        drain_started_at_ms: None,
+        now_ms: tenkai::now_millis(),
+        restart: false,
+    })
+    .unwrap();
+    assert_eq!(decision, WorkerPoolDecision::Apply { replicas: 1 });
+    let restarted = port.observe(&scope("1.0.0", 2)).unwrap();
+    assert_eq!(restarted.len(), 1);
+    assert_eq!(restarted[0].snapshot.worker_id, "w1");
+    assert_eq!(recorded_generation(&root, "w1"), 2);
+    port.stop_replica(&WorkerReplicaRequest {
+        scope: scope("1.0.0", 2),
+        worker_id: "w1".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+}
+
+/// A slot recorded under a newer generation still refuses an older
+/// controller, dead process or not.
+#[test]
+fn slot_recorded_under_a_newer_generation_refuses_an_older_start() {
+    let root = TestRoot::new("tenkai-worker-live-newer");
+    let port = LocalProcessWorkerLifecycle::new(root.0.join("runtime"), fixture_bin());
+    port.start_replica(&WorkerReplicaRequest {
+        scope: scope("1.0.0", 3),
+        worker_id: "w1".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    kill_worker(&root, "w1");
+    let err = port
+        .start_replica(&WorkerReplicaRequest {
+            scope: scope("1.0.0", 1),
+            worker_id: "w1".into(),
+            version: "1.0.0".into(),
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("newer generation 3"), "{err}");
+    assert_eq!(recorded_generation(&root, "w1"), 3);
+}
+
 #[test]
 fn worker_exits_once_its_directory_is_removed() {
     let root = TestRoot::new("tenkai-worker-live-orphan");

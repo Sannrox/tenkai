@@ -55,6 +55,10 @@ and, when needed, `TENKAI_WORKER_LIFECYCLE_FIXTURE` plus
 `tenkai-worker-lifecycle-fixture`. It is not a work scheduler. A fixture
 process exits when its worker directory under the root is removed, since it
 can no longer be observed or stopped.
+A worker that died is restarted under the controller's current fencing
+generation, even when it was started under an older one: after a takeover the
+next reconcile reclaims the slot without manual cleanup. A slot recorded under
+a newer generation still refuses an older controller.
 
 Environment inspect shows
 `worker_pool.<product>.{state,replicas,intake,detail,observation_source}`.
