@@ -279,17 +279,23 @@ pub fn observation(
     }
 }
 
+/// Record one pass's observation. `.replicas` is the replica count the pool
+/// was last applied at, which the next pass reads as `previous_replicas`:
+/// it moves to the desired count only when this pass's `decision` applies
+/// it. A pass that waits for drain or is refused keeps the prior count, so
+/// the next pass still sees the scale-down and its drain-timeout bound
+/// (#1310).
 pub fn persist_observation(
     properties: &mut std::collections::HashMap<String, String>,
     observation: &WorkerPoolObservation,
+    decision: &WorkerPoolDecision,
 ) {
     let prefix = format!("worker_pool.{}", observation.product);
     properties.insert(format!("{prefix}.version"), observation.version.clone());
     properties.insert(format!("{prefix}.intake"), observation.intake.clone());
-    properties.insert(
-        format!("{prefix}.replicas"),
-        observation.desired_replicas.to_string(),
-    );
+    if let WorkerPoolDecision::Apply { replicas } = decision {
+        properties.insert(format!("{prefix}.replicas"), replicas.to_string());
+    }
     properties.insert(
         format!("{prefix}.observed_replicas"),
         observation.observed_replicas.to_string(),
@@ -704,6 +710,49 @@ replicas = 1
             .await
             .unwrap();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    // #1310: a pass that waits for drain keeps the applied replica count, so
+    // a later pass still bounds the drain and degrades on timeout.
+    #[test]
+    fn a_waiting_scale_down_keeps_its_drain_timeout() {
+        let mut properties = std::collections::HashMap::new();
+        let applied = spec(2);
+        let apply = WorkerPoolDecision::Apply { replicas: 2 };
+        persist_observation(&mut properties, &observation(&applied, &[], &apply), &apply);
+        let desired = spec(1);
+        let busy = vec![WorkerLifecycleSnapshot {
+            active_claims: 1,
+            state: "active".into(),
+            ..ready_snapshot(&desired, "w1")
+        }];
+        let first = reconcile(
+            &desired,
+            &busy,
+            previous_replicas(&properties, &desired.product),
+            Some(0),
+            1,
+        )
+        .unwrap();
+        assert_eq!(first, WorkerPoolDecision::WaitDrain);
+        persist_observation(
+            &mut properties,
+            &observation(&desired, &busy, &first),
+            &first,
+        );
+
+        let later = reconcile(
+            &desired,
+            &busy,
+            previous_replicas(&properties, &desired.product),
+            Some(0),
+            desired.drain_timeout_ms as i64 + 1,
+        )
+        .unwrap();
+        assert!(
+            matches!(later, WorkerPoolDecision::Degraded { .. }),
+            "{later:?}"
+        );
     }
 
     #[test]

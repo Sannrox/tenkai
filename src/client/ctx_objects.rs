@@ -175,6 +175,16 @@ impl Ctx {
         .await
     }
 
+    /// Whether this context commits objects and provider events in one
+    /// transaction: embedded state and a tenant hub do; remote application
+    /// state does not.
+    pub(crate) fn commits_provider_events_atomically(&self) -> bool {
+        self.is_embedded()
+            || self
+                .catalog_binding()
+                .is_some_and(|(_, tenant)| tenant.is_some())
+    }
+
     /// [`Self::put_with_provider_events`] for an existing object, committed
     /// only while the lease `fencing_token` names is still held (#1294).
     /// Remote application state keeps dropping observations, but refuses
@@ -188,11 +198,7 @@ impl Ctx {
         events: &[crate::storage::ProviderEventRecord],
         observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Result<()> {
-        let atomic = self.is_embedded()
-            || self
-                .catalog_binding()
-                .is_some_and(|(_, tenant)| tenant.is_some());
-        if atomic {
+        if self.commits_provider_events_atomically() {
             return self
                 .guarded_update_objects_with_provider_events(
                     &[object],

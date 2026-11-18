@@ -493,14 +493,19 @@ fn requirements_for(
     let Some(profile) = profile else {
         return Ok(Vec::new());
     };
-    let mut requirements = BTreeMap::new();
-    for component in profile.components.values() {
-        for (contract, requirement) in &component.requires {
-            requirements.insert(contract.clone(), requirement.clone());
-        }
-    }
+    // The strictest requirement across components, as binding checks see it.
+    let contracts: BTreeSet<&String> = profile
+        .components
+        .values()
+        .flat_map(|component| component.requires.keys())
+        .collect();
     let mut out = Vec::new();
-    for (contract, requirement) in requirements {
+    for contract in contracts {
+        let contract = contract.clone();
+        let Some(requirement) = crate::environment_bindings::requirement_for(profile, &contract)
+        else {
+            continue;
+        };
         if dependency_document::self_satisfies(profile, &contract, &requirement)? {
             continue;
         }
@@ -706,6 +711,27 @@ mod tests {
             &BTreeMap::new(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn the_strictest_component_requirement_is_shown() {
+        let mut app = profile(&[("database", "2.0.0", false)], &[]);
+        let mut lenient = app.components["main"].clone();
+        lenient.requires = profile(&[("database", "1.0.0", true)], &[]).components["main"]
+            .requires
+            .clone();
+        app.components.insert("zz-sidecar".into(), lenient);
+        let requirements = requirements_for(
+            "app",
+            Some(&app),
+            &BTreeMap::new(),
+            &crate::environment_bindings::EnvironmentBindings::default(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(requirements.len(), 1);
+        assert_eq!(requirements[0].minimum, "2.0.0");
+        assert!(!requirements[0].optional);
     }
 
     #[test]

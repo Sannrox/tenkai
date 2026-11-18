@@ -353,3 +353,34 @@ fn a_certificate_record_is_forgotten_only_after_a_successful_step() {
     );
     assert!(!recorded());
 }
+
+/// A certificate record that cannot be removed after a successful step is
+/// named in the recorded result; the step is still recorded, not left to
+/// settle as Interrupted (#1310).
+#[test]
+fn an_unremovable_certificate_record_still_records_the_step() {
+    let host = host();
+    let path =
+        tenkai::host_apply::identity::identity_record_path(&host.paths.state_dir, "edge", "k3s");
+    // A non-empty directory where the record file would be: removing it fails.
+    std::fs::create_dir_all(path.join("blocker")).unwrap();
+
+    let release = host.release_with("1.0.0", ["true", "true", "true"]);
+    let (instance, _) = host.spool(install(&release, 0));
+    let output = applier(&host, &instance).output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = tenkai_host_applier::store::recorded_result(&host.paths, &instance)
+        .unwrap()
+        .expect("the step is recorded");
+    assert_eq!(result.outcome, HostApplyOutcome::Succeeded);
+    assert!(
+        result.detail.contains("workload certificate record"),
+        "{}",
+        result.detail
+    );
+}

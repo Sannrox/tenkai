@@ -245,12 +245,17 @@ pub async fn run(
         .await
     {
         Ok(lease) => lease,
-        Err(_) => {
+        // Only another holder is a retryable availability refusal; a store
+        // or transport fault is reported as itself (#1310).
+        Err(crate::client::LeaseError::AlreadyExists) => {
             return Err(AvailabilityRefused(format!(
                 "topology {} is upgrading another replica; retry once it finishes",
                 topology.name
             ))
             .into());
+        }
+        Err(crate::client::LeaseError::Failed(error)) => {
+            return Err(error.context(format!("acquiring the topology {} lease", topology.name)));
         }
     };
 
@@ -516,12 +521,13 @@ async fn refresh_topology_lease(
     )
     .await
     .map(|_| ())
-    .map_err(|_| {
-        AvailabilityRefused(format!(
-            "topology {} is upgrading another replica; retry once it finishes",
+    // Failing to refresh a lease this drill holds means it was lost or the
+    // store failed, not that another replica is upgrading (#1310).
+    .with_context(|| {
+        format!(
+            "refreshing the topology {} lease this drill holds",
             topology.name
-        ))
-        .into()
+        )
     })
 }
 
@@ -532,10 +538,11 @@ async fn claim_drill_environment(
     match crate::apply::claim_environment_for_drill(ctx, replica, &format!("drill:{replica}")).await
     {
         Ok(lease) => Ok(lease),
-        Err(_) => Err(AvailabilityRefused(format!(
-            "environment {replica} has an apply in progress; retry once it finishes"
-        ))
+        Err(error) if crate::apply::is_apply_in_progress(&error) => Err(AvailabilityRefused(
+            format!("environment {replica} has an apply in progress; retry once it finishes"),
+        )
         .into()),
+        Err(error) => Err(error.context(format!("claiming environment {replica} for the drill"))),
     }
 }
 
@@ -714,6 +721,43 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    // #1310: only another holder's apply is an availability refusal; a
+    // claim refused for another reason reports that reason.
+    #[tokio::test]
+    async fn a_drill_claim_refusal_is_availability_only_for_contention() {
+        let root = temp_root("claim-kind");
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        plan::env_add(&mut ctx, "busy", "fixture").await.unwrap();
+        plan::env_add(&mut ctx, "gone", "fixture").await.unwrap();
+        let held = crate::apply::claim_environment(&mut ctx, "busy", "apply")
+            .await
+            .unwrap();
+        let Err(busy) = claim_drill_environment(&mut ctx, "busy").await else {
+            panic!("a held environment must refuse the drill claim");
+        };
+        assert!(
+            busy.downcast_ref::<AvailabilityRefused>().is_some(),
+            "{busy:#}"
+        );
+        crate::apply::release_environment(&mut ctx, &held)
+            .await
+            .unwrap();
+
+        crate::environment::retire_environment(&mut ctx, "gone", "test", "tester")
+            .await
+            .unwrap();
+        let Err(gone) = claim_drill_environment(&mut ctx, "gone").await else {
+            panic!("a retired environment must refuse the drill claim");
+        };
+        assert!(
+            gone.downcast_ref::<AvailabilityRefused>().is_none(),
+            "{gone:#}"
+        );
+        assert!(format!("{gone:#}").contains("retired"), "{gone:#}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn write_seed(path: &std::path::Path) {

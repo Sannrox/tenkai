@@ -481,11 +481,24 @@ impl WeightCache {
     pub fn admit_file(&self, artifact_digest: &str, source: &Path) -> Result<PathBuf> {
         let destination = self.blob_path(artifact_digest)?;
         if destination.is_file() {
-            verify_file_digest(&destination, artifact_digest)?;
-            return Ok(destination);
+            match verify_file_digest(&destination, artifact_digest) {
+                Ok(()) => return Ok(destination),
+                // Nothing else to admit: the cached blob is the source.
+                Err(error) if source == destination.as_path() => return Err(error),
+                // A blob that does not match its own address is garbage,
+                // for example one a crash truncated. It is replaced by the
+                // verified source below instead of refusing this digest
+                // forever (#1310).
+                Err(_) => {}
+            }
         }
         verify_file_digest(source, artifact_digest)
             .context("weight digest verification failed; model not activated")?;
+        if destination.is_file() {
+            std::fs::remove_file(&destination).with_context(|| {
+                format!("removing corrupt cached weights {}", destination.display())
+            })?;
+        }
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating weight cache {}", parent.display()))?;
@@ -495,14 +508,30 @@ impl WeightCache {
         }
         match std::fs::rename(source, &destination) {
             Ok(()) => Ok(destination),
+            // Across filesystems: copy beside the destination, verify, and
+            // rename, so the content-addressed path only ever holds a whole
+            // verified blob (#1310).
             Err(_) => {
-                std::fs::copy(source, &destination).with_context(|| {
-                    format!(
+                let staging = destination.with_extension(format!(
+                    "partial-{}-{}",
+                    std::process::id(),
+                    uuid::Uuid::new_v4()
+                ));
+                let staged = (|| {
+                    std::fs::copy(source, &staging)?;
+                    std::fs::File::open(&staging)?.sync_all()?;
+                    verify_file_digest(&staging, artifact_digest)?;
+                    std::fs::rename(&staging, &destination)?;
+                    anyhow::Ok(())
+                })();
+                if let Err(error) = staged {
+                    let _ = std::fs::remove_file(&staging);
+                    return Err(error.context(format!(
                         "copying verified weights from {} to {}",
                         source.display(),
                         destination.display()
-                    )
-                })?;
+                    )));
+                }
                 let _ = std::fs::remove_file(source);
                 Ok(destination)
             }
@@ -1780,6 +1809,30 @@ mod tests {
 
         descriptor.model.artifact_digest = format!("sha256:{}", "11".repeat(32));
         assert!(executor.apply(&descriptor).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn admitting_over_a_truncated_blob_replaces_it_with_the_verified_source() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-weights-admit-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let payload = b"complete-model-bytes";
+        let digest = format!("sha256:{:x}", Sha256::digest(payload));
+        let cache = WeightCache::new(root.join("cache"));
+        let blob = cache.blob_path(&digest).unwrap();
+        std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        std::fs::write(&blob, &payload[..4]).unwrap();
+        let staged = root.join("staged");
+        std::fs::write(&staged, payload).unwrap();
+
+        let stored = cache.admit_file(&digest, &staged).unwrap();
+        assert_eq!(stored, blob);
+        assert_eq!(std::fs::read(&blob).unwrap(), payload);
+        verify_file_digest(&blob, &digest).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

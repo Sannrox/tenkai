@@ -712,10 +712,16 @@ async fn claim_topology_leases(
                 }
                 checked
             }
-            Err(_) => Err(crate::topology::AvailabilityRefused(format!(
-                "topology {topology} is upgrading another replica; retry once it finishes"
-            ))
-            .into()),
+            // Only another holder is a retryable availability refusal (#1310).
+            Err(crate::client::LeaseError::AlreadyExists) => {
+                Err(crate::topology::AvailabilityRefused(format!(
+                    "topology {topology} is upgrading another replica; retry once it finishes"
+                ))
+                .into())
+            }
+            Err(crate::client::LeaseError::Failed(error)) => {
+                Err(error.context(format!("acquiring the topology {topology} lease")))
+            }
         };
         if let Err(error) = checked {
             release_topology_leases(ctx, &held).await;

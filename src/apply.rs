@@ -33,7 +33,7 @@ pub(crate) use execution_admission::{CandidateAdmission, classify_candidate};
 pub(crate) use execution_lease::{
     ENVIRONMENT_LEASE_NAMESPACE, EnvironmentLease, claim_environment,
     claim_environment_for_completion, claim_environment_for_drill, environment_lease_status,
-    is_execution_fence_lost, refresh_environment_lease, release_environment,
+    is_apply_in_progress, is_execution_fence_lost, refresh_environment_lease, release_environment,
     release_environment_fence, run_with_lease_renewal, runtime_may_take_over,
 };
 pub use execution_lease::{EnvironmentLeaseInspect, inspect_environment_lease, unlock_environment};

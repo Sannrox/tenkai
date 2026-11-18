@@ -261,7 +261,10 @@ pub(crate) fn select_matching(
 
 /// Strictest requirement for `contract` across components. A required entry
 /// wins over optional; the higher minimum wins.
-fn requirement_for(profile: &CompatibilityProfile, contract: &str) -> Option<ContractRequirement> {
+pub(crate) fn requirement_for(
+    profile: &CompatibilityProfile,
+    contract: &str,
+) -> Option<ContractRequirement> {
     let mut selected: Option<ContractRequirement> = None;
     for component in profile.components.values() {
         let Some(next) = component.requires.get(contract) else {

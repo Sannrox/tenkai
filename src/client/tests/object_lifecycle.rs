@@ -209,3 +209,26 @@ async fn tenant_hub_catalog_captures_feedback_observations() {
             .is_empty()
     );
 }
+
+/// A tenant-bound hub commits objects and provider events in one write, so
+/// a runtime completion there takes the same atomic path as embedded state
+/// instead of dropping its events (#1310).
+#[tokio::test]
+async fn tenant_bound_hub_commits_provider_events_atomically() {
+    use crate::storage::MemoryCatalogGraph;
+    use std::sync::Arc;
+
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-atomic-events-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let embedded = Ctx::embedded(root.join("tenkai.db")).unwrap();
+    assert!(embedded.commits_provider_events_atomically());
+    let graph = Arc::new(MemoryCatalogGraph::new());
+    let hub = Ctx::tenant_hub_catalog(graph).with_catalog_tenant("tenant-a");
+    assert!(hub.commits_provider_events_atomically());
+    assert!(!Ctx::tenant_hub().commits_provider_events_atomically());
+    let _ = std::fs::remove_dir_all(root);
+}

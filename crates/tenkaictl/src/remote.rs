@@ -245,19 +245,15 @@ pub(crate) async fn run(
                 anyhow::bail!("selector {env} matches no environments");
             }
             let selector = selector.then_some(env.as_str());
-            for name in names {
-                // Pass the operator's --generation through. Filling it from
-                // inspect would skip the observed-generation fence (#703).
-                crate::remote_hold::environment(
-                    &client,
-                    &name,
-                    selector,
-                    generation,
-                    action.clone(),
-                )
-                .await?;
-            }
-            Ok(())
+            // Pass the operator's --generation through. Filling it from
+            // inspect would skip the observed-generation fence (#703). Every
+            // matched environment is tried, and the result names which
+            // changed and which refused (#1310).
+            crate::remote_hold::each(names, async |name| {
+                crate::remote_hold::environment(&client, name, selector, generation, action.clone())
+                    .await
+            })
+            .await
         }
         Command::Env {
             command:

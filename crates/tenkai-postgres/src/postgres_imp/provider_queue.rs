@@ -22,58 +22,83 @@ pub(crate) fn enqueue_provider_event_in(
             detail: "new events require identities, content, and pristine delivery state".into(),
         });
     }
-    let existing = tx
-        .query_opt(
-            "SELECT provider_kind,binding_digest,payload_json FROM provider_events
-             WHERE provider_kind = $1 AND id = $2",
-            &[&event.provider_kind, &event.id],
-        )
-        .map_err(pg)?;
-    if let Some(row) = existing {
-        let kind: String = row.get(0);
-        let digest: String = row.get(1);
-        let payload: String = row.get(2);
-        if kind != event.provider_kind
-            || digest != event.binding_digest
-            || !provider_event_payloads_match(&payload, &event.payload_json)
-        {
-            // Same first-wins rule as SQLite: a replayed observation id may
-            // carry a new body and must not roll back capture (#1102).
-            if event.provider_kind == "feedback_webhook" {
-                return Ok(());
-            }
-            return Err(StoreError::ImmutableConflict {
-                kind: "provider event",
-                id: event.id.clone(),
-            });
-        }
-        return Ok(());
+    if let Some(conflict) = existing_provider_event(tx, event)? {
+        return conflict;
     }
     let attempts = event.attempts as i32;
     let environment_id =
         tenkai::storage::provider_event_environment_id(&event.payload_json).unwrap_or_default();
     let observed_at =
         tenkai::storage::provider_event_observed_at(&event.payload_json, event.next_attempt_at);
-    tx.execute(
-        "INSERT INTO provider_events(id,provider_kind,binding_digest,payload_json,attempts,next_attempt_at,delivered_at,last_error,claim_token,claim_until,environment_id,observed_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
-        &[
-            &event.id,
-            &event.provider_kind,
-            &event.binding_digest,
-            &event.payload_json,
-            &attempts,
-            &event.next_attempt_at,
-            &event.delivered_at,
-            &event.last_error,
-            &event.claim_token,
-            &event.claim_until,
-            &environment_id,
-            &observed_at,
-        ],
-    )
-    .map_err(pg)?;
+    // A concurrent enqueue of the same event may commit between the read
+    // above and this insert. The key conflict then means "already queued",
+    // judged by the same rule as a sequential replay, not a store error
+    // (#1310).
+    let inserted = tx
+        .execute(
+            "INSERT INTO provider_events(id,provider_kind,binding_digest,payload_json,attempts,next_attempt_at,delivered_at,last_error,claim_token,claim_until,environment_id,observed_at)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+             ON CONFLICT (provider_kind,id) DO NOTHING",
+            &[
+                &event.id,
+                &event.provider_kind,
+                &event.binding_digest,
+                &event.payload_json,
+                &attempts,
+                &event.next_attempt_at,
+                &event.delivered_at,
+                &event.last_error,
+                &event.claim_token,
+                &event.claim_until,
+                &environment_id,
+                &observed_at,
+            ],
+        )
+        .map_err(pg)?;
+    if inserted == 0 {
+        return existing_provider_event(tx, event)?.unwrap_or_else(|| {
+            Err(StoreError::InvalidData {
+                kind: "provider event",
+                detail: format!("event {} conflicted but is not stored", event.id),
+            })
+        });
+    }
     Ok(())
+}
+
+/// The outcome for `event` when a row with its key already exists: `Ok` for
+/// the same event (or a first-wins webhook replay), a conflict otherwise.
+/// `None` when no row exists yet.
+fn existing_provider_event(
+    tx: &mut Transaction<'_>,
+    event: &ProviderEventRecord,
+) -> Result<Option<Result<()>>> {
+    let Some(row) = tx
+        .query_opt(
+            "SELECT binding_digest,payload_json FROM provider_events
+             WHERE provider_kind = $1 AND id = $2",
+            &[&event.provider_kind, &event.id],
+        )
+        .map_err(pg)?
+    else {
+        return Ok(None);
+    };
+    let digest: String = row.get(0);
+    let payload: String = row.get(1);
+    if digest == event.binding_digest
+        && provider_event_payloads_match(&payload, &event.payload_json)
+    {
+        return Ok(Some(Ok(())));
+    }
+    // Same first-wins rule as SQLite: a replayed observation id may carry a
+    // new body and must not roll back capture (#1102).
+    if event.provider_kind == "feedback_webhook" {
+        return Ok(Some(Ok(())));
+    }
+    Ok(Some(Err(StoreError::ImmutableConflict {
+        kind: "provider event",
+        id: event.id.clone(),
+    })))
 }
 
 impl Inner {

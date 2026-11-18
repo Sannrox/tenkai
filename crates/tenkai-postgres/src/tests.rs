@@ -322,6 +322,8 @@ mod live_property_lookup;
 #[cfg(feature = "postgres")]
 mod live_provider_claim;
 #[cfg(feature = "postgres")]
+mod live_provider_enqueue;
+#[cfg(feature = "postgres")]
 mod live_retirement;
 #[cfg(feature = "postgres")]
 mod live_schema_ensure;
