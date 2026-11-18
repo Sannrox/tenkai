@@ -1,3 +1,4 @@
+use crate::client::action_governed::idempotency_key;
 use crate::client::{
     action_actor_from_changes, apply_remote_property_index, canonical_create_request,
     canonical_update_request, lease_precondition, token_transport_is_safe,
@@ -156,4 +157,17 @@ fn emergency_override_actor_uses_property_change_field() {
         ),
         None
     );
+}
+
+#[test]
+fn a_reused_correlation_with_other_parameters_gets_its_own_admission_key() {
+    let params = |target: &str| {
+        std::collections::HashMap::from([
+            ("correlation".to_owned(), "c-1".to_owned()),
+            ("target".to_owned(), target.to_owned()),
+        ])
+    };
+    let key = idempotency_key("pause", &params("a"));
+    assert_eq!(key, idempotency_key("pause", &params("a")));
+    assert_ne!(key, idempotency_key("pause", &params("b")));
 }
