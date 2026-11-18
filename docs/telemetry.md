@@ -24,9 +24,40 @@ Each export gives up after one second to connect and three seconds in all,
 and export runs in the background, so a stalled collector never delays a
 delivery operation.
 
-Every span carries a random trace and span id and its start and end time;
-every metric point carries the time it was recorded. Each span is its own
-trace: spans are not yet linked to the span that started them.
+Every span carries a trace id, a random span id, and its start and end time;
+every metric point carries the time it was recorded.
+
+## Trace structure
+
+Spans of one delivery share a trace. A span opened while another Tenkai span
+runs its work is that span's child and carries its `parentSpanId`:
+
+```text
+tenkai.reconcile            one tick, the root unless a caller's trace is given
+├── tenkai.plan             planning of each environment
+└── tenkai.apply            each plan the tick applies
+    ├── tenkai.rollback     when the plan rolls back
+    ├── tenkai.health
+    └── tenkai.health_gate
+```
+
+A plan or apply run on its own, from `tenkaictl` or a hub request, is the
+root of its trace, with its health and rollback spans under it. Embedded and
+server hosts produce the same shape. `tenkai.operation_id` stays the delivery
+identity; the trace id only links spans.
+
+## Inbound trace context
+
+A hub request may carry the standard `traceparent` header. When it is valid, the
+hub's spans for that request join the caller's trace as children of the
+caller's span. Only version `00` in lowercase hex with non-zero ids is
+accepted, and `tracestate` is ignored. A missing or malformed value starts a
+new trace: the request is never refused for it, and the value is never
+recorded. Like `x-request-id`, trace context is caller input and grants
+nothing.
+
+Remote `tenkaictl` sends `traceparent` next to `x-request-id` when the call
+runs inside a Tenkai trace context.
 
 ## Inbound correlation identity
 

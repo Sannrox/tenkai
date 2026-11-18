@@ -290,16 +290,20 @@ impl Reconciler {
             "tenkai.reconcile",
             &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Reconcile),
         );
-        let result = tick_admission::run(tick_admission::TickRequest {
-            ctx: self.ctx.clone(),
-            config: self.config.clone(),
-            state: Arc::clone(&self.state),
-            environment_index: Arc::clone(&self.environment_index),
-            tick_lock: self.tick_lock.as_ref(),
-            runtime_environments: Arc::clone(&self.runtime_environments),
-            diagnostics: Arc::clone(&self.diagnostics),
-            allowed_environments,
-        })
+        // Applies and health checks of this tick are children of its span.
+        let result = crate::telemetry::in_trace(
+            span.context(),
+            tick_admission::run(tick_admission::TickRequest {
+                ctx: self.ctx.clone(),
+                config: self.config.clone(),
+                state: Arc::clone(&self.state),
+                environment_index: Arc::clone(&self.environment_index),
+                tick_lock: self.tick_lock.as_ref(),
+                runtime_environments: Arc::clone(&self.runtime_environments),
+                diagnostics: Arc::clone(&self.diagnostics),
+                allowed_environments,
+            }),
+        )
         .await;
         crate::telemetry::record_metric(
             crate::telemetry::METRIC_RECONCILE_LATENCY_MS,

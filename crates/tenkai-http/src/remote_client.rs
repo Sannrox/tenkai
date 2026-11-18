@@ -523,6 +523,9 @@ impl RemoteClient {
         if let Some(operation_id) = tenkai::telemetry::current_operation_id() {
             request = request.header("x-request-id", operation_id);
         }
+        if let Some(trace) = tenkai::telemetry::current_trace() {
+            request = request.header("traceparent", trace.traceparent());
+        }
         if let Some(body) = body {
             request = request.json(body);
         }

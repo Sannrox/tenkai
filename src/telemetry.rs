@@ -5,6 +5,11 @@
 //! span: only versioned delivery identities are admitted. Transport is not a
 //! domain boundary — the same port is used from embedded `tenkaictl` and the
 //! server host.
+//!
+//! Spans link into one trace. A span opened inside [`in_trace`] is a child of
+//! that context; the reconcile tick and an apply run their work inside their
+//! own span's context, and the hub runs a request inside the caller's
+//! `traceparent` when it carries a valid one (#1443).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -197,8 +202,116 @@ fn looks_like_secret(key: &str, value: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpanToken(u64);
 
+/// One position in a trace: the trace and the span there. Carries no
+/// authority; a caller's value only names where Tenkai's spans attach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TraceContext {
+    pub trace_id: [u8; 16],
+    pub span_id: [u8; 8],
+}
+
+/// Length of a version `00` `traceparent`: `00-<32 hex>-<16 hex>-<2 hex>`.
+const TRACEPARENT_LEN: usize = 55;
+
+impl TraceContext {
+    /// The first span of a new trace.
+    fn root() -> Self {
+        Self {
+            // Random v4 bytes carry a version nibble, so neither id is all zero.
+            trace_id: *uuid::Uuid::new_v4().as_bytes(),
+            span_id: random_span_id(),
+        }
+    }
+
+    /// A new span in this trace.
+    fn child(self) -> Self {
+        Self {
+            trace_id: self.trace_id,
+            span_id: random_span_id(),
+        }
+    }
+
+    /// Parse an inbound `traceparent` header. Only version `00` in lowercase
+    /// hex with non-zero ids is accepted; anything else is `None`, so the
+    /// caller starts a fresh trace instead of recording the value. The
+    /// trace flags are read for shape and ignored: Tenkai exports every span.
+    pub fn from_traceparent(value: &str) -> Option<Self> {
+        if value.len() != TRACEPARENT_LEN {
+            return None;
+        }
+        let mut fields = value.split('-');
+        let (Some("00"), Some(trace), Some(span), Some(flags), None) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            return None;
+        };
+        decode_hex::<1>(flags)?;
+        let context = Self {
+            trace_id: decode_hex(trace)?,
+            span_id: decode_hex(span)?,
+        };
+        (context.trace_id != [0; 16] && context.span_id != [0; 8]).then_some(context)
+    }
+
+    /// This context as an outbound `traceparent` header, sampled.
+    pub fn traceparent(self) -> String {
+        format!("00-{}-{}-01", hex(&self.trace_id), hex(&self.span_id))
+    }
+}
+
+/// Exactly `2 * N` lowercase hex digits.
+fn decode_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
+    let digits = text.as_bytes();
+    if digits.len() != 2 * N {
+        return None;
+    }
+    let nibble = |digit: u8| match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
+    };
+    let mut bytes = [0; N];
+    for (byte, pair) in bytes.iter_mut().zip(digits.chunks_exact(2)) {
+        *byte = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+    }
+    Some(bytes)
+}
+
+fn random_span_id() -> [u8; 8] {
+    let mut span_id = [0; 8];
+    span_id.copy_from_slice(&uuid::Uuid::new_v4().as_bytes()[..8]);
+    span_id
+}
+
+/// Where a new span sits: its own context and the span it is a child of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SpanIds {
+    pub context: TraceContext,
+    pub parent_span_id: Option<[u8; 8]>,
+}
+
+impl SpanIds {
+    /// A child of `parent`, or the root of a new trace without one.
+    pub fn under(parent: Option<TraceContext>) -> Self {
+        match parent {
+            Some(parent) => Self {
+                context: parent.child(),
+                parent_span_id: Some(parent.span_id),
+            },
+            None => Self {
+                context: TraceContext::root(),
+                parent_span_id: None,
+            },
+        }
+    }
+}
+
 pub trait Telemetry: Send + Sync {
-    fn start_span(&self, name: &str, attrs: &DeliveryAttributes) -> SpanToken;
+    fn start_span(&self, name: &str, attrs: &DeliveryAttributes, ids: SpanIds) -> SpanToken;
     fn end_span(&self, token: SpanToken, attrs: &DeliveryAttributes, status: SpanStatus);
     fn record_metric(&self, name: &str, value: f64, attrs: &DeliveryAttributes);
 }
@@ -207,7 +320,7 @@ pub trait Telemetry: Send + Sync {
 pub struct NoopTelemetry;
 
 impl Telemetry for NoopTelemetry {
-    fn start_span(&self, _name: &str, _attrs: &DeliveryAttributes) -> SpanToken {
+    fn start_span(&self, _name: &str, _attrs: &DeliveryAttributes, _ids: SpanIds) -> SpanToken {
         SpanToken(0)
     }
 
@@ -219,6 +332,7 @@ impl Telemetry for NoopTelemetry {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CompletedSpan {
     pub name: String,
+    pub ids: SpanIds,
     pub attributes: BTreeMap<String, String>,
     pub status: SpanStatus,
 }
@@ -233,7 +347,7 @@ pub struct RecordedMetric {
 #[derive(Debug, Default)]
 pub struct MemoryTelemetry {
     next: AtomicU64,
-    open: Mutex<BTreeMap<u64, String>>,
+    open: Mutex<BTreeMap<u64, (String, SpanIds)>>,
     spans: Mutex<Vec<CompletedSpan>>,
     metrics: Mutex<Vec<RecordedMetric>>,
 }
@@ -253,27 +367,28 @@ impl MemoryTelemetry {
 }
 
 impl Telemetry for MemoryTelemetry {
-    fn start_span(&self, name: &str, _attrs: &DeliveryAttributes) -> SpanToken {
+    fn start_span(&self, name: &str, _attrs: &DeliveryAttributes, ids: SpanIds) -> SpanToken {
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         self.open
             .lock()
             .expect("telemetry mutex")
-            .insert(id, name.into());
+            .insert(id, (name.into(), ids));
         SpanToken(id)
     }
 
     fn end_span(&self, token: SpanToken, attrs: &DeliveryAttributes, status: SpanStatus) {
-        let name = self
+        let (name, ids) = self
             .open
             .lock()
             .expect("telemetry mutex")
             .remove(&token.0)
-            .unwrap_or_else(|| "tenkai.unknown".into());
+            .unwrap_or_else(|| ("tenkai.unknown".into(), SpanIds::under(None)));
         self.spans
             .lock()
             .expect("telemetry mutex")
             .push(CompletedSpan {
                 name,
+                ids,
                 attributes: attrs.allowlisted_pairs(),
                 status,
             });
@@ -327,28 +442,22 @@ fn blocking_export_client() -> Result<reqwest::blocking::Client> {
         .build()?)
 }
 
-/// One finished span as exported: its identity and wall-clock bounds.
+/// One finished span as exported: its place in the trace and wall-clock bounds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpanRecord {
     pub name: String,
-    pub trace_id: [u8; 16],
-    pub span_id: [u8; 8],
+    pub ids: SpanIds,
     pub start_unix_nanos: u64,
     pub end_unix_nanos: u64,
 }
 
 impl SpanRecord {
-    /// A span opened now, in a trace of its own.
-    fn open(name: impl Into<String>) -> Self {
-        let span = uuid::Uuid::new_v4();
-        let mut span_id = [0; 8];
-        span_id.copy_from_slice(&span.as_bytes()[..8]);
+    /// A span opened now.
+    fn open(name: impl Into<String>, ids: SpanIds) -> Self {
         let now = unix_nanos();
         Self {
             name: name.into(),
-            // Random v4 bytes carry a version nibble, so neither id is all zero.
-            trace_id: *uuid::Uuid::new_v4().as_bytes(),
-            span_id,
+            ids,
             start_unix_nanos: now,
             end_unix_nanos: now,
         }
@@ -401,12 +510,12 @@ impl OtlpHttpTelemetry {
 }
 
 impl Telemetry for OtlpHttpTelemetry {
-    fn start_span(&self, name: &str, _attrs: &DeliveryAttributes) -> SpanToken {
+    fn start_span(&self, name: &str, _attrs: &DeliveryAttributes, ids: SpanIds) -> SpanToken {
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         self.open
             .lock()
             .expect("telemetry mutex")
-            .insert(id, SpanRecord::open(name));
+            .insert(id, SpanRecord::open(name, ids));
         SpanToken(id)
     }
 
@@ -416,7 +525,7 @@ impl Telemetry for OtlpHttpTelemetry {
             .lock()
             .expect("telemetry mutex")
             .remove(&token.0)
-            .unwrap_or_else(|| SpanRecord::open("tenkai.unknown"));
+            .unwrap_or_else(|| SpanRecord::open("tenkai.unknown", SpanIds::under(None)));
         span.end_unix_nanos = unix_nanos().max(span.start_unix_nanos);
         self.export("/v1/traces", otlp_trace_payload(&span, attrs, status));
     }
@@ -427,11 +536,30 @@ impl Telemetry for OtlpHttpTelemetry {
 }
 
 /// OTLP/JSON encodes ids as lowercase hex and 64-bit times as decimal strings.
+/// A root span has no `parentSpanId`.
 pub fn otlp_trace_payload(
     span: &SpanRecord,
     attrs: &DeliveryAttributes,
     status: SpanStatus,
 ) -> serde_json::Value {
+    let mut encoded = serde_json::json!({
+        "traceId": hex(&span.ids.context.trace_id),
+        "spanId": hex(&span.ids.context.span_id),
+        "name": span.name,
+        "kind": 1,
+        "startTimeUnixNano": span.start_unix_nanos.to_string(),
+        "endTimeUnixNano": span.end_unix_nanos.to_string(),
+        "attributes": otlp_attributes(attrs),
+        "status": {
+            "code": match status {
+                SpanStatus::Ok => 1,
+                SpanStatus::Error => 2,
+            }
+        }
+    });
+    if let Some(parent) = span.ids.parent_span_id {
+        encoded["parentSpanId"] = hex(&parent).into();
+    }
     serde_json::json!({
         "resourceSpans": [{
             "resource": {
@@ -440,21 +568,7 @@ pub fn otlp_trace_payload(
                 ]
             },
             "scopeSpans": [{
-                "spans": [{
-                    "traceId": hex(&span.trace_id),
-                    "spanId": hex(&span.span_id),
-                    "name": span.name,
-                    "kind": 1,
-                    "startTimeUnixNano": span.start_unix_nanos.to_string(),
-                    "endTimeUnixNano": span.end_unix_nanos.to_string(),
-                    "attributes": otlp_attributes(attrs),
-                    "status": {
-                        "code": match status {
-                            SpanStatus::Ok => 1,
-                            SpanStatus::Error => 2,
-                        }
-                    }
-                }]
+                "spans": [encoded]
             }]
         }]
     })
@@ -508,6 +622,7 @@ static PROCESS_OPERATION: Mutex<Option<String>> = Mutex::new(None);
 tokio::task_local! {
     static TASK_TELEMETRY: Arc<dyn Telemetry>;
     static TASK_OPERATION: String;
+    static TASK_TRACE: TraceContext;
 }
 
 pub fn bind_process_operation_id(operation_id: impl Into<String>) {
@@ -578,12 +693,53 @@ where
     TASK_OPERATION.scope(operation_id.into(), fut).await
 }
 
+/// The trace context spans opened now attach to, if any.
+pub fn current_trace() -> Option<TraceContext> {
+    TASK_TRACE.try_with(|context| *context).ok()
+}
+
+/// Run `fut` so that spans it opens are children of `context`: an open
+/// span's [`SpanGuard::context`], or a caller's parsed `traceparent`.
+pub async fn in_trace<F: std::future::Future>(context: TraceContext, fut: F) -> F::Output {
+    TASK_TRACE.scope(context, fut).await
+}
+
+/// Wrap `fut` for `tokio::spawn` so the spawned task keeps this task's
+/// telemetry, operation id and trace context. Task-locals do not cross a
+/// spawn on their own.
+pub fn carry<F: std::future::Future>(fut: F) -> impl std::future::Future<Output = F::Output> {
+    let telemetry = TASK_TELEMETRY.try_with(Clone::clone).ok();
+    let operation = TASK_OPERATION.try_with(Clone::clone).ok();
+    let trace = current_trace();
+    async move {
+        let fut = async move {
+            match trace {
+                Some(trace) => TASK_TRACE.scope(trace, fut).await,
+                None => fut.await,
+            }
+        };
+        let fut = async move {
+            match operation {
+                Some(operation) => TASK_OPERATION.scope(operation, fut).await,
+                None => fut.await,
+            }
+        };
+        match telemetry {
+            Some(telemetry) => TASK_TELEMETRY.scope(telemetry, fut).await,
+            None => fut.await,
+        }
+    }
+}
+
+/// Open a span under the current trace context, or as a new trace's root.
 pub fn start_span(name: &str, attrs: &DeliveryAttributes) -> SpanGuard {
     let telemetry = selected();
-    let token = telemetry.start_span(name, attrs);
+    let ids = SpanIds::under(current_trace());
+    let token = telemetry.start_span(name, attrs, ids);
     SpanGuard {
         telemetry,
         token: Some(token),
+        context: ids.context,
         attrs: attrs.clone(),
         status: SpanStatus::Ok,
     }
@@ -592,11 +748,17 @@ pub fn start_span(name: &str, attrs: &DeliveryAttributes) -> SpanGuard {
 pub struct SpanGuard {
     telemetry: Arc<dyn Telemetry>,
     token: Option<SpanToken>,
+    context: TraceContext,
     attrs: DeliveryAttributes,
     status: SpanStatus,
 }
 
 impl SpanGuard {
+    /// This span's place in the trace, for [`in_trace`].
+    pub fn context(&self) -> TraceContext {
+        self.context
+    }
+
     pub fn fail(&mut self) {
         self.status = SpanStatus::Error;
         self.attrs.outcome = Some("error".into());
@@ -681,7 +843,11 @@ mod tests {
             .environment("lab")
             .release_digest("deadbeef")
             .fencing_generation(9);
-        let payload = otlp_trace_payload(&SpanRecord::open("tenkai.apply"), &attrs, SpanStatus::Ok);
+        let payload = otlp_trace_payload(
+            &SpanRecord::open("tenkai.apply", SpanIds::under(None)),
+            &attrs,
+            SpanStatus::Ok,
+        );
         let encoded = payload.to_string();
         assert!(encoded.contains(ATTR_PLAN_ID));
         assert!(encoded.contains("deadbeef"));
@@ -694,7 +860,7 @@ mod tests {
     #[test]
     fn otlp_payloads_carry_the_fields_a_collector_requires() {
         let attrs = DeliveryAttributes::new(Operation::Apply);
-        let mut opened = SpanRecord::open("tenkai.apply");
+        let mut opened = SpanRecord::open("tenkai.apply", SpanIds::under(None));
         opened.end_unix_nanos = opened.start_unix_nanos + 5;
         let trace = otlp_trace_payload(&opened, &attrs, SpanStatus::Ok);
         let span = &trace["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
@@ -723,6 +889,54 @@ mod tests {
             .parse()
             .expect("u64");
         assert!(at > 0);
+    }
+
+    #[test]
+    fn traceparent_round_trips_and_rejects_malformed_values() {
+        let value = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let context = TraceContext::from_traceparent(value).expect("valid traceparent");
+        assert_eq!(hex(&context.trace_id), "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_eq!(hex(&context.span_id), "00f067aa0ba902b7");
+        assert_eq!(context.traceparent(), value);
+        for malformed in [
+            "",
+            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",
+            "00-00000000000000000000000000000000-00f067aa0ba902b7-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0g",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-",
+            "00_4bf92f3577b34da6a3ce929d0e0e4736_00f067aa0ba902b7_01",
+            "00-4bf92f3577b34da6a3ce929d0e0e47-3600f067aa0ba902b7-01",
+        ] {
+            assert_eq!(
+                TraceContext::from_traceparent(malformed),
+                None,
+                "{malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_child_span_exports_a_parent() {
+        let attrs = DeliveryAttributes::new(Operation::Apply);
+        let root = SpanIds::under(None);
+        let child = SpanIds::under(Some(root.context));
+        assert_eq!(child.context.trace_id, root.context.trace_id);
+        assert_ne!(child.context.span_id, root.context.span_id);
+        let encode = |ids| {
+            otlp_trace_payload(
+                &SpanRecord::open("tenkai.apply", ids),
+                &attrs,
+                SpanStatus::Ok,
+            )["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+                .clone()
+        };
+        assert!(encode(root).get("parentSpanId").is_none());
+        assert_eq!(
+            encode(child)["parentSpanId"],
+            hex(&root.context.span_id).as_str()
+        );
     }
 
     #[test]
@@ -874,6 +1088,24 @@ mod tests {
         assert!(names.contains(&"tenkai.apply"), "{names:?}");
         assert!(names.contains(&"tenkai.health"), "{names:?}");
         assert!(names.contains(&"tenkai.rollback"), "{names:?}");
+        // Health spans, and the rollback the second apply runs, are children
+        // of that apply. Planning the rollback happens outside any apply.
+        let under_apply = |span: &CompletedSpan| {
+            spans.iter().any(|apply| {
+                apply.name == "tenkai.apply"
+                    && Some(apply.ids.context.span_id) == span.ids.parent_span_id
+                    && apply.ids.context.trace_id == span.ids.context.trace_id
+            })
+        };
+        for health in spans.iter().filter(|span| span.name == "tenkai.health") {
+            assert!(under_apply(health), "{health:?}");
+        }
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.name == "tenkai.rollback" && under_apply(span)),
+            "{spans:?}"
+        );
         for span in &spans {
             assert_eq!(
                 span.attributes.get(ATTR_OPERATION_ID).map(String::as_str),
@@ -958,6 +1190,82 @@ mod tests {
             assert_eq!(
                 span.attributes.get(ATTR_OPERATION_ID).map(String::as_str),
                 Some("corr-380-reconcile"),
+                "{span:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// One tick that plans and applies: both are the tick's children, in the
+    /// tick's trace, across the tick's per-environment task (#1443). The drill
+    /// above covers health and rollback under apply.
+    #[tokio::test]
+    async fn reconcile_tick_links_plan_and_apply_into_one_trace() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-otel-trace-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        write_shell_product(&root, "1.0.0");
+        let ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        let mut setup = ctx.clone();
+        crate::ontology::register(&mut setup).await.unwrap();
+        let options = PublishOptions {
+            allow_unsigned_development: true,
+            ..Default::default()
+        };
+        publish(
+            &mut setup,
+            &root.join("1.0.0").join("tenkai.toml"),
+            &options,
+        )
+        .await
+        .unwrap();
+        let actor = test_management_context("otel-trace");
+        crate::catalog::promote(&mut setup, &actor, "edge-app@1.0.0", "stable")
+            .await
+            .unwrap();
+        plan::env_add(&mut setup, "local", "fixture").await.unwrap();
+        plan::subscribe(&mut setup, "local", "edge-app", "stable")
+            .await
+            .unwrap();
+        let memory = Arc::new(MemoryTelemetry::new());
+        scope(memory.clone(), "corr-1443-tick", async {
+            let reconciler = crate::reconciler::Reconciler::new(
+                ctx,
+                crate::reconciler::Config {
+                    initial_backoff: std::time::Duration::from_millis(100),
+                    max_backoff: std::time::Duration::from_millis(250),
+                    max_concurrency: 2,
+                    skip_gates: false,
+                    unapproved_development_reason: Some("otel trace drill".into()),
+                    approval_directory: None,
+                    approval_trust_roots: None,
+                    channel_promotion_policies: true,
+                },
+            )
+            .unwrap();
+            // The test binary has no executor guard, so the apply fails
+            // after it starts; its span still records where it sat.
+            reconciler.run_once().await.unwrap();
+        })
+        .await;
+        let spans = memory.spans();
+        let named = |name: &str| {
+            spans
+                .iter()
+                .find(|span| span.name == name)
+                .unwrap_or_else(|| panic!("no {name} span in {spans:?}"))
+        };
+        let tick = named("tenkai.reconcile");
+        assert_eq!(tick.ids.parent_span_id, None);
+        for span in [named("tenkai.plan"), named("tenkai.apply")] {
+            assert_eq!(span.ids.parent_span_id, Some(tick.ids.context.span_id));
+            assert_eq!(span.ids.context.trace_id, tick.ids.context.trace_id);
+            assert_eq!(
+                span.attributes.get(ATTR_OPERATION_ID).map(String::as_str),
+                Some("corr-1443-tick"),
                 "{span:?}"
             );
         }

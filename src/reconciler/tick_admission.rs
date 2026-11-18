@@ -245,7 +245,8 @@ async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport>
                     completed: false,
                 };
                 let permits = Arc::clone(&permits);
-                jobs.spawn(async move {
+                // Carried, so the environment's apply stays in this tick's trace.
+                jobs.spawn(crate::telemetry::carry(async move {
                     let _permit = permits
                         .acquire_owned()
                         .await
@@ -268,7 +269,7 @@ async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport>
                     .await;
                     guard.finish(result.is_ok());
                     (name, result)
-                });
+                }));
             }
         }
     }

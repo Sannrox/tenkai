@@ -101,7 +101,10 @@ pub async fn execute_with_options(
     // Content collection removes what no deployment keeps; it waits for
     // this apply, and an apply after it verifies the content it uses (#635).
     let _content = crate::content_inventory::ContentLock::shared_from_env().await?;
-    match execute_with_options_inner(ctx, plan_id, options, &mut apply_span).await {
+    // Rollback and health spans of this apply are its children.
+    let trace = apply_span.context();
+    let attempt = execute_with_options_inner(ctx, plan_id, options, &mut apply_span);
+    match crate::telemetry::in_trace(trace, attempt).await {
         Ok(outcomes) => {
             apply_span.succeed();
             crate::telemetry::record_metric(
