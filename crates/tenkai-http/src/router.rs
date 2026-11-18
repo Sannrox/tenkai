@@ -590,14 +590,34 @@ pub fn router(
                 axum::routing::delete(reset_development_fixture),
             );
     }
-    Ok(router.with_state(Arc::new(AppState {
-        tenant_store: config.tenant_store.clone(),
-        management,
-        config,
-        reconciler,
-        store,
-        runtime_delivery,
-    })))
+    Ok(router
+        .layer(axum::middleware::from_fn(continue_trace))
+        .with_state(Arc::new(AppState {
+            tenant_store: config.tenant_store.clone(),
+            management,
+            config,
+            reconciler,
+            store,
+            runtime_delivery,
+        })))
+}
+
+/// Run the request inside the caller's trace when it sends a valid
+/// `traceparent`, so Tenkai's spans continue it. A missing or malformed value
+/// starts a fresh trace; it never refuses the request and is never recorded.
+async fn continue_trace(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let parent = request
+        .headers()
+        .get("traceparent")
+        .and_then(|value| value.to_str().ok())
+        .and_then(tenkai::telemetry::TraceContext::from_traceparent);
+    match parent {
+        Some(parent) => tenkai::telemetry::in_trace(parent, next.run(request)).await,
+        None => next.run(request).await,
+    }
 }
 
 /// Keep `config.trust_status` current: computed now, then every minute on a

@@ -36,6 +36,7 @@ mod software_compatibility;
 mod support;
 mod tenant;
 mod tenant_routes;
+mod trace_context;
 mod trust;
 mod upgrade_pace;
 mod webhook_attribution;
