@@ -894,20 +894,35 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_wait_longer_than_the_lease_ttl_keeps_the_lease() {
+        // An 8 s TTL renews every 2 s and gives each renewal 2 s. That is twice
+        // the 1 s that flaked under full-suite load (#1031, #1473), and the
+        // test runs about as long as before.
+        const TTL_MS: i64 = 8_000;
         let mut ctx = context("renew-slow");
-        // 4s TTL → 1s renew_within. A 1s TTL / 250ms bound flakes when a
-        // SQLite refresh is delayed under the default cargo test load.
-        let lease = claim_environment_with_options(&mut ctx, "prod", "plan-1", 4_000, false)
+        let claimed_at = crate::now_millis();
+        let lease = claim_environment_with_options(&mut ctx, "prod", "plan-1", TTL_MS, false)
             .await
             .unwrap();
-        let waited = run_with_lease_renewal(&mut ctx, &lease, |stop| {
-            std::thread::sleep(std::time::Duration::from_millis(10_000));
+        // The control: same TTL, never renewed.
+        let control = claim_environment_with_options(&mut ctx, "stage", "plan-2", TTL_MS, false)
+            .await
+            .unwrap();
+        // Work until both leases' first expiry has passed, by the store's clock.
+        let past_expiry = claimed_at + TTL_MS + TTL_MS / 4;
+        let waited = run_with_lease_renewal(&mut ctx, &lease, move |stop| {
+            while crate::now_millis() <= past_expiry {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             Ok(stop.load(Ordering::SeqCst))
         })
         .await
         .unwrap()
         .unwrap();
         assert!(!waited, "a renewed lease must not stop the work");
+        // The control lease expired, so the wait outlived the TTL.
+        release_environment(&mut ctx, &control)
+            .await
+            .expect_err("an unrenewed lease is gone after the wait");
         // Releasing proves this apply is still the fenced holder.
         release_environment(&mut ctx, &lease).await.unwrap();
     }
