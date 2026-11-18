@@ -6,14 +6,14 @@
 //! `secret_env`. Apply, recall, automatic hold, and stale-health events fan
 //! out to the product and environment endpoints, once per URL.
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
 use crate::criticality_store::{
     claim_product_mutation, finish_product_mutation, persist_product_object,
 };
-use crate::deploy_webhook::{WebhookEndpoint, parse_endpoints, parse_endpoints_json};
+use crate::deploy_webhook::{WebhookEndpoint, parse_endpoints};
 use crate::ontology::{KIND_PRODUCT, NS, product_id, validate_identifier};
 use crate::pb::sekai::Object;
 
@@ -358,17 +358,15 @@ pub async fn set_product_webhook(
     let lease = claim_product_mutation(ctx, product).await?;
     let result = async {
         let mut object = load_product(ctx, product).await?;
-        let mut endpoints = parse_endpoints(&object).unwrap_or_default();
-        if let Some(existing) = endpoints.iter_mut().find(|item| item.url == endpoint.url) {
-            *existing = endpoint.clone();
-        } else {
-            endpoints.push(endpoint.clone());
-        }
-        crate::deploy_webhook::validate_endpoint_list(&endpoints)?;
-        object.properties.insert(
-            crate::deploy_webhook::WEBHOOKS_PROPERTY.into(),
-            serde_json::to_string(&endpoints)?,
-        );
+        let stored = object
+            .properties
+            .get(crate::deploy_webhook::WEBHOOKS_PROPERTY)
+            .map(String::as_str);
+        let rewritten = crate::deploy_webhook::upsert_endpoint_json(stored, &endpoint)
+            .with_context(|| format!("product {product} webhooks are unchanged"))?;
+        object
+            .properties
+            .insert(crate::deploy_webhook::WEBHOOKS_PROPERTY.into(), rewritten);
         object.updated = crate::now_millis();
         persist_product_object(ctx, object, &lease, false).await?;
         Ok(format!("set {product} webhook {}", endpoint.url))
@@ -403,21 +401,15 @@ pub async fn clear_product_webhooks(
                 Ok(format!("cleared {product} webhooks"))
             }
             Some(url) => {
-                let mut endpoints = parse_endpoints_json(&raw)?;
-                let before = endpoints.len();
-                endpoints.retain(|endpoint| endpoint.url != url);
-                if endpoints.len() == before {
-                    bail!("product {product} has no webhook {url}");
-                }
-                if endpoints.is_empty() {
-                    object
-                        .properties
-                        .remove(crate::deploy_webhook::WEBHOOKS_PROPERTY);
-                } else {
-                    object.properties.insert(
-                        crate::deploy_webhook::WEBHOOKS_PROPERTY.into(),
-                        serde_json::to_string(&endpoints)?,
-                    );
+                use crate::deploy_webhook::{Removal, WEBHOOKS_PROPERTY, remove_endpoint_json};
+                match remove_endpoint_json(&raw, url)? {
+                    Removal::Absent => bail!("product {product} has no webhook {url}"),
+                    Removal::Empty => {
+                        object.properties.remove(WEBHOOKS_PROPERTY);
+                    }
+                    Removal::Remaining(rest) => {
+                        object.properties.insert(WEBHOOKS_PROPERTY.into(), rest);
+                    }
                 }
                 object.updated = crate::now_millis();
                 persist_product_object(ctx, object, &lease, false).await?;
@@ -579,5 +571,174 @@ mod tests {
         assert!(validate_contact("   ").is_err());
         assert!(validate_contact("oncall\n").is_err());
         assert!(validate_contact("oncall@example").is_ok());
+    }
+
+    /// Embedded state with environment `prod` and published product `api`.
+    async fn webhook_fixture() -> (Ctx, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-stored-webhooks-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("tenkai.toml"),
+            "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\n",
+        )
+        .unwrap();
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "prod", "webhooks")
+            .await
+            .unwrap();
+        crate::catalog::publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        (ctx, root)
+    }
+
+    /// The `webhooks` property of the environment (`product: false`) or the product.
+    async fn stored(ctx: &mut Ctx, product: bool) -> Option<String> {
+        let id = if product {
+            product_id("api")
+        } else {
+            crate::environment::environment(ctx, "prod")
+                .await
+                .unwrap()
+                .id
+        };
+        let object = ctx.get(&id).await.unwrap().unwrap();
+        object
+            .properties
+            .get(crate::deploy_webhook::WEBHOOKS_PROPERTY)
+            .cloned()
+    }
+
+    async fn store(ctx: &mut Ctx, product: bool, raw: &str) {
+        let id = if product {
+            product_id("api")
+        } else {
+            crate::environment::environment(ctx, "prod")
+                .await
+                .unwrap()
+                .id
+        };
+        let mut object = ctx.get(&id).await.unwrap().unwrap();
+        object
+            .properties
+            .insert(crate::deploy_webhook::WEBHOOKS_PROPERTY.into(), raw.into());
+        ctx.put(object).await.unwrap();
+    }
+
+    async fn set(ctx: &mut Ctx, product: bool, url: &str) -> Result<String> {
+        let endpoint = WebhookEndpoint {
+            sources: Vec::new(),
+            url: url.into(),
+            secret_env: "HOOK_SECRET".into(),
+            events: vec![WebhookEvent::ApplyFailed],
+            operational: Vec::new(),
+            feedback: Vec::new(),
+        };
+        if product {
+            set_product_webhook(ctx, "api", endpoint).await
+        } else {
+            crate::deploy_webhook::set_environment_webhook(ctx, "prod", endpoint).await
+        }
+    }
+
+    /// #1306: a list a newer version wrote, with an event name this version
+    /// does not know, survives an upsert and a removal on both paths.
+    /// Reading ignores the unknown name, and skips an endpoint that
+    /// subscribes to nothing this version knows rather than sending it every
+    /// apply outcome.
+    #[tokio::test]
+    async fn an_upsert_keeps_entries_written_by_a_newer_version() {
+        let (mut ctx, root) = webhook_fixture().await;
+        let newer = serde_json::json!([
+            {"url": "https://hooks.example.test/mixed", "secret_env": "HOOK_SECRET",
+             "operational": ["plan.held", "plan.from_the_future"]},
+            {"url": "https://hooks.example.test/future-only", "secret_env": "HOOK_SECRET",
+             "events": ["apply.from_the_future"]},
+        ]);
+        for product in [false, true] {
+            store(&mut ctx, product, &newer.to_string()).await;
+            set(&mut ctx, product, "https://hooks.example.test/added")
+                .await
+                .unwrap();
+            let raw: serde_json::Value =
+                serde_json::from_str(&stored(&mut ctx, product).await.unwrap()).unwrap();
+            let entries = raw.as_array().unwrap();
+            assert_eq!(entries.len(), 3, "{raw}");
+            assert_eq!(&entries[..2], newer.as_array().unwrap().as_slice(), "{raw}");
+
+            let read = parse_endpoints(&crate::pb::sekai::Object {
+                properties: [(
+                    crate::deploy_webhook::WEBHOOKS_PROPERTY.to_string(),
+                    raw.to_string(),
+                )]
+                .into(),
+                ..Default::default()
+            })
+            .unwrap();
+            let urls: Vec<&str> = read.iter().map(|e| e.url.as_str()).collect();
+            assert_eq!(
+                urls,
+                [
+                    "https://hooks.example.test/mixed",
+                    "https://hooks.example.test/added"
+                ]
+            );
+            assert_eq!(
+                read[0].operational,
+                [crate::deploy_webhook::OperationalEvent::PlanHeld]
+            );
+            assert!(
+                read[0].events.is_empty(),
+                "not widened to every apply outcome"
+            );
+
+            if product {
+                clear_product_webhooks(&mut ctx, "api", Some("https://hooks.example.test/added"))
+                    .await
+                    .unwrap();
+            } else {
+                crate::deploy_webhook::clear_environment_webhooks(
+                    &mut ctx,
+                    "prod",
+                    Some("https://hooks.example.test/added"),
+                )
+                .await
+                .unwrap();
+            }
+            let after: serde_json::Value =
+                serde_json::from_str(&stored(&mut ctx, product).await.unwrap()).unwrap();
+            assert_eq!(after, newer, "removal keeps the newer entries verbatim");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #1306: an upsert never overwrites a list it could not read.
+    #[tokio::test]
+    async fn an_upsert_over_a_corrupt_list_fails_and_writes_nothing() {
+        let (mut ctx, root) = webhook_fixture().await;
+        for product in [false, true] {
+            store(&mut ctx, product, "{not json").await;
+            let err = set(&mut ctx, product, "https://hooks.example.test/added")
+                .await
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("unchanged"), "{err:#}");
+            assert_eq!(
+                stored(&mut ctx, product).await.as_deref(),
+                Some("{not json")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

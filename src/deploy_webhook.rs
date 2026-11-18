@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use ring::hmac;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -20,6 +20,10 @@ use crate::provider_event::{ProviderEventStore, deliver_optional_event, provider
 use crate::providers::{
     DeliveryStatus, EvidenceBinding, PROVIDER_CONTRACT_VERSION, ProviderError, ProviderEvent,
 };
+
+mod stored;
+pub use stored::parse_stored_endpoints_json;
+pub(crate) use stored::{Removal, remove_endpoint_json, upsert_endpoint_json};
 
 pub const DEPLOY_WEBHOOK_KIND: &str = "deploy_webhook";
 pub const DEPLOY_WEBHOOK_SCHEMA: &str = "tenkai.deploy_webhook.v1";
@@ -312,14 +316,18 @@ impl WebhookSecrets for ProcessWebhookSecrets {
     }
 }
 
-/// Parse and validate the environment `webhooks` property.
-pub fn parse_endpoints(environment: &Object) -> Result<Vec<WebhookEndpoint>> {
-    let Some(raw) = environment.properties.get(WEBHOOKS_PROPERTY) else {
+/// Parse and validate a stored `webhooks` property (environment or
+/// product). Event names this version does not know are ignored; see
+/// [`parse_stored_endpoints_json`].
+pub fn parse_endpoints(object: &Object) -> Result<Vec<WebhookEndpoint>> {
+    let Some(raw) = object.properties.get(WEBHOOKS_PROPERTY) else {
         return Ok(Vec::new());
     };
-    parse_endpoints_json(raw)
+    parse_stored_endpoints_json(raw)
 }
 
+/// Parse and validate operator-supplied endpoints. Strict: an unknown event
+/// name is an error, so a typo is reported instead of ignored.
 pub fn parse_endpoints_json(raw: &str) -> Result<Vec<WebhookEndpoint>> {
     let endpoints: Vec<WebhookEndpoint> = serde_json::from_str(raw)
         .map_err(|error| anyhow::anyhow!("parsing {WEBHOOKS_PROPERTY}: {error}"))?;
@@ -359,16 +367,15 @@ pub async fn set_environment_webhook(
     validate_identifier("environment", env)?;
     endpoint.validate()?;
     let mut env_obj = crate::environment::environment(ctx, env).await?;
-    let mut endpoints = configured_endpoints(&env_obj);
-    if let Some(existing) = endpoints.iter_mut().find(|item| item.url == endpoint.url) {
-        *existing = endpoint.clone();
-    } else {
-        endpoints.push(endpoint.clone());
-    }
-    validate_endpoint_list(&endpoints)?;
+    let stored = env_obj
+        .properties
+        .get(WEBHOOKS_PROPERTY)
+        .map(String::as_str);
+    let rewritten = upsert_endpoint_json(stored, &endpoint)
+        .with_context(|| format!("environment {env} webhooks are unchanged"))?;
     env_obj
         .properties
-        .insert(WEBHOOKS_PROPERTY.into(), serde_json::to_string(&endpoints)?);
+        .insert(WEBHOOKS_PROPERTY.into(), rewritten);
     env_obj.updated = crate::now_millis();
     ctx.put(env_obj).await?;
     Ok(format!("set {env} webhook {}", endpoint.url))
@@ -398,18 +405,14 @@ pub async fn clear_environment_webhooks(
             Ok(format!("cleared {env} webhooks"))
         }
         Some(url) => {
-            let mut endpoints = parse_endpoints_json(&raw)?;
-            let before = endpoints.len();
-            endpoints.retain(|endpoint| endpoint.url != url);
-            if endpoints.len() == before {
-                bail!("environment {env} has no webhook {url}");
-            }
-            if endpoints.is_empty() {
-                env_obj.properties.remove(WEBHOOKS_PROPERTY);
-            } else {
-                env_obj
-                    .properties
-                    .insert(WEBHOOKS_PROPERTY.into(), serde_json::to_string(&endpoints)?);
+            match remove_endpoint_json(&raw, url)? {
+                Removal::Absent => bail!("environment {env} has no webhook {url}"),
+                Removal::Empty => {
+                    env_obj.properties.remove(WEBHOOKS_PROPERTY);
+                }
+                Removal::Remaining(rest) => {
+                    env_obj.properties.insert(WEBHOOKS_PROPERTY.into(), rest);
+                }
             }
             env_obj.updated = crate::now_millis();
             ctx.put(env_obj).await?;
