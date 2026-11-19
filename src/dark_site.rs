@@ -221,6 +221,57 @@ pub fn activation_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join(ACTIVATION_FILE)
 }
 
+/// Refusals kept in the activation file; older ones are dropped and counted.
+pub const MAX_CLOUD_ROUTE_REFUSALS: usize = 256;
+
+/// `reason` of the leading entry that counts dropped refusals; its `route`
+/// holds the count. A marker entry keeps the activation file's shape, so a
+/// reader from before the bound still parses it.
+pub const REFUSALS_DROPPED_REASON: &str = "older_refusals_dropped";
+
+/// Run a load-modify-store of the activation file under an exclusive file
+/// lock beside it, so a concurrent activation or refusal is not overwritten.
+fn with_activation_lock<T>(runtime_dir: &Path, work: impl FnOnce() -> Result<T>) -> Result<T> {
+    let lock = runtime_dir.join(format!("{ACTIVATION_FILE}.lock"));
+    crate::fenced_mutation::with_mutation_lock(&lock, work)
+        .with_context(|| format!("locking {}", lock.display()))?
+}
+
+/// Append `new` refusals, keeping at most [`MAX_CLOUD_ROUTE_REFUSALS`] and
+/// counting the oldest dropped ones in a leading marker entry.
+fn append_refusals(
+    refusals: &mut Vec<CloudRouteRefusal>,
+    new: Vec<CloudRouteRefusal>,
+    now_ms: i64,
+) {
+    let mut dropped = match refusals.first() {
+        Some(marker) if marker.reason == REFUSALS_DROPPED_REASON => {
+            let count = marker.route.parse::<u64>().unwrap_or(0);
+            refusals.remove(0);
+            count
+        }
+        _ => 0,
+    };
+    refusals.extend(new);
+    if refusals.len() > MAX_CLOUD_ROUTE_REFUSALS {
+        let excess = refusals.len() - MAX_CLOUD_ROUTE_REFUSALS;
+        refusals.drain(..excess);
+        dropped = dropped.saturating_add(u64::try_from(excess).unwrap_or(u64::MAX));
+    }
+    if dropped > 0 {
+        refusals.insert(
+            0,
+            CloudRouteRefusal {
+                at_ms: now_ms,
+                route: dropped.to_string(),
+                model: String::new(),
+                provider: String::new(),
+                reason: REFUSALS_DROPPED_REASON.into(),
+            },
+        );
+    }
+}
+
 pub fn load_activation(runtime_dir: &Path) -> Result<Option<DarkSiteActivation>> {
     match atomic_state::read_json_optional::<DarkSiteActivation>(&activation_path(runtime_dir))? {
         Some(activation) => {
@@ -271,26 +322,29 @@ pub fn activate(
     if !jwks.is_file() {
         bail!("local JWKS {} is missing", jwks.display());
     }
-    // Re-activating the same pins keeps the stored predecessor and refusal
-    // audit, so rollback still has a target (#1309). New pins make the
-    // prior pins the predecessor and start a fresh audit.
-    let (previous, cloud_route_refusals) = match load_activation(runtime_dir)? {
-        Some(prior) if prior.profile.pins() == profile.pins() => {
-            (prior.previous, prior.cloud_route_refusals)
-        }
-        Some(prior) => (Some(prior.profile.pins()), Vec::new()),
-        None => (None, Vec::new()),
-    };
-    let activation = DarkSiteActivation {
-        schema: ACTIVATION_SCHEMA.into(),
-        profile_digest: profile.digest()?,
-        profile: profile.clone(),
-        previous,
-        activated_at_ms: now_ms,
-        cloud_route_refusals,
-    };
-    store_activation(runtime_dir, &activation)?;
-    Ok(activation)
+    let profile_digest = profile.digest()?;
+    with_activation_lock(runtime_dir, || {
+        // Re-activating the same pins keeps the stored predecessor, so
+        // rollback still has a target (#1309); new pins make the prior pins
+        // the predecessor. The refusal audit always carries forward (#1341).
+        let (previous, cloud_route_refusals) = match load_activation(runtime_dir)? {
+            Some(prior) if prior.profile.pins() == profile.pins() => {
+                (prior.previous, prior.cloud_route_refusals)
+            }
+            Some(prior) => (Some(prior.profile.pins()), prior.cloud_route_refusals),
+            None => (None, Vec::new()),
+        };
+        let activation = DarkSiteActivation {
+            schema: ACTIVATION_SCHEMA.into(),
+            profile_digest,
+            profile: profile.clone(),
+            previous,
+            activated_at_ms: now_ms,
+            cloud_route_refusals,
+        };
+        store_activation(runtime_dir, &activation)?;
+        Ok(activation)
+    })
 }
 
 pub fn admit_applied_routing(runtime_dir: &Path, config: &RoutingConfig) -> Result<()> {
@@ -303,7 +357,7 @@ pub fn admit_applied_routing_at(
     config: &RoutingConfig,
     now_ms: i64,
 ) -> Result<()> {
-    let Some(mut activation) = load_activation(runtime_dir)? else {
+    let Some(activation) = load_activation(runtime_dir)? else {
         return Ok(());
     };
     let mut refused = Vec::new();
@@ -323,8 +377,14 @@ pub fn admit_applied_routing_at(
         }
     }
     if !refused.is_empty() {
-        activation.cloud_route_refusals.extend(refused);
-        store_activation(runtime_dir, &activation)?;
+        // Reload under the lock so a concurrent append is not overwritten.
+        with_activation_lock(runtime_dir, || {
+            let Some(mut current) = load_activation(runtime_dir)? else {
+                return Ok(());
+            };
+            append_refusals(&mut current.cloud_route_refusals, refused, now_ms);
+            store_activation(runtime_dir, &current)
+        })?;
         bail!("dark-site profile refuses cloud model routes while active");
     }
     if let Some(model) = wrong_model {
@@ -678,6 +738,70 @@ jwks = "jwks.json"
         assert_eq!(load_activation(&runtime).unwrap().unwrap(), again);
         rollback_decision(&again, &[], None, 3_100).unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // #1341: activate, refuse, re-activate with new pins, refuse again:
+    // both refusals are kept.
+    #[test]
+    fn reactivating_new_pins_keeps_the_refusal_audit() {
+        let root = tmp();
+        let runtime = root.join("runtime");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("jwks.json"), "{\"keys\":[]}").unwrap();
+        let cloud = RoutingConfig {
+            version: 1,
+            routes: vec![Route {
+                name: "chat".into(),
+                model: "qwen-coder".into(),
+                provider: "openai".into(),
+                weight: 100,
+            }],
+        };
+        let mut first = profile();
+        first.site_agent.image_digest = PREV_WORKER.into();
+        let mut first_stack = stack();
+        first_stack.images = vec![PREV_WORKER.into()];
+        activate(&first, &first_stack, &runtime, &root, 1_000).unwrap();
+        admit_applied_routing_at(&runtime, &cloud, 1_100).unwrap_err();
+        activate(&profile(), &stack(), &runtime, &root, 2_000).unwrap();
+        admit_applied_routing_at(&runtime, &cloud, 2_100).unwrap_err();
+
+        let stored = load_activation(&runtime).unwrap().unwrap();
+        assert_eq!(
+            stored
+                .cloud_route_refusals
+                .iter()
+                .map(|refusal| refusal.at_ms)
+                .collect::<Vec<_>>(),
+            vec![1_100, 2_100]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_refusal_audit_is_bounded_and_counts_what_it_drops() {
+        let refusal = |at_ms| CloudRouteRefusal {
+            at_ms,
+            route: "chat".into(),
+            model: "m".into(),
+            provider: "openai".into(),
+            reason: "cloud_route_refused".into(),
+        };
+        let mut refusals = Vec::new();
+        append_refusals(
+            &mut refusals,
+            (0..MAX_CLOUD_ROUTE_REFUSALS as i64).map(refusal).collect(),
+            1,
+        );
+        assert_eq!(refusals.len(), MAX_CLOUD_ROUTE_REFUSALS);
+        append_refusals(&mut refusals, vec![refusal(1_000), refusal(1_001)], 2);
+        append_refusals(&mut refusals, vec![refusal(1_002)], 3);
+
+        assert_eq!(refusals.len(), MAX_CLOUD_ROUTE_REFUSALS + 1);
+        assert_eq!(refusals[0].reason, REFUSALS_DROPPED_REASON);
+        assert_eq!(refusals[0].route, "3");
+        assert_eq!(refusals[1].at_ms, 3);
+        assert_eq!(refusals.last().unwrap().at_ms, 1_002);
     }
 
     #[test]
