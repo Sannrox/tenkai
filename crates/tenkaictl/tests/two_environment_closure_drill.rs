@@ -303,7 +303,9 @@ fn signed_closure_reaches_two_environments_without_rebuilding_members() {
         &drill.cli.approvals.join(format!("{}.json", completed[1])),
     );
     assert!(
-        stale.contains("approval") || stale.contains("identity") || stale.contains("bound"),
+        stale.contains(
+            "plan approval is bound to different executable content, environment, or gate policy"
+        ),
         "{stale}"
     );
     for env in ENVS {

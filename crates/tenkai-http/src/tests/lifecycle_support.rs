@@ -87,7 +87,10 @@ pub(super) async fn lifecycle_router(
     }
     let mut config = ServerConfig::community(
         "management-secret",
-        HashMap::from([("runtime-secret".into(), "stage".into())]),
+        HashMap::from([
+            ("runtime-secret".into(), "stage".into()),
+            ("runtime-prod-secret".into(), "prod".into()),
+        ]),
     );
     config.release_trust_roots = Some(root.join("trust-roots.toml"));
     config

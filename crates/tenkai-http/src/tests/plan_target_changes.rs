@@ -32,9 +32,18 @@ async fn plan_step_target_changes_are_readable_over_http() {
     let planned = client.plan_environment("stage", generation).await.unwrap();
     let plan_id = planned.resource.clone().expect("plan id");
 
+    // The Secret change comes from the planner's own comparison of a desired
+    // plaintext value with a live one, so a regression that let either value
+    // through would reach the HTTP output below.
     let secret = "s3cret-value-must-not-appear";
-    let hashed_from = format!("sha256:{}", "a".repeat(64));
-    let hashed_to = format!("sha256:{}", "b".repeat(64));
+    let secret_change = tenkai::spec_drift::compare_desired_live(
+        "Secret",
+        "creds",
+        &serde_json::json!({ "kind": "Secret", "stringData": { "password": secret } }),
+        Some(&serde_json::json!({ "kind": "Secret", "data": { "password": "b2xkLXZhbHVl" } })),
+    );
+    let hashed_from = secret_change.fields[0].from.clone().expect("live digest");
+    let hashed_to = secret_change.fields[0].to.clone().expect("desired digest");
     let mut ctx = tenkai::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
     let mut stored = tenkai::plan::load(&mut ctx, &plan_id).await.unwrap();
     stored.created_at = stored.created_at.saturating_add(1);
@@ -50,17 +59,7 @@ async fn plan_step_target_changes_are_readable_over_http() {
             field_count: None,
             live_digest: "sha256:planned-live".into(),
         },
-        TargetChange {
-            kind: "Secret".into(),
-            name: "creds".into(),
-            fields: vec![TargetFieldChange {
-                field: "data.password".into(),
-                from: Some(hashed_from.clone()),
-                to: Some(hashed_to.clone()),
-            }],
-            field_count: None,
-            live_digest: "sha256:secret-live".into(),
-        },
+        secret_change,
         TargetChange {
             kind: "ConfigMap".into(),
             name: "cfg".into(),
@@ -123,6 +122,7 @@ async fn plan_step_target_changes_are_readable_over_http() {
     assert_eq!(changes[2].fields.len(), 1);
     let encoded = serde_json::to_string(&full).unwrap();
     assert!(!encoded.contains(secret), "{encoded}");
+    assert!(!encoded.contains("b2xkLXZhbHVl"), "{encoded}");
 
     let _ = std::fs::remove_dir_all(root);
 }

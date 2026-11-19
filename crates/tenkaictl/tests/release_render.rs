@@ -79,10 +79,12 @@ fn render_signs_and_publishes_the_written_bytes() {
     assert_eq!(digest, expected);
 }
 
-#[test]
-fn render_does_not_open_a_store_or_server() {
+/// Render with `target` (`None` is the default embedded target) and a
+/// database path that must not be created: the only file left is the
+/// rendered manifest.
+fn render_offline(label: &str, target: Option<&str>) {
     let root = std::env::temp_dir().join(format!(
-        "tenkai-release-render-offline-{}-{}",
+        "tenkai-release-render-offline-{label}-{}-{}",
         std::process::id(),
         tenkai::now_millis()
     ));
@@ -94,21 +96,35 @@ fn render_does_not_open_a_store_or_server() {
         "[product]\nname = \"app\"\nversion = \"1.0.0\"\n[deploy]\ninstall = \"true\"\n",
     )
     .unwrap();
-    let output = render_command(&root)
-        .args([
-            "--target",
-            "remote",
-            "release",
-            "render",
-            input.to_str().unwrap(),
-        ])
+    let database = root.join("store").join("tenkai.db");
+    let mut command = render_command(&root);
+    command.env("TENKAI_DATABASE", &database);
+    if let Some(target) = target {
+        command.args(["--target", target]);
+    }
+    let output = command
+        .args(["release", "render", input.to_str().unwrap()])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "render with --target remote must not need a server\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "render ({label}) must need no store or server\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+    let left = fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(left, ["tenkai.toml"], "render ({label}) left files behind");
+    assert!(!database.exists(), "render ({label}) opened a store");
+    let rendered = fs::read_to_string(&input).unwrap();
+    assert!(rendered.contains("name = \"app\""), "{rendered}");
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn render_does_not_open_a_store_or_server() {
+    render_offline("remote", Some("remote"));
+    render_offline("embedded", None);
 }

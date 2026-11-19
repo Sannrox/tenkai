@@ -83,6 +83,28 @@ fn kubectl(kubeconfig: &Path, args: &[&str]) -> std::process::Output {
         .expect("start kubectl")
 }
 
+/// `.spec.replicas` of the live Deployment `name` in `namespace`.
+fn live_replicas(kubeconfig: &Path, namespace: &str, name: &str) -> String {
+    let output = kubectl(
+        kubeconfig,
+        &[
+            "get",
+            "deployment",
+            name,
+            "-n",
+            namespace,
+            "-o",
+            "jsonpath={.spec.replicas}",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 fn unique_env(suffix: &str) -> String {
     format!(
         "tk376{suffix}{}",
@@ -115,6 +137,7 @@ fn apply_a_to_b_to_rollback_observes_rollout_conditions() {
     executor
         .apply(&request(&root_b, &kubeconfig, &env, "2.0.0"))
         .expect("apply B");
+    assert_eq!(live_replicas(&kubeconfig, &env, "edge"), "2", "B is live");
     executor
         .apply(&request(&root_a, &kubeconfig, &env, "1.0.0"))
         .expect("rollback to A");
@@ -123,6 +146,11 @@ fn apply_a_to_b_to_rollback_observes_rollout_conditions() {
             .observe(&request(&root_a, &kubeconfig, &env, "1.0.0"))
             .unwrap(),
         SoftwareObserveStatus::Present
+    );
+    assert_eq!(
+        live_replicas(&kubeconfig, &env, "edge"),
+        "1",
+        "the rollback restored A"
     );
     let _ = kubectl(&kubeconfig, &["delete", "namespace", &env, "--wait=false"]);
     let _ = std::fs::remove_dir_all(root_a);
@@ -410,9 +438,12 @@ spec:
         .unwrap_err()
         .to_string();
     assert!(err.contains("server-side apply conflict"), "{err}");
-    assert!(err.contains("helm") || err.contains("conflict"), "{err}");
+    assert!(err.contains("helm"), "the foreign manager is named: {err}");
+    assert!(
+        err.contains(&format!("{FIELD_MANAGER} refused to overwrite")),
+        "{err}"
+    );
     assert!(!err.to_ascii_lowercase().contains("force=true"), "{err}");
-    let _ = FIELD_MANAGER;
     let _ = kubectl(&kubeconfig, &["delete", "namespace", &env, "--wait=false"]);
     let _ = std::fs::remove_dir_all(root);
 }

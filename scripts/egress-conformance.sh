@@ -5,8 +5,10 @@
 # The drills are built normally (dependencies may download), then run in a
 # fresh network namespace that has only loopback, under strace. Every
 # connect() or addressed send (sendto/sendmsg/sendmmsg, as unconnected UDP
-# uses) to a non-loopback address, and every DNS lookup to any address, is an
-# outbound attempt; the report names the process that made it.
+# uses) to a non-loopback address, every DNS lookup to any address, and every
+# connect() to a host resolver or daemon Unix socket (systemd-resolved, nscd,
+# D-Bus, Docker) is an outbound attempt; the report names the process that
+# made it.
 # Linux only; needs strace, unshare, ip, and root or passwordless sudo.
 set -euo pipefail
 
@@ -70,7 +72,9 @@ for entry in "${binaries[@]}"; do
   # Outbound: a connect or an addressed send (unconnected UDP) to IPv4
   # outside 127/8 or IPv6 other than loopback, or to port 53 anywhere. Each
   # destination on a line is judged on its own: one sendmmsg can carry
-  # several, and a loopback one must not hide another.
+  # several, and a loopback one must not hide another. The network namespace
+  # does not cover host Unix sockets, so a connect to a resolver or daemon
+  # socket that can reach the network for the drill counts as outbound too.
   if [[ -f "$trace" ]]; then
     # No network syscall at all is the expected clean trace: grep's "no
     # match" (1) is not an error, anything above it is.
@@ -84,7 +88,9 @@ for entry in "${binaries[@]}"; do
         esac
       done < <(grep -oE 'inet_addr\("[^"]+"\)|inet_pton\(AF_INET6?, "[^"]+"' <<< "$line" \
         | sed -E 's/.*"([^"]+)".*/\1/')
-      if [[ "$line" =~ htons\(53\) ]]; then
+      if [[ "$line" =~ AF_UNIX.*sun_path=\"(/run/systemd/resolve/|/var/run/nscd/|/run/nscd/|/run/dbus/|/var/run/dbus/|[^\"]*docker\.sock) ]]; then
+        echo "$drill: unix: $line"
+      elif [[ "$line" =~ htons\(53\) ]]; then
         echo "$drill: dns: $line"
       elif $outbound; then
         echo "$drill: $line"

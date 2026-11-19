@@ -700,8 +700,15 @@ struct SoftwareTokenPool {
     next: usize,
 }
 
+/// Tokens initialised up front for each test process. SoftHSM lists its
+/// tokens when the library initialises, so a token created after the first
+/// PKCS#11 load would not be found.
+#[cfg(feature = "test-support")]
+const SOFTWARE_TOKEN_POOL: usize = 16;
+
 /// Next fresh software token `(module, label)` from a per-process pool, or
 /// `None` when no software-token module is installed (required in CI).
+/// Panics when the pool is used up, so a test never skips for lack of one.
 #[cfg(feature = "test-support")]
 pub fn next_software_token() -> Option<(PathBuf, String)> {
     use std::process::Command;
@@ -718,7 +725,7 @@ pub fn next_software_token() -> Option<(PathBuf, String)> {
             let mut labels = Vec::new();
             if !module.as_os_str().is_empty() {
                 let _ = softhsm_conf();
-                for _ in 0..8 {
+                for _ in 0..SOFTWARE_TOKEN_POOL {
                     let label = uuid::Uuid::new_v4().simple().to_string();
                     let status = Command::new("softhsm2-util")
                         .args([
@@ -748,7 +755,13 @@ pub fn next_software_token() -> Option<(PathBuf, String)> {
     if pool.module.as_os_str().is_empty() {
         return None;
     }
-    let label = pool.labels.get(pool.next)?.clone();
+    let label = pool
+        .labels
+        .get(pool.next)
+        .unwrap_or_else(|| {
+            panic!("all {SOFTWARE_TOKEN_POOL} software tokens are used; raise SOFTWARE_TOKEN_POOL")
+        })
+        .clone();
     pool.next += 1;
     Some((pool.module.clone(), label))
 }

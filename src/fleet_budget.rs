@@ -197,10 +197,12 @@ fn resource_usage() -> Result<(u64, u64)> {
             bail!("failed to read process resource usage");
         }
         let cpu_ms = timeval_ms(&usage.ru_utime).saturating_add(timeval_ms(&usage.ru_stime));
-        let memory_bytes = if cfg!(target_os = "linux") {
-            (usage.ru_maxrss as u64).saturating_mul(1024)
-        } else {
+        // Apple systems report `ru_maxrss` in bytes; other Unix systems in
+        // kilobytes.
+        let memory_bytes = if cfg!(target_vendor = "apple") {
             usage.ru_maxrss as u64
+        } else {
+            (usage.ru_maxrss as u64).saturating_mul(1024)
         };
         Ok((cpu_ms, memory_bytes))
     }

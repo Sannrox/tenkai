@@ -257,6 +257,16 @@ fn kill_group(child: &std::process::Child) {
         .status();
 }
 
+/// Kills a spawned process group on every exit path, including a panic.
+struct GroupGuard(std::process::Child);
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        kill_group(&self.0);
+        wait_exited(&mut self.0, Duration::from_secs(5));
+    }
+}
+
 fn wait_exited(child: &mut std::process::Child, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
@@ -494,7 +504,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
         apply_cmd.process_group(0);
     }
     let mutations_before_crash = drill.mutation_count();
-    let mut child = apply_cmd.spawn().expect("spawn crashing apply");
+    let child = GroupGuard(apply_cmd.spawn().expect("spawn crashing apply"));
     // Accept is mutation plus ledger. Probing only the ledger races the count.
     let accepted = wait_for(Duration::from_secs(20), || {
         drill.ledger_contains(TARGET_VERSION)
@@ -503,8 +513,7 @@ fn signed_stateful_upgrade_survives_executor_loss() {
     });
     assert!(accepted, "fixture did not accept B before crash");
     let mutations_after_accept = drill.mutation_count();
-    kill_group(&child);
-    wait_exited(&mut child, Duration::from_secs(5));
+    drop(child);
     std::thread::sleep(Duration::from_millis(200));
     drill.clear_control("crash-after-accept");
 

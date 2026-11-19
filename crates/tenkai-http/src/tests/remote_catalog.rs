@@ -1,5 +1,5 @@
-use super::lifecycle_support::{catalog_router, signed_catalog_fixture};
-use super::support::router_generation;
+use super::lifecycle_support::{catalog_router, signed_catalog_fixture, signed_plan_requests};
+use super::support::{current_generation, router_generation};
 use super::*;
 
 #[tokio::test]
@@ -203,25 +203,29 @@ async fn remote_catalog_lifecycle_publish_promote_subscribe_and_recall() {
         .unwrap();
     assert_eq!(runtime.status(), StatusCode::FORBIDDEN);
 
+    // The signed publish that succeeded above, plus the development bypass
+    // flag: the flag is the only reason it is refused.
+    let mut with_bypass = serde_json::to_value(&first).unwrap();
+    with_bypass["allow_unsigned_development"] = serde_json::Value::Bool(true);
     let bypass = app
         .oneshot(
             Request::post("/v1/releases")
                 .header("authorization", "Bearer management-secret")
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "version": 1,
-                        "operation": "publish",
-                        "manifest": "[product]",
-                        "allow_unsigned_development": true
-                    })
-                    .to_string(),
-                ))
+                .body(Body::from(with_bypass.to_string()))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(bypass.status(), StatusCode::BAD_REQUEST);
+    let refusal = String::from_utf8(
+        axum::body::to_bytes(bypass.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(refusal.contains("allow_unsigned_development"), "{refusal}");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -304,6 +308,65 @@ async fn remote_environment_retirement_hides_listing_and_stops_runtime_polling()
     ));
     std::fs::create_dir_all(&root).unwrap();
     let (app, _) = catalog_router(&root).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let served = app.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, served).await.unwrap();
+    });
+    let client = RemoteClient::new(format!("http://{addr}"), "management-secret").unwrap();
+
+    // Both environments get the same approved work. `prod` is the control:
+    // its runtime is offered the plan. Polling `stage` first would claim its
+    // plan, and a live claim refuses the retirement (#1294).
+    client
+        .publish_release(&signed_catalog_fixture(&root, "1.0.0"))
+        .await
+        .unwrap();
+    client.promote_release("api@1.0.0", "stable").await.unwrap();
+    let mut approved = Vec::new();
+    for environment in ["stage", "prod"] {
+        let generation = current_generation(&client, environment).await;
+        client
+            .subscribe_environment(environment, "api=stable", generation, None)
+            .await
+            .unwrap();
+        let plan = client
+            .plan_environment(environment, generation)
+            .await
+            .unwrap();
+        let plan_id = plan.resource.clone().unwrap();
+        let (approve, _) = signed_plan_requests(
+            &root,
+            &format!("approve-{environment}"),
+            environment,
+            &plan.digest.unwrap(),
+            generation,
+        );
+        client.approve_plan(&plan_id, &approve).await.unwrap();
+        approved.push(plan_id);
+    }
+    let work = |environment: &'static str, token: &'static str| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::get(format!("/v1/runtime/environments/{environment}/work"))
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("x-tenkai-runtime-instance", "runtime-test")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<RuntimeWork>(&bytes).unwrap()
+        }
+    };
+
     let request = tenkai::management_lifecycle::RetireEnvironmentRequest {
         version: 1,
         operation: "retire".into(),
@@ -328,26 +391,15 @@ async fn remote_environment_retirement_hides_listing_and_stops_runtime_polling()
         .unwrap();
     assert_eq!(first_body, repeat_body);
 
-    let list = app
-        .clone()
-        .oneshot(
-            Request::get("/v1/environments")
-                .header("authorization", "Bearer management-secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
+    let names = client
+        .list_environments()
         .await
-        .unwrap();
-    assert_eq!(list.status(), StatusCode::OK);
-    let list_body = String::from_utf8(
-        axum::body::to_bytes(list.into_body(), usize::MAX)
-            .await
-            .unwrap()
-            .to_vec(),
-    )
-    .unwrap();
-    assert!(!list_body.contains("stage"), "{list_body}");
-    assert!(list_body.contains("prod"), "{list_body}");
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect::<Vec<_>>();
+    assert!(!names.iter().any(|name| name == "stage"), "{names:?}");
+    assert!(names.iter().any(|name| name == "prod"), "{names:?}");
 
     let inspect = app
         .clone()
@@ -373,24 +425,15 @@ async fn remote_environment_retirement_hides_listing_and_stops_runtime_polling()
         "{inspect_body}"
     );
 
-    let runtime = app
-        .oneshot(
-            Request::get("/v1/runtime/environments/stage/work")
-                .header("authorization", "Bearer runtime-secret")
-                .header("x-tenkai-runtime-instance", "runtime-test")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(runtime.status(), StatusCode::OK);
-    let runtime_body = String::from_utf8(
-        axum::body::to_bytes(runtime.into_body(), usize::MAX)
-            .await
-            .unwrap()
-            .to_vec(),
-    )
-    .unwrap();
-    assert!(runtime_body.contains("\"plan\":null"), "{runtime_body}");
-    assert!(runtime_body.contains("\"claim\":null"), "{runtime_body}");
+    // The control environment's runtime is offered its approved plan; the
+    // retired one, with the same approved work, is offered nothing.
+    let control = work("prod", "runtime-prod-secret").await;
+    assert_eq!(
+        control.plan.as_ref().map(|plan| plan.id.as_str()),
+        Some(approved[1].as_str())
+    );
+    let retired = work("stage", "runtime-secret").await;
+    assert!(retired.plan.is_none(), "{:?}", retired.plan);
+    assert!(retired.claim.is_none(), "{:?}", retired.claim);
+    let _ = std::fs::remove_dir_all(root);
 }
