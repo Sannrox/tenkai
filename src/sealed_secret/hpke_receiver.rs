@@ -195,4 +195,92 @@ mod tests {
             }
         }
     }
+
+    /// Every malformed or foreign input is refused, and no refusal carries
+    /// key, shared-secret or plaintext bytes.
+    #[test]
+    fn malformed_and_foreign_wraps_are_refused_without_leaking_bytes() {
+        let mut rng = rand_core::UnwrapErr(rand_core::OsRng);
+        let (private, public) = Kem::gen_keypair(&mut rng);
+        let recipient = public.to_bytes().to_vec();
+        let message = b"plaintext-sentinel-data-key".to_vec();
+        let (encapsulated, wrapped) = hpke::single_shot_seal::<Aead, Kdf, Kem, _>(
+            &hpke::OpModeS::Base,
+            &public,
+            b"info",
+            &message,
+            b"aad",
+            &mut rng,
+        )
+        .unwrap();
+        let encapsulated = encapsulated.to_bytes().to_vec();
+        let scalar = p256::SecretKey::from_slice(&private.to_bytes()).unwrap();
+        let (other_private, _) = Kem::gen_keypair(&mut rng);
+        let other = p256::SecretKey::from_slice(&other_private.to_bytes()).unwrap();
+        let dh = software_ecdh(&scalar)(&encapsulated).unwrap();
+
+        let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let secrets = [
+            hex(&scalar.to_bytes()),
+            hex(&dh),
+            hex(&message),
+            String::from_utf8(message.clone()).unwrap(),
+        ];
+        let refused = |error: anyhow::Error, expected: &str| {
+            let text = format!("{error:#} {error:?}");
+            assert!(text.contains(expected), "{text}");
+            for secret in &secrets {
+                assert!(!text.contains(secret.as_str()), "{text}");
+            }
+        };
+        let never_called = |_: &[u8]| -> Result<Zeroizing<Vec<u8>>> {
+            panic!("ECDH must not run on a malformed encapsulated key")
+        };
+
+        let mut compressed = encapsulated.clone();
+        compressed[0] = 0x02;
+        for bad in [&encapsulated[..64], &compressed[..], &[][..]] {
+            refused(
+                open(&recipient, bad, b"info", b"aad", &wrapped, never_called).unwrap_err(),
+                "not an uncompressed P-256 point",
+            );
+        }
+
+        let short = Zeroizing::new(dh[..31].to_vec());
+        refused(
+            open(&recipient, &encapsulated, b"info", b"aad", &wrapped, |_| {
+                Ok(short)
+            })
+            .unwrap_err(),
+            "wrong length",
+        );
+
+        let mut tampered = wrapped.clone();
+        tampered[0] ^= 0x01;
+        refused(
+            open(
+                &recipient,
+                &encapsulated,
+                b"info",
+                b"aad",
+                &tampered,
+                software_ecdh(&scalar),
+            )
+            .unwrap_err(),
+            "does not open for this key",
+        );
+
+        refused(
+            open(
+                &recipient,
+                &encapsulated,
+                b"info",
+                b"aad",
+                &wrapped,
+                software_ecdh(&other),
+            )
+            .unwrap_err(),
+            "does not open for this key",
+        );
+    }
 }

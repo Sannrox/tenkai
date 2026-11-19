@@ -461,3 +461,33 @@ fn an_uninstall_keeps_a_directory_tenkai_did_not_create() {
     assert!(result_of(&output).detail.contains("not created by Tenkai"));
     assert!(foreign.join("theirs").exists());
 }
+
+/// Malformed invocations are refused with exit 2 and the usage, before
+/// any state is read.
+#[test]
+fn usage_errors_exit_2_before_anything_runs() {
+    for (args, expected) in [
+        (&[][..], "usage:"),
+        (&["apply", "x"][..], "usage:"),
+        (&["run"][..], "usage:"),
+        (
+            &["run", "x", "--state-dir"][..],
+            "--state-dir needs a value",
+        ),
+        (
+            &["run", "x", "--unknown", "v"][..],
+            "unknown argument --unknown",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_tenkai-host-applier"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.starts_with("tenkai-host-applier: ") && stderr.contains(expected),
+            "{args:?}: {stderr}"
+        );
+    }
+}

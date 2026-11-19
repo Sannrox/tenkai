@@ -150,6 +150,23 @@ impl Host {
         assert_eq!(recorded.certificate, current.certificate);
     }
 
+    /// Run the shipped binary on the spooled `instance`.
+    fn run_binary(&self, instance: &str) -> std::process::Output {
+        std::process::Command::new(env!("CARGO_BIN_EXE_tenkai-host-applier"))
+            .arg("run")
+            .arg(instance)
+            .arg("--config-dir")
+            .arg(&self.paths.config_dir)
+            .arg("--state-dir")
+            .arg(&self.paths.state_dir)
+            .arg("--run-dir")
+            .arg(&self.paths.run_dir)
+            .arg("--boot-id")
+            .arg(&self.paths.boot_id)
+            .output()
+            .unwrap()
+    }
+
     fn refused(&self, instance: &str) -> String {
         match renew::renew(&self.paths, instance).unwrap() {
             Renewal::Refused(reason) => reason,
@@ -281,4 +298,35 @@ fn a_renewal_that_cannot_be_recorded_is_not_reported_as_refused() {
     );
     assert_eq!(host.installed_certificate(), renewed.certificate);
     assert!(store::refusal(&host.paths, &instance).unwrap().is_none());
+}
+
+/// The binary dispatches a spooled renewal: an installed renewal exits 0,
+/// a refused one exits 2, says so, records it and writes nothing.
+#[test]
+fn the_binary_exits_with_the_renewal_outcome() {
+    let Some(shm) = memory_backed() else {
+        eprintln!("skipped: no memory-backed /dev/shm on this host");
+        return;
+    };
+    let host = Host::new(&shm);
+    let grant = host.grant(Reload::Runtime, &["api.edge.internal"]);
+    let first = host.issue(&grant);
+    let record = host.installed(&first);
+
+    let wider = host.issue(&host.grant(Reload::Runtime, &["api.edge.internal", "bank.example"]));
+    let instance = host.spool_renewal(&record, &wider);
+    let output = host.run_binary(&instance);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("refused:"),
+        "{output:?}"
+    );
+    assert!(store::refusal(&host.paths, &instance).unwrap().is_some());
+    host.unchanged(&first);
+
+    let renewed = host.issue(&grant);
+    let instance = host.spool_renewal(&record, &renewed);
+    let output = host.run_binary(&instance);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(host.installed_certificate(), renewed.certificate);
 }

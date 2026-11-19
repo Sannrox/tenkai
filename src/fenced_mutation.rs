@@ -763,6 +763,69 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Holds generation `own`; another controller takes `own + 1` after the
+    /// first refresh, so every later refresh is refused as stale.
+    struct SupersededFence {
+        own: u64,
+        refreshes: u32,
+    }
+
+    impl MutationFence for SupersededFence {
+        fn generation(&self) -> u64 {
+            self.own
+        }
+
+        fn refresh(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+            self.refreshes += 1;
+            let stale = self.refreshes > 1;
+            let own = self.own;
+            Box::pin(async move {
+                if stale {
+                    anyhow::bail!("generation {own} is fenced by {}", own + 1);
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// A guard whose generation was superseded while it queued for the lock
+    /// never receives the go, so its command never runs.
+    #[tokio::test]
+    async fn a_superseded_generation_never_runs_its_command() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-guard-stale-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("ran");
+        let command = format!("touch '{}'", marker.display());
+        let mut fence = SupersededFence {
+            own: 1,
+            refreshes: 0,
+        };
+        let error = run(
+            &mut fence,
+            MutationCommand {
+                lock_path: &dir.join("mutation.lock"),
+                workdir: &dir,
+                environment: "lab",
+                product: "app",
+                instance: "",
+                command: &command,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("generation 1 is fenced by 2"),
+            "{error:#}"
+        );
+        assert_eq!(fence.refreshes, 2, "refused at the refresh before the go");
+        assert!(!marker.exists(), "a stale guard ran its command");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn denied_authorization_never_runs_guarded_work() {
         let dir = std::env::temp_dir().join(format!("tenkai-mutation-auth-{}", std::process::id()));

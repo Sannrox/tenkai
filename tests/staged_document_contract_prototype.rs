@@ -102,24 +102,38 @@ document = "module.json"
         validate_document_bytes(kind, bytes).unwrap();
     }
 
-    assert!(
-        validate_document_bytes(ProductKind::PolicyBundle, br#"{"version":1,"policies":[]}"#)
-            .is_err()
-    );
-    assert!(
-        validate_document_bytes(
+    // Every staged kind refuses a malformed document and names the rule.
+    let rejected: [(ProductKind, &[u8], &str); 5] = [
+        (
+            ProductKind::PolicyBundle,
+            br#"{"version":1,"policies":[]}"#,
+            "at least one policy",
+        ),
+        (
             ProductKind::EvalSuite,
-            br#"{"version":1,"suite_id":"gate-smoke","cases":["health","health"]}"#
-        )
-        .is_err()
-    );
-    assert!(
-        validate_document_bytes(
+            br#"{"version":1,"suite_id":"gate-smoke","cases":["health","health"]}"#,
+            "duplicate eval_suite case health",
+        ),
+        (
             ProductKind::AgentDefinition,
-            br#"{"version":1,"agent_id":"ops-agent","runtime":"local","entrypoint":"../secret"}"#
-        )
-        .is_err()
-    );
+            br#"{"version":1,"agent_id":"ops-agent","runtime":"local","entrypoint":"../secret"}"#,
+            "entrypoint must not contain path traversal",
+        ),
+        (
+            ProductKind::PromptPackage,
+            br#"{"version":1,"package_id":"ops-prompts","runtime":"local","eval_suite":"prompt-quality","prompts":[]}"#,
+            "at least one prompt",
+        ),
+        (
+            ProductKind::WorkshopModule,
+            br#"{"version":1,"profile":"tenkai.workshop_module.v1","module_id":"hello-workshop","module_digest":"sha256:zz","type_compatibility":{"version":1,"digests":["sha256:2222222222222222222222222222222222222222222222222222222222222222"]},"runtime_compatibility":{"version":1,"digests":["sha256:3333333333333333333333333333333333333333333333333333333333333333"]}}"#,
+            "module_digest must contain 64 lowercase hexadecimal characters",
+        ),
+    ];
+    for (kind, bytes, rule) in rejected {
+        let error = format!("{:#}", validate_document_bytes(kind, bytes).unwrap_err());
+        assert!(error.contains(rule), "{kind:?}: {error}");
+    }
     assert!(!is_staged_kind(ProductKind::Software));
     assert!(
         validate_document_bytes(ProductKind::Software, b"{}")
