@@ -116,6 +116,10 @@ or `unhealthy` relative to the baseline (or prior sample in a continuous run).
 Existing hard drift that was already in the baseline does not fail by default.
 `fleet watch` also exits non-zero when an open exposure's age exceeds the
 environment's `exposure.max_age_ms.<severity>` property.
+A sample that fails (server unreachable, expired token) exits non-zero with
+`--once` or when it is the last `--max-samples` sample. A continuous watch
+logs it to stderr, reports error status, and samples again after the
+interval.
 
 **Terminal program status:** when stdout is a terminal and output is text (not
 `--json`), `fleet watch` also writes an OSC 7501 program status report (OSC

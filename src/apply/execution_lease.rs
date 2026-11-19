@@ -346,7 +346,7 @@ async fn refresh_environment_lease_inner(ctx: &mut Ctx, lease: &EnvironmentLease
     let refreshed = ctx
         .refresh_leases(refreshes)
         .await
-        .map_err(|error| map_held_lease_error(ctx, error))?;
+        .map_err(|error| map_held_lease_error(ctx, lease, error))?;
     let Some(env) = refreshed.last() else {
         bail!("Tenkai refreshed no environment lease");
     };
@@ -359,22 +359,37 @@ async fn refresh_environment_lease_inner(ctx: &mut Ctx, lease: &EnvironmentLease
     Ok(())
 }
 
-fn map_held_lease_error(ctx: &Ctx, error: anyhow::Error) -> anyhow::Error {
-    let Some(first) = ctx.held_execution_leases.first() else {
-        return error;
-    };
-    let detail = error.to_string();
-    let held = ctx
+/// Attribute a failed batch refresh to the lease it names as
+/// `namespace/key`. Naming the environment lease is a lost environment fence
+/// whether or not wave leases are held. An error that names no lease fails
+/// closed as the first held wave lease when one is held, and passes through
+/// unchanged otherwise. A bare key is not matched: an environment name can
+/// appear inside a wave lease key.
+fn map_held_lease_error(
+    ctx: &Ctx,
+    lease: &EnvironmentLease,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let detail = format!("{error:#}");
+    let names = |namespace: &str, key: &str| detail.contains(&format!("{namespace}/{key}"));
+    let (namespace, key) = if names(ENVIRONMENT_LEASE_NAMESPACE, &lease.environment) {
+        (
+            ENVIRONMENT_LEASE_NAMESPACE.to_string(),
+            lease.environment.clone(),
+        )
+    } else if let Some(held) = ctx
         .held_execution_leases
         .iter()
-        .find(|held| {
-            detail.contains(&format!("{}/{}", held.namespace, held.key))
-                || detail.contains(&held.key)
-        })
-        .unwrap_or(first);
+        .find(|held| names(&held.namespace, &held.key))
+        .or_else(|| ctx.held_execution_leases.first())
+    {
+        (held.namespace.clone(), held.key.clone())
+    } else {
+        return error;
+    };
     ExecutionFenceLost {
-        namespace: held.namespace.clone(),
-        key: held.key.clone(),
+        namespace,
+        key,
         detail,
     }
     .into()
@@ -1099,18 +1114,67 @@ mod tests {
         release_environment(&mut ctx, &lease).await.unwrap();
     }
 
+    fn prod_lease() -> EnvironmentLease {
+        EnvironmentLease {
+            environment: "prod".into(),
+            owner: "apply".into(),
+            generation: 1,
+            fencing_token: "token".into(),
+            ttl_ms: 60_000,
+            took_over: false,
+        }
+    }
+
+    /// #1349: a refresh error is attributed to the lease it names, and the
+    /// environment lease is a lost fence whether or not wave leases are held.
     #[test]
-    fn a_batch_refresh_failure_while_holding_leases_is_fence_loss() {
+    fn a_batch_refresh_failure_is_attributed_to_the_lease_it_names() {
         let mut ctx = context("map-held-err");
-        ctx.held_execution_leases = vec![crate::client::HeldExecutionLease::new(
-            "tenkai/wave-execution",
-            "roll",
-            "token",
-            60_000,
-        )];
-        let err = map_held_lease_error(&ctx, anyhow::anyhow!("catalog writer unavailable"));
-        assert!(is_execution_fence_lost(&err), "{err:#}");
-        assert!(err.to_string().contains("roll"), "{err:#}");
+        let lease = prod_lease();
+        let lost = |ctx: &Ctx, message: &str| {
+            let err = map_held_lease_error(ctx, &lease, anyhow::anyhow!(message.to_owned()));
+            err.chain()
+                .find_map(|cause| cause.downcast_ref::<ExecutionFenceLost>())
+                .map(|lost| format!("{}/{}", lost.namespace, lost.key))
+        };
+        let environment_lost =
+            "embedded lease tenkai/environment-execution/prod is not the active fenced holder";
+
+        assert_eq!(lost(&ctx, "catalog writer unavailable"), None);
+        assert_eq!(
+            lost(&ctx, environment_lost).as_deref(),
+            Some("tenkai/environment-execution/prod")
+        );
+
+        ctx.held_execution_leases = ["prod-roll", "roll"]
+            .into_iter()
+            .map(|key| {
+                crate::client::HeldExecutionLease::new(
+                    "tenkai/wave-execution",
+                    key,
+                    "token",
+                    60_000,
+                )
+            })
+            .collect();
+        assert_eq!(
+            lost(&ctx, environment_lost).as_deref(),
+            Some("tenkai/environment-execution/prod")
+        );
+        // The full `namespace/key` decides; `roll` inside `prod-roll` does not.
+        assert_eq!(
+            lost(
+                &ctx,
+                "lease tenkai/wave-execution/roll is not the active fenced holder"
+            )
+            .as_deref(),
+            Some("tenkai/wave-execution/roll")
+        );
+        // Naming no lease still fails closed while wave leases are held.
+        assert_eq!(
+            lost(&ctx, "catalog writer unavailable").as_deref(),
+            Some("tenkai/wave-execution/prod-roll")
+        );
     }
 
     #[test]

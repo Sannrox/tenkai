@@ -102,11 +102,15 @@ async fn main() -> ExitCode {
         }
     };
     let output = cli.output;
-    let machine_command = command_name(&cli.command, cli.target.unwrap_or(Target::Embedded))
+    let requested_command = command_name(&cli.command, cli.target.unwrap_or(Target::Embedded))
         .unwrap_or(CommandName::Invocation);
-    match run(cli).await {
+    let mut effective_command = None;
+    match run(cli, &mut effective_command).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            // Name the failure after the target `run` resolved (client.toml,
+            // host socket, `--database`), not the flag alone (#1349).
+            let machine_command = effective_command.unwrap_or(requested_command);
             if output == OutputFormat::JsonV1 {
                 let remote = error
                     .chain()
@@ -140,7 +144,10 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(mut cli: Cli) -> Result<()> {
+/// Runs the parsed command. `effective_command` receives the machine
+/// command name for the resolved target as soon as that target is known, so
+/// a failure after resolution is reported under the right name.
+async fn run(mut cli: Cli, effective_command: &mut Option<CommandName>) -> Result<()> {
     tenkai::key_revocation::load_configured()?;
     if let Some(path) = &cli.deploy_profile {
         tenkai::signer::bind_deploy_profile(tenkai::key_provider::DeployProfile::load(path)?)?;
@@ -188,7 +195,8 @@ async fn run(mut cli: Cli) -> Result<()> {
     } else {
         cli.target.or(config.target).unwrap_or(Target::Embedded)
     };
-    if cli.output == OutputFormat::JsonV1 && command_name(&cli.command, target).is_none() {
+    *effective_command = command_name(&cli.command, target);
+    if cli.output == OutputFormat::JsonV1 && effective_command.is_none() {
         let (code, message) = match target {
             Target::Embedded => (
                 "unsupported_command",

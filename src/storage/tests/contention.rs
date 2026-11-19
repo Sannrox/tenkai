@@ -79,3 +79,52 @@ fn two_handles_on_one_file_serialize_read_then_write_operations() {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }
+
+/// #1349: a claimed row that does not decode rolls the whole claim back, so
+/// no event stays claimed under a token the caller never received.
+#[test]
+fn a_claim_that_cannot_decode_its_rows_claims_nothing() {
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-claim-decode-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let store = SqliteStore::open(&path).unwrap();
+    store
+        .enqueue_provider_event(&ProviderEventRecord {
+            id: "event-1".into(),
+            provider_kind: "feedback".into(),
+            binding_digest: "sha256:binding".into(),
+            payload_json: "{}".into(),
+            attempts: 0,
+            next_attempt_at: 0,
+            delivered_at: None,
+            last_error: String::new(),
+            claim_token: None,
+            claim_until: None,
+        })
+        .unwrap();
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    raw.execute("UPDATE provider_events SET attempts='corrupt'", [])
+        .unwrap();
+    let far = crate::now_millis() + 600_000;
+
+    assert!(store.claim_provider_events(0, 1, "first", far).is_err());
+    assert!(
+        store
+            .claim_provider_events_for_kind("feedback", 0, 1, "second", far)
+            .is_err()
+    );
+    let claimed: Option<String> = raw
+        .query_row("SELECT claim_token FROM provider_events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(claimed, None);
+
+    drop(raw);
+    drop(store);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
