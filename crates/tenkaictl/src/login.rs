@@ -591,10 +591,23 @@ async fn read_json<T: for<'de> Deserialize<'de>>(mut response: reqwest::Response
     Ok(serde_json::from_slice(&body)?)
 }
 
+/// How long one connection to the callback listener may take to send its
+/// request; a slower one is dropped and the login keeps waiting.
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Wait for the browser's redirect. Any local process can connect, so a
+/// request that does not carry `expected_state` is answered and ignored;
+/// only the provider's redirect, which carries it, can end the login.
 async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<String> {
     loop {
         let (mut stream, _) = listener.accept().await?;
-        match read_callback(&mut stream, expected_state).await {
+        let read = tokio::time::timeout(
+            CALLBACK_READ_TIMEOUT,
+            read_callback(&mut stream, expected_state),
+        )
+        .await
+        .unwrap_or(Err(CallbackRead::Ignore));
+        match read {
             Ok(code) => return Ok(code),
             Err(CallbackRead::Ignore) => continue,
             Err(CallbackRead::Failed(error)) => return Err(error),
@@ -614,10 +627,9 @@ async fn read_callback(
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
-        let n = stream
-            .read(&mut chunk)
-            .await
-            .map_err(|error| CallbackRead::Failed(error.into()))?;
+        let Ok(n) = stream.read(&mut chunk).await else {
+            return Err(CallbackRead::Ignore);
+        };
         if n == 0 {
             let _ = write_http(stream, 400, "bad request").await;
             return Err(CallbackRead::Ignore);
@@ -649,18 +661,15 @@ async fn read_callback(
         return Err(CallbackRead::Ignore);
     }
     let query: std::collections::HashMap<_, _> = target.query_pairs().into_owned().collect();
+    // The state first: without it the request is not the provider's, and
+    // neither its error nor its code may end the login.
+    if query.get("state").map(String::as_str) != Some(expected_state) {
+        let _ = write_http(stream, 400, "state mismatch").await;
+        return Err(CallbackRead::Ignore);
+    }
     if let Some(error) = query.get("error").filter(|value| !value.is_empty()) {
         let _ = write_http(stream, 400, "login failed").await;
         return Err(CallbackRead::Failed(anyhow!("login failed: {error}")));
-    }
-    match query.get("state") {
-        Some(state) if state == expected_state => {}
-        _ => {
-            let _ = write_http(stream, 400, "state mismatch").await;
-            return Err(CallbackRead::Failed(anyhow!(
-                "login callback state mismatch"
-            )));
-        }
     }
     let Some(code) = query.get("code").filter(|value| !value.is_empty()).cloned() else {
         let _ = write_http(stream, 400, "missing code").await;
@@ -745,6 +754,44 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// A local process cannot abort a pending login: a callback without the
+    /// expected state, error or not, is ignored, and so is a connection
+    /// that never sends; the provider's redirect still completes it.
+    #[tokio::test]
+    async fn a_forged_callback_is_ignored_and_the_login_keeps_waiting() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let waiting = tokio::spawn(wait_for_callback(listener, "expected"));
+        let get = |path: &'static str| async move {
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            stream
+                .write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut response = String::new();
+            let _ = stream.read_to_string(&mut response).await;
+            response
+        };
+        assert!(get("/callback?error=access_denied").await.contains("400"));
+        assert!(
+            get("/callback?state=forged&error=access_denied")
+                .await
+                .contains("400")
+        );
+        assert!(
+            get("/callback?state=forged&code=stolen")
+                .await
+                .contains("400")
+        );
+        assert!(!waiting.is_finished());
+        assert!(
+            get("/callback?state=expected&code=real")
+                .await
+                .contains("200")
+        );
+        assert_eq!(waiting.await.unwrap().unwrap(), "real");
+    }
 
     /// #1322: a body that streams past the limit with no `Content-Length` is
     /// refused once it crosses it. The server then holds the connection open,

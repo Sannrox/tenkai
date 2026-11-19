@@ -518,54 +518,21 @@ fn evidence_from_outcomes(
     plan: &Plan,
     outcomes: &[Outcome],
 ) -> Result<(String, String, String, WaveEnvironmentStatus, String)> {
-    let mut gate = "satisfied";
-    let mut health = "passed_or_not_configured";
-    let mut status = WaveEnvironmentStatus::Succeeded;
-    let mut detail = plan.status_detail.clone();
-    for outcome in outcomes {
-        match outcome.classified_status()? {
-            StepOutcomeStatus::Blocked => {
-                gate = if outcome.is_gate_blocked()? {
-                    "blocked"
-                } else {
-                    gate
-                };
-                health = "not_run";
-                status = WaveEnvironmentStatus::Blocked;
-                detail = outcome.detail.clone();
-            }
-            StepOutcomeStatus::Failed => {
-                health = "failed_or_unknown";
-                status = WaveEnvironmentStatus::Failed;
-                detail = outcome.detail.clone();
-            }
-            StepOutcomeStatus::RolledBack => {
-                health = "failed_or_unknown";
-                status = WaveEnvironmentStatus::Failed;
-                detail = outcome.detail.clone();
-            }
-            StepOutcomeStatus::Succeeded => {}
-        }
-    }
-    match plan.state {
+    // The plan state decides the wave status. Outcomes only refine gate,
+    // health and detail for a plan that did not succeed: a plan that succeeded
+    // after retries reports the success, not its earlier failed attempts.
+    let status = match plan.state {
         PlanState::Succeeded => {
-            if status != WaveEnvironmentStatus::Succeeded {
-                status = WaveEnvironmentStatus::Succeeded;
-            }
+            return Ok((
+                "satisfied".into(),
+                "passed_or_not_configured".into(),
+                plan.state.to_string(),
+                WaveEnvironmentStatus::Succeeded,
+                plan.status_detail.clone(),
+            ));
         }
-        PlanState::Blocked => {
-            status = WaveEnvironmentStatus::Blocked;
-            if gate == "satisfied" {
-                gate = "blocked";
-            }
-            health = "not_run";
-        }
-        PlanState::Failed => {
-            status = WaveEnvironmentStatus::Failed;
-            if health == "passed_or_not_configured" {
-                health = "failed_or_unknown";
-            }
-        }
+        PlanState::Blocked => WaveEnvironmentStatus::Blocked,
+        PlanState::Failed => WaveEnvironmentStatus::Failed,
         PlanState::Running | PlanState::Computed => {
             bail!(
                 "plan {} is {} after apply; wave {} requires terminal evidence",
@@ -574,6 +541,33 @@ fn evidence_from_outcomes(
                 plan.environment
             );
         }
+    };
+    let mut gate = "satisfied";
+    let mut health = "passed_or_not_configured";
+    let mut detail = plan.status_detail.clone();
+    for outcome in outcomes {
+        match outcome.classified_status()? {
+            StepOutcomeStatus::Blocked => {
+                if outcome.is_gate_blocked()? {
+                    gate = "blocked";
+                }
+                health = "not_run";
+                detail = outcome.detail.clone();
+            }
+            StepOutcomeStatus::Failed | StepOutcomeStatus::RolledBack => {
+                health = "failed_or_unknown";
+                detail = outcome.detail.clone();
+            }
+            StepOutcomeStatus::Succeeded => {}
+        }
+    }
+    if status == WaveEnvironmentStatus::Blocked {
+        if gate == "satisfied" {
+            gate = "blocked";
+        }
+        health = "not_run";
+    } else if health == "passed_or_not_configured" {
+        health = "failed_or_unknown";
     }
     Ok((
         gate.into(),
@@ -1588,5 +1582,45 @@ mod tests {
             &record(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_plan_that_succeeded_after_a_failed_attempt_reports_only_the_success() {
+        let mut plan = plan(vec![input("web", "1.0.0")], vec![step("web")]);
+        plan.state = PlanState::Succeeded;
+        plan.status_detail = "applied".into();
+        let step: crate::plan::Step = plan.steps[0].clone();
+        let outcomes = [
+            Outcome::recorded(
+                step.clone(),
+                StepOutcomeStatus::Blocked,
+                "gate blocked",
+                Some(crate::apply::DeploymentCause::gate_blocked(
+                    "exposure",
+                    None,
+                    "gate blocked",
+                )),
+                None,
+            ),
+            Outcome::recorded(step, StepOutcomeStatus::Succeeded, "ok", None, None),
+        ];
+        let (gate, health, terminal, status, detail) =
+            evidence_from_outcomes(&plan, &outcomes).unwrap();
+        assert_eq!(
+            (
+                gate.as_str(),
+                health.as_str(),
+                terminal.as_str(),
+                status,
+                detail.as_str()
+            ),
+            (
+                "satisfied",
+                "passed_or_not_configured",
+                "succeeded",
+                WaveEnvironmentStatus::Succeeded,
+                "applied"
+            )
+        );
     }
 }

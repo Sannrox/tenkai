@@ -124,6 +124,65 @@ where
     result
 }
 
+/// Why this sample ends the watch, naming the flag and the environments
+/// that caused it, or `None` to keep watching. By default only hard drift
+/// new since the baseline or the previous sample ends it.
+fn exit_reason(opts: &FleetWatchOptions, delta: &plan::FleetDriftSummary) -> Option<String> {
+    let list = |environments: Vec<&String>| {
+        environments
+            .into_iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    if opts.exit_on_any_posture_change {
+        delta.has_any_posture_change.then(|| {
+            let mut changed: Vec<&String> = [
+                &delta.entered_behind,
+                &delta.left_behind,
+                &delta.entered_unhealthy,
+                &delta.left_unhealthy,
+                &delta.entered_empty,
+                &delta.left_empty,
+                &delta.entered_current,
+                &delta.left_current,
+                &delta.appeared,
+                &delta.disappeared,
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            changed.sort();
+            changed.dedup();
+            format!(
+                "posture changed ({}) (--exit-on-any-posture-change)",
+                list(changed)
+            )
+        })
+    } else if opts.exit_on_any_hard_drift {
+        delta.has_any_hard_drift.then(|| {
+            let drifting = delta
+                .current
+                .postures
+                .iter()
+                .filter(|(_, posture)| matches!(posture.as_str(), "behind" | "unhealthy"))
+                .map(|(environment, _)| environment)
+                .collect();
+            format!(
+                "hard drift present ({}) (--exit-on-any-hard-drift)",
+                list(drifting)
+            )
+        })
+    } else {
+        delta.has_new_hard_drift.then(|| {
+            format!(
+                "new hard drift detected ({})",
+                list(delta.new_hard_drift.iter().collect())
+            )
+        })
+    }
+}
+
 fn report_status<W: Write>(status: &mut Option<&mut W>, bytes: &[u8]) -> std::io::Result<()> {
     let Some(out) = status else {
         return Ok(());
@@ -181,27 +240,8 @@ where
                 .join(",");
             bail!("fleet watch: exposure exceeded maximum age ({detail})");
         }
-        let should_exit_error = if opts.exit_on_any_posture_change {
-            delta.has_any_posture_change
-        } else if opts.exit_on_any_hard_drift {
-            delta.has_any_hard_drift
-        } else {
-            // Default: non-zero only when *new* hard drift appears vs baseline/prior sample.
-            delta.has_new_hard_drift
-        };
-        if should_exit_error {
-            bail!(
-                "fleet drift watch: new hard drift detected ({})",
-                if delta.new_hard_drift.is_empty() {
-                    if delta.has_any_hard_drift {
-                        "hard drift present".to_string()
-                    } else {
-                        "posture changed".to_string()
-                    }
-                } else {
-                    delta.new_hard_drift.join(",")
-                }
-            );
+        if let Some(reason) = exit_reason(&opts, &delta) {
+            bail!("fleet drift watch: {reason}");
         }
         let clean = report.environments_behind == 0 && report.environments_unhealthy == 0;
         report_status(status, if clean { STATUS_IDLE } else { STATUS_ERROR })?;
@@ -294,6 +334,49 @@ mod tests {
             json: false,
             max_samples: 0,
         }
+    }
+
+    /// The exit message names the flag that ended the watch and the
+    /// environments behind it, not always "new hard drift".
+    #[test]
+    fn the_exit_message_names_its_flag_and_environments() {
+        let snapshot = |postures: &[(&str, &str)]| plan::FleetPostureSnapshot {
+            postures: postures
+                .iter()
+                .map(|(environment, posture)| (environment.to_string(), posture.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        // stage stays behind; prod goes from current to empty.
+        let delta = plan::compare_fleet_posture(
+            &snapshot(&[("stage", "behind"), ("prod", "current")]),
+            &snapshot(&[("stage", "behind"), ("prod", "empty")]),
+        );
+        assert_eq!(exit_reason(&options(), &delta), None);
+        let posture = FleetWatchOptions {
+            exit_on_any_posture_change: true,
+            ..options()
+        };
+        assert_eq!(
+            exit_reason(&posture, &delta).unwrap(),
+            "posture changed (prod) (--exit-on-any-posture-change)"
+        );
+        let hard = FleetWatchOptions {
+            exit_on_any_hard_drift: true,
+            ..options()
+        };
+        assert_eq!(
+            exit_reason(&hard, &delta).unwrap(),
+            "hard drift present (stage) (--exit-on-any-hard-drift)"
+        );
+        let entered = plan::compare_fleet_posture(
+            &snapshot(&[("prod", "current")]),
+            &snapshot(&[("prod", "unhealthy")]),
+        );
+        assert_eq!(
+            exit_reason(&options(), &entered).unwrap(),
+            "new hard drift detected (prod)"
+        );
     }
 
     /// One-environment report with the given posture and an optional overdue exposure.

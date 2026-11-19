@@ -83,10 +83,12 @@ pub(super) async fn admit(
                 .find(|step| step.action != Action::Rollback)
                 .cloned();
             let outcomes = step.as_ref().map(|step| {
-                vec![Outcome::new(
+                vec![Outcome::recorded(
                     step.clone(),
                     StepOutcomeStatus::Blocked,
                     detail.clone(),
+                    Some(DeploymentCause::gate_blocked("exposure", None, &detail)),
+                    None,
                 )]
             });
             let observation = plan_completion::plan_observation(
@@ -141,7 +143,17 @@ pub(super) async fn admit(
                 GateDecision::Allowed => continue,
                 GateDecision::Denied(detail) | GateDecision::Unavailable(detail) => detail,
             };
-            let outcome = Outcome::new(step.clone(), StepOutcomeStatus::Blocked, detail.clone());
+            let outcome = Outcome::recorded(
+                step.clone(),
+                StepOutcomeStatus::Blocked,
+                detail.clone(),
+                Some(DeploymentCause::gate_blocked(
+                    "eval_suite",
+                    Some(suite.to_string()),
+                    &detail,
+                )),
+                None,
+            );
             let observation = plan_completion::plan_observation(
                 lease,
                 plan,

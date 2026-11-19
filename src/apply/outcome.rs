@@ -171,6 +171,17 @@ impl DeploymentCause {
         .seal()
     }
 
+    /// A step a delivery gate held before anything deployed: the cause
+    /// names `gate`, never a deployment failure parsed from the prose.
+    pub fn gate_blocked(gate: &str, value: Option<String>, detail: &str) -> Self {
+        Self::new(
+            DeploymentCausePhase::Admission,
+            DeploymentCauseKind::GateBreached,
+            detail,
+        )
+        .with_gate(gate, value)
+    }
+
     pub fn with_raw(mut self, raw: impl Into<String>) -> Self {
         self.raw = Some(raw.into());
         self.seal()
@@ -545,6 +556,23 @@ impl Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A gate that held a step is its cause, even when its prose reads like
+    /// a deployment failure ("unavailable").
+    #[test]
+    fn a_gate_blocked_step_names_its_gate() {
+        let detail =
+            "gate unavailable: evaluation gate evidence for suite s1 omitted its projection";
+        assert_eq!(
+            DeploymentCause::classify(detail).kind,
+            DeploymentCauseKind::TargetUnavailable
+        );
+        let cause = DeploymentCause::gate_blocked("eval_suite", Some("s1".into()), detail);
+        assert_eq!(cause.phase, DeploymentCausePhase::Admission);
+        assert_eq!(cause.kind, DeploymentCauseKind::GateBreached);
+        assert_eq!(cause.gate.as_deref(), Some("eval_suite"));
+        assert_eq!(cause.gate_value.as_deref(), Some("s1"));
+    }
 
     fn step() -> Step {
         Step {

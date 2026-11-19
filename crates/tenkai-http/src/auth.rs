@@ -121,6 +121,11 @@ pub(super) async fn reset_development_fixture(
     };
     match result {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        // The same non-disclosing answer as import.
+        Err(tenkai::tenant_isolation::IsolationError::NotFound)
+        | Err(tenkai::tenant_isolation::IsolationError::Unauthenticated) => {
+            error_response(StatusCode::NOT_FOUND, NON_DISCLOSING_DENY)
+        }
         Err(error) => {
             eprintln!("development fixture reset failed: {error}");
             error_response(StatusCode::CONFLICT, "fixture reset conflict")
@@ -345,14 +350,13 @@ pub(super) fn manage_result<T: Serialize>(result: Result<T, ManagementError>) ->
     }
 }
 
+/// Parse a management route's JSON body; a malformed one is a 400 that
+/// names no route.
 pub(super) fn parse_management_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, Box<Response>> {
-    parse_migration_json(body)
-}
-fn parse_migration_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, Box<Response>> {
     serde_json::from_slice(body).map_err(|error| {
         Box::new(error_response(
             StatusCode::BAD_REQUEST,
-            format!("invalid package migration request: {error}"),
+            format!("invalid request body: {error}"),
         ))
     })
 }

@@ -350,9 +350,14 @@ fn match_host_grants(
             Some(environment.to_string())
         }
         _ => {
-            return Err(AuthError::Forbidden(
-                "host identity grants confine management to more than one environment".into(),
-            ));
+            let scoped_management = scoped
+                .values()
+                .any(|capabilities| capabilities.contains(&DeliveryCapability::Management));
+            return Err(AuthError::Forbidden(if scoped_management {
+                "host identity grants confine management to more than one environment".into()
+            } else {
+                "host identity grants scope access to more than one environment; one host identity serves one environment, or every environment".into()
+            }));
         }
     };
     if fleet_management {
@@ -814,6 +819,30 @@ mod tests {
             .unwrap();
         assert_eq!(context.principal_id(), format!("host:uid:{uid}"));
         assert!(context.has_delivery_capability(DeliveryCapability::Read));
+    }
+
+    /// Read-only grants in two environments are refused without claiming
+    /// that management was granted; scoped management still says so.
+    #[test]
+    fn grants_spanning_environments_name_what_they_grant() {
+        let rule = |environment: &str, capability: &str| OidcGrantRule {
+            value: "ops".into(),
+            capabilities: vec![capability.into()],
+            environment: Some(environment.into()),
+            channels: Vec::new(),
+            products: Vec::new(),
+            kind: None,
+        };
+        let groups = ["ops".to_string()];
+        let message = |rules: &[OidcGrantRule]| match match_host_grants(rules, &groups) {
+            Err(AuthError::Forbidden(message)) => message,
+            _ => panic!("grants spanning two environments must be refused"),
+        };
+        let read = message(&[rule("stage", "read"), rule("prod", "read")]);
+        assert!(!read.contains("management"), "{read}");
+        assert!(read.contains("more than one environment"), "{read}");
+        let management = message(&[rule("stage", "read"), rule("prod", "management")]);
+        assert!(management.contains("management"), "{management}");
     }
 
     #[test]

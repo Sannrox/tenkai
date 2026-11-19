@@ -85,15 +85,14 @@ pub fn decide_step(
             step.id
         )));
     };
-    match policy.verify_plan_as(RUNTIME_REFUSAL, plan, envelopes, now_ms) {
-        Ok(_) => Ok(StepDecision::Allowed),
-        Err(error) => {
-            let message = format!("{error:#}");
-            if message.contains("different executable content") {
-                return Ok(StepDecision::Refuse(message));
-            }
-            Ok(StepDecision::Wait(message))
+    let approvals = policy.evaluate_as(RUNTIME_REFUSAL, plan, envelopes, now_ms);
+    match approvals.require_all(&crate::host_apply::plan_purposes(plan)) {
+        Ok(()) => Ok(StepDecision::Allowed),
+        // An approval for other content never comes to count: refuse.
+        Err(error) if approvals.rejected_a_binding_mismatch() => {
+            Ok(StepDecision::Refuse(format!("{error:#}")))
         }
+        Err(error) => Ok(StepDecision::Wait(format!("{error:#}"))),
     }
 }
 
@@ -298,6 +297,18 @@ mod tests {
         let mut plan = sealed_plan(now);
         let signed = envelopes(&fixture, &plan, now, &[0]);
         plan.steps[0].to = "9.9.9".into();
+        // Refused by the typed mismatch, not waited on.
+        assert!(matches!(
+            decide_step(
+                Some(&fixture.trust.policy),
+                &plan,
+                &plan.steps[0],
+                &signed,
+                now
+            )
+            .unwrap(),
+            StepDecision::Refuse(_)
+        ));
         let error = require_step(
             Some(&fixture.trust.policy),
             &plan,
