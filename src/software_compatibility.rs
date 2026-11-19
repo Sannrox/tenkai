@@ -326,6 +326,17 @@ impl CompatibilityProfile {
 }
 
 impl ComponentPin {
+    /// Whether two pins name the same source. Revisions are hex, so case
+    /// does not change what they name; signed releases and stored evidence
+    /// may already carry either case, so they are compared, not refused.
+    /// Digests are canonical lowercase and compare exactly.
+    fn names_same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Revision(left), Self::Revision(right)) => left.eq_ignore_ascii_case(right),
+            _ => self == other,
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         match self {
             Self::Digest(value) => {
@@ -544,7 +555,7 @@ fn evaluate_owned(
                     component: name.clone(),
                 }),
             Some(observed) => {
-                if observed.pin != required.pin
+                if !observed.pin.names_same(&required.pin)
                     || observed.provides != required.provides
                     || observed.requires != required.required_minimums()
                 {
@@ -1519,6 +1530,17 @@ pub(crate) async fn require_manifest(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_revision_pin_matches_regardless_of_case() {
+        let revision = "a".repeat(39) + "f";
+        let lower = super::ComponentPin::Revision(revision.clone());
+        let upper = super::ComponentPin::Revision(revision.to_ascii_uppercase());
+        assert!(upper.validate().is_ok());
+        assert!(lower.names_same(&upper));
+        assert!(!lower.names_same(&super::ComponentPin::Revision("b".repeat(40))));
+        let digest = super::ComponentPin::Digest(format!("sha256:{}", "a".repeat(64)));
+        assert!(!digest.names_same(&lower));
+    }
     use super::*;
 
     fn fixture() -> (CompatibilityProfile, CompatibilityEvidence) {

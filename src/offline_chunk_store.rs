@@ -97,7 +97,8 @@ pub fn export_weight_chunks(
 /// Stream `len` bytes of `input` into verified chunk files under
 /// `chunk_dir`: weights, and image blobs too large for an archive entry
 /// (#684). Existing matching chunks are kept so an interrupted export can
-/// resume.
+/// resume. Empty input is refused: import preflight requires at least one
+/// chunk, so an empty artifact could never round-trip.
 pub fn export_chunks(
     input: &mut dyn Read,
     len: u64,
@@ -107,6 +108,11 @@ pub fn export_chunks(
 ) -> Result<OfflineChunkArtifact> {
     if chunk_size == 0 {
         bail!("chunk size must be greater than zero");
+    }
+    if len == 0 {
+        bail!(
+            "refusing to export an empty {media_type} artifact; import requires at least one chunk"
+        );
     }
     fs::create_dir_all(chunk_dir)
         .with_context(|| format!("creating chunk directory {}", chunk_dir.display()))?;
@@ -844,6 +850,20 @@ const MAX_REASONABLE_WEIGHT: u64 = 512 * 1024 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_input_is_refused_at_export_so_it_never_fails_import() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-chunk-empty-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let error = super::export_chunks(&mut std::io::empty(), 0, "weights", &dir, 1024)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("empty"), "{error}");
+        assert!(!dir.exists(), "nothing is written for refused input");
+    }
+
     use super::*;
     use crate::offline_bundle::{BundleEnvelope, BundleStatement};
     use crate::release_signing::{TrustRoots, TrustedSigner};

@@ -111,7 +111,7 @@ impl Inner {
         self.with_schema("public", move |tx| {
             let rows = tx
                 .query(
-                    "SELECT nspname FROM pg_namespace WHERE nspname LIKE 'tenkai_t_%' ORDER BY nspname",
+                    "SELECT nspname FROM pg_namespace WHERE left(nspname, 9) = 'tenkai_t_' ORDER BY nspname",
                     &[],
                 )
                 .map_err(pg)?;

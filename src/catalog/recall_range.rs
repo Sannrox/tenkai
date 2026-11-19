@@ -176,7 +176,8 @@ async fn list_product_ranges(ctx: &mut Ctx, product: &str) -> Result<Vec<RecallR
     Ok(ranges)
 }
 
-/// Recorded ranges for `product`, ordered by `--from`.
+/// Recorded ranges for `product`, ordered by `--from` in semver precedence,
+/// ties broken by the raw string.
 pub async fn list_recall_ranges(ctx: &mut Ctx, product: &str) -> Result<RecallRangePage> {
     validate_identifier("product", product)?;
     let mut items: Vec<RecallRangeView> = list_product_ranges(ctx, product)
@@ -185,11 +186,19 @@ pub async fn list_recall_ranges(ctx: &mut Ctx, product: &str) -> Result<RecallRa
         .map(RecallRangeView::from)
         .collect();
     items.sort_by(|left, right| {
-        left.from
-            .cmp(&right.from)
-            .then(left.product.cmp(&right.product))
+        from_order(&left.from, &right.from).then_with(|| left.product.cmp(&right.product))
     });
     Ok(RecallRangePage { items })
+}
+
+/// Semver precedence of two `--from` versions, ties broken by the raw string,
+/// so 1.9.0 sorts before 1.10.0.
+fn from_order(left: &str, right: &str) -> std::cmp::Ordering {
+    match (semver::Version::parse(left), semver::Version::parse(right)) {
+        (Ok(left), Ok(right)) => left.cmp_precedence(&right),
+        _ => std::cmp::Ordering::Equal,
+    }
+    .then_with(|| left.cmp(right))
 }
 
 /// The first recorded range that currently covers `release_id`.
@@ -584,6 +593,13 @@ install = "true"
             .to_string();
         assert!(widen.contains("cannot widen"), "{widen}");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ranges_list_in_semver_order_not_text_order() {
+        let mut froms = vec!["1.10.0", "1.9.0", "1.9.0+b", "1.9.0+a", "1.2.0"];
+        froms.sort_by(|left, right| from_order(left, right));
+        assert_eq!(froms, ["1.2.0", "1.9.0", "1.9.0+a", "1.9.0+b", "1.10.0"]);
     }
 
     #[test]

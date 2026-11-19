@@ -309,14 +309,21 @@ pub async fn admit(
         {
             bail!("health observation of {} is in the future", report.instance);
         }
-        if report.artifact_digest.is_empty()
-            || !report
-                .artifact_digest
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
-        {
+        if report.artifact_digest.is_empty() {
             bail!(
                 "health observation of {} is missing artifact_digest",
+                report.instance
+            );
+        }
+        // Lowercase only, like every stored digest: the overlay compares
+        // digests exactly, so an uppercase one would never match.
+        if !report
+            .artifact_digest
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            bail!(
+                "health observation of {} carries an artifact_digest that is not lowercase hex",
                 report.instance
             );
         }
@@ -705,6 +712,28 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("future"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_uppercase_artifact_digest_is_refused() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-instance-health-case-{}-{}.db",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "prod", "runtime")
+            .await
+            .unwrap();
+        let mut upper = observation(crate::now_millis(), HealthCheckState::Healthy);
+        upper.artifact_digest = DIGEST.to_ascii_uppercase();
+        let error = admit(&mut ctx, "prod", &[upper])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not lowercase hex"), "{error}");
+        let _ = std::fs::remove_file(database);
     }
 
     #[tokio::test]

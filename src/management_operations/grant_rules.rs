@@ -198,20 +198,15 @@ impl ManagementOperations {
     ) -> Result<GrantRuleList, ManagementError> {
         let principal = self.require_fleet_administrator(credential, "grant_rule.create")?;
         let value = request.rule.value.clone();
-        let reason = request.reason.clone();
-        self.audit_grant_rule(
-            &principal,
-            "grant_rule.create.requested",
-            &value,
-            &request.reason,
-        )?;
+        let reason = grant_rule_reason(&request.reason)?;
+        self.audit_grant_rule(&principal, "grant_rule.create.requested", &value, &reason)?;
         let created = {
-            let (stored, principal) = (stored.clone(), principal.clone());
+            let (stored, principal, reason) = (stored.clone(), principal.clone(), reason.clone());
             tokio::task::spawn_blocking(move || {
                 stored.create(
                     request.rule,
                     &principal,
-                    &request.reason,
+                    &reason,
                     crate::now_millis(),
                     Some(request.generation),
                 )
@@ -234,12 +229,7 @@ impl ManagementOperations {
         request: RemoveGrantRuleRequest,
     ) -> Result<GrantRuleList, ManagementError> {
         let principal = self.require_fleet_administrator(credential, "grant_rule.remove")?;
-        let reason = request.reason.trim().to_string();
-        if reason.is_empty() || reason.len() > 1024 {
-            return Err(ManagementError::BadRequest(
-                "a reason of 1..=1024 bytes is required".into(),
-            ));
-        }
+        let reason = grant_rule_reason(&request.reason)?;
         self.audit_grant_rule(
             &principal,
             "grant_rule.remove.requested",
@@ -283,4 +273,16 @@ impl ManagementOperations {
         )?;
         Ok(Self::grant_rule_list(&stored, after))
     }
+}
+
+/// The trimmed reason a grant-rule change records, checked before its first
+/// audit write: 1..=1024 bytes.
+fn grant_rule_reason(reason: &str) -> Result<String, ManagementError> {
+    let reason = reason.trim();
+    if reason.is_empty() || reason.len() > 1024 {
+        return Err(ManagementError::BadRequest(
+            "a reason of 1..=1024 bytes is required".into(),
+        ));
+    }
+    Ok(reason.to_string())
 }
