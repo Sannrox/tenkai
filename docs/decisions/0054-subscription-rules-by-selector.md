@@ -2,12 +2,14 @@
 
 - Status: Proposed
 - Date: 2026-11-18
-- Issue: [#1184](https://github.com/Sannrox/tenkai/issues/1184)
+- Issue: [#1184](https://github.com/Sannrox/tenkai/issues/1184); §8 added by
+  [#1335](https://github.com/Sannrox/tenkai/issues/1335) (2026-11-19, accepted)
 - Owner: Tenkai maintainers
 - Builds on: [ADR 0044](0044-product-instances-and-dependency-bindings.md),
   [labels and selectors](../manage-environments.md#labels-and-selectors),
   [config presets](../manage-environments.md#presets)
-- Related: [plan approval](../plan-approval.md)
+- Related: [plan approval](../plan-approval.md),
+  [rollout waves](../rollout-waves.md)
 
 ## Context
 
@@ -169,6 +171,41 @@ A rule never writes overrides. A rule's preset must exist in the channel
 head when the rule is written, and planning refuses a candidate that drops
 it, as for any selected preset.
 
+### 8. Promotion targets and wave cohorts reuse rules
+
+Added for [#1335](https://github.com/Sannrox/tenkai/issues/1335). A
+subscription rule is the one record that says which environments receive a
+product's channel. Nothing else stores a selector for that purpose.
+
+- **Promotion targets.** A channel promotion policy moves the head of its
+  target channel. It gains no environment selector of its own. The
+  environments a promotion reaches are the environments subscribed to the
+  target channel: explicit subscriptions plus those written by rules for
+  that product and channel. `GET` on the channel's promotion policy reports
+  those rules by name and version, and each rule's `rule status` reports
+  its environments.
+- **Changing the targets.** Adding, editing or deleting a rule for the
+  target channel is the only way a selector changes where promotions land.
+  That write follows §5, and every subscription it causes goes through each
+  environment's plan approval, as in §2. A policy edit never changes which
+  environments a promotion reaches.
+- **Wave cohorts.** `wave run` and `wave execute` accept `--cohort-rule
+  <name>` beside `--cohort`. The wave resolves that rule's selector once, at
+  start, exactly as a selector cohort resolves today (see
+  [rollout waves](../rollout-waves.md)). It stores the concrete environment
+  names together with the rule's name, version and selector as provenance.
+  A later rule edit or label change does not rewrite a wave, and the rule is
+  not part of the wave identity. No separate cohort record exists.
+
+Rejected for §8:
+
+- **A selector on the promotion policy.** It would be a second answer to
+  "which environments get this release", and it could disagree with
+  subscriptions. A label write would then change delivery scope with no
+  plan in between.
+- **A stored cohort record.** It would hold the same selector as a rule
+  under a different name and would need its own versioning and audit.
+
 ## Out of scope
 
 - Environment templates, and rules that set overrides, secrets, bindings,
@@ -176,6 +213,7 @@ it, as for any selected preset.
 - Automatic removal on deletion or non-match.
 - Rule precedence, priorities or weights.
 - Reconcile writing subscriptions without a plan.
+- Waves that keep resolving a rule after they start.
 
 ## Compatibility
 
