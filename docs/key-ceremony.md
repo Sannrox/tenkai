@@ -71,7 +71,10 @@ tenkaictl keys ceremony \
 ```
 
 `lab-profile.toml` uses `class = "lab"` and `kind = "software"`. The software
-provider writes owner-only files under `--provider-dir`. Tenant data keys are
+provider writes owner-only files under `--provider-dir`, which must be
+missing or empty; the ceremony refuses a directory that holds anything. A
+failed ceremony removes what it wrote, so a retry on the same directory
+works. Tenant data keys are
 wrapped with the root (AES-256-GCM) so deleting the root makes them unusable.
 That directory is not a bundle, plan, or log path. The JSON at `--out` is
 signed evidence: provider kind, root key id, per-tenant data-key ids,

@@ -8,6 +8,7 @@ use anyhow::{Context as _, Result, bail};
 use tenkai::now_millis;
 
 use crate::helm_secrets::{self, LiveSecrets};
+use crate::temp_doc::TempDoc;
 use tenkai::software_executor::{
     SoftwareApplyRequest, SoftwareDeployPhase, SoftwareExecutor, SoftwareObserveStatus,
     run_captured_command, validate_request,
@@ -258,15 +259,8 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
 /// string; overlay values keep the scalar typing `--set` gave them.
 fn helm_values_file(request: &SoftwareApplyRequest, command: &mut Command) -> Result<TempDoc> {
     let values = serde_json::json!({ "tenkai": tenkai_values(request)? });
-    let path = std::env::temp_dir().join(format!(
-        "tenkai-values-{}-{}.json",
-        std::process::id(),
-        uuid_like()
-    ));
-    let doc = TempDoc(path);
-    std::fs::write(&doc.0, values.to_string())
-        .with_context(|| format!("writing {}", doc.0.display()))?;
-    command.arg("-f").arg(&doc.0);
+    let doc = TempDoc::write("values.json", values.to_string().as_bytes())?;
+    command.arg("-f").arg(doc.path());
     Ok(doc)
 }
 
@@ -323,14 +317,6 @@ fn overlay_scalar(value: &str) -> serde_json::Value {
     value.into()
 }
 
-struct TempDoc(PathBuf);
-
-impl Drop for TempDoc {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 fn helm_dependency_file(
     request: &SoftwareApplyRequest,
     command: &mut Command,
@@ -338,29 +324,13 @@ fn helm_dependency_file(
     if request.dependency_document.is_empty() {
         return Ok(None);
     }
-    let path = std::env::temp_dir().join(format!(
-        "tenkai-dependencies-{}-{}.json",
-        std::process::id(),
-        uuid_like()
-    ));
-    std::fs::write(&path, request.dependency_document.as_bytes())
-        .with_context(|| format!("writing {}", path.display()))?;
+    let doc = TempDoc::write("dependencies.json", request.dependency_document.as_bytes())?;
     command.arg("--set-file").arg(format!(
         "{}={}",
         tenkai::dependency_document::HELM_VALUES_KEY,
-        path.display()
+        doc.path().display()
     ));
-    Ok(Some(TempDoc(path)))
-}
-
-fn uuid_like() -> String {
-    format!(
-        "{:x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    )
+    Ok(Some(doc))
 }
 
 fn helm_values_mismatch(values_json: &str, request: &SoftwareApplyRequest) -> bool {

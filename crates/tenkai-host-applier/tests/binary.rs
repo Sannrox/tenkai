@@ -379,8 +379,85 @@ fn an_unremovable_certificate_record_still_records_the_step() {
         .expect("the step is recorded");
     assert_eq!(result.outcome, HostApplyOutcome::Succeeded);
     assert!(
-        result.detail.contains("workload certificate record"),
+        result.detail.contains("workload certificate"),
         "{}",
         result.detail
     );
+}
+
+/// A Tenkai-made instance directory in `tree` holding one file, as an
+/// earlier step's certificate or sealed values leave it.
+fn owned_instance(host: &Host, tree: &str) -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let dir = host.paths.state_dir.join(tree).join("edge").join("k3s");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(dir.join("gen-1"))
+        .unwrap();
+    std::fs::write(dir.join(tenkai_host_applier::secrets::OWNED_MARKER), "").unwrap();
+    std::fs::write(dir.join("gen-1/key.pem"), "private key").unwrap();
+    dir
+}
+
+/// A successful uninstall leaves no key material behind: the certificate
+/// generations and the sealed values go with the record. An install
+/// without a certificate drops only the certificate.
+#[test]
+fn an_uninstall_removes_the_instance_key_and_sealed_values() {
+    use tenkai_host_applier::secrets::{IDENTITY, SECRETS};
+    let host = host();
+    let identity = owned_instance(&host, IDENTITY);
+    let sealed = owned_instance(&host, SECRETS);
+
+    let release = host.release_with("1.0.0", ["true", "true", "true"]);
+    let (instance, _) = host.spool(install(&release, 0));
+    assert_eq!(
+        applier(&host, &instance).output().unwrap().status.code(),
+        Some(0)
+    );
+    assert!(!identity.exists());
+    assert!(sealed.join("gen-1/key.pem").exists());
+
+    owned_instance(&host, IDENTITY);
+    let (instance, _) = host.spool(Step {
+        release: &release,
+        action: HostAction::Uninstall,
+        step_action: Action::Upgrade,
+        from: Some("1.0.0"),
+        generation: 1,
+        approvers: &[0],
+    });
+    let output = applier(&host, &instance).output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(!result_of(&output).detail.contains("failed"));
+    for tree in [IDENTITY, SECRETS] {
+        let environment = host.paths.state_dir.join(tree).join("edge");
+        let left: Vec<_> = std::fs::read_dir(&environment)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "{tree}: {left:?}");
+    }
+}
+
+/// A directory Tenkai did not create is never removed; the step is still
+/// recorded, naming it.
+#[test]
+fn an_uninstall_keeps_a_directory_tenkai_did_not_create() {
+    let host = host();
+    let foreign = host
+        .paths
+        .state_dir
+        .join(tenkai_host_applier::secrets::IDENTITY)
+        .join("edge/k3s");
+    std::fs::create_dir_all(&foreign).unwrap();
+    std::fs::write(foreign.join("theirs"), "kept").unwrap();
+
+    let release = host.release_with("1.0.0", ["true", "true", "true"]);
+    let (instance, _) = host.spool(install(&release, 0));
+    let output = applier(&host, &instance).output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(result_of(&output).detail.contains("not created by Tenkai"));
+    assert!(foreign.join("theirs").exists());
 }
