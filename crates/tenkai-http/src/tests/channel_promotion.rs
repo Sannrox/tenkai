@@ -1,5 +1,6 @@
 use super::lifecycle_support::{lifecycle_router, signed_catalog_fixture};
 use super::support::current_generation;
+use super::support::{RUNTIME_DENIED, assert_forbidden};
 use super::*;
 use tenkai::auth_context::{
     AuthenticatedRequestContext, AuthenticatedRequestContextBuilder, PrincipalIdentity,
@@ -123,12 +124,8 @@ async fn pause_without_management_is_refused_and_pause_records_the_actor() {
     let runtime_err = runtime
         .pause_channel_policy("api", "stable")
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        runtime_err.contains("403") || runtime_err.contains("runtime"),
-        "{runtime_err}"
-    );
+        .unwrap_err();
+    assert_forbidden(runtime_err, RUNTIME_DENIED);
 
     let paused = management
         .pause_channel_policy("api", "stable")

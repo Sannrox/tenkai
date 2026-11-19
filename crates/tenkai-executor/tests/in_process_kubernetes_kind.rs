@@ -153,10 +153,12 @@ fn pod_disruption_budget_applies_and_is_removed_with_the_product() {
 
     executor.remove(&request).expect("remove");
 
+    // NotFound, not any kubectl failure (an unreachable API also exits non-zero).
     let after = kubectl(&kubeconfig, &pdb);
+    let stderr = String::from_utf8_lossy(&after.stderr);
     assert!(
-        !after.status.success(),
-        "PodDisruptionBudget survived removal"
+        !after.status.success() && stderr.contains("NotFound"),
+        "PodDisruptionBudget survived removal: {stderr}"
     );
     let _ = kubectl(&kubeconfig, &["delete", "namespace", &env, "--wait=false"]);
     let _ = std::fs::remove_dir_all(root);

@@ -167,12 +167,15 @@ fn memory_backed() -> Option<PathBuf> {
         .then_some(shm)
 }
 
+/// Whether `text` carries the value, as plaintext or in the base64 form
+/// the spool holds it in.
+fn leaks(text: &str) -> bool {
+    text.contains(VALUE) || text.contains(&STANDARD.encode(VALUE))
+}
+
 fn refusal(result: anyhow::Result<tenkai_host_applier::Intake>) -> String {
     let error = format!("{:#}", result.expect_err("intake must refuse"));
-    assert!(
-        !error.contains(VALUE),
-        "a refusal carries the value: {error}"
-    );
+    assert!(!leaks(&error), "a refusal carries the value: {error}");
     error
 }
 
@@ -266,7 +269,7 @@ fn a_directory_tenkai_did_not_create_is_never_written() {
         secrets::write(&host.paths, &intake.verified, &intake.secrets).unwrap_err()
     );
     assert!(error.contains("not created by Tenkai"), "{error}");
-    assert!(!error.contains(VALUE), "{error}");
+    assert!(!leaks(&error), "{error}");
     assert_eq!(
         std::fs::read_to_string(dir.join("db").join("password")).unwrap(),
         "someone else's"

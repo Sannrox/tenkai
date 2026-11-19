@@ -1,5 +1,6 @@
 use super::lifecycle_support::{lifecycle_router, signed_catalog_fixture};
 use super::support::current_generation;
+use super::support::{CATALOG_WIDE_DENIED, RUNTIME_DENIED, assert_forbidden};
 use super::*;
 use tenkai::management_lifecycle::{
     ExposureWaiverClearRequest, ExposureWaiverRequest, MANAGEMENT_LIFECYCLE_API_VERSION,
@@ -59,29 +60,18 @@ async fn remote_waiver_and_grace_require_management() {
         .await
         .unwrap();
 
-    let runtime_err = runtime
-        .set_exposure_waiver(waiver_set())
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        runtime_err.contains("403") || runtime_err.contains("runtime"),
-        "{runtime_err}"
-    );
-    let scoped_err = scoped
-        .set_exposure_waiver(waiver_set())
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        scoped_err.contains("catalog-wide") || scoped_err.contains("403"),
-        "{scoped_err}"
-    );
+    let runtime_err = runtime.set_exposure_waiver(waiver_set()).await.unwrap_err();
+    assert_forbidden(runtime_err, RUNTIME_DENIED);
+    let scoped_err = scoped.set_exposure_waiver(waiver_set()).await.unwrap_err();
+    assert_forbidden(scoped_err, CATALOG_WIDE_DENIED);
 
     let set = management.set_exposure_waiver(waiver_set()).await.unwrap();
     assert!(set.message.contains("TENKAI-2026-1"), "{}", set.message);
     // Listed without any current match, to read credentials only.
-    assert!(runtime.list_exposure_waivers(false).await.is_err());
+    assert_forbidden(
+        runtime.list_exposure_waivers(false).await.unwrap_err(),
+        RUNTIME_DENIED,
+    );
     let listed = scoped.list_exposure_waivers(false).await.unwrap().waivers;
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].advisory_id, "TENKAI-2026-1");
@@ -107,19 +97,15 @@ async fn remote_waiver_and_grace_require_management() {
     let runtime_grace = runtime
         .configure_environment_exposure_grace("stage", "24h", 0)
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        runtime_grace.contains("403") || runtime_grace.contains("runtime"),
-        "{runtime_grace}"
-    );
+        .unwrap_err();
+    assert_forbidden(runtime_grace, RUNTIME_DENIED);
     let generation = current_generation(&management, "stage").await;
     let env_grace = scoped
         .configure_environment_exposure_grace("stage", "24h", generation)
         .await
         .unwrap();
     assert!(
-        env_grace.message.contains("86400000") || env_grace.message.contains("exposure grace"),
+        env_grace.message == "exposure grace 86400000ms for stage",
         "{}",
         env_grace.message
     );
@@ -128,19 +114,16 @@ async fn remote_waiver_and_grace_require_management() {
     let scoped_channel = scoped
         .configure_channel_exposure_grace("api", "stable", "24h")
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        scoped_channel.contains("catalog-wide") || scoped_channel.contains("403"),
-        "{scoped_channel}"
-    );
+        .unwrap_err();
+    assert_forbidden(scoped_channel, CATALOG_WIDE_DENIED);
     let channel_grace = management
         .configure_channel_exposure_grace("api", "stable", "24h")
         .await
         .unwrap();
     assert!(
-        channel_grace.message.contains("86400000")
-            || channel_grace.message.contains("exposure grace"),
+        channel_grace
+            .message
+            .starts_with("exposure grace 86400000ms for "),
         "{}",
         channel_grace.message
     );

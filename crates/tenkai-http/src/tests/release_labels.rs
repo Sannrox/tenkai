@@ -1,4 +1,5 @@
 use super::lifecycle_support::{lifecycle_router, signed_catalog_fixture};
+use super::support::{CATALOG_WIDE_DENIED, RUNTIME_DENIED, assert_forbidden};
 use super::*;
 
 #[tokio::test]
@@ -25,21 +26,13 @@ async fn remote_release_labels_require_management() {
     let runtime_err = runtime
         .set_release_label("api", "1.0.0", "tier", "stable", "grouping")
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        runtime_err.contains("403") || runtime_err.contains("runtime"),
-        "{runtime_err}"
-    );
+        .unwrap_err();
+    assert_forbidden(runtime_err, RUNTIME_DENIED);
     let scoped_err = scoped
         .set_release_label("api", "1.0.0", "tier", "stable", "grouping")
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        scoped_err.contains("catalog-wide") || scoped_err.contains("403"),
-        "{scoped_err}"
-    );
+        .unwrap_err();
+    assert_forbidden(scoped_err, CATALOG_WIDE_DENIED);
 
     let set = management
         .set_release_label("api", "1.0.0", "tier", "stable", "grouping")

@@ -95,7 +95,12 @@ manifest = json.dumps({
     "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar",
                 "digest": layer_digest, "size": len(layer)}],
 }).encode()
-print(put(manifest))
+manifest_digest = put(manifest)
+# A tag entry beside the digest: the tag refusal below must hold even though
+# the store could answer it.
+with open(os.path.join(out, "latest"), "wb") as f:
+    f.write(manifest)
+print(manifest_digest)
 PY
 )"
 echo "manifest $MANIFEST"
@@ -133,9 +138,15 @@ case "$AGAIN" in
 esac
 
 step "tags and origin pulls are refused"
-if docker exec "$RUN-host" docker pull "$NAME/edge/app:latest" >/dev/null 2>&1; then
+# The registry answered the digest pulls above; the tag pull must be refused
+# by it, by name, not fail for any other reason.
+if TAGGED="$(docker exec "$RUN-host" docker pull "$NAME/edge/app:latest" 2>&1)"; then
   fail "a tag was served"
 fi
+case "$TAGGED" in
+  *"serves by digest only"*) echo "tag refused: $TAGGED" ;;
+  *) fail "tag pull failed for another reason: $TAGGED" ;;
+esac
 if docker exec "$RUN-host" docker pull alpine >/dev/null 2>&1; then
   fail "the Docker host reached an origin registry"
 fi
