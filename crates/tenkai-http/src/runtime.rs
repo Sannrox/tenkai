@@ -341,6 +341,9 @@ fn runtime_caller<'a>(
             tenkai::runtime_delivery::INSTANCE_HEALTH_CAPABILITY,
         ),
         os_image: names_capability(headers, tenkai::runtime_delivery::OS_IMAGE_CAPABILITY),
+        executors: headers
+            .get(tenkai::runtime_delivery::EXECUTORS_HEADER)
+            .and_then(|value| value.to_str().ok()),
     }
 }
 

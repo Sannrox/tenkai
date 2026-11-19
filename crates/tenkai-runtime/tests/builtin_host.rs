@@ -248,6 +248,13 @@ async fn rig(label: &str) -> Rig {
     let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
     let store = Arc::new(tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap());
+    ctx = ctx.with_execution_capabilities(Arc::new(
+        tenkai::execution_capabilities::StoreExecutionCapabilities::new(
+            store.clone(),
+            Default::default,
+            std::collections::HashSet::from(["prod".into()]),
+        ),
+    ));
     let reconciler = Arc::new(
         Reconciler::new(ctx.clone(), ReconcilerConfig::default())
             .unwrap()

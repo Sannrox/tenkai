@@ -71,8 +71,21 @@ report it:
 | `certificates.near_expiry` | Some certificate is in the last sixth of its lifetime | `status` certificate |
 | `certificates.renewal_failing` | Instances whose latest renewal attempt failed | `status` certificate |
 
-`awaiting_approval`, `drifted_instances` and `certificates` are omitted when
-false, zero, or absent.
+| `runtimes` | The environment's runtime instances: `id` (runner/instance), `version`, `executors`, `checked_in_at` | runner registry |
+
+`awaiting_approval`, `drifted_instances`, `certificates` and `runtimes` are
+omitted when false, zero, or absent.
+
+The report's `replicas` lists the server replicas that checked in within
+three writer-lease lifetimes, each with its writer-lease holder `id`,
+`version`, installed `executors` and `checked_in_at`. It is omitted on a
+single-replica server. A plan whose release declares an executor that one
+of them, or the environment's runtime, lacks is refused at plan time
+([ADR 0057](decisions/0057-advertise-and-enforce-execution-capabilities.md)).
+`GET /v1/environments/{env}/runtime` reports that environment's
+`supported_executors`. The leader's `/readyz` names peers whose set
+differs from its own in `replica_executors_differ`, without changing
+readiness.
 
 ```bash
 # embedded

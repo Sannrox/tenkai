@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use tenkai::execution_capabilities::ReplicaView;
 use tenkai::storage::Result;
 #[cfg(not(feature = "postgres"))]
 use tenkai::storage::StoreError;
@@ -28,7 +29,19 @@ pub struct PostgresHubWriterLease {
     holder: String,
     ttl_ms: i64,
     fence: Arc<WriterFence>,
+    /// This replica's installed executors, recorded before each renewal
+    /// (ADR 0057). `None` records nothing.
+    executors: Option<String>,
+    /// The replicas seen at the last renewal.
+    view: std::sync::RwLock<ReplicaView>,
 }
+
+/// A replica counts as checked in for three lease lifetimes (ADR 0057).
+#[cfg(feature = "postgres")]
+const REPLICA_WINDOW_TTLS: i64 = 3;
+/// Rows older than this many lease lifetimes are deleted.
+#[cfg(feature = "postgres")]
+const REPLICA_FORGET_TTLS: i64 = 100;
 
 #[cfg(feature = "postgres")]
 impl PostgresHubWriterLease {
@@ -44,7 +57,24 @@ impl PostgresHubWriterLease {
             holder: holder.into(),
             ttl_ms,
             fence,
+            executors: None,
+            view: std::sync::RwLock::new(ReplicaView::default()),
         })
+    }
+
+    /// Record `executors` (comma-separated canonical names) as this
+    /// replica's set on every renewal, before it competes for the lease.
+    pub fn with_executors(mut self, executors: impl Into<String>) -> Self {
+        self.executors = Some(executors.into());
+        self
+    }
+
+    /// The replicas that had checked in at the last renewal.
+    pub fn replicas(&self) -> ReplicaView {
+        self.view
+            .read()
+            .map(|view| view.clone())
+            .unwrap_or_default()
     }
 
     /// Runs `work` on the lease connection, opening it if needed and
@@ -64,16 +94,56 @@ impl PostgresHubWriterLease {
         result
     }
 
+    /// Record this replica's set. A failure is reported, not returned: the
+    /// record is a planning aid, and apply still checks on the replica
+    /// that runs the step.
+    fn record_executors(&self) {
+        let Some(executors) = &self.executors else {
+            return;
+        };
+        let recorded = self.on_connection(|inner| {
+            inner.record_hub_replica(
+                &self.holder,
+                executors,
+                tenkai::version_skew::SERVER_VERSION,
+                self.ttl_ms * REPLICA_FORGET_TTLS,
+            )
+        });
+        if let Err(error) = recorded {
+            eprintln!("tenkai-server warning: recording this replica's executors failed: {error}");
+        }
+    }
+
+    /// Read every replica's set into the view. A failure keeps the last one.
+    fn refresh_replicas(&self) {
+        match self.on_connection(|inner| inner.hub_replicas(self.ttl_ms * REPLICA_WINDOW_TTLS)) {
+            Ok((replicas, leader)) => {
+                if let Ok(mut view) = self.view.write() {
+                    *view = ReplicaView {
+                        this: Some(self.holder.clone()),
+                        leader,
+                        replicas,
+                    };
+                }
+            }
+            Err(error) => {
+                eprintln!("tenkai-server warning: reading replica executors failed: {error}");
+            }
+        }
+    }
+
     /// Takes or renews the lease and publishes the role. A failed renewal
     /// fails closed: the fence becomes standby until a renewal succeeds.
     pub fn renew(&self) -> Result<WriterRole> {
         // Taken before the request: the database's expiry is at least this
         // plus the lifetime, so the local deadline never outlives the lease.
         let requested = std::time::Instant::now();
+        self.record_executors();
         match self.on_connection(|inner| inner.acquire_writer_lease(&self.holder, self.ttl_ms)) {
             Ok(role) => {
                 let lifetime = std::time::Duration::from_millis(self.ttl_ms.max(0) as u64);
                 self.fence.set_until(role.clone(), requested + lifetime);
+                self.refresh_replicas();
                 Ok(role)
             }
             Err(error) => {
@@ -133,6 +203,14 @@ impl HubWriterLease {
     }
 
     pub fn holder(&self) -> &str {
+        match *self {}
+    }
+
+    pub fn with_executors(self, _executors: impl Into<String>) -> Self {
+        match self {}
+    }
+
+    pub fn replicas(&self) -> ReplicaView {
         match *self {}
     }
 }

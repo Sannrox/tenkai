@@ -19,6 +19,11 @@ const PROPERTY_PREFIX: &str = "observed_runtime.";
 pub struct EnvironmentRuntimeReport {
     pub environment: String,
     pub components: Vec<ObservedRuntimeComponent>,
+    /// What the processes that run this environment's steps can execute
+    /// (ADR 0057): its runtime's set, or the server replicas' common set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub supported_executors: Option<crate::execution_capabilities::SupportedExecutors>,
 }
 
 /// Observed state of one deployed product on an environment.
@@ -197,9 +202,13 @@ pub async fn report(ctx: &mut Ctx, environment: &str) -> Result<EnvironmentRunti
         components.push(component);
     }
     components.sort_by(|left, right| left.product.cmp(&right.product));
+    let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
+    let supported_executors =
+        Some(crate::execution_capabilities::supported_for(ctx, environment, &executors).await?);
     Ok(EnvironmentRuntimeReport {
         environment: env_obj.name,
         components,
+        supported_executors,
     })
 }
 

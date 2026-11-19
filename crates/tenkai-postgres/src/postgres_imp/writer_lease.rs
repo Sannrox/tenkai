@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use postgres::Transaction;
+use tenkai::execution_capabilities::{ProcessExecutors, ProcessKind, parse_names};
 use tenkai::writer_fence::{WriterFence, WriterRole};
 
 use super::{Inner, Result, StoreError, pg};
@@ -146,6 +147,77 @@ impl Inner {
             )
             .map_err(pg)?;
             Ok(())
+        })
+    }
+}
+
+impl Inner {
+    /// Record `holder`'s installed executors at the database's time, and
+    /// forget replicas that have not checked in for `forget_ms` (ADR 0057).
+    /// Not fenced: a standby records its set before it competes.
+    pub fn record_hub_replica(
+        &self,
+        holder: &str,
+        executors: &str,
+        version: &str,
+        forget_ms: i64,
+    ) -> Result<()> {
+        let (holder, executors, version) =
+            (holder.to_owned(), executors.to_owned(), version.to_owned());
+        self.with_schema("public", move |tx| {
+            bound_lease_transaction(tx, 5_000)?;
+            tx.execute(
+                &format!(
+                    "INSERT INTO tenkai_hub_replicas (holder, executors, version, checked_in_at)
+                     VALUES ($1, $2, $3, {DB_NOW})
+                     ON CONFLICT (holder) DO UPDATE SET executors = excluded.executors,
+                         version = excluded.version, checked_in_at = excluded.checked_in_at"
+                ),
+                &[&holder, &executors, &version],
+            )
+            .map_err(pg)?;
+            tx.execute(
+                &format!("DELETE FROM tenkai_hub_replicas WHERE checked_in_at < {DB_NOW} - $1"),
+                &[&forget_ms],
+            )
+            .map_err(pg)?;
+            Ok(())
+        })
+    }
+
+    /// Replicas that checked in within `window_ms`, and the holder of a
+    /// live writer lease.
+    pub fn hub_replicas(&self, window_ms: i64) -> Result<(Vec<ProcessExecutors>, Option<String>)> {
+        self.with_schema("public", move |tx| {
+            let replicas = tx
+                .query(
+                    &format!(
+                        "SELECT holder, executors, version, checked_in_at FROM tenkai_hub_replicas
+                         WHERE checked_in_at >= {DB_NOW} - $1 ORDER BY holder"
+                    ),
+                    &[&window_ms],
+                )
+                .map_err(pg)?
+                .into_iter()
+                .map(|row| ProcessExecutors {
+                    kind: ProcessKind::Replica,
+                    id: row.get(0),
+                    executors: Some(parse_names(row.get(1))),
+                    version: Some(row.get(2)),
+                    checked_in_at: row.get(3),
+                })
+                .collect();
+            let leader = tx
+                .query_opt(
+                    &format!(
+                        "SELECT holder FROM tenkai_hub_writer_lease
+                         WHERE id = 1 AND expires_at > {DB_NOW}"
+                    ),
+                    &[],
+                )
+                .map_err(pg)?
+                .map(|row| row.get(0));
+            Ok((replicas, leader))
         })
     }
 }

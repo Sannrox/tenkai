@@ -132,7 +132,7 @@ impl Fixture {
     }
 
     async fn apply(&mut self, executors: &SoftwareExecutors) -> anyhow::Result<Vec<Outcome>> {
-        let plan = crate::plan::create(&mut self.ctx, "local").await?;
+        let plan = crate::plan::create_with(&mut self.ctx, "local", executors).await?;
         super::execute_with_options(
             &mut self.ctx,
             &plan.id,
@@ -337,7 +337,7 @@ async fn a_plan_that_changes_a_product_executor_is_refused() {
     let error = fixture.apply(&executors).await.unwrap_err().to_string();
 
     assert!(
-        error.contains("installed with the shell executor")
+        error.contains("installed with the fake executor")
             && error.contains("resolves to kubernetes-inprocess"),
         "{error}"
     );
@@ -453,7 +453,7 @@ async fn an_unsubscribed_release_is_removed_through_its_own_executor() {
     );
     assert_eq!(in_process.calls(), ["apply app@1.0.0", "remove app@1.0.0"]);
     assert_eq!(fixture.deployed("app").await, None);
-    let next = crate::plan::create(&mut fixture.ctx, "local")
+    let next = crate::plan::create_with(&mut fixture.ctx, "local", &executors)
         .await
         .unwrap();
     assert!(next.steps.is_empty(), "{:?}", next.steps);
@@ -497,7 +497,7 @@ async fn a_provider_is_unsubscribed_only_after_its_bound_dependents() {
         .unwrap();
     // Declared contracts order the removals dependents first; a binding
     // alone only gates the unsubscribe.
-    let plan = crate::plan::create(&mut fixture.ctx, "local")
+    let plan = crate::plan::create_with(&mut fixture.ctx, "local", &executors)
         .await
         .unwrap();
     let mut removals: Vec<_> = plan
@@ -591,7 +591,7 @@ async fn a_failed_removal_is_retried_by_the_next_plan() {
         "{:?}",
         environment.properties
     );
-    let next = crate::plan::create(&mut fixture.ctx, "local")
+    let next = crate::plan::create_with(&mut fixture.ctx, "local", &executors)
         .await
         .unwrap();
     assert!(next.steps.is_empty(), "{:?}", next.steps);
@@ -623,7 +623,7 @@ async fn a_failed_first_install_is_removed_after_unsubscribing() {
         "{removed:?}"
     );
     assert_eq!(in_process.calls()[before..], ["remove app@1.0.0"]);
-    let next = crate::plan::create(&mut fixture.ctx, "local")
+    let next = crate::plan::create_with(&mut fixture.ctx, "local", &executors)
         .await
         .unwrap();
     assert!(next.steps.is_empty(), "{:?}", next.steps);
@@ -647,7 +647,7 @@ async fn a_failure_an_older_server_keyed_by_product_removes_no_other_instance() 
         .await
         .unwrap();
     // The plan that failed installs instance blue; the record names the product.
-    let failed = crate::plan::create(&mut fixture.ctx, "local")
+    let failed = crate::plan::create_with(&mut fixture.ctx, "local", &executors)
         .await
         .unwrap();
     assert_eq!(failed.steps[0].instance_name(), "blue");
@@ -662,7 +662,7 @@ async fn a_failure_an_older_server_keyed_by_product_removes_no_other_instance() 
     }
     fixture.ctx.put(environment).await.unwrap();
 
-    let plan = crate::plan::create(&mut fixture.ctx, "local")
+    let plan = crate::plan::create_with(&mut fixture.ctx, "local", &executors)
         .await
         .unwrap();
 
@@ -688,7 +688,7 @@ async fn a_runtime_gets_no_removal_package_once_the_instance_is_subscribed_again
     unsubscribe(&mut fixture, "app", Some("1.0.0"), &executors)
         .await
         .unwrap();
-    let removal = crate::plan::create(&mut fixture.ctx, "local")
+    let removal = crate::plan::create_with(&mut fixture.ctx, "local", &executors)
         .await
         .unwrap();
     crate::plan::subscribe(&mut fixture.ctx, "local", "app", "stable")
@@ -755,4 +755,153 @@ async fn publication_binds_os_image_to_host_releases_only() {
             .contains("[os_image] is only supported on releases with deploy.executor = \"host\""),
         "{error:#}"
     );
+}
+
+/// Executor sets a host would read from replica and runtime check-ins
+/// (ADR 0057), set directly by the test.
+#[derive(Default)]
+struct CheckIns {
+    replicas: Mutex<crate::execution_capabilities::ReplicaView>,
+    runtimes: Mutex<Vec<(String, crate::execution_capabilities::ProcessExecutors)>>,
+}
+
+impl crate::execution_capabilities::ExecutionCapabilitySource for CheckIns {
+    fn replicas(&self) -> crate::execution_capabilities::ReplicaView {
+        self.replicas.lock().unwrap().clone()
+    }
+
+    fn runtimes(
+        &self,
+    ) -> anyhow::Result<Vec<(String, crate::execution_capabilities::ProcessExecutors)>> {
+        Ok(self.runtimes.lock().unwrap().clone())
+    }
+}
+
+fn checked_in(
+    kind: crate::execution_capabilities::ProcessKind,
+    id: &str,
+    executors: Option<&str>,
+    checked_in_at: i64,
+) -> crate::execution_capabilities::ProcessExecutors {
+    crate::execution_capabilities::ProcessExecutors {
+        kind,
+        id: id.into(),
+        version: None,
+        executors: executors.map(crate::execution_capabilities::parse_names),
+        checked_in_at,
+    }
+}
+
+/// A fixture whose planner reads `check_ins`, with a `docker` release and
+/// a docker adapter in this process.
+async fn docker_fixture(name: &str, check_ins: &Arc<CheckIns>) -> (Fixture, SoftwareExecutors) {
+    let mut fixture = Fixture::new(name).await;
+    fixture.ctx = fixture
+        .ctx
+        .clone()
+        .with_execution_capabilities(check_ins.clone());
+    fixture
+        .release("api", "1.0.0", "install = \"true\"\nexecutor = \"docker\"")
+        .await;
+    let executors = SoftwareExecutors::with_default(Arc::new(Recorder::default()))
+        .with_adapter(Kind::Docker, Arc::new(Recorder::default()));
+    (fixture, executors)
+}
+
+#[tokio::test]
+async fn a_plan_is_refused_until_every_replica_has_the_declared_executor() {
+    use crate::execution_capabilities::{ProcessKind::Replica, ReplicaView};
+    let check_ins = Arc::new(CheckIns::default());
+    *check_ins.replicas.lock().unwrap() = ReplicaView {
+        this: Some("leader".into()),
+        leader: Some("leader".into()),
+        replicas: vec![
+            checked_in(Replica, "leader", Some("shell,docker"), 0),
+            checked_in(Replica, "standby", Some("shell"), 0),
+        ],
+    };
+    let (mut fixture, executors) = docker_fixture("replicas", &check_ins).await;
+
+    // This process has docker; the standby that may take over does not.
+    let error = crate::plan::create_with(&mut fixture.ctx, "local", &executors)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("tenkai:release:api@1.0.0")
+            && error.contains("\"docker\"")
+            && error.contains("not installed on standby that"),
+        "{error}"
+    );
+
+    check_ins.replicas.lock().unwrap().replicas[1] =
+        checked_in(Replica, "standby", Some("docker,shell"), 0);
+    crate::plan::create_with(&mut fixture.ctx, "local", &executors)
+        .await
+        .unwrap();
+}
+
+/// A leader that recorded no set runs a version before ADR 0057, so
+/// planning cannot tell and leaves the check to apply.
+#[tokio::test]
+async fn an_unrecorded_leader_leaves_the_executor_check_to_apply() {
+    use crate::execution_capabilities::{ProcessKind::Replica, ReplicaView};
+    let check_ins = Arc::new(CheckIns::default());
+    *check_ins.replicas.lock().unwrap() = ReplicaView {
+        this: Some("new".into()),
+        leader: Some("old".into()),
+        replicas: vec![checked_in(Replica, "new", Some("shell"), 0)],
+    };
+    let (mut fixture, executors) = docker_fixture("old-leader", &check_ins).await;
+
+    crate::plan::create_with(&mut fixture.ctx, "local", &executors)
+        .await
+        .unwrap();
+}
+
+/// A runtime-run environment is checked against its runtime, not this
+/// process; a runtime that has not checked in recently makes it unknown.
+#[tokio::test]
+async fn a_runtime_environment_is_checked_against_its_fresh_runtime() {
+    use crate::execution_capabilities::ProcessKind::Runtime;
+    let check_ins = Arc::new(CheckIns::default());
+    let now = crate::now_millis();
+    *check_ins.runtimes.lock().unwrap() = vec![(
+        "local".into(),
+        checked_in(Runtime, "runner/instance", Some("shell,helm"), now),
+    )];
+    let (mut fixture, executors) = docker_fixture("runtime", &check_ins).await;
+
+    let error = crate::plan::create_with(&mut fixture.ctx, "local", &executors)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("not installed on runner/instance"),
+        "{error}"
+    );
+
+    check_ins.runtimes.lock().unwrap()[0].1.checked_in_at =
+        now - crate::execution_capabilities::RUNTIME_CHECK_IN_WINDOW_MS - 1;
+    crate::plan::create_with(&mut fixture.ctx, "local", &executors)
+        .await
+        .unwrap();
+}
+
+/// Without a host source, embedded planning refuses on its own set, as
+/// apply in the same process would.
+#[tokio::test]
+async fn embedded_planning_refuses_an_executor_this_process_lacks() {
+    let mut fixture = Fixture::new("embedded-plan").await;
+    fixture
+        .release("api", "1.0.0", "install = \"true\"\nexecutor = \"docker\"")
+        .await;
+    let executors = SoftwareExecutors::with_default(Arc::new(Recorder::default()));
+
+    let error = crate::plan::create_with(&mut fixture.ctx, "local", &executors)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("not installed on this process"), "{error}");
 }

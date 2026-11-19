@@ -65,6 +65,12 @@ Soft: #874 and #870 can make takeover timing noisy; record the measured
   stays `200`, so it is kept running but sent no traffic.
 - Logs from every replica are collected; the lease writes one
   `tenkai.writer_lease role=…` line per change of role.
+- Every replica has the same executors installed. Each records its set on
+  every lease renewal, and plans are refused for a declared executor that
+  any replica that checked in lacks, so a takeover cannot strand a plan.
+  `GET /v1/fleet/status` lists each replica's `executors`, and the
+  leader's `/readyz` names peers that differ in `replica_executors_differ`
+  ([ADR 0057](decisions/0057-advertise-and-enforce-execution-capabilities.md)).
 
 ## Detection
 
@@ -140,6 +146,7 @@ replica clock skew does not change who leads.
 | Leader killed, and stopped then resumed, inside a write; takeover within the bound; one receipt per step; the resumed commit refused | `live_failover_drill` (#749), CI job `Failover drill` |
 | Two environments; kill the writer; takeover; exactly-once receipts; repeat after replacing current-binary replica processes; unfenced stall step commits | `live_ha_qualification_drill` (#903), `bash scripts/hub-ha-qualification-drill.sh` |
 | Standby is live and not ready | `a_standby_replica_is_live_but_not_ready` (#748) |
+| Replicas record their executors before competing for the lease; the leader sees a standby's set | `live_replicas_record_their_executors_before_competing_for_the_lease` (#1375) |
 | PostgreSQL is the sole store; catalog and terminal-outcome export live in each tenant schema; startup names any missing surface | `--require-enterprise-profile` (#747, #764, #765) |
 
 Related: [multi-replica compose steps](multi-replica-hub-runbook.md),

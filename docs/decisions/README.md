@@ -56,3 +56,4 @@
 - [0054 — Subscription rules by selector](0054-subscription-rules-by-selector.md) (proposed; §8 promotion targets and wave cohorts accepted)
 - [0055 — Signer quorum for promotion and policy changes](0055-signer-quorum-for-promotion-and-policy.md) (proposed)
 - [0056 — Recall removal scope, range exclusions and an instance-count threshold](0056-recall-scope-exclusions-and-count-threshold.md)
+- [0057 — Advertise and enforce what each server and runtime can execute](0057-advertise-and-enforce-execution-capabilities.md)

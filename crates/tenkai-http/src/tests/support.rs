@@ -156,6 +156,7 @@ impl ReconcilePort for FixedReconciler {
                     awaiting_approval: false,
                     drifted_instances: 0,
                     certificates: None,
+                    runtimes: Vec::new(),
                     posture: "empty".into(),
                     criticality: None,
                     open_exposures: Vec::new(),
@@ -168,6 +169,7 @@ impl ReconcilePort for FixedReconciler {
                 environments_unhealthy: 0,
                 environments_empty: 1,
                 promotion_policies: Vec::new(),
+                replicas: Vec::new(),
             })
         })
     }

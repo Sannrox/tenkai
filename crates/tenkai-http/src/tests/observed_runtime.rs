@@ -137,6 +137,11 @@ async fn runtime_get_requires_read_and_returns_docker_and_model_runtime_fixtures
     assert_eq!(status, StatusCode::OK, "{empty}");
     assert_eq!(empty["environment"], "prod");
     assert_eq!(empty["components"], serde_json::json!([]));
+    assert_eq!(empty["supported_executors"]["state"], "known", "{empty}");
+    assert!(
+        empty["supported_executors"]["executors"].is_array(),
+        "{empty}"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

@@ -520,7 +520,7 @@ mod tests {
             &mut self,
             executors: &SoftwareExecutors,
         ) -> anyhow::Result<Vec<crate::apply::Outcome>> {
-            let plan = crate::plan::create(&mut self.ctx, "local").await?;
+            let plan = crate::plan::create_with(&mut self.ctx, "local", executors).await?;
             crate::apply::execute_with_options(
                 &mut self.ctx,
                 &plan.id,

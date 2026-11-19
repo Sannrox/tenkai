@@ -2478,6 +2478,18 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
         }
         row.certificates = certificates.remove(&row.name);
     }
+    if let Some(source) = ctx.execution_capabilities() {
+        report.replicas = source.replicas().replicas;
+        for (environment, runtime) in source.runtimes()? {
+            if let Some(row) = report
+                .environments
+                .iter_mut()
+                .find(|row| row.name == environment || row.id == environment)
+            {
+                row.runtimes.push(runtime);
+            }
+        }
+    }
     Ok(report)
 }
 
@@ -5168,6 +5180,103 @@ mod tests {
                 .iter()
                 .all(|row| row.posture == "empty" && row.latest_plan_state.is_none())
         );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    /// ADR 0057: fleet status lists replica check-ins and attaches each
+    /// runtime to the environment it recorded, by name or id.
+    #[tokio::test]
+    async fn fleet_status_lists_replica_and_runtime_executors() {
+        use crate::execution_capabilities::{
+            ExecutionCapabilitySource, ProcessExecutors, ProcessKind, ReplicaView, parse_names,
+        };
+        use std::sync::Arc;
+
+        struct CheckIns {
+            replicas: ReplicaView,
+            runtimes: Vec<(String, ProcessExecutors)>,
+        }
+
+        impl ExecutionCapabilitySource for CheckIns {
+            fn replicas(&self) -> ReplicaView {
+                self.replicas.clone()
+            }
+
+            fn runtimes(&self) -> anyhow::Result<Vec<(String, ProcessExecutors)>> {
+                Ok(self.runtimes.clone())
+            }
+        }
+
+        let process = |kind, id: &str, executors: &str| ProcessExecutors {
+            kind,
+            id: id.into(),
+            version: None,
+            executors: Some(parse_names(executors)),
+            checked_in_at: 1,
+        };
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-fleet-executors-{}-{}-{}.db",
+            std::process::id(),
+            crate::now_millis(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_file(&database);
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "prod", "Prod").await.unwrap();
+        env_add(&mut ctx, "stage", "Stage").await.unwrap();
+        let prod_id = crate::ontology::env_id("prod");
+        ctx = ctx.with_execution_capabilities(Arc::new(CheckIns {
+            replicas: ReplicaView {
+                this: Some("hub-a".into()),
+                leader: Some("hub-a".into()),
+                replicas: vec![
+                    process(ProcessKind::Replica, "hub-a", "shell,docker"),
+                    process(ProcessKind::Replica, "hub-b", "shell"),
+                ],
+            },
+            runtimes: vec![
+                (
+                    "prod".into(),
+                    process(ProcessKind::Runtime, "runner/a", "shell,docker"),
+                ),
+                (
+                    prod_id.clone(),
+                    process(ProcessKind::Runtime, "runner/b", "shell"),
+                ),
+                (
+                    "missing".into(),
+                    process(ProcessKind::Runtime, "runner/gone", "shell"),
+                ),
+            ],
+        }));
+        let report = fleet_status(&mut ctx).await.unwrap();
+        assert_eq!(
+            report
+                .replicas
+                .iter()
+                .map(|replica| replica.id.as_str())
+                .collect::<Vec<_>>(),
+            ["hub-a", "hub-b"]
+        );
+        let prod = report
+            .environments
+            .iter()
+            .find(|row| row.name == "prod")
+            .unwrap();
+        assert_eq!(
+            prod.runtimes
+                .iter()
+                .map(|runtime| runtime.id.as_str())
+                .collect::<Vec<_>>(),
+            ["runner/a", "runner/b"]
+        );
+        let stage = report
+            .environments
+            .iter()
+            .find(|row| row.name == "stage")
+            .unwrap();
+        assert!(stage.runtimes.is_empty());
         let _ = std::fs::remove_file(&database);
     }
 

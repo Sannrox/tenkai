@@ -281,3 +281,60 @@ fn live_a_trust_crossing_is_appended_once_across_a_takeover() {
     drop((a, b));
     drop(scratch);
 }
+
+/// Every replica records its executors on each renewal, a standby too, so
+/// the leader's view names the standby and what it lacks (ADR 0057). A
+/// replica that stops checking in leaves the view after three lifetimes.
+#[cfg(feature = "postgres")]
+#[test]
+#[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
+fn live_replicas_record_their_executors_before_competing_for_the_lease() {
+    let scratch = ScratchDatabase::create();
+    let config = PostgresTenantConfig::new(scratch.url.clone()).expect("scratch config");
+    let open = |holder: &str, executors: &str| {
+        PostgresHubWriterLease::open(&config, holder, 1_000, Arc::new(WriterFence::default()))
+            .expect("lease")
+            .with_executors(executors)
+    };
+    let leader = open("hub-a", "docker,shell");
+    let standby = open("hub-b", "shell");
+
+    assert!(matches!(
+        leader.renew().expect("a"),
+        WriterRole::Leader { .. }
+    ));
+    assert_eq!(standby.renew().expect("b"), WriterRole::Standby);
+    leader.renew().expect("a again");
+
+    let view = leader.replicas();
+    assert_eq!(view.leader.as_deref(), Some("hub-a"));
+    assert_eq!(
+        view.replicas
+            .iter()
+            .map(|replica| (replica.id.as_str(), replica.executors.clone().unwrap()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "hub-a",
+                tenkai::execution_capabilities::parse_names("docker,shell")
+            ),
+            (
+                "hub-b",
+                tenkai::execution_capabilities::parse_names("shell")
+            ),
+        ]
+    );
+    assert_eq!(view.differing_peers(), ["hub-b"]);
+
+    // The standby stops; past three lifetimes it is no longer counted.
+    std::thread::sleep(std::time::Duration::from_millis(3_100));
+    leader.renew().expect("a after the standby left");
+    let view = leader.replicas();
+    assert_eq!(
+        view.replicas
+            .iter()
+            .map(|replica| replica.id.as_str())
+            .collect::<Vec<_>>(),
+        ["hub-a"]
+    );
+}

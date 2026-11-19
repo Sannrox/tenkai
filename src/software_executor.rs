@@ -735,7 +735,7 @@ pub fn k8s_label_value(raw: &str) -> String {
 /// the process default `TENKAI_SOFTWARE_EXECUTOR` (ADR 0041). Both read the
 /// same name set through [`SoftwareExecutorKind::from_name`]; the test-only
 /// `fake` selector is the one process name a manifest cannot declare.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SoftwareExecutorKind {
     /// `deploy.install` behind `tenkai-executor-guard`, as the server's user.
     Shell,

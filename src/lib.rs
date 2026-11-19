@@ -209,6 +209,7 @@ pub mod environment;
 pub mod environment_bindings;
 pub mod environment_config;
 pub mod environment_dependencies;
+pub mod execution_capabilities;
 pub mod exports;
 pub mod exposure;
 pub mod family_release;

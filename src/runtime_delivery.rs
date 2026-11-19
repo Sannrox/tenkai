@@ -1180,7 +1180,14 @@ pub struct RuntimeCaller<'a> {
     /// `reboot` as awaiting the boot and resumes at `verify` after it (ADR
     /// 0051 §3). Only such a runtime is handed an OS image plan.
     pub os_image: bool,
+    /// The agent's installed executor kinds from `x-tenkai-runtime-executors`
+    /// (ADR 0057), comma-separated. Recorded on work pull; planning refuses
+    /// a release whose executor the runtime lacks.
+    pub executors: Option<&'a str>,
 }
+
+/// The header a runtime names its installed executor kinds in (ADR 0057).
+pub const EXECUTORS_HEADER: &str = "x-tenkai-runtime-executors";
 
 /// The capability a runtime names to be offered identity issuer work.
 pub const WORKLOAD_IDENTITY_CAPABILITY: &str = "workload_identity";
@@ -1230,7 +1237,9 @@ enum Activity {
 const ACTIVITY_INTERVAL_MS: i64 = 30_000;
 
 /// Last written activity per `(runner, instance, kind)`, with its version.
-type ActivityWrites = HashMap<(String, String, Activity), (i64, Option<String>)>;
+/// Per runner instance and kind: when it was last written, with the
+/// version and executors it carried.
+type ActivityWrites = HashMap<(String, String, Activity), (i64, Option<String>, Option<String>)>;
 
 /// Deep runtime delivery module used after transport extraction.
 pub struct RuntimeDeliveryOperations {
@@ -1274,11 +1283,18 @@ impl RuntimeDeliveryOperations {
         identity: &RuntimeIdentity,
         environment: &str,
         version: Option<&str>,
+        executors: Option<&str>,
         kind: Activity,
     ) {
         let version = version
             .filter(|version| !version.is_empty() && version.len() <= 64 && version.is_ascii())
             .map(str::to_string);
+        let executors = executors.filter(|names| names.len() <= 256).map(|names| {
+            let names: Vec<_> = crate::execution_capabilities::parse_names(names)
+                .into_iter()
+                .collect();
+            names.join(",")
+        });
         let now = crate::now_millis();
         let key = (identity.runner_id.clone(), identity.instance.clone(), kind);
         {
@@ -1286,13 +1302,14 @@ impl RuntimeDeliveryOperations {
                 .activity
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            if let Some((at, recorded)) = written.get(&key)
+            if let Some((at, recorded, recorded_executors)) = written.get(&key)
                 && now - at < ACTIVITY_INTERVAL_MS
                 && (version.is_none() || version == *recorded)
+                && (executors.is_none() || executors == *recorded_executors)
             {
                 return;
             }
-            written.insert(key, (now, version.clone()));
+            written.insert(key, (now, version.clone(), executors.clone()));
         }
         let at = Some(now);
         let record = crate::storage::RuntimeActivityRecord {
@@ -1304,6 +1321,7 @@ impl RuntimeDeliveryOperations {
             last_work_at: at.filter(|_| kind == Activity::Work),
             last_heartbeat_at: at.filter(|_| kind == Activity::Heartbeat),
             last_inventory_at: at.filter(|_| kind == Activity::Inventory),
+            executors,
         };
         if let Err(error) = self.store.record_runtime_activity(&record) {
             eprintln!("recording runtime activity failed (continuing): {error}");
@@ -1469,7 +1487,13 @@ impl RuntimeDeliveryOperations {
     ) -> Result<RuntimeWork, RuntimeDeliveryError> {
         let caller = *caller;
         let identity = self.admit_work(token, &caller, environment).await?;
-        self.note_activity(&identity, environment, caller.version, Activity::Work);
+        self.note_activity(
+            &identity,
+            environment,
+            caller.version,
+            caller.executors,
+            Activity::Work,
+        );
         // While the server may still run a plan it began before a runtime
         // enrolled (#630), no plan is handed out. Checked before the plan is
         // chosen, so one the server finished meanwhile is seen as finished.
@@ -2059,7 +2083,13 @@ impl RuntimeDeliveryOperations {
     ) -> Result<RuntimeClaim, RuntimeDeliveryError> {
         let caller = caller.into();
         let identity = self.admit_work(token, &caller, environment).await?;
-        self.note_activity(&identity, environment, caller.version, Activity::Heartbeat);
+        self.note_activity(
+            &identity,
+            environment,
+            caller.version,
+            None,
+            Activity::Heartbeat,
+        );
         let Some(mut ctx) = self.reconciler.application_ctx() else {
             return Err(RuntimeDeliveryError::Unavailable(
                 "software compatibility preflight unavailable".into(),
@@ -2264,7 +2294,13 @@ impl RuntimeDeliveryOperations {
     ) -> Result<RuntimeHostRecordsResponse, RuntimeDeliveryError> {
         let caller = caller.into();
         let identity = self.admit_work(token, &caller, environment).await?;
-        self.note_activity(&identity, environment, caller.version, Activity::Inventory);
+        self.note_activity(
+            &identity,
+            environment,
+            caller.version,
+            None,
+            Activity::Inventory,
+        );
         let Some(mut ctx) = self.reconciler.application_ctx() else {
             return Err(RuntimeDeliveryError::Unavailable(
                 "environment state unavailable".into(),
@@ -2287,7 +2323,13 @@ impl RuntimeDeliveryOperations {
     ) -> Result<RuntimeCertificatesResponse, RuntimeDeliveryError> {
         let caller = caller.into();
         let identity = self.admit_work(token, &caller, environment).await?;
-        self.note_activity(&identity, environment, caller.version, Activity::Inventory);
+        self.note_activity(
+            &identity,
+            environment,
+            caller.version,
+            None,
+            Activity::Inventory,
+        );
         let Some(mut ctx) = self.reconciler.application_ctx() else {
             return Err(RuntimeDeliveryError::Unavailable(
                 "environment state unavailable".into(),
@@ -2310,7 +2352,13 @@ impl RuntimeDeliveryOperations {
     ) -> Result<RuntimeHealthResponse, RuntimeDeliveryError> {
         let caller = caller.into();
         let identity = self.admit_work(token, &caller, environment).await?;
-        self.note_activity(&identity, environment, caller.version, Activity::Inventory);
+        self.note_activity(
+            &identity,
+            environment,
+            caller.version,
+            None,
+            Activity::Inventory,
+        );
         let Some(mut ctx) = self.reconciler.application_ctx() else {
             return Err(RuntimeDeliveryError::Unavailable(
                 "environment state unavailable".into(),
@@ -2331,7 +2379,13 @@ impl RuntimeDeliveryOperations {
     ) -> Result<RuntimeInventoryResponse, RuntimeDeliveryError> {
         let caller = caller.into();
         let identity = self.admit_work(token, &caller, environment).await?;
-        self.note_activity(&identity, environment, caller.version, Activity::Inventory);
+        self.note_activity(
+            &identity,
+            environment,
+            caller.version,
+            None,
+            Activity::Inventory,
+        );
         validate_inventory_source(&report.source)?;
         let applied = self
             .reconciler
@@ -3878,6 +3932,7 @@ health = "curl -f http://127.0.0.1:9/health"
                 issuer_removal: false,
                 instance_health: false,
                 os_image: false,
+                executors: None,
             };
             operations.admit(None, &caller, environment)
         };
@@ -3930,6 +3985,7 @@ health = "curl -f http://127.0.0.1:9/health"
                         issuer_removal: false,
                         instance_health: false,
                         os_image: false,
+                        executors: None,
                     },
                     "prod",
                     &request,
@@ -4115,6 +4171,7 @@ health = "curl -f http://127.0.0.1:9/health"
                             issuer_removal: false,
                             instance_health: false,
                             os_image: false,
+                            executors: None,
                         },
                         "prod",
                         &request,
@@ -4203,6 +4260,7 @@ health = "curl -f http://127.0.0.1:9/health"
                         issuer_removal: false,
                         instance_health: false,
                         os_image: false,
+                        executors: None,
                     },
                     "prod",
                     RuntimeInventoryReport {
@@ -5177,6 +5235,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     issuer_removal: false,
                     instance_health: false,
                     os_image: false,
+                    executors: None,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -5297,6 +5356,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     issuer_removal: false,
                     instance_health: false,
                     os_image: false,
+                    executors: None,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -5338,6 +5398,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     issuer_removal: false,
                     instance_health: false,
                     os_image: false,
+                    executors: None,
                 },
                 "prod",
                 &RuntimeCertificateRequest {

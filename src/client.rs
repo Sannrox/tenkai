@@ -93,6 +93,8 @@ pub struct Ctx {
     plan_kind_list: Arc<PlanKindListTick>,
     health_metrics: Option<Arc<dyn crate::health_gate::HealthMetricsSource>>,
     trust_sources: Option<Arc<crate::trust_posture::TrustSources>>,
+    execution_capabilities:
+        Option<Arc<dyn crate::execution_capabilities::ExecutionCapabilitySource>>,
     pub(crate) held_execution_leases: Vec<HeldExecutionLease>,
     plan_proposer: Option<crate::plan::PlanProposer>,
 }
@@ -253,6 +255,7 @@ pub async fn connect() -> Result<Ctx> {
         plan_kind_list: Arc::new(PlanKindListTick::default()),
         health_metrics: None,
         trust_sources: None,
+        execution_capabilities: None,
         held_execution_leases: Vec::new(),
         plan_proposer: None,
     })

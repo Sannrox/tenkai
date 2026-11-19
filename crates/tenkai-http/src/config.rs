@@ -74,6 +74,10 @@ pub struct ServerConfig {
     /// The hub writer role on multi-replica hubs (#748): a standby reports
     /// not ready. `None` on single-replica hosts.
     pub writer_fence: Option<Arc<tenkai::writer_fence::WriterFence>>,
+    /// Executor sets of this server's replicas and runtimes (ADR 0057).
+    /// `/readyz` names peers whose set differs from this replica's.
+    pub execution_capabilities:
+        Option<Arc<dyn tenkai::execution_capabilities::ExecutionCapabilitySource>>,
     /// The host's trust configuration, shown by `GET /v1/trust` (#676).
     pub trust_sources: tenkai::trust_posture::TrustSources,
     /// The worst certificate status and since when, refreshed in the
@@ -119,6 +123,7 @@ impl ServerConfig {
             runner_ca: None,
             runner_certificates_admitted: false,
             writer_fence: None,
+            execution_capabilities: None,
             trust_sources: Default::default(),
             trust_status: Default::default(),
             host_identity: None,
