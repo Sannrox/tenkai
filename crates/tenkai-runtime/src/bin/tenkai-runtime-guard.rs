@@ -40,13 +40,23 @@ async fn main() -> Result<()> {
     let mut parent = tokio::io::stdin();
     let mut byte = [0_u8; 1];
     let status = tokio::select! {
-        status = child.wait() => return status.context("waiting for runtime executor").and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                anyhow::bail!("runtime executor failed")
-            }
-        }),
+        status = child.wait() => {
+            // Exit here, not by returning: dropping the runtime waits for the
+            // blocking stdin read, which never ends while the parent holds
+            // the pipe open, so the parent would never see the exit.
+            let code = match status {
+                Ok(status) if status.success() => 0,
+                Ok(_) => {
+                    eprintln!("runtime executor failed");
+                    1
+                }
+                Err(error) => {
+                    eprintln!("waiting for runtime executor: {error}");
+                    1
+                }
+            };
+            std::process::exit(code);
+        }
         read = parent.read(&mut byte) => read,
         _ = shutdown_signal(interrupt, terminate) => Ok(0),
     };

@@ -161,6 +161,18 @@ fn run_sequence(drill: &BindDrill) {
     assert!(planned.contains("plan id:"), "{planned}");
     assert!(planned.contains("install   app"), "{planned}");
 
+    // Before app is installed, unbinding succeeds and the ambiguity is back.
+    let unbound_ok = drill.cli.ok(&["env", "unbind", "local", "app", "database"]);
+    assert!(
+        unbound_ok.contains("unbound local app database"),
+        "{unbound_ok}"
+    );
+    let ambiguous = drill.cli.fail(&["plan", "--env", "local"]);
+    assert!(ambiguous.contains("AmbiguousContract"), "{ambiguous}");
+    drill
+        .cli
+        .ok(&["env", "bind", "local", "app", "database=db-a"]);
+
     drill
         .cli
         .ok(&["env", "reconcile", "local", "app", "--deployed", "1.0.0"]);
