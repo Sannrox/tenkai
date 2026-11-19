@@ -73,6 +73,9 @@ pub struct BundleBuildRequest<'a> {
     pub advisory_feed: Option<&'a [u8]>,
     /// Optional `tenkai.derived-criticality.v2` JSON carried as `criticality/derived.json`.
     pub derived_criticality: Option<&'a [u8]>,
+    /// Operator docs packed under `docs/<version>/`. Production `tenkaictl`
+    /// supplies this tree's `docs/`; tests inject a fixture.
+    pub docs: &'a [(&'a str, &'a [u8])],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,8 +340,10 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
 
     // The docs of the Tenkai that built this bundle, readable offline (#646).
     let version = env!("CARGO_PKG_VERSION");
-    crate::offline_docs::insert(&mut payloads, version)?;
-    let doc_files: Vec<SbomFile> = crate::offline_docs::embedded()
+    crate::offline_docs::insert(&mut payloads, version, request.docs)?;
+    let doc_files: Vec<SbomFile> = request
+        .docs
+        .iter()
         .map(|(path, bytes)| {
             sbom_file(
                 &crate::offline_docs::entry_path(version, path),
@@ -1133,6 +1138,11 @@ mod tests {
     use base64::Engine as _;
     use std::sync::Arc;
 
+    const FIXTURE_DOCS: &[(&str, &[u8])] = &[
+        ("offline-bundles.md", b"# Offline bundles fixture\n"),
+        ("guides/install.md", b"# Install fixture\n"),
+    ];
+
     #[tokio::test]
     async fn hosts_only_bundle_carries_hosts_checksum_sbom_and_trust_roots() {
         let fixture = Fixture::new("hosts-only").await;
@@ -1760,8 +1770,8 @@ inputs = ["schemas"]
         }
     }
 
-    /// The bundle carries this build's docs under its version; extracted
-    /// from the verified bundle they are byte for byte the source docs.
+    /// The bundle carries the supplied docs under this build's version;
+    /// extracted from the verified bundle they are byte for byte the fixture.
     #[tokio::test]
     async fn the_bundle_carries_this_versions_docs() {
         let fixture = Fixture::new("docs").await;
@@ -1779,14 +1789,9 @@ inputs = ["schemas"]
         let out = fixture.root.join("docs-out");
         let written = crate::offline_docs::extract(&verified, &out).unwrap();
         assert_eq!(written, out.join(env!("CARGO_PKG_VERSION")));
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
-        for file in &index.files {
-            assert_eq!(
-                std::fs::read(written.join(&file.path)).unwrap(),
-                std::fs::read(source.join(&file.path)).unwrap(),
-                "{}",
-                file.path
-            );
+        assert_eq!(index.files.len(), FIXTURE_DOCS.len());
+        for (path, bytes) in FIXTURE_DOCS {
+            assert_eq!(std::fs::read(written.join(path)).unwrap(), *bytes, "{path}");
         }
         let checksums = String::from_utf8(payload(&built, CHECKSUM_MANIFEST_PATH)).unwrap();
         assert!(checksums.contains(crate::offline_docs::DOCS_INDEX_PATH));
@@ -2245,6 +2250,7 @@ max_startup_seconds = 30
                 base: None,
                 advisory_feed: None,
                 derived_criticality: None,
+                docs: FIXTURE_DOCS,
             }
         }
 

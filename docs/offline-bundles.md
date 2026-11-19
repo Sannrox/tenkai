@@ -269,7 +269,7 @@ anything is stored.
 ## Docs
 
 Every bundle carries the docs of the Tenkai version that built it, embedded
-at compile time from `docs/`, under `docs/<version>/` with a signed index
+at compile time into `tenkaictl` from `docs/`, under `docs/<version>/` with a signed index
 (`docs/index.json`, `tenkai.offline-docs.v1`) naming each file's digest. On a
 dark site, write them out as plain files:
 

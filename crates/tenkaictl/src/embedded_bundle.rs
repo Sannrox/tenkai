@@ -10,6 +10,10 @@ use tenkai::release_signing::TrustRoots;
 
 use crate::bundle_args::BundleCommand;
 
+mod embedded_docs {
+    include!(concat!(env!("OUT_DIR"), "/embedded_docs.rs"));
+}
+
 pub(crate) async fn run(ctx: &mut Ctx, command: BundleCommand) -> Result<()> {
     match command {
         BundleCommand::Build(args) => {
@@ -91,6 +95,7 @@ pub(crate) async fn run(ctx: &mut Ctx, command: BundleCommand) -> Result<()> {
                     base,
                     advisory_feed: advisory_feed.as_deref(),
                     derived_criticality: derived_criticality.as_deref(),
+                    docs: embedded_docs::DOCS,
                 },
             )
             .await?;
@@ -160,4 +165,24 @@ fn load_hosts(dir: &Path, provenance: HostBinaryProvenance) -> Result<Vec<HostBi
         );
     }
     Ok(inputs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn the_embedded_docs_are_this_trees_docs() {
+        let readme = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/offline-bundles.md"
+        ))
+        .unwrap();
+        let embedded: BTreeMap<_, _> = embedded_docs::DOCS.iter().copied().collect();
+        assert_eq!(
+            embedded.get("offline-bundles.md").copied(),
+            Some(readme.as_slice())
+        );
+    }
 }
