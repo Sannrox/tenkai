@@ -57,8 +57,10 @@ The approving principal is recorded on the train.
 
 A train is immutable: admitting the same profile again is a no-op, and a
 different profile under an admitted name is refused. Promoting a stable train
-is a no-op. Admitting and promoting need the management credential, like
-`promote`, and run with `--target embedded`.
+is a no-op. Two promotions at once never both write: one records its
+principal, and the other sees the stable train or is refused with a retry.
+Admitting and promoting need the management credential, like `promote`, and
+run with `--target embedded`.
 
 ## Automatic channel promotion
 

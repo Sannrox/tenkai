@@ -177,7 +177,8 @@ fn safe_relative(path: &str) -> Result<PathBuf> {
     Ok(candidate.to_path_buf())
 }
 
-fn media_type(path: &str) -> &'static str {
+/// The media type a bundled doc file is stored under.
+pub fn media_type(path: &str) -> &'static str {
     if path.ends_with(".md") {
         "text/markdown"
     } else if path.ends_with(".json") {

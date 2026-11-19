@@ -16,7 +16,7 @@ use super::action_governed::{
 };
 use super::action_remote::{
     apply_remote_ops, ensure_remote_type_enabled, preview_remote_decision,
-    record_remote_execution_decision, remote_governed_action_exists,
+    record_remote_execution_decision, refuse_divergent_type, remote_governed_action,
 };
 use super::{RemoteClient, remote_unary};
 use crate::pb::graph_action::{ActionResult, ActionTypeDef};
@@ -71,6 +71,7 @@ impl ActionLifecycle<'_> {
             } => {
                 let action_name = action.name.clone();
                 let governed = governed_action_type(&action)?;
+                let local = governed.clone();
                 let response: std::result::Result<PutGovernedActionTypeResponse, tonic::Status> =
                     remote_unary(
                         client,
@@ -89,12 +90,24 @@ impl ActionLifecycle<'_> {
                             )));
                         }
                     }
-                    Err(status) if status.code() == tonic::Code::AlreadyExists => {}
+                    // An existing type is success only when it is this
+                    // definition. Some hosts surface the conflict as Internal.
                     Err(status)
-                        if status.code() == tonic::Code::Internal
-                            && remote_governed_action_exists(client, &action_name).await =>
+                        if matches!(
+                            status.code(),
+                            tonic::Code::AlreadyExists | tonic::Code::Internal
+                        ) =>
                     {
-                        // Idempotent bootstrap against hosts that surface conflicts as Internal.
+                        match remote_governed_action(client, &action_name).await {
+                            Some(remote) => refuse_divergent_type(&local, &remote)
+                                .map_err(super::ClientError::Failed)?,
+                            None if status.code() == tonic::Code::AlreadyExists => {
+                                return Err(super::ClientError::Failed(anyhow!(
+                                    "remote action type {action_name} already exists but cannot be read to confirm it matches"
+                                )));
+                            }
+                            None => return Err(status.into()),
+                        }
                     }
                     Err(status) => return Err(status.into()),
                 }

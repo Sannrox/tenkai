@@ -244,5 +244,17 @@ async fn remote_graph_action_registration_uses_governed_rpc() {
             Some("Bearer provider-token".into())
         )]
     );
+
+    // Re-registering the same definition is idempotent; a changed one fails
+    // and names what differs instead of diverging silently.
+    ctx.register_action(action.clone()).await.unwrap();
+    let mut changed = action.clone();
+    changed.description = "a different description".into();
+    let error = ctx.register_action(changed).await.unwrap_err().to_string();
+    assert!(
+        error.contains(&action.name) && error.contains("different description"),
+        "{error}"
+    );
+    assert_eq!(state.governed_actions.lock().unwrap().len(), 1);
     server.abort();
 }

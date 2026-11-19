@@ -104,6 +104,10 @@ impl UpgradeEnvironmentStatus {
     }
 }
 
+/// Where an intermittent transfer stopped. `plan_digest` is the bound plan's
+/// executable digest (`sha256:...`); checkpoints written before it was bound
+/// hold the release digest there and must be resumed again (re-verified)
+/// before they can apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferCheckpoint {
     pub plan_id: String,
@@ -321,8 +325,8 @@ async fn interrupt_transfer_locked(
     let generation = current_generation(ctx, environment).await?;
     record.environments[index].plan_id = Some(plan.id.clone());
     record.environments[index].transfer = Some(TransferCheckpoint {
+        plan_digest: plan_binding_digest(&plan)?,
         plan_id: plan.id,
-        plan_digest: record.release_digest.clone(),
         release_digest: record.release_digest.clone(),
         artifact_digest: record.artifact_digest.clone(),
         generation,
@@ -366,7 +370,22 @@ async fn resume_transfer_locked(
     {
         bail!("interrupted transfer no longer matches the pinned release content");
     }
+    let plan = ensure_plan(ctx, &record, environment).await?;
+    let plan_digest = plan_binding_digest(&plan)?;
     let mut checkpoint = checkpoint;
+    match checkpoint_binding(&checkpoint, &plan, &plan_digest) {
+        CheckpointBinding::Bound => {}
+        // Resuming is the re-verification an unbound checkpoint needs; it
+        // still must belong to the plan this environment is bound to.
+        CheckpointBinding::Legacy => checkpoint.plan_digest = plan_digest,
+        CheckpointBinding::Mismatch => bail!(
+            "interrupted transfer for environment {environment} was checkpointed for plan {} ({}), \
+             not the bound plan {} ({plan_digest}); interrupt the transfer again",
+            checkpoint.plan_id,
+            checkpoint.plan_digest,
+            plan.id
+        ),
+    }
     checkpoint.verified = true;
     record.environments[index].transfer = Some(checkpoint);
     record.environments[index].detail = "transfer verified; ready to apply".into();
@@ -411,11 +430,16 @@ async fn advance_locked(
         }
         ConnectivityClass::Intermittent => {
             let generation = current_generation(ctx, &environment).await?;
+            let plan_digest = plan_binding_digest(&plan)?;
+            let binding = record.environments[index]
+                .transfer
+                .as_ref()
+                .map(|checkpoint| checkpoint_binding(checkpoint, &plan, &plan_digest));
             match record.environments[index].transfer.as_ref() {
                 None => {
                     record.environments[index].transfer = Some(TransferCheckpoint {
                         plan_id: plan.id.clone(),
-                        plan_digest: record.release_digest.clone(),
+                        plan_digest,
                         release_digest: record.release_digest.clone(),
                         artifact_digest: record.artifact_digest.clone(),
                         generation,
@@ -424,6 +448,28 @@ async fn advance_locked(
                     record.environments[index].status = UpgradeEnvironmentStatus::Interrupted;
                     record.environments[index].detail =
                         "intermittent transfer requires resume after verified content".into();
+                    record.status = UpgradeStatus::Interrupted;
+                }
+                Some(checkpoint)
+                    if checkpoint.verified && binding == Some(CheckpointBinding::Mismatch) =>
+                {
+                    bail!(
+                        "verified transfer for environment {environment} belongs to plan {} ({}), \
+                         not the bound plan {}; interrupt and resume the transfer again",
+                        checkpoint.plan_id,
+                        checkpoint.plan_digest,
+                        plan.id
+                    );
+                }
+                Some(checkpoint)
+                    if checkpoint.verified && binding == Some(CheckpointBinding::Legacy) =>
+                {
+                    let mut checkpoint = checkpoint.clone();
+                    checkpoint.verified = false;
+                    record.environments[index].transfer = Some(checkpoint);
+                    record.environments[index].status = UpgradeEnvironmentStatus::Interrupted;
+                    record.environments[index].detail =
+                        "transfer checkpoint predates plan binding; resume to re-verify".into();
                     record.status = UpgradeStatus::Interrupted;
                 }
                 Some(checkpoint) if !checkpoint.verified => {
@@ -1294,6 +1340,38 @@ async fn revalidate(record: &UpgradeRecord, ctx: &mut Ctx) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The digest a transfer checkpoint binds: the plan's executable content.
+fn plan_binding_digest(plan: &Plan) -> Result<String> {
+    Ok(format!("sha256:{}", plan.executable_digest()?))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CheckpointBinding {
+    /// Same plan id and executable digest.
+    Bound,
+    /// Same plan id, written before the digest was bound (it holds the
+    /// release digest instead): needs re-verification, not corrupt.
+    Legacy,
+    /// Another plan, or the plan's executable content changed.
+    Mismatch,
+}
+
+fn checkpoint_binding(
+    checkpoint: &TransferCheckpoint,
+    plan: &Plan,
+    plan_digest: &str,
+) -> CheckpointBinding {
+    if checkpoint.plan_id != plan.id {
+        CheckpointBinding::Mismatch
+    } else if checkpoint.plan_digest == plan_digest {
+        CheckpointBinding::Bound
+    } else if checkpoint.plan_digest == checkpoint.release_digest {
+        CheckpointBinding::Legacy
+    } else {
+        CheckpointBinding::Mismatch
+    }
 }
 
 async fn ensure_plan(ctx: &mut Ctx, record: &UpgradeRecord, environment: &str) -> Result<Plan> {
@@ -2742,21 +2820,55 @@ install = "true"
             interrupted.environments[1].status,
             UpgradeEnvironmentStatus::Interrupted
         );
-        resume_transfer(&mut ctx, "fleet-1", "site-b")
+        let site_b = approval_path(&first, "site-b", &approval_dir);
+        let site_b_auth = || ExecutionAuthorization::Signed {
+            approval: &site_b,
+            trust_roots: &trust,
+            requester: None,
+        };
+        // Rewrites site-b's checkpoint as stored, outside any operation.
+        async fn rewrite_checkpoint(ctx: &mut Ctx, edit: impl FnOnce(&mut TransferCheckpoint)) {
+            let mut record = load_upgrade(ctx, "fleet-1").await.unwrap();
+            edit(record.environments[1].transfer.as_mut().unwrap());
+            ctx.put(upgrade_object(&record).unwrap()).await.unwrap();
+        }
+        // A verified checkpoint from before plan binding holds the release
+        // digest: it is re-verified, not applied and not treated as corrupt.
+        rewrite_checkpoint(&mut ctx, |checkpoint| {
+            checkpoint.plan_digest = checkpoint.release_digest.clone();
+            checkpoint.verified = true;
+        })
+        .await;
+        let legacy = advance(&mut ctx, "fleet-1", site_b_auth()).await.unwrap();
+        assert_eq!(
+            legacy.environments[1].status,
+            UpgradeEnvironmentStatus::Interrupted
+        );
+        assert!(
+            legacy.environments[1]
+                .detail
+                .contains("predates plan binding")
+        );
+        // A checkpoint bound to other plan content resumes nothing.
+        rewrite_checkpoint(&mut ctx, |checkpoint| {
+            checkpoint.plan_digest = format!("sha256:{}", "0".repeat(64));
+        })
+        .await;
+        let mismatch = resume_transfer(&mut ctx, "fleet-1", "site-b")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(mismatch.contains("not the bound plan"), "{mismatch}");
+        rewrite_checkpoint(&mut ctx, |checkpoint| {
+            checkpoint.plan_digest = checkpoint.release_digest.clone();
+        })
+        .await;
+        let rebound = resume_transfer(&mut ctx, "fleet-1", "site-b")
             .await
             .unwrap();
-        let site_b = approval_path(&first, "site-b", &approval_dir);
-        let resumed = advance(
-            &mut ctx,
-            "fleet-1",
-            ExecutionAuthorization::Signed {
-                approval: &site_b,
-                trust_roots: &trust,
-                requester: None,
-            },
-        )
-        .await
-        .unwrap();
+        let checkpoint = rebound.environments[1].transfer.as_ref().unwrap();
+        assert!(checkpoint.verified && checkpoint.plan_digest != checkpoint.release_digest);
+        let resumed = advance(&mut ctx, "fleet-1", site_b_auth()).await.unwrap();
         assert_eq!(
             resumed.environments[1].status,
             UpgradeEnvironmentStatus::Applied

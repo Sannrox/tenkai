@@ -189,7 +189,11 @@ pub async fn provision(
     let pin_json = pin.canonical_json()?;
     let id = env_id(name);
     if let Some(existing) = ctx.get(&id).await? {
-        return replay_or_conflict(existing, name, &pin, &plan_digest, expires_at);
+        let replayed = replay_or_conflict(existing, name, &pin, &plan_digest, expires_at)?;
+        // A replay finishes what a create that stopped before its
+        // configuration left undone, as environment registration does.
+        crate::maintenance::ensure_configuration(ctx, name).await?;
+        return Ok(replayed);
     }
     let description = if description.is_empty() {
         format!("preview environment bound to {}", pin.pin_digest)
@@ -220,7 +224,9 @@ pub async fn provision(
             let Some(existing) = ctx.get(&id).await? else {
                 bail!("preview environment {name} disappeared after create conflict");
             };
-            return replay_or_conflict(existing, name, &pin, &plan_digest, expires_at);
+            let replayed = replay_or_conflict(existing, name, &pin, &plan_digest, expires_at)?;
+            crate::maintenance::ensure_configuration(ctx, name).await?;
+            return Ok(replayed);
         }
         Err(status) => return Err(status.into()),
     }
@@ -495,6 +501,14 @@ mod tests {
             .await
             .unwrap();
         assert!(replay.contains("already registered"), "{replay}");
+        // A create that stopped before its maintenance configuration is
+        // finished by the replay.
+        let config = "tenkai:maintenance:review-a";
+        ctx.delete(config).await.unwrap();
+        provision(&mut ctx, "review-a", pin.clone(), expires, "", now)
+            .await
+            .unwrap();
+        assert!(ctx.get(config).await.unwrap().is_some());
 
         let left = inspect_from_object(
             &crate::environment::environment(&mut ctx, "review-a")
