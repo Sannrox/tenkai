@@ -2392,18 +2392,29 @@ pub use crate::fleet::{
 ///
 /// One pass over registered environments: subscription posture from the
 /// environment object and its channel links. Does not inspect each environment
-/// (facts, overlays, modules, or the plan catalog). Plan state belongs on
-/// environment detail, not the fleet table. `latest_plan_state` on fleet rows
-/// is therefore always `None`.
+/// (facts, overlays, or modules). Each row carries what needs a person
+/// (#1372): the latest plan's state and approval, read the way the server's
+/// inspect reads them, drifted instances, and certificate expiry and renewal
+/// failures, read the way `status` reads them.
 pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
     let mut environments = ctx.list_kind(KIND_ENVIRONMENT).await?;
     environments.sort_by(|left, right| left.name.cmp(&right.name));
     let mut reports = Vec::with_capacity(environments.len());
+    let mut certificates = BTreeMap::new();
+    let execution = crate::approval_policy::ExecutionPolicy::from_host_env();
     for env_obj in environments {
         if retirement_from_object(&env_obj).is_some() {
             continue;
         }
         let rows = status_from_object(ctx, &env_obj).await?;
+        if let Some(summary) = crate::fleet::FleetCertificateSummary::from_statuses(
+            rows.iter().filter_map(|row| row.certificate.as_ref()),
+        ) {
+            certificates.insert(env_obj.name.clone(), summary);
+        }
+        let latest_plan =
+            latest_plan_for_environment(ctx, &env_obj.name, &env_obj.properties, execution.clone())
+                .await?;
         let subscriptions = subscription_views_from_status(ctx, &env_obj, rows).await?;
         let lease = crate::apply::inspect_environment_lease(ctx, &env_obj.name).await?;
         let retirement = retirement_from_object(&env_obj);
@@ -2435,7 +2446,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             overlays: Default::default(),
             config: Vec::new(),
             lease,
-            latest_plan: None,
+            latest_plan,
             maintenance: None,
             constraints: Vec::new(),
             webhooks,
@@ -2465,6 +2476,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
         if let Some(exposures) = open_exposures.get(&row.name) {
             row.open_exposures = exposures.clone();
         }
+        row.certificates = certificates.remove(&row.name);
     }
     Ok(report)
 }
@@ -5156,6 +5168,99 @@ mod tests {
                 .iter()
                 .all(|row| row.posture == "empty" && row.latest_plan_state.is_none())
         );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    // #1372: the fleet row reports the latest plan the way the server's
+    // inspect does, including a plan that waits for a person.
+    #[tokio::test]
+    async fn fleet_status_reports_a_plan_awaiting_approval_like_inspect() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-fleet-awaiting-{}-{}.db",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "lab", "Lab").await.unwrap();
+        env_add(&mut ctx, "quiet", "Quiet").await.unwrap();
+        let mut install = crate::plan::Plan {
+            format_version: crate::plan::PLAN_FORMAT_VERSION,
+            id: String::new(),
+            content_id: String::new(),
+            environment: "lab".into(),
+            created_at: 100,
+            inputs: vec![crate::plan::DesiredStateInput {
+                product: "api".into(),
+                instance: String::new(),
+                channel: "stable".into(),
+                channel_id: "tenkai:channel:api/stable".into(),
+                desired_version: "1.0.0".into(),
+                release_id: "tenkai:release:api@1.0.0".into(),
+                release_digest: "abc".into(),
+                artifact_digest: "abc".into(),
+                deployed_version: None,
+                providers: Default::default(),
+            }],
+            steps: vec![crate::plan::Step {
+                id: String::new(),
+                order: 0,
+                product: "api".into(),
+                instance: String::new(),
+                action: crate::plan::Action::Install,
+                from: None,
+                to: "1.0.0".into(),
+                release_id: "tenkai:release:api@1.0.0".into(),
+                release_digest: "abc".into(),
+                artifact_digest: "abc".into(),
+                workdir: ".".into(),
+                host: None,
+                sealed: Vec::new(),
+                restore: None,
+                rewrap: None,
+                issuer: None,
+                identity: None,
+                restore_identity: None,
+                target_changes: Vec::new(),
+            }],
+            state: crate::plan::PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+            credential_runway: None,
+            artifact_availability: Vec::new(),
+            config_presets: Vec::new(),
+            approval_brief: None,
+        };
+        install.bind_content_identity().unwrap();
+        crate::plan::store(&mut ctx, &install).await.unwrap();
+
+        let inspected = inspect_environment_with_outcomes(&mut ctx, "lab")
+            .await
+            .unwrap()
+            .latest_plan
+            .unwrap();
+        assert_eq!(inspected.approval.as_ref().unwrap().source, "required");
+        let report = fleet_status(&mut ctx).await.unwrap();
+        let lab = report
+            .environments
+            .iter()
+            .find(|row| row.name == "lab")
+            .unwrap();
+        assert_eq!(
+            lab.latest_plan_state.as_deref(),
+            Some(inspected.state.as_str())
+        );
+        assert!(lab.awaiting_approval);
+        let quiet = report
+            .environments
+            .iter()
+            .find(|row| row.name == "quiet")
+            .unwrap();
+        assert_eq!(quiet.latest_plan_state, None);
+        assert!(!quiet.awaiting_approval);
         let _ = std::fs::remove_file(&database);
     }
 

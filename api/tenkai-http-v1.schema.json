@@ -5125,15 +5125,53 @@
       ],
       "type": "string"
     },
+    "FleetCertificateSummary": {
+      "description": "The workload certificates of one environment, folded for the fleet table.",
+      "properties": {
+        "near_expiry": {
+          "description": "True when any certificate is in the last sixth of its lifetime.",
+          "type": "boolean"
+        },
+        "nearest_expires_at": {
+          "description": "The earliest expiry among the reported certificates, in Unix seconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "renewal_failing": {
+          "description": "Instances whose latest renewal attempt failed. Omitted when zero.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "nearest_expires_at"
+      ],
+      "type": "object"
+    },
     "FleetEnvironmentRow": {
       "description": "One environment's row in a fleet posture table (no credentials).",
       "properties": {
+        "awaiting_approval": {
+          "description": "True while the latest plan waits for a person to approve it: it is\nstill to run and its approval source is `required`. Omitted when false.",
+          "type": "boolean"
+        },
+        "certificates": {
+          "$ref": "#/$defs/FleetCertificateSummary",
+          "description": "Workload certificates reported in this environment (ADR 0046 §3).\nOmitted when none was reported."
+        },
         "criticality": {
           "description": "Effective environment criticality when set (#694).",
           "type": "string"
         },
         "description": {
           "type": "string"
+        },
+        "drifted_instances": {
+          "description": "Instances whose live spec was modified outside Tenkai (#1028), as\n`status` reports them. Omitted when zero.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
         },
         "health_summary": {
           "description": "`ok` | `unknown` | `error` | `n/a` (no subscriptions).",
@@ -5143,7 +5181,7 @@
           "type": "string"
         },
         "latest_plan_state": {
-          "description": "Latest plan state when a plan exists. Fleet status leaves this empty;\n`inspect_environment` is the source for plan detail.",
+          "description": "Latest plan state when a plan exists, as `inspect_environment`\nreports it (#1372).",
           "type": [
             "string",
             "null"
