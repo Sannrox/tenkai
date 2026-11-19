@@ -134,18 +134,7 @@ fn os_image_releases_update_only_through_the_image_actions() {
         refusal(case.verify(&request(&case, HostAction::Stage)))
             .contains("needs a release that declares [os_image]")
     );
-    case.release.manifest = format!(
-        "{}\n[os_image]\ndigest = \"sha256:{}\"\nboot_deadline_seconds = 900\n",
-        case.release
-            .manifest
-            .replacen("[deploy]\n", "[deploy]\nconfirm = \"./confirm.sh\"\n", 1),
-        "c".repeat(64)
-    );
-    case.release.signature = case.fixture.sign_release(
-        &crate::manifest::digest(&case.release.manifest),
-        &case.release.signature.statement.artifact_digest,
-        crate::now_millis(),
-    );
+    declare_os_image(&mut case);
     assert!(
         refusal(case.verify(&request(&case, HostAction::Install)))
             .contains("updates through stage, reboot, verify and confirm, not install")
@@ -163,6 +152,53 @@ fn os_image_releases_update_only_through_the_image_actions() {
             Some(format!("sha256:{}", "c".repeat(64)))
         );
     }
+}
+
+/// Re-sign `case`'s release as an `[os_image]` release with a confirm
+/// command.
+fn declare_os_image(case: &mut Case) {
+    case.release.manifest = format!(
+        "{}\n[os_image]\ndigest = \"sha256:{}\"\nboot_deadline_seconds = 900\n",
+        case.release
+            .manifest
+            .replacen("[deploy]\n", "[deploy]\nconfirm = \"./confirm.sh\"\n", 1),
+        "c".repeat(64)
+    );
+    case.release.signature = case.fixture.sign_release(
+        &crate::manifest::digest(&case.release.manifest),
+        &case.release.signature.statement.artifact_digest,
+        crate::now_millis(),
+    );
+}
+
+/// A planned image step names the image record's generation; once the
+/// record moved on, the applier refuses the step before anything runs.
+#[test]
+fn an_image_step_planned_against_a_stale_record_is_refused() {
+    let mut case = Case::new(Vec::new());
+    declare_os_image(&mut case);
+    let now = crate::now_millis();
+    let plan = case.fixture.plan(
+        "edge",
+        now,
+        &[case.spec(HostAction::Stage, Action::Install, None)],
+    );
+    let approvals = vec![case.fixture.approve(&plan, 0, now)];
+    let stage = case
+        .verify(&case.fixture.request(&plan, 0, &case.release, approvals))
+        .unwrap();
+    let fresh = state::AppliedStateRecord::empty("edge", "k3s");
+    assert!(fresh.admit(&stage, None, now).is_ok());
+
+    let moved = state::AppliedStateRecord {
+        generation: 1,
+        ..fresh
+    };
+    let error = format!("{:#}", moved.admit(&stage, None, now).unwrap_err());
+    assert!(
+        error.contains("step expects generation 0") && error.contains("at generation 1"),
+        "{error}"
+    );
 }
 
 #[test]

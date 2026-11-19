@@ -54,6 +54,17 @@ fn progress(record: &AppliedStateRecord) -> (u64, i64, Option<i64>) {
     )
 }
 
+/// Whether `record` is the applier's host-wide OS image record. The applier
+/// writes that record only when a step of an image release starts, its
+/// `health` included, and records the image digest with every such start;
+/// a start on a product record never carries one.
+pub(crate) fn is_os_image_record(record: &AppliedStateRecord) -> bool {
+    record
+        .last_started
+        .as_ref()
+        .is_some_and(|started| started.image_digest.is_some())
+}
+
 fn record_id(environment: &str, product: &str, json: &str) -> String {
     format!(
         "tenkai:host-record:{environment}:{product}:{:x}",
@@ -245,8 +256,40 @@ impl<'a> HostRecords<'a> {
             Self::Local(host) => host.applied_state(environment, product),
             Self::Reported(records) => Ok(records
                 .get(product)
+                .filter(|record| !is_os_image_record(record))
                 .cloned()
                 .unwrap_or_else(|| AppliedStateRecord::empty(environment, product))),
+        }
+    }
+
+    /// The host-wide OS image record for the image release `product` in
+    /// `environment` (ADR 0051 §2), or an empty one before any image step
+    /// started. A record that belongs to another image release is refused:
+    /// the host's updater has one pair of slots, and the applier would refuse
+    /// every step planned against it.
+    pub(crate) fn os_image_state(
+        &self,
+        environment: &str,
+        product: &str,
+    ) -> Result<AppliedStateRecord> {
+        let record = match self {
+            Self::Local(host) => host.os_image_record()?,
+            // A runtime reports the image record under the product it names.
+            Self::Reported(records) => records
+                .values()
+                .find(|record| is_os_image_record(record))
+                .cloned(),
+        };
+        match record {
+            None => Ok(AppliedStateRecord::empty(environment, product)),
+            Some(record) if record.environment == environment && record.product == product => {
+                Ok(record)
+            }
+            Some(record) => bail!(
+                "the host's OS image record belongs to {} in {}, not {product} in {environment}; one host updates one image release",
+                record.product,
+                record.environment
+            ),
         }
     }
 
@@ -338,6 +381,42 @@ mod tests {
         HostRecords::of(ctx, &executors, "edge")
             .await?
             .applied_states("edge")
+    }
+
+    /// A reported image record is read only as the host-wide image record,
+    /// whichever step of the image release last started on it.
+    #[tokio::test]
+    async fn a_reported_image_record_is_read_only_as_the_image_record() {
+        let (database, mut ctx) = ctx("image").await;
+        let (running, _) = install_running_then_done();
+        // A health check after confirm is still a start on the image record.
+        let mut health = running.last_started.clone().unwrap();
+        health.action = crate::host_apply::HostAction::Health;
+        health.product = "os".into();
+        health.image_digest = Some(format!("sha256:{}", "d".repeat(64)));
+        let image = AppliedStateRecord {
+            last_started: Some(health),
+            ..record("os", 4, "2.0.0")
+        };
+        admit(&mut ctx, "edge", &[running.clone(), image.clone()])
+            .await
+            .unwrap();
+        let executors = crate::software_executor::SoftwareExecutors::default();
+        let records = HostRecords::of(&mut ctx, &executors, "edge").await.unwrap();
+
+        assert_eq!(records.os_image_state("edge", "os").unwrap(), image);
+        assert_eq!(
+            records.applied_state("edge", "os").unwrap(),
+            AppliedStateRecord::empty("edge", "os")
+        );
+        assert_eq!(records.applied_state("edge", "cluster").unwrap(), running);
+        // One host updates one image release.
+        let error = records.os_image_state("edge", "other-os").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("belongs to os in edge"),
+            "{error:#}"
+        );
+        let _ = std::fs::remove_file(database);
     }
 
     #[tokio::test]

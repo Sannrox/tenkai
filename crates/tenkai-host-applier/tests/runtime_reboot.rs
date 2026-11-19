@@ -274,42 +274,32 @@ impl Rig {
         .unwrap()
     }
 
-    /// An approved plan that updates the image: stage, reboot, verify and
-    /// confirm, each at the generation the one before it leaves.
+    /// An approved plan that updates the image toward 2.0.0, as the planner
+    /// makes it: stage, reboot, verify and confirm, each at the generation
+    /// the one before it leaves.
     async fn image_plan(&mut self) -> plan::Plan {
-        let steps = self.image_steps().await;
-        let image = plan::create_from_steps(&mut self.ctx, "prod", steps)
-            .await
-            .unwrap();
-        self.approve(image).await
-    }
-
-    /// The four image steps, toward 2.0.0.
-    async fn image_steps(&mut self) -> Vec<plan::Step> {
-        // No planner path makes the four image steps yet: they are made
-        // from the bound host step of the release and planned as given.
-        let base = plan::compute(&mut self.ctx, "prod")
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|step| step.product == "os")
-            .expect("a host step for the image release");
-        [
-            (HostAction::Stage, 0),
-            (HostAction::Reboot, 1),
-            (HostAction::Verify, 2),
-            (HostAction::Confirm, 2),
-        ]
-        .into_iter()
-        .map(|(action, expected_generation)| {
-            let mut step = base.clone();
-            step.host = Some(plan::HostStep {
+        let image = plan::create(&mut self.ctx, "prod").await.unwrap();
+        let bindings: Vec<_> = image
+            .steps
+            .iter()
+            .map(|step| (step.product.as_str(), step.host))
+            .collect();
+        let bound = |action, expected_generation| {
+            Some(plan::HostStep {
                 action,
                 expected_generation,
-            });
-            step
-        })
-        .collect()
+            })
+        };
+        assert_eq!(
+            bindings,
+            [
+                ("os", bound(HostAction::Stage, 0)),
+                ("os", bound(HostAction::Reboot, 1)),
+                ("os", bound(HostAction::Verify, 2)),
+                ("os", bound(HostAction::Confirm, 2)),
+            ]
+        );
+        self.approve(image).await
     }
 
     async fn approve(&mut self, image: plan::Plan) -> plan::Plan {
@@ -514,10 +504,7 @@ async fn an_image_plan_whose_reboot_outlasts_every_window_is_refused_at_planning
     tenkai::maintenance::set(&mut rig.ctx, "prod", short)
         .await
         .unwrap();
-    let steps = rig.image_steps().await;
-    let refused = plan::create_from_steps(&mut rig.ctx, "prod", steps)
-        .await
-        .unwrap_err();
+    let refused = plan::create(&mut rig.ctx, "prod").await.unwrap_err();
     assert!(
         format!("{refused:#}").contains("unbroken maintenance window of 900s"),
         "{refused:#}"

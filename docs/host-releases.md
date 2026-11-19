@@ -282,8 +282,14 @@ An environment runtime runs the four steps
 
 1. Publish the release with `[os_image]`; `boot_deadline_seconds` is part of
    what it signs.
-2. Plan it. Planning refuses the plan when no maintenance window of the
-   environment and the product, in the next two weeks, is one unbroken
+2. Plan it. The plan holds `stage`, `reboot`, `verify` and `confirm`, in
+   that order, bound to the host-wide record's generation `g` as `g`, `g+1`,
+   `g+2` and `g+2`; a declared `deploy.health` follows at `g+3`. A record
+   that belongs to another image release refuses the plan: one host updates
+   one image release. A record that moved on after planning makes the
+   applier refuse the step, so it never runs. Planning refuses the plan
+   when no maintenance window of the environment and the product, in the
+   next two weeks, is one unbroken
    stretch at least as long as the boot deadline, so a host that never
    returns is judged inside the window. With no windows, any time fits.
 3. Approve and let the runtime claim it. Only a built-in runtime with a host

@@ -343,6 +343,12 @@ itself plans them. A stale record makes the step refused by the applier's
 generation check, never run. An older server answers `404`; the runtime
 logs it and continues.
 
+The host-wide OS image record is reported too, under the product it names,
+when it is this environment's and no product record of that product is in
+the report. An unreadable image record is left out and logged. The server
+plans an `[os_image]` release only from that record, and reads a record whose
+last start was an image step only as the image record.
+
 ### Workload certificates
 
 A built-in runtime with a sealing key renews workload certificates itself
