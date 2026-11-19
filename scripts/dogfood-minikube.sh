@@ -65,9 +65,9 @@ current="$("${TENKAI_KUBECTL_BIN}" config current-context)"
 "${TENKAI_KUBECTL_BIN}" get nodes >/dev/null \
   || die "kubectl cannot reach the $PROFILE cluster; is minikube running?"
 
-if [[ ! -x "$ROOT/target/debug/tenkaictl" ]]; then
-  cargo build --bin tenkaictl
-fi
+# Always build: incremental, so a no-op when nothing changed, and never a
+# stale binary after a source edit.
+cargo build --bin tenkaictl
 BIN="$ROOT/target/debug/tenkaictl"
 MANIFEST="$ROOT/examples/hello-minikube/tenkai.toml"
 PRODUCT_VERSION="hello-minikube@0.1.0"

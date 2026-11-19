@@ -327,10 +327,15 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" != "pull_request" ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
-          elif git diff --name-only "$BASE"...HEAD | grep -qE '^(crates/tenkai-executor/|crates/tenkai-server/|crates/tenkaictl/|crates/tenkai-http/src/config\.rs|src/(software_executor|model_runtime|offline_|connectivity|outbound_tls|oci_artifact|oidc_verifier|telemetry|deploy_webhook|runtime_agent)|Cargo\.(toml|lock)|build\.rs|crates/[^/]+/build\.rs|crates/[^/]+/Cargo\.toml|scripts/egress-conformance\.sh|\.github/workflows/)'; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "run=false" >> "$GITHUB_OUTPUT"
+            # Its own statement, so a failing diff fails the step instead of
+            # reading as "nothing in scope".
+            files="$(git diff --name-only "$BASE"...HEAD)"
+            if grep -qE '^(crates/tenkai-executor/|crates/tenkai-server/|crates/tenkaictl/|crates/tenkai-http/src/config\.rs|src/(software_executor|model_runtime|offline_|connectivity|outbound_tls|oci_artifact|oidc_verifier|telemetry|deploy_webhook|runtime_agent)|Cargo\.(toml|lock)|build\.rs|crates/[^/]+/build\.rs|crates/[^/]+/Cargo\.toml|scripts/egress-conformance\.sh|\.github/workflows/)' <<<"$files"; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "run=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
       - if: steps.scope.outputs.run == 'true'
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -362,10 +367,15 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" != "pull_request" ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
-          elif git diff --name-only "$BASE"...HEAD | grep -qE '^(\.github/actions/publish-release/|crates/tenkaictl/|crates/tenkai-server/|crates/tenkai-http/|src/(catalog|oidc_verifier|management_|command_result)|Cargo\.(toml|lock)|build\.rs|crates/[^/]+/build\.rs|crates/[^/]+/Cargo\.toml|scripts/publish-step-|\.github/workflows/)'; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "run=false" >> "$GITHUB_OUTPUT"
+            # Its own statement, so a failing diff fails the step instead of
+            # reading as "nothing in scope".
+            files="$(git diff --name-only "$BASE"...HEAD)"
+            if grep -qE '^(\.github/actions/publish-release/|crates/tenkaictl/|crates/tenkai-server/|crates/tenkai-http/|src/(catalog|oidc_verifier|management_|command_result)|Cargo\.(toml|lock)|build\.rs|crates/[^/]+/build\.rs|crates/[^/]+/Cargo\.toml|scripts/publish-step-|\.github/workflows/)' <<<"$files"; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "run=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
       - if: steps.scope.outputs.run == 'true'
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable

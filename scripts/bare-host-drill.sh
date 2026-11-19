@@ -252,7 +252,9 @@ attempts=$(failed_ticks)
 [ "$attempts" -ge 2 ] || fail "reconcile did not retry the in-cluster release ($attempts attempts): $(inspect)"
 [ "$(inspect | json 'r["latest_plan"]["state"]')" = failed ] || fail "the latest plan did not fail: $(inspect)"
 # Inspect redacts failure detail; the server's store records it.
-(cd / && sudo -u tenkai cat "$database" "$database-wal" 2>/dev/null) | grep -aq "$kubeconfig is not a readable kubeconfig file" ||
+# A missing -wal file makes cat exit non-zero; only grep's verdict counts.
+(cd / && sudo -u tenkai cat "$database" "$database-wal" 2>/dev/null) >"$work/store.bin" || true
+grep -aq "$kubeconfig is not a readable kubeconfig file" "$work/store.bin" ||
   fail "the failed plan does not name the missing kubeconfig"
 [ -z "$(subscription app deployed)" ] || fail "app is recorded as deployed without a cluster"
 [ "$(subscription app health)" != unknown ] || fail "a refused in-cluster install left app unknown"
