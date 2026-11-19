@@ -1,37 +1,37 @@
 use super::*;
 use crate::feedback_observation::FeedbackObservation;
 
+/// The object `id` as [`SqliteStore::get_object`] returns it, read through
+/// `connection`. Writers pass their open transaction, so the previous object
+/// they diff against or check for is the one they replace.
+pub(super) fn object_in(connection: &Connection, id: &str) -> AnyResult<Option<Object>> {
+    if let Some(record) = crate::storage::sqlite_operational_store::plan_record_in(connection, id)?
+    {
+        if let Some(stored) = super::listings::catalog_object_in(connection, id)? {
+            return Ok(Some(stored));
+        }
+        return plan_record_to_object(&record).map(Some);
+    }
+    if let Some(record) = crate::storage::sqlite_store::environment_record_in(connection, id)? {
+        return Ok(Some(environment_record_to_object(&record)?));
+    }
+    if let Some(record) =
+        crate::storage::sqlite_operational_store::release_record_in(connection, id)?
+    {
+        return Ok(Some(release_record_to_object(&record)?));
+    }
+    if let Some(record) = super::listings::channel_record_in(connection, id)? {
+        return Ok(Some(super::listings::channel_object_in(
+            connection, &record,
+        )?));
+    }
+    let catalog = super::listings::catalog_object_in(connection, id)?;
+    Ok(catalog.filter(|object| !is_strict_authority(&object.kind)))
+}
+
 impl SqliteStore {
     pub fn get_object(&self, id: &str) -> AnyResult<Option<Object>> {
-        if let Some(record) = OperationalStore::get_plan(self, id).map_err(anyhow::Error::from)? {
-            if let Some(stored) = self.get_catalog_object(id)? {
-                return Ok(Some(stored));
-            }
-            return plan_record_to_object(&record).map(Some);
-        }
-        if let Some(record) = self.get_environment(id).map_err(anyhow::Error::from)? {
-            return Ok(Some(environment_record_to_object(&record)?));
-        }
-        if let Some(record) =
-            OperationalStore::get_release(self, id).map_err(anyhow::Error::from)?
-        {
-            return Ok(Some(release_record_to_object(&record)?));
-        }
-        if let Some(record) = self.channel_record(id).map_err(anyhow::Error::from)? {
-            return Ok(Some(self.channel_to_object(&record)?));
-        }
-        let connection = self.connection()?;
-        let catalog = decode_optional(
-            connection
-                .query_row(
-                    "SELECT payload FROM catalog_objects WHERE id=?1",
-                    [id],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .optional()?,
-            "object",
-        )?;
-        Ok(catalog.filter(|object| !is_strict_authority(&object.kind)))
+        object_in(&*self.connection()?, id)
     }
 
     pub fn get(&self, id: &str) -> AnyResult<Option<Object>> {
@@ -90,9 +90,9 @@ impl SqliteStore {
     }
 
     pub fn put_object(&self, object: Object) -> AnyResult<Object> {
-        let previous = self.get_object(&object.id)?;
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
+        let previous = object_in(&tx, &object.id)?;
         upsert_object_in(&tx, &object, &self.principal).map_err(anyhow::Error::from)?;
         if let Some(previous) = previous {
             record_changes(&tx, &previous, &object, &self.principal)?;
@@ -194,15 +194,15 @@ impl SqliteStore {
             unique.len() == objects.len(),
             "embedded object update contains duplicate identities"
         );
+        let mut connection = self.connection()?;
+        // Immediate (the store's default): the lease and previous objects are
+        // read before the objects are written, so a concurrent writer waits on
+        // the busy timeout instead of changing them in between.
+        let tx = connection.transaction()?;
         let previous = objects
             .iter()
-            .map(|object| self.get_object(&object.id))
+            .map(|object| object_in(&tx, &object.id))
             .collect::<AnyResult<Vec<_>>>()?;
-        let mut connection = self.connection()?;
-        // Immediate (the store's default): the lease is read before the
-        // objects are written, so a concurrent writer waits on the busy
-        // timeout instead of failing the lock upgrade.
-        let tx = connection.transaction()?;
         if let Some((namespace, key, token)) = lease {
             require_active_lease_in(&tx, namespace, key, token)?;
         }
@@ -326,11 +326,12 @@ impl SqliteStore {
         fencing_token: &str,
         create: bool,
     ) -> AnyResult<Object> {
-        let previous = self.get_object(&object.id)?;
         let mut connection = self.connection()?;
-        // Immediate: the lease is read before the object is written, so a concurrent
-        // writer waits on the busy timeout instead of failing the lock upgrade.
+        // Immediate: the lease and previous object are read before the object
+        // is written, so a concurrent writer waits on the busy timeout instead
+        // of changing them in between.
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let previous = object_in(&tx, &object.id)?;
         require_active_lease_in(&tx, namespace, key, fencing_token)?;
         if create && previous.is_some() {
             return Err(StoreError::already_exists("object", object.id.clone()).into());

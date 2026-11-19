@@ -104,19 +104,7 @@ impl SqliteStore {
 
     /// Load one environment by id (used by tenant-scoped adapters and inspect paths).
     pub fn get_environment(&self, id: &str) -> Result<Option<EnvironmentRecord>> {
-        let connection = self.connection()?;
-        let mut statement = connection
-            .prepare("SELECT id, revision, configuration_json FROM environments WHERE id=?1")?;
-        let mut rows = statement.query(rusqlite::params![id])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(EnvironmentRecord {
-                id: row.get(0)?,
-                revision: row.get(1)?,
-                configuration_json: row.get(2)?,
-            }))
-        } else {
-            Ok(None)
-        }
+        environment_record_in(&*self.connection()?, id)
     }
 
     /// List environment ids in stable order (no configuration payloads).
@@ -165,4 +153,23 @@ pub fn refuse_postgres_on_embedded() -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// The environment row `id`, read through `connection` (a transaction too).
+pub(crate) fn environment_record_in(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<EnvironmentRecord>> {
+    let mut statement = connection
+        .prepare("SELECT id, revision, configuration_json FROM environments WHERE id=?1")?;
+    let mut rows = statement.query(rusqlite::params![id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(EnvironmentRecord {
+            id: row.get(0)?,
+            revision: row.get(1)?,
+            configuration_json: row.get(2)?,
+        }))
+    } else {
+        Ok(None)
+    }
 }

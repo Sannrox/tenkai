@@ -317,10 +317,11 @@ impl CatalogGraph for MemoryCatalogGraph {
     }
 
     fn put(&self, tenant: Option<&str>, object: Object) -> AnyResult<Object> {
-        let previous = self.get(tenant, &object.id)?;
+        // Read the previous object under the same guard that records the
+        // change and writes, so concurrent puts diff against what they replace.
         let mut partitions = self.lock()?;
         let partition = partitions.entry(Self::key(tenant)).or_default();
-        if let Some(previous) = previous {
+        if let Some(previous) = partition.objects.get(&object.id).cloned() {
             record_memory_changes(partition, &previous, &object, &self.principal);
         }
         partition.objects.insert(object.id.clone(), object.clone());

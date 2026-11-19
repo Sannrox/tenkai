@@ -58,28 +58,10 @@ impl Inner {
         let receipt = receipt.clone();
         let steps = steps.to_vec();
         self.with_writer_schema(schema, move |tx| {
-            let existing = tx
-                .query_opt(
-                    "SELECT environment_id,plan_id,receipt_json FROM offline_imports
-                     WHERE bundle_digest = $1",
-                    &[&receipt.bundle_digest],
-                )
-                .map_err(pg)?;
-            if let Some(row) = existing {
-                let env: String = row.get(0);
-                let plan: String = row.get(1);
-                let json: String = row.get(2);
-                if env != receipt.environment_id
-                    || plan != receipt.plan_id
-                    || json != receipt.receipt_json
-                {
-                    return Err(StoreError::ImmutableConflict {
-                        kind: "offline import",
-                        id: receipt.bundle_digest.clone(),
-                    });
-                }
-            }
             require_plan_environment(tx, &receipt.plan_id, &receipt.environment_id)?;
+            // Insert, then compare what is stored, as `record_receipt_in`
+            // does: under read committed a concurrent import can land between
+            // a pre-check and the insert, and DO NOTHING would hide it.
             tx.execute(
                 "INSERT INTO offline_imports(bundle_digest,environment_id,plan_id,receipt_json)
                  VALUES($1,$2,$3,$4) ON CONFLICT(bundle_digest) DO NOTHING",
@@ -91,6 +73,22 @@ impl Inner {
                 ],
             )
             .map_err(pg)?;
+            let stored = tx
+                .query_one(
+                    "SELECT environment_id,plan_id,receipt_json FROM offline_imports
+                     WHERE bundle_digest = $1",
+                    &[&receipt.bundle_digest],
+                )
+                .map_err(pg)?;
+            if stored.get::<_, String>(0) != receipt.environment_id
+                || stored.get::<_, String>(1) != receipt.plan_id
+                || stored.get::<_, String>(2) != receipt.receipt_json
+            {
+                return Err(StoreError::ImmutableConflict {
+                    kind: "offline import",
+                    id: receipt.bundle_digest.clone(),
+                });
+            }
             for step in steps {
                 let attempt = step.attempt as i32;
                 tx.execute(
@@ -109,6 +107,25 @@ impl Inner {
                     ],
                 )
                 .map_err(pg)?;
+                let stored = tx
+                    .query_one(
+                        "SELECT environment_id,plan_id,step_id,attempt,result_digest,succeeded
+                         FROM offline_step_receipts WHERE receipt_id = $1",
+                        &[&step.receipt_id],
+                    )
+                    .map_err(pg)?;
+                if stored.get::<_, String>(0) != step.environment_id
+                    || stored.get::<_, String>(1) != step.plan_id
+                    || stored.get::<_, String>(2) != step.step_id
+                    || stored.get::<_, i32>(3) != attempt
+                    || stored.get::<_, String>(4) != step.result_digest
+                    || stored.get::<_, bool>(5) != step.succeeded
+                {
+                    return Err(StoreError::ImmutableConflict {
+                        kind: "offline step receipt",
+                        id: step.receipt_id.clone(),
+                    });
+                }
             }
             Ok(())
         })

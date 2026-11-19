@@ -460,6 +460,64 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
     }
 }
 
+/// A head moved to a release this store does not hold drops the typed row,
+/// so nothing keeps serving the old release, and keeps the revision floor.
+#[test]
+fn a_head_on_an_unknown_release_drops_the_stale_typed_row() {
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-1348-unknown-head-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let store = SqliteStore::open(&path).unwrap();
+    let release = crate::ontology::release_id("api", "1.0.0");
+    store
+        .put(Object {
+            id: release.clone(),
+            kind: crate::ontology::KIND_RELEASE.into(),
+            name: "api@1.0.0".into(),
+            properties: HashMap::from([
+                ("product".into(), "api".into()),
+                ("version".into(), "1.0.0".into()),
+                ("digest".into(), "a".repeat(64)),
+            ]),
+            ..Object::default()
+        })
+        .unwrap();
+    let id = crate::ontology::channel_id("api", "stable");
+    let channel = |head: &str| Object {
+        id: id.clone(),
+        kind: KIND_CHANNEL.into(),
+        name: "api/stable".into(),
+        properties: HashMap::from([
+            ("product".to_string(), "api".to_string()),
+            ("channel".to_string(), "stable".to_string()),
+            ("current_release".to_string(), head.to_string()),
+        ]),
+        ..Object::default()
+    };
+    store.put(channel(&release)).unwrap();
+    let headed = store.channel_record(&id).unwrap().expect("typed row");
+
+    let unknown = crate::ontology::release_id("api", "9.9.9");
+    store.put(channel(&unknown)).unwrap();
+    assert!(
+        store.channel_record(&id).unwrap().is_none(),
+        "a typed row would still name {release}"
+    );
+    let read = store.get(&id).unwrap().expect("channel stays");
+    assert_eq!(read.properties.get("current_release"), Some(&unknown));
+    assert_eq!(
+        read.properties.get(crate::ontology::CHANNEL_REVISION_FLOOR),
+        Some(&headed.revision.to_string())
+    );
+
+    store.put(channel(&release)).unwrap();
+    let restored = store.channel_record(&id).unwrap().expect("typed row");
+    assert_eq!(restored.revision, headed.revision + 1);
+    let _ = std::fs::remove_file(path);
+}
+
 /// A channel whose head is cleared (#1174) reads back headless and keeps no
 /// typed row naming the old release (development fixtures join on it).
 #[test]
