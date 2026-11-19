@@ -109,7 +109,7 @@ impl TenantOperationalStore for PostgresTenantOperationalStore {
         let partition = self.partition_for(context)?;
         partition
             .append_change_event(occurred_at, kind, resource, environment_id)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     fn list_change_events_for(
@@ -121,7 +121,7 @@ impl TenantOperationalStore for PostgresTenantOperationalStore {
         let partition = self.partition_for(context)?;
         partition
             .list_change_events_after(cursor, limit)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     fn list_provider_events_for(
@@ -134,7 +134,7 @@ impl TenantOperationalStore for PostgresTenantOperationalStore {
         let partition = self.partition_for(context)?;
         partition
             .list_provider_events(provider_kind, environment_id, limit)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     fn provider_event_partitions(&self) -> StoreResult<Vec<Arc<dyn OperationalStore>>> {

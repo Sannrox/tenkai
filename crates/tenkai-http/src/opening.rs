@@ -114,6 +114,20 @@ where
     }
 }
 
+/// Whether `path` is exactly the enrollment or renewal route,
+/// `/v1/runtime/environments/{environment}/enroll` or `.../certificate`.
+/// They are how a runner gets a certificate (#674): a first one, and a new
+/// one once its own has expired, so they alone skip the client-certificate
+/// requirement. Matching the whole pattern keeps a future route that merely
+/// ends the same way from inheriting the exemption.
+fn is_certificate_bootstrap(path: &str) -> bool {
+    matches!(
+        path.split('/').collect::<Vec<_>>().as_slice(),
+        ["", "v1", "runtime", "environments", environment, "enroll" | "certificate"]
+            if !environment.is_empty()
+    )
+}
+
 impl Service<Request> for HotSwap {
     type Response = Response;
     type Error = Infallible;
@@ -124,10 +138,7 @@ impl Service<Request> for HotSwap {
     }
 
     fn call(&mut self, mut req: Request) -> Self::Future {
-        // Enrollment and renewal are how a runner gets a certificate (#674):
-        // a first one, and a new one once its own has expired.
-        let enrollment =
-            req.uri().path().ends_with("/enroll") || req.uri().path().ends_with("/certificate");
+        let enrollment = is_certificate_bootstrap(req.uri().path());
         if self.runtime_client_certificate_required
             && self.client_certificate.is_none()
             && req.uri().path().starts_with("/v1/runtime/")
@@ -218,5 +229,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ready.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn only_the_enrollment_and_renewal_routes_skip_the_client_certificate() {
+        let swap = HotSwap::new(Router::new().fallback(|| async { StatusCode::OK }))
+            .requiring_runtime_client_certificates();
+        for (path, status) in [
+            ("/v1/runtime/environments/prod/enroll", StatusCode::OK),
+            ("/v1/runtime/environments/prod/certificate", StatusCode::OK),
+            ("/v1/runtime/environments/prod/work", StatusCode::FORBIDDEN),
+            (
+                "/v1/runtime/environments/prod/x/enroll",
+                StatusCode::FORBIDDEN,
+            ),
+            ("/v1/runtime/issuers/certificate", StatusCode::FORBIDDEN),
+            ("/v1/runtime/environments//enroll", StatusCode::FORBIDDEN),
+        ] {
+            let response = swap
+                .clone()
+                .oneshot(Request::post(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{path}");
+        }
     }
 }

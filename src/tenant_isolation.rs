@@ -297,18 +297,59 @@ pub enum IsolationError {
     Unauthenticated,
     #[error("invalid credential: {0}")]
     InvalidCredential(String),
+    /// An internal invariant failed. The detail is for the server log only.
     #[error("isolation contract violation: {0}")]
     Contract(String),
+    /// A refusal about the caller's own resource, such as a retired
+    /// environment or an apply in progress. Its text is safe to return.
+    #[error("{0}")]
+    Conflict(String),
+    /// The tenant store or its backend failed. The detail is for the server
+    /// log only.
+    #[error("tenant store unavailable: {0}")]
+    Unavailable(String),
 }
 
+/// Public text of every [`IsolationError::Contract`].
+pub const CONTRACT_PUBLIC_MESSAGE: &str = "tenant request failed an internal consistency check";
+
 impl IsolationError {
-    /// Public error text that must never include foreign tenant identifiers.
+    /// Public error text that must never include foreign tenant identifiers
+    /// or raw storage detail.
     pub fn public_message(&self) -> String {
         match self {
             Self::NotFound => NON_DISCLOSING_DENY.into(),
             Self::Unauthenticated => "unauthenticated".into(),
             Self::InvalidCredential(_) => "invalid credential".into(),
-            Self::Contract(detail) => detail.clone(),
+            Self::Contract(_) => CONTRACT_PUBLIC_MESSAGE.into(),
+            Self::Conflict(message) => message.clone(),
+            Self::Unavailable(_) => "tenant store unavailable".into(),
+        }
+    }
+}
+
+/// A store error from the caller's own partition. Backend failures are
+/// `Unavailable`; refusals about the caller's records keep their text;
+/// unreadable stored data is a `Contract` violation.
+impl From<crate::storage::StoreError> for IsolationError {
+    fn from(error: crate::storage::StoreError) -> Self {
+        use crate::storage::StoreError;
+        match error {
+            StoreError::Database(_)
+            | StoreError::Postgres(_)
+            | StoreError::Poisoned
+            | StoreError::AdapterUnavailable(_)
+            | StoreError::NotActiveWriter(_)
+            | StoreError::UnsupportedSchema { .. } => Self::Unavailable(error.to_string()),
+            // The store's refusal to retire or rewrite an environment that
+            // still has delivery work.
+            StoreError::InvalidData { ref detail, .. }
+                if detail.ends_with("has active delivery work") =>
+            {
+                Self::Conflict(detail.clone())
+            }
+            StoreError::InvalidData { .. } => Self::Contract(error.to_string()),
+            _ => Self::Conflict(error.to_string()),
         }
     }
 }
