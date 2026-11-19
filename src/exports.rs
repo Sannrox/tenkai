@@ -355,7 +355,8 @@ impl Exports {
     }
 
     /// Every export, newest first. Staging directories are not exports.
-    /// Expired artifacts are removed on the way.
+    /// Expired artifacts are removed on the way. An export whose record cannot
+    /// be read is reported on stderr and left out.
     pub fn list(&self) -> Result<ExportList> {
         self.list_at(crate::now_millis())
     }
@@ -368,7 +369,18 @@ impl Exports {
                 continue;
             };
             if uuid::Uuid::try_parse(&id).is_ok() {
-                let entry = self.with_expiry(self.read_entry(&id)?, now_ms);
+                // One unreadable record is reported and left out; it must not
+                // hide every other export or block the audit chain (#1339).
+                let record = match self.read_entry(&id) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        eprintln!(
+                            "export {id} is unreadable and left out of the listing: {error:#}"
+                        );
+                        continue;
+                    }
+                };
+                let entry = self.with_expiry(record, now_ms);
                 if entry.expired {
                     self.remove_artifact(&id)?;
                 }
@@ -609,6 +621,34 @@ mod tests {
                 (3, ExportAction::Downloaded)
             ]
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// #1339: one corrupt record is left out and the others still list.
+    #[test]
+    fn a_corrupt_export_record_does_not_hide_the_others() {
+        let (exports, root) = exports("corrupt");
+        let store = |name: &str| {
+            exports
+                .store(
+                    ExportKind::SupportBundle,
+                    None,
+                    name,
+                    b"{}",
+                    &event(1, ExportAction::Created),
+                )
+                .unwrap()
+        };
+        let good = store("good.json");
+        let bad = store("bad.json");
+        std::fs::write(
+            root.join("exports").join(&bad.export.id).join(RECORD_FILE),
+            "not json",
+        )
+        .unwrap();
+        let listed = exports.list().unwrap().exports;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].export.id, good.export.id);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -410,6 +410,9 @@ where
     )?;
     let mut delivered = 0;
     let mut deferred = 0;
+    // Every claimed record is attempted; the first store error is returned
+    // after the batch, not in the middle of it (#1339).
+    let mut failure = None;
     for record in &records {
         match deliver_optional_event(store, record, timeout, now, |event, kind| async move {
             if kind != FEEDBACK_PROVIDER_KIND {
@@ -419,13 +422,16 @@ where
             }
             provider.deliver(&event).await
         })
-        .await?
+        .await
         {
-            DeliveryStatus::Delivered => delivered += 1,
-            DeliveryStatus::Deferred => deferred += 1,
+            Ok(DeliveryStatus::Delivered) => delivered += 1,
+            Ok(DeliveryStatus::Deferred) => deferred += 1,
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
         }
     }
-    Ok((delivered, deferred))
+    failure.map_or(Ok((delivered, deferred)), Err)
 }
 
 /// Reference adapter: authenticated `SubmitEvidence` then

@@ -326,15 +326,28 @@ async fn reconcile_held(
             .cloned(),
     );
     let observed_at = crate::now_millis();
+    // An unreadable origin plan skips its outcome event and says so in the
+    // result, instead of blocking the operator's reconciliation (#1339). A
+    // readable origin that does not match stays an error.
+    let mut skipped_outcome = None;
     let provider_events = if ctx.outcome_export_enabled() && was_unknown {
         match unknown_origin.clone() {
             (Some(plan_id), Some(step_id), Some(deployment_id)) => {
-                let plan = crate::plan::load(ctx, &plan_id).await?;
-                anyhow::ensure!(
-                    plan.environment == env,
-                    "unknown deployment origin belongs to a different environment"
-                );
-                let step = plan
+                let plan = match crate::plan::load(ctx, &plan_id).await {
+                    Ok(plan) => Some(plan),
+                    Err(error) => {
+                        skipped_outcome = Some(format!(
+                            "; outcome export skipped: origin plan {plan_id} is unreadable: {error:#}"
+                        ));
+                        None
+                    }
+                };
+                if let Some(plan) = plan {
+                    anyhow::ensure!(
+                        plan.environment == env,
+                        "unknown deployment origin belongs to a different environment"
+                    );
+                    let step = plan
                     .steps
                     .iter()
                     .find(|step| step.id == step_id && step.product == product)
@@ -343,14 +356,17 @@ async fn reconcile_held(
                             "unknown deployment origin step {step_id} is absent from plan {plan_id}"
                         )
                     })?;
-                vec![crate::providers::terminal_outcome_record(
-                    &plan,
-                    step,
-                    &deployment_id,
-                    crate::providers::TerminalOutcomeState::UnknownReconciled,
-                    &object,
-                    observed_at,
-                )?]
+                    vec![crate::providers::terminal_outcome_record(
+                        &plan,
+                        step,
+                        &deployment_id,
+                        crate::providers::TerminalOutcomeState::UnknownReconciled,
+                        &object,
+                        observed_at,
+                    )?]
+                } else {
+                    Vec::new()
+                }
             }
             _ => Vec::new(),
         }
@@ -424,10 +440,11 @@ async fn reconcile_held(
         &feedback,
     )
     .await?;
-    Ok(match deployed {
+    let message = match deployed {
         Some(version) => format!("recorded {product}@{version} as deployed in {env}"),
         None => format!("cleared unknown deployment state for {product} in {env}"),
-    })
+    };
+    Ok(message + skipped_outcome.as_deref().unwrap_or_default())
 }
 
 async fn update_reconciled_deployment_object(
@@ -4691,6 +4708,39 @@ mod tests {
             created: 1,
             updated: 1,
         }
+    }
+
+    // #1339: with outcome export on, an unreadable origin plan skips its
+    // outcome event and says so; the reconciliation itself still lands.
+    #[tokio::test]
+    async fn an_unreadable_origin_plan_does_not_block_reconciliation() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-unknown-origin-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded_with_outcome_export(root.join("state.db"), true).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        env_add(&mut ctx, "stage", "stage").await.unwrap();
+        let mut object = environment(&mut ctx, "stage").await.unwrap();
+        object.properties.extend(environment_object().properties);
+        ctx.put(object).await.unwrap();
+
+        let message = reconcile_deployment_fenced(&mut ctx, "stage", "api", None, |_| Ok(()))
+            .await
+            .unwrap();
+        assert!(
+            message.contains("outcome export skipped: origin plan old-plan"),
+            "{message}"
+        );
+        let object = environment(&mut ctx, "stage").await.unwrap();
+        assert!(
+            !object
+                .properties
+                .contains_key("deployment_unknown_plan.api")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

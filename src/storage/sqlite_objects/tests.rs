@@ -658,3 +658,60 @@ fn a_record_from_before_a_head_removal_stays_fenced() {
     assert!(store.promote_channel(&stale).is_err());
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn a_plan_page_skips_catalog_leftovers_before_paging() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    store
+        .put(Object {
+            id: env_id("lab"),
+            kind: KIND_ENVIRONMENT.into(),
+            name: "lab".into(),
+            namespace: NS.into(),
+            properties: [("description".into(), "fixture".into())]
+                .into_iter()
+                .collect(),
+            created: 1,
+            updated: 1,
+            ..Object::default()
+        })
+        .unwrap();
+    let plan = sample_plan("lab", 10);
+    store.put(plan.to_object().unwrap()).unwrap();
+    // A catalog plan object with no operational plan row, sorting first.
+    let connection = store.connection().unwrap();
+    connection
+        .execute(
+            "INSERT INTO catalog_objects(id,kind,payload) VALUES(?1,?2,?3)",
+            rusqlite::params![
+                "tenkai:plan:0",
+                KIND_PLAN,
+                Object {
+                    id: "tenkai:plan:0".into(),
+                    kind: KIND_PLAN.into(),
+                    ..Object::default()
+                }
+                .encode_to_vec()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO catalog_object_properties(object_id,kind,key,value) VALUES(?1,?2,'environment','lab')",
+            rusqlite::params!["tenkai:plan:0", KIND_PLAN],
+        )
+        .unwrap();
+    drop(connection);
+
+    let page = store
+        .find_by_property_matching(crate::embedded::PropertyIndexQuery {
+            limit: Some(1),
+            ..crate::embedded::PropertyIndexQuery::new(KIND_PLAN, "environment", "lab")
+        })
+        .unwrap();
+
+    assert_eq!(
+        page.iter().map(|object| &object.id).collect::<Vec<_>>(),
+        vec![&plan.id]
+    );
+}

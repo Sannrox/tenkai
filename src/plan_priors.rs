@@ -180,10 +180,6 @@ pub fn project_priors_from_outcome_events(
 ) -> anyhow::Result<Vec<DeploymentOutcomePrior>> {
     let mut priors = Vec::new();
     for event in events {
-        event
-            .binding
-            .validate()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let payload: OutcomePriorPayload = match serde_json::from_str(&event.payload_json) {
             Ok(p) => p,
             Err(_) => continue,
@@ -191,6 +187,11 @@ pub fn project_priors_from_outcome_events(
         if payload.schema != OUTCOME_PRIOR_SCHEMA {
             continue;
         }
+        // Only a prior's own binding gates the projection (#1339).
+        event
+            .binding
+            .validate()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let prior = DeploymentOutcomePrior {
             product: payload.product,
             fact_key: payload.fact_key,
@@ -621,6 +622,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("provider unavailable"));
+    }
+
+    #[test]
+    fn a_bad_binding_on_an_unrelated_event_does_not_fail_the_projection() {
+        use crate::providers::{EvidenceBinding, PROVIDER_CONTRACT_VERSION, ProviderEvent};
+        let unrelated = ProviderEvent {
+            id: "ev".into(),
+            binding: EvidenceBinding {
+                contract_version: PROVIDER_CONTRACT_VERSION,
+                release_digest: String::new(),
+                plan_digest: "sha256:p".into(),
+                configuration_digest: "sha256:c".into(),
+                environment_id: "e".into(),
+            },
+            payload_json: r#"{"schema":"tenkai.terminal_outcome.v1"}"#.into(),
+            collected_at_ms: None,
+            source_sequence: None,
+        };
+        assert!(unrelated.binding.validate().is_err());
+        assert!(
+            project_priors_from_outcome_events(&[unrelated])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
