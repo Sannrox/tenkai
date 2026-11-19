@@ -6,11 +6,7 @@ impl OperationalStore for SqliteStore {
     }
 
     fn get_release(&self, id: &str) -> Result<Option<ReleaseRecord>> {
-        let connection = self.connection()?;
-        Ok(connection.query_row(
-            "SELECT id,product,version,content_digest,descriptor_json FROM releases WHERE id=?1", [id],
-            |row| Ok(ReleaseRecord { id: row.get(0)?, product: row.get(1)?, version: row.get(2)?, content_digest: row.get(3)?, descriptor_json: row.get(4)? }),
-        ).optional()?)
+        release_record_in(&*self.connection()?, id)
     }
 
     fn import_development_fixture(
@@ -51,16 +47,7 @@ impl OperationalStore for SqliteStore {
     }
 
     fn get_plan(&self, id: &str) -> Result<Option<PlanRecord>> {
-        let connection = self.connection()?;
-        connection.query_row(
-            "SELECT id,environment_id,format_version,content_digest,plan_json,status,status_detail FROM plans WHERE id=?1", [id],
-            |row| {
-                let status: String = row.get(5)?;
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, status, row.get(6)?))
-            },
-        ).optional()?.map(|(id, environment_id, format_version, content_digest, plan_json, status, status_detail)| {
-            Ok::<PlanRecord, StoreError>(PlanRecord { id, environment_id, format_version, content_digest, plan_json, status: PlanStatus::parse(&status)?, status_detail })
-        }).transpose()
+        plan_record_in(&*self.connection()?, id)
     }
 
     fn transition_plan(
@@ -491,4 +478,42 @@ impl OperationalStore for SqliteStore {
     fn runtime_sealing_key(&self, runner_id: &str) -> Result<Option<RuntimeSealingKeyRecord>> {
         self.runtime_sealing_key_sqlite(runner_id)
     }
+}
+
+/// The release row `id`, read through `connection` (a transaction too).
+pub(crate) fn release_record_in(
+    connection: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<ReleaseRecord>> {
+    Ok(connection
+        .query_row(
+            "SELECT id,product,version,content_digest,descriptor_json FROM releases WHERE id=?1",
+            [id],
+            |row| {
+                Ok(ReleaseRecord {
+                    id: row.get(0)?,
+                    product: row.get(1)?,
+                    version: row.get(2)?,
+                    content_digest: row.get(3)?,
+                    descriptor_json: row.get(4)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// The plan row `id`, read through `connection` (a transaction too).
+pub(crate) fn plan_record_in(
+    connection: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<PlanRecord>> {
+    connection.query_row(
+            "SELECT id,environment_id,format_version,content_digest,plan_json,status,status_detail FROM plans WHERE id=?1", [id],
+            |row| {
+                let status: String = row.get(5)?;
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, status, row.get(6)?))
+            },
+        ).optional()?.map(|(id, environment_id, format_version, content_digest, plan_json, status, status_detail)| {
+            Ok::<PlanRecord, StoreError>(PlanRecord { id, environment_id, format_version, content_digest, plan_json, status: PlanStatus::parse(&status)?, status_detail })
+        }).transpose()
 }

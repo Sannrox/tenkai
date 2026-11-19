@@ -165,28 +165,27 @@ pub(super) fn upsert_channel_in(tx: &Transaction<'_>, object: &Object) -> Result
         Some(revision) => Some(revision),
         None => channel_revision_floor(tx, &object.id)?,
     };
-    if release.is_empty() {
-        // A removed head (#1174) leaves no typed row; reads fall back to the
-        // catalog object, which keeps the revision floor.
+    let release_exists = !release.is_empty()
+        && tx
+            .query_row("SELECT 1 FROM releases WHERE id=?1", [&release], |_| Ok(()))
+            .optional()?
+            .is_some();
+    if !release_exists {
+        // A removed head (#1174), or a head naming a release this store does
+        // not hold, leaves no typed row: a stale one would keep serving the
+        // old release. Reads fall back to the catalog object, which keeps the
+        // revision floor.
         tx.execute("DELETE FROM channels WHERE id=?1", [&object.id])?;
-        let mut headless = object.clone();
+        let mut catalog_only = object.clone();
         if let Some(floor) = floor {
-            headless
+            catalog_only
                 .properties
                 .insert(CHANNEL_REVISION_FLOOR.into(), floor.to_string());
         }
-        upsert_catalog_in(tx, &headless)?;
+        upsert_catalog_in(tx, &catalog_only)?;
         return Ok(());
     }
     let next = floor.map(|value| value + 1).unwrap_or(1);
-    let release_exists = tx
-        .query_row("SELECT 1 FROM releases WHERE id=?1", [&release], |_| Ok(()))
-        .optional()?
-        .is_some();
-    if !release_exists {
-        upsert_catalog_in(tx, object)?;
-        return Ok(());
-    }
     tx.execute(
         "INSERT INTO channels(id,product,name,release_id,revision) VALUES(?1,?2,?3,?4,?5)
          ON CONFLICT(id) DO UPDATE SET release_id=excluded.release_id, revision=excluded.revision",

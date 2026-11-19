@@ -169,48 +169,6 @@ pub(crate) async fn begin_attempt(
     }
 }
 
-pub(crate) async fn mark_attempt_started(ctx: &mut Ctx, attempt_id: &str) -> Result<()> {
-    let mut attempt = ctx
-        .get(attempt_id)
-        .await?
-        .with_context(|| format!("canary attempt {attempt_id} not found"))?;
-    if object_property(&attempt, "status")? != "pending" {
-        bail!("canary attempt {attempt_id} is not pending");
-    }
-    let plan_id = object_property(&attempt, "plan_id")?.to_string();
-    let started_at = crate::now_millis().max(attempt.created);
-    attempt
-        .properties
-        .insert("execution_started_at".into(), started_at.to_string());
-    attempt.updated = started_at;
-    match ctx.put(attempt).await {
-        Ok(_) => Ok(()),
-        Err(start_error) => {
-            let cleanup = async {
-                let mut current = ctx
-                    .get(attempt_id)
-                    .await?
-                    .with_context(|| format!("canary attempt {attempt_id} disappeared"))?;
-                if object_property(&current, "status")? == "pending" {
-                    current
-                        .properties
-                        .insert("status".into(), "abandoned".into());
-                    current.updated = crate::now_millis().max(current.created);
-                    ctx.put(current).await?;
-                }
-                Ok::<_, anyhow::Error>(())
-            }
-            .await;
-            match cleanup {
-                Ok(()) => Err(start_error.context("abandoned canary attempt after start failed")),
-                Err(cleanup_error) => Err(start_error.context(format!(
-                    "abandoning canary attempt also failed: {cleanup_error}; run `tenkaictl canary repair {plan_id}`"
-                ))),
-            }
-        }
-    }
-}
-
 async fn persist_attempt(
     ctx: &mut Ctx,
     plan: &Plan,
@@ -241,6 +199,10 @@ async fn persist_attempt(
                 ("gates_skipped".into(), gates_skipped.to_string()),
                 ("status".into(), "pending".into()),
                 ("policies".into(), serialized.clone()),
+                // Stamped in the fenced create, while the policy locks are
+                // held: a later unfenced write could race a lock-holding
+                // repair and revive an attempt it had abandoned.
+                ("execution_started_at".into(), started_at.to_string()),
             ]),
             created: started_at,
             updated: started_at,
@@ -371,14 +333,6 @@ where
             };
         }
     };
-    if let Some(attempt_id) = attempt_id.as_deref()
-        && let Err(error) = mark_attempt_started(ctx, attempt_id).await
-    {
-        return AttemptExecution {
-            execution: Err(error.context("marking canary attempt as started")),
-            finalization_error: None,
-        };
-    }
     let execution = execute(ctx).await;
     let finalization_error = match attempt_id.as_deref() {
         Some(attempt_id) => finish_attempt(
@@ -987,6 +941,14 @@ mod tests {
                 .map(|object| object.id.as_str())
                 .collect::<Vec<_>>(),
             vec![attempt_id.as_str()]
+        );
+        // The start is stamped in the fenced create; no unfenced write
+        // follows it.
+        let attempt = ctx.get(&attempt_id).await.unwrap().unwrap();
+        assert_eq!(object_property(&attempt, "status").unwrap(), "pending");
+        assert_eq!(
+            object_property(&attempt, "execution_started_at").unwrap(),
+            attempt.created.to_string()
         );
 
         let _ = std::fs::remove_file(database);

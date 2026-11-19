@@ -163,56 +163,77 @@ impl SqliteStore {
         decode_many(payloads, "object")
     }
 
+    #[cfg(test)]
     pub(super) fn channel_record(&self, id: &str) -> Result<Option<ChannelRecord>> {
-        let connection = self.connection()?;
-        Ok(connection
-            .query_row(
-                "SELECT id,product,name,release_id,revision FROM channels WHERE id=?1",
-                [id],
-                |row| {
-                    Ok(ChannelRecord {
-                        id: row.get(0)?,
-                        product: row.get(1)?,
-                        name: row.get(2)?,
-                        release_id: row.get(3)?,
-                        revision: row.get(4)?,
-                    })
-                },
-            )
-            .optional()?)
+        channel_record_in(&*self.connection()?, id)
     }
 
     pub(super) fn channel_to_object(&self, record: &ChannelRecord) -> AnyResult<Object> {
-        if let Some(stored) = self.get_catalog_object(&record.id)? {
-            return Ok(stored);
-        }
-        Ok(Object {
-            id: record.id.clone(),
-            kind: KIND_CHANNEL.into(),
-            name: record.name.clone(),
-            namespace: NS.into(),
-            properties: BTreeMap::from([
-                ("product".into(), record.product.clone()),
-                ("name".into(), record.name.clone()),
-                ("current_release".into(), record.release_id.clone()),
-            ])
-            .into_iter()
-            .collect(),
-            ..Object::default()
-        })
+        channel_object_in(&*self.connection()?, record)
     }
 
     pub(super) fn get_catalog_object(&self, id: &str) -> AnyResult<Option<Object>> {
-        let connection = self.connection()?;
-        decode_optional(
-            connection
-                .query_row(
-                    "SELECT payload FROM catalog_objects WHERE id=?1",
-                    [id],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .optional()?,
-            "object",
-        )
+        catalog_object_in(&*self.connection()?, id)
     }
+}
+
+/// The typed channel row `id`, read through `connection`.
+pub(super) fn channel_record_in(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<ChannelRecord>> {
+    Ok(connection
+        .query_row(
+            "SELECT id,product,name,release_id,revision FROM channels WHERE id=?1",
+            [id],
+            |row| {
+                Ok(ChannelRecord {
+                    id: row.get(0)?,
+                    product: row.get(1)?,
+                    name: row.get(2)?,
+                    release_id: row.get(3)?,
+                    revision: row.get(4)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// A channel as an object: its stored catalog object, else one built from
+/// the typed row.
+pub(super) fn channel_object_in(
+    connection: &Connection,
+    record: &ChannelRecord,
+) -> AnyResult<Object> {
+    if let Some(stored) = catalog_object_in(connection, &record.id)? {
+        return Ok(stored);
+    }
+    Ok(Object {
+        id: record.id.clone(),
+        kind: KIND_CHANNEL.into(),
+        name: record.name.clone(),
+        namespace: NS.into(),
+        properties: BTreeMap::from([
+            ("product".into(), record.product.clone()),
+            ("name".into(), record.name.clone()),
+            ("current_release".into(), record.release_id.clone()),
+        ])
+        .into_iter()
+        .collect(),
+        ..Object::default()
+    })
+}
+
+/// The catalog object `id`, read through `connection`.
+pub(super) fn catalog_object_in(connection: &Connection, id: &str) -> AnyResult<Option<Object>> {
+    decode_optional(
+        connection
+            .query_row(
+                "SELECT payload FROM catalog_objects WHERE id=?1",
+                [id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?,
+        "object",
+    )
 }

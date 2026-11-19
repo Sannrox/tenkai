@@ -23,8 +23,8 @@ use crate::pb::graph_action::{ActionResult, ActionTypeDef};
 use crate::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use crate::plan::{Plan, PlanState};
 use crate::storage::{
-    ChannelRecord, EnvironmentRecord, OperationalStore, PlanRecord, PlanStatus,
-    ProviderEventRecord, ReleaseRecord, Result, SqliteStore, StoreError, enqueue_provider_event_in,
+    ChannelRecord, EnvironmentRecord, PlanRecord, PlanStatus, ProviderEventRecord, ReleaseRecord,
+    Result, SqliteStore, StoreError, enqueue_provider_event_in,
 };
 
 const STRICT_AUTHORITY_KINDS: &[&str] = &[KIND_PLAN, KIND_ENVIRONMENT, KIND_RELEASE];

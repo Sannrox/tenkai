@@ -121,12 +121,16 @@ normalize_fingerprint() {
 }
 
 verify_signed_tag() {
-  local tag="$1" expected_commit="$2" object_type actual raw fingerprint primary allowed line version
+  local tag="$1" expected_commit="$2" object_type embedded actual raw fingerprint primary allowed line version
   [[ "$tag" =~ $RELEASE_TAG_PATTERN ]] || fail "invalid release tag: ${tag}"
   [[ "$expected_commit" =~ ^[0-9a-f]{40}$ ]] || fail "expected commit must be a full lowercase SHA"
 
   object_type="$(git cat-file -t "refs/tags/${tag}" 2>/dev/null)" || fail "tag ${tag} was not found"
   [[ "$object_type" == tag ]] || fail "tag ${tag} is lightweight; release tags must be annotated and signed"
+  # The signature covers the name inside the tag object, not the ref. A
+  # signed tag copied to another ref name must not vouch for that name.
+  embedded="$(git cat-file tag "refs/tags/${tag}" | awk '/^tag /{print $2; exit} /^$/{exit}')"
+  [[ "$embedded" == "$tag" ]] || fail "tag ${tag} was signed as ${embedded:-an unnamed tag}"
   actual="$(git rev-parse "refs/tags/${tag}^{commit}")"
   [[ "$actual" == "$expected_commit" ]] || fail "tag ${tag} resolves to ${actual}, expected ${expected_commit}"
 

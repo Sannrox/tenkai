@@ -230,6 +230,12 @@ class SignedTag(unittest.TestCase):
         repo("checkout", "-q", "-b", "elsewhere", cls.first)
         cls.elsewhere = repo.commit("1.2.5", "not released")
         repo("tag", "-s", "v1.2.5", "-m", "off main", cls.elsewhere)
+        # A tag signed as v1.2.7, copied to the ref v1.2.6 at a 1.2.6 commit.
+        repo("checkout", "-q", "-b", "renamed", cls.first)
+        cls.renamed = repo.commit("1.2.6", "renamed")
+        repo("tag", "-s", "v1.2.7", "-m", "signed under another name", cls.renamed)
+        repo("update-ref", "refs/tags/v1.2.6", "refs/tags/v1.2.7")
+        repo("tag", "-d", "v1.2.7")
         repo("checkout", "-q", "main")
         cls.origin = cls.tmp / "o.git"
         subprocess.run(["git", "init", "--bare", "-q", str(cls.origin)], check=True)
@@ -257,6 +263,9 @@ class SignedTag(unittest.TestCase):
     def test_refuses_lightweight_and_unsigned_tags(self):
         self.assertRefused(self.signed("v1.2.0", self.first), "is lightweight")
         self.assertRefused(self.signed("v1.2.1", self.first), "is unsigned")
+
+    def test_refuses_a_signed_tag_under_another_ref_name(self):
+        self.assertRefused(self.signed("v1.2.6", self.renamed), "was signed as v1.2.7")
 
     def test_refuses_a_tag_for_another_commit(self):
         self.assertRefused(self.signed("v1.2.3", "0" * 40), f"expected {'0' * 40}")
