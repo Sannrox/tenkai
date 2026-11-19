@@ -12,6 +12,7 @@ fn live_postgres_development_fixture_is_atomic_and_tenant_scoped() {
     use tenkai::development_fixtures::{DevelopmentFixture, FixtureEnvironment, FixturePlan};
 
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let authority = TenantDerivationAuthority::new("test");
@@ -29,8 +30,14 @@ fn live_postgres_development_fixture_is_atomic_and_tenant_scoped() {
         .build()
         .unwrap()
     };
-    let ctx_a = context(&format!("fixture-a-{suffix}"), "fixture-request-a");
-    let ctx_b = context(&format!("fixture-b-{suffix}"), "fixture-request-b");
+    let ctx_a = context(
+        &tenants.adopt_id(format!("fixture-a-{suffix}")),
+        "fixture-request-a",
+    );
+    let ctx_b = context(
+        &tenants.adopt_id(format!("fixture-b-{suffix}")),
+        "fixture-request-b",
+    );
     let fixture = DevelopmentFixture {
         contract_version: 1,
         fixture_id: format!("demo-{suffix}"),

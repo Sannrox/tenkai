@@ -287,6 +287,85 @@ fn invalidate_tenant_schema_stamp(
     store.inner.forget_ensured_schema(schema);
 }
 
+/// Tenant schemas a live test creates in the shared database. Dropping the
+/// guard, also while a failed test unwinds, drops each schema and deletes its
+/// version and owner rows, so repeated and concurrent runs leave no
+/// `tenkai_t_*` schemas behind (#1344). Declare it before the store so it
+/// drops after the store's connections.
+#[cfg(feature = "postgres")]
+pub(crate) struct LiveTenants {
+    url: String,
+    schemas: std::sync::Mutex<Vec<String>>,
+}
+
+#[cfg(feature = "postgres")]
+impl LiveTenants {
+    pub(crate) fn new(config: &PostgresTenantConfig) -> Self {
+        Self {
+            url: config.url.clone(),
+            schemas: std::sync::Mutex::default(),
+        }
+    }
+
+    /// A tenant id unique to this process and call, registered for cleanup.
+    pub(crate) fn tenant(&self, label: &str) -> String {
+        let tenant = format!(
+            "{label}{}{}",
+            std::process::id(),
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        self.adopt(&tenant);
+        tenant
+    }
+
+    /// Register `tenant` and hand it back, for inline use.
+    pub(crate) fn adopt_id(&self, tenant: String) -> String {
+        self.adopt(&tenant);
+        tenant
+    }
+
+    /// Register a tenant id the test built itself; returns its schema.
+    pub(crate) fn adopt(&self, tenant: &str) -> String {
+        let schema = tenant_schema_name(tenant).expect("valid tenant id");
+        let mut schemas = self.schemas.lock().unwrap_or_else(|e| e.into_inner());
+        if !schemas.contains(&schema) {
+            schemas.push(schema.clone());
+        }
+        schema
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl Drop for LiveTenants {
+    fn drop(&mut self) {
+        let schemas = std::mem::take(self.schemas.get_mut().unwrap_or_else(|e| e.into_inner()));
+        if schemas.is_empty() {
+            return;
+        }
+        // The blocking client starts its own runtime, which panics inside an
+        // async test's runtime, so the cleanup runs on a thread of its own.
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let Ok(mut client) = postgres::Client::connect(&self.url, postgres::NoTls) else {
+                    eprintln!("live test cleanup could not connect; schemas left: {schemas:?}");
+                    return;
+                };
+                for schema in &schemas {
+                    // A schema name is built from validated characters only.
+                    let cleanup = format!(
+                        "DROP SCHEMA IF EXISTS {schema} CASCADE;
+                         DELETE FROM public.tenkai_tenant_schema_versions WHERE schema_name = '{schema}';
+                         DELETE FROM public.tenkai_tenant_schema_owners WHERE schema_name = '{schema}';"
+                    );
+                    if let Err(error) = client.batch_execute(&cleanup) {
+                        eprintln!("live test cleanup of {schema} failed: {error}");
+                    }
+                }
+            });
+        });
+    }
+}
+
 #[cfg(feature = "postgres")]
 mod live_catalog;
 #[cfg(feature = "postgres")]

@@ -36,6 +36,7 @@ fn named(object: &Object, name: &str) -> Object {
 #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
 fn live_postgres_tenant_partition_captures_feedback_observations() {
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
     let suffix = format!(
         "{}{}",
@@ -43,6 +44,8 @@ fn live_postgres_tenant_partition_captures_feedback_observations() {
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     );
     let (tenant_a, tenant_b) = (format!("fa{suffix}"), format!("fb{suffix}"));
+    tenants.adopt(&tenant_a);
+    tenants.adopt(&tenant_b);
     let (a, b) = (Some(tenant_a.as_str()), Some(tenant_b.as_str()));
     let object = Object {
         id: format!("tenkai:conformance:observed:{suffix}"),
@@ -110,7 +113,6 @@ fn live_postgres_tenant_partition_captures_feedback_observations() {
 
     // A capture that cannot be stored rolls back alone.
     let schema_a = tenant_schema_name(&tenant_a).unwrap();
-    let schema_b = tenant_schema_name(&tenant_b).unwrap();
     let mut raw = postgres::Client::connect(&config.url, postgres::NoTls).expect("raw connect");
     // Every catalog call re-runs the idempotent tenant migration, so refuse
     // inserts with a constraint rather than dropping the table.
@@ -132,8 +134,4 @@ fn live_postgres_tenant_partition_captures_feedback_observations() {
         "uncaptured"
     );
     assert_eq!(store.feedback_observations(a, "prod").unwrap().len(), 1);
-    raw.batch_execute(&format!(
-        "DROP SCHEMA {schema_a} CASCADE; DROP SCHEMA {schema_b} CASCADE"
-    ))
-    .unwrap();
 }

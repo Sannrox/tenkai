@@ -12,12 +12,9 @@ use tenkai::storage::{OperationalStore as _, ProviderEventRecord};
 #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
 fn live_provider_enqueue_racing_a_duplicate_is_idempotent() {
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
-    let tenant = format!(
-        "pe{}{}",
-        std::process::id(),
-        &uuid::Uuid::new_v4().simple().to_string()[..8]
-    );
+    let tenant = tenants.tenant("pe");
     let partition = store.partition_by_id(&tenant).unwrap();
     let event = |id: &str| ProviderEventRecord {
         id: id.into(),

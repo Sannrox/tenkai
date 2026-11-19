@@ -88,7 +88,23 @@ fn drill_replica() {
     let partition = store.partition_for(&context(&tenant)).expect("partition");
     let lease = PostgresHubWriterLease::open(&config, &holder, WRITER_TTL_MS, fence.clone())
         .expect("lease");
-    let mut last_role = None;
+    // Renew on its own thread, as the server does: a write that waits on
+    // another replica's row lock must not starve the lease renewal.
+    std::thread::spawn(move || {
+        let mut last_role = None;
+        loop {
+            let role = match lease.renew() {
+                Ok(WriterRole::Leader { generation, .. }) => format!("leader {generation}"),
+                Ok(WriterRole::Standby) => "standby".to_owned(),
+                Err(error) => format!("standby ({error})"),
+            };
+            if last_role.as_ref() != Some(&role) {
+                println!("drill: role {role}");
+                last_role = Some(role);
+            }
+            std::thread::sleep(TICK);
+        }
+    });
     let mut turn = 0usize;
     loop {
         if fence.is_leader() && go.exists() {
@@ -111,15 +127,6 @@ fn drill_replica() {
                     }
                 }
             }
-        }
-        let role = match lease.renew() {
-            Ok(WriterRole::Leader { generation, .. }) => format!("leader {generation}"),
-            Ok(WriterRole::Standby) => "standby".to_owned(),
-            Err(error) => format!("standby ({error})"),
-        };
-        if last_role.as_ref() != Some(&role) {
-            println!("drill: role {role}");
-            last_role = Some(role);
         }
         std::thread::sleep(TICK);
     }

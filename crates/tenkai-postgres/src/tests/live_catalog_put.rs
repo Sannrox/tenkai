@@ -12,12 +12,9 @@ use tenkai::storage::CatalogGraph;
 #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
 fn live_catalog_put_rewrites_only_changed_rows() {
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
-    let tenant = format!(
-        "put{}{}",
-        std::process::id(),
-        &uuid::Uuid::new_v4().simple().to_string()[..8]
-    );
+    let tenant = tenants.tenant("put");
     let schema = tenant_schema_name(&tenant).unwrap();
     let tenant = Some(tenant.as_str());
     let mut raw = postgres::Client::connect(&config.url, postgres::NoTls).expect("raw connect");

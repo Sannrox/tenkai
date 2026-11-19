@@ -12,6 +12,7 @@ fn live_postgres_tenant_isolation() {
     use tenkai::storage::{OperationalStore as _, ReleaseRecord};
 
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
     // Unique per run: the check expects tenant A to list only `env_a`, so a
     // rerun or a neighbouring agent on the same database must not share it.
@@ -22,6 +23,8 @@ fn live_postgres_tenant_isolation() {
     );
     let tenant_a = format!("iso-a-{suffix}");
     let tenant_b = format!("iso-b-{suffix}");
+    tenants.adopt(&tenant_a);
+    tenants.adopt(&tenant_b);
     let authority = TenantDerivationAuthority::new("test");
     let ctx_a = AuthenticatedRequestContextBuilder::new(
         "r-a",

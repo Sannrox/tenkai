@@ -8,12 +8,14 @@ use tenkai::storage::CatalogGraph;
 #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
 fn live_colliding_tenant_ids_never_share_a_schema() {
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let suffix = format!(
         "{}{}",
         std::process::id(),
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     );
     let owner = format!("own-{suffix}");
+    tenants.adopt(&owner);
     let rival = format!("OWN_{suffix}");
     let schema = tenant_schema_name(&owner).unwrap();
     assert_eq!(tenant_schema_name(&rival).unwrap(), schema);
@@ -42,17 +44,4 @@ fn live_colliding_tenant_ids_never_share_a_schema() {
     let upgraded = config.open().expect("connect");
     assert_eq!(upgraded.get(Some(&owner), "tenkai:none").unwrap(), None);
     assert!(upgraded.get(Some(&rival), "tenkai:none").is_err());
-
-    raw.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
-        .unwrap();
-    for table in [
-        "tenkai_tenant_schema_owners",
-        "tenkai_tenant_schema_versions",
-    ] {
-        raw.execute(
-            &format!("DELETE FROM public.{table} WHERE schema_name = $1"),
-            &[&schema],
-        )
-        .unwrap();
-    }
 }

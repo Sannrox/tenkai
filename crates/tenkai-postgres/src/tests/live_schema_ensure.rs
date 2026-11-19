@@ -8,12 +8,9 @@ use tenkai::storage::CatalogGraph;
 #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
 fn live_tenant_schema_ensure_skips_ddl_once_current() {
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
-    let tenant = format!(
-        "ens{}{}",
-        std::process::id(),
-        &uuid::Uuid::new_v4().simple().to_string()[..8]
-    );
+    let tenant = tenants.tenant("ens");
     let schema = tenant_schema_name(&tenant).unwrap();
     assert_eq!(store.get(Some(&tenant), "tenkai:none").unwrap(), None);
 
@@ -57,11 +54,4 @@ fn live_tenant_schema_ensure_skips_ddl_once_current() {
         }
     }
     raw.batch_execute("ROLLBACK").unwrap();
-    raw.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
-        .unwrap();
-    raw.execute(
-        "DELETE FROM public.tenkai_tenant_schema_versions WHERE schema_name = $1",
-        &[&schema],
-    )
-    .unwrap();
 }

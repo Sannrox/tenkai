@@ -22,12 +22,9 @@ fn live_kind_listing_matches_per_id_reads() {
     };
 
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
-    let tenant = format!(
-        "list{}{}",
-        std::process::id(),
-        &uuid::Uuid::new_v4().simple().to_string()[..8]
-    );
+    let tenant = tenants.tenant("list");
     let authority = TenantDerivationAuthority::new("test");
     let ctx = AuthenticatedRequestContextBuilder::new(
         "listing-request",

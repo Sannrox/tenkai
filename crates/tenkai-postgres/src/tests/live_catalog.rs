@@ -10,6 +10,7 @@ use tenkai::storage::{CatalogGraph, StoreError};
 #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
 fn live_postgres_catalog_matches_sqlite_contract_and_isolates_tenants() {
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
     let suffix = format!(
         "{}{}",
@@ -18,6 +19,8 @@ fn live_postgres_catalog_matches_sqlite_contract_and_isolates_tenants() {
     );
     let tenant_a = format!("ca{suffix}");
     let tenant_b = format!("cb{suffix}");
+    tenants.adopt(&tenant_a);
+    tenants.adopt(&tenant_b);
     assert_graph(&store, Some(&tenant_a));
 
     let isolated = Object {
@@ -177,6 +180,7 @@ fn sample_event(id: &str, environment: &str) -> tenkai::storage::ProviderEventRe
 #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
 async fn live_postgres_catalog_enqueues_provider_events_atomically_and_exports() {
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
     let suffix = format!(
         "{}{}",
@@ -185,6 +189,8 @@ async fn live_postgres_catalog_enqueues_provider_events_atomically_and_exports()
     );
     let tenant_a = format!("oa{suffix}");
     let tenant_b = format!("ob{suffix}");
+    tenants.adopt(&tenant_a);
+    tenants.adopt(&tenant_b);
     let id = format!("tenkai:conformance:outbox:{suffix}");
     let original = sample(&id, "tenkai.conformance", "original");
     store.create(Some(&tenant_a), original.clone()).unwrap();
@@ -244,6 +250,7 @@ async fn live_postgres_catalog_enqueues_provider_events_atomically_and_exports()
     );
 
     let tenant_export = format!("oe{suffix}");
+    tenants.adopt(&tenant_export);
     let export_id = format!("tenkai:conformance:export:{suffix}");
     let export_object = sample(&export_id, "tenkai.conformance", "export");
     store
@@ -293,6 +300,7 @@ async fn live_postgres_catalog_enqueues_provider_events_atomically_and_exports()
         (1, 0)
     );
     let tenant_export_b = format!("of{suffix}");
+    tenants.adopt(&tenant_export_b);
     let export_b_id = format!("tenkai:conformance:export-b:{suffix}");
     let export_b_object = sample(&export_b_id, "tenkai.conformance", "export-b");
     store

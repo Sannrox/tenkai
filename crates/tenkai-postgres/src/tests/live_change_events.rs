@@ -13,10 +13,9 @@ fn live_postgres_change_events_skip_unknown_kinds() {
     use tenkai::change_stream::ChangeEventKind;
 
     let suffix = uuid::Uuid::new_v4().simple().to_string();
-    let store = PostgresTenantConfig::from_env()
-        .expect("TENKAI_POSTGRES_URL")
-        .open()
-        .expect("connect");
+    let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
+    let store = config.open().expect("connect");
     let authority = TenantDerivationAuthority::new("test");
     let context = AuthenticatedRequestContextBuilder::new(
         format!("events-{suffix}"),
@@ -26,7 +25,7 @@ fn live_postgres_change_events_skip_unknown_kinds() {
         },
         "test",
     )
-    .with_tenant(format!("events-{suffix}"), &authority)
+    .with_tenant(tenants.adopt_id(format!("events-{suffix}")), &authority)
     .unwrap()
     .build()
     .unwrap();
