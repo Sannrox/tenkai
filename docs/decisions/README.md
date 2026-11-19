@@ -55,3 +55,4 @@
 - [0053 — Network policy derived from dependency bindings](0053-network-policy-from-bindings.md) (proposed)
 - [0054 — Subscription rules by selector](0054-subscription-rules-by-selector.md) (proposed)
 - [0055 — Signer quorum for promotion and policy changes](0055-signer-quorum-for-promotion-and-policy.md) (proposed)
+- [0056 — Recall removal scope, range exclusions and an instance-count threshold](0056-recall-scope-exclusions-and-count-threshold.md)
