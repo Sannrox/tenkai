@@ -1,0 +1,55 @@
+# Publish a signed Tenkai release from CI, then optionally promote it.
+# Reference it pinned to a Tenkai release tag or full commit SHA that
+# contains it: `Sannrox/tenkai/.github/actions/publish-release@<tag or SHA>`.
+# See docs/deploy-from-github.md.
+name: Publish a Tenkai release
+description: >-
+  Publish a manifest and its detached release signature to a Tenkai server as
+  a machine principal, and optionally promote the release to a channel. It
+  takes no signing key and no management token.
+inputs:
+  manifest:
+    description: Path to the release manifest (tenkai.toml) the signature covers.
+    required: true
+  signature:
+    description: Path to the detached release signature envelope.
+    required: true
+  trust-roots:
+    description: Path to the release trust roots the signature must verify against.
+    required: true
+  server-url:
+    description: Tenkai server URL (https, or http on loopback).
+    required: true
+  client-id:
+    description: OIDC client id of the CI machine principal.
+    required: true
+  client-secret:
+    description: OIDC client secret of the CI machine principal. Pass it from a secret.
+    required: true
+  channel:
+    description: Channel to promote the release to. Empty publishes only.
+    required: false
+    default: ""
+  tenkaictl:
+    description: tenkaictl to run, a path or a command on PATH.
+    required: false
+    default: tenkaictl
+outputs:
+  release:
+    description: The published release, as product@version.
+    value: ${{ steps.publish.outputs.release }}
+runs:
+  using: composite
+  steps:
+    - id: publish
+      shell: bash
+      env:
+        PUBLISH_MANIFEST: ${{ inputs.manifest }}
+        PUBLISH_SIGNATURE: ${{ inputs.signature }}
+        PUBLISH_TRUST_ROOTS: ${{ inputs.trust-roots }}
+        PUBLISH_CHANNEL: ${{ inputs.channel }}
+        PUBLISH_TENKAICTL: ${{ inputs.tenkaictl }}
+        TENKAI_SERVER_URL: ${{ inputs.server-url }}
+        TENKAI_OIDC_CLIENT_ID: ${{ inputs.client-id }}
+        TENKAI_OIDC_CLIENT_SECRET: ${{ inputs.client-secret }}
+      run: bash "$GITHUB_ACTION_PATH/publish.sh"

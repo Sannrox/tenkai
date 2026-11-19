@@ -4,7 +4,9 @@ Sample GitHub Actions workflow for a product repository. It is not a live
 workflow in this Tenkai checkout. Copy `publish.yml` into the product repo
 as `.github/workflows/publish.yml` and replace the placeholders.
 
-The job authenticates as a machine principal with
+The job renders and signs the manifest, then publishes and promotes it with
+the `publish-release` step from `.github/actions/publish-release`, which
+authenticates as a machine principal with
 `tenkaictl login --client-credentials`. It does not use the fleet
 `TENKAI_MANAGEMENT_TOKEN`. Tenkai verifies the access token and never holds
 the client secret.
@@ -33,10 +35,9 @@ See [configure server authentication](../../docs/configure-server-authentication
 | `TENKAI_TRUST_ROOTS` | Public trust-root TOML for `--trust-roots` |
 | `TENKAI_RELEASE_SEED` | 32-byte Ed25519 seed used by the product's signing step, not by `tenkai-server` |
 
-`TENKAI_OIDC_CLIENT_ID`, `TENKAI_SERVER_URL`, and `TENKAI_PRODUCT` may be
-variables. Render the checked-in manifest with `tenkaictl release render`
-(`--version`, and `--artifact` / `--sbom` when the release names images), then
-sign those bytes. The sample writes the rendered manifest next to the source
+`TENKAI_OIDC_CLIENT_ID` and `TENKAI_SERVER_URL` may be variables. Render the
+checked-in manifest with `tenkaictl release render` (`--version`, and
+`--artifact` / `--sbom` when the release names images), then sign those bytes. The sample writes the rendered manifest next to the source
 so `deploy.workdir` still resolves, and the signature under `$RUNNER_TEMP`.
 See [the manifest](../../docs/manifest.md#render-before-signing).
 The server keeps only public trust roots. Rotate by overlapping public keys,
@@ -46,5 +47,6 @@ laptop dogfood, not the production signer.
 
 ## Idempotent re-run
 
-The same version with the same signed manifest is a no-op (`already published`).
-A changed manifest for the same version is rejected; bump `product.version`.
+The same version with the same signed manifest is a no-op, and the promote
+changes nothing. A changed manifest for the same version fails the step; bump
+`product.version`.

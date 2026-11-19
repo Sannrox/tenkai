@@ -343,6 +343,94 @@ jobs:
       - if: steps.scope.outputs.run == 'true'
         run: bash scripts/egress-conformance.sh
 
+  # The publish-release step against an ephemeral loopback server and OIDC
+  # issuer: publish and promote with a machine credential, a re-run that
+  # succeeds without change, and a changed manifest for the same version
+  # that fails.
+  publish-step:
+    name: Publish step
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Scope
+        id: scope
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "$BASE"...HEAD | grep -qE '^(\.github/actions/publish-release/|crates/tenkaictl/|crates/tenkai-server/|crates/tenkai-http/|src/(catalog|oidc_verifier|management_|command_result)|Cargo\.(toml|lock)|build\.rs|crates/[^/]+/build\.rs|crates/[^/]+/Cargo\.toml|scripts/publish-step-|\.github/workflows/)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.scope.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.96.1
+      - if: steps.scope.outputs.run == 'true'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - if: steps.scope.outputs.run == 'true'
+        run: cargo build --locked --bin tenkai-server --bin tenkaictl
+      - name: Start the server and issuer
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          bash scripts/publish-step-fixture.sh target/debug "$RUNNER_TEMP/publish-step" > "$RUNNER_TEMP/publish-step.env"
+          echo "::add-mask::$(sed -n 's/^PUBLISH_STEP_CLIENT_SECRET=//p' "$RUNNER_TEMP/publish-step.env")"
+          cat "$RUNNER_TEMP/publish-step.env" >> "$GITHUB_ENV"
+      - name: Publish and promote
+        if: steps.scope.outputs.run == 'true'
+        id: first
+        uses: ./.github/actions/publish-release
+        with:
+          manifest: ${{ env.PUBLISH_STEP_RELEASE }}/tenkai.toml
+          signature: ${{ env.PUBLISH_STEP_RELEASE }}/signature.json
+          trust-roots: ${{ env.PUBLISH_STEP_TRUST_ROOTS }}
+          server-url: ${{ env.PUBLISH_STEP_SERVER_URL }}
+          client-id: ${{ env.PUBLISH_STEP_CLIENT_ID }}
+          client-secret: ${{ env.PUBLISH_STEP_CLIENT_SECRET }}
+          channel: stable
+          tenkaictl: target/debug/tenkaictl
+      - name: Re-run is a no-op
+        if: steps.scope.outputs.run == 'true'
+        id: again
+        uses: ./.github/actions/publish-release
+        with:
+          manifest: ${{ env.PUBLISH_STEP_RELEASE }}/tenkai.toml
+          signature: ${{ env.PUBLISH_STEP_RELEASE }}/signature.json
+          trust-roots: ${{ env.PUBLISH_STEP_TRUST_ROOTS }}
+          server-url: ${{ env.PUBLISH_STEP_SERVER_URL }}
+          client-id: ${{ env.PUBLISH_STEP_CLIENT_ID }}
+          client-secret: ${{ env.PUBLISH_STEP_CLIENT_SECRET }}
+          channel: stable
+          tenkaictl: target/debug/tenkaictl
+      - name: A changed manifest for the same version
+        if: steps.scope.outputs.run == 'true'
+        id: changed
+        continue-on-error: true
+        uses: ./.github/actions/publish-release
+        with:
+          manifest: ${{ env.PUBLISH_STEP_CHANGED }}/tenkai.toml
+          signature: ${{ env.PUBLISH_STEP_CHANGED }}/signature.json
+          trust-roots: ${{ env.PUBLISH_STEP_TRUST_ROOTS }}
+          server-url: ${{ env.PUBLISH_STEP_SERVER_URL }}
+          client-id: ${{ env.PUBLISH_STEP_CLIENT_ID }}
+          client-secret: ${{ env.PUBLISH_STEP_CLIENT_SECRET }}
+          tenkaictl: target/debug/tenkaictl
+      - name: Check the outcomes
+        if: steps.scope.outputs.run == 'true'
+        env:
+          FIRST: ${{ steps.first.outputs.release }}
+          AGAIN: ${{ steps.again.outputs.release }}
+          CHANGED: ${{ steps.changed.outcome }}
+        run: |
+          [[ "$FIRST" == "publish-step@1.0.0" ]] || { echo "::error::first run published '$FIRST'"; exit 1; }
+          [[ "$AGAIN" == "$FIRST" ]] || { echo "::error::the re-run published '$AGAIN'"; exit 1; }
+          [[ "$CHANGED" == "failure" ]] || { echo "::error::a changed manifest for a published version was $CHANGED"; exit 1; }
+
   # Proto compatibility against the last final v* tag (proto/buf.yaml sets the
   # rules). A reported break passes only when the pull request is marked
   # breaking (`type!:` subject or a Breaking/Upgrade section, see
