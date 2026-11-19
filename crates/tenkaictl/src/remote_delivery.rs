@@ -114,14 +114,21 @@ pub(crate) async fn run(
             product,
             env,
             bypass,
-            emergency_reason: _,
+            emergency_reason,
             allow_recalled_recovery,
             recovery_reason,
             generation,
             no_hold,
-            reason: _,
+            reason,
         } => {
             let env = crate::client_config::require_env(env)?;
+            // The rollback API carries neither reason, so refuse them instead
+            // of accepting a flag that is silently dropped.
+            if emergency_reason.is_some() || reason.is_some() {
+                bail!(
+                    "--emergency-reason and --reason are not sent by remote rollback; use --recovery-reason for recalled recovery, or run with --target embedded"
+                );
+            }
             if no_hold {
                 bail!(
                     "--no-hold applies only when rollback executes now; remote rollback only plans, so clear the hold after apply"

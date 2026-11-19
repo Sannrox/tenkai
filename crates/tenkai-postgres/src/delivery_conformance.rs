@@ -103,8 +103,14 @@ impl Config {
         if !matches!(parsed.scheme(), "postgres" | "postgresql") {
             return Err(ConfigurationError::Unsafe);
         }
+        // `postgres://` is not a special scheme, so the parser leaves the host
+        // opaque (an IPv6 literal keeps its brackets); parse it as an address.
         let local_host = parsed.host_str().is_some_and(|host| {
-            host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
         });
         let database = parsed.path().trim_matches('/');
         if !local_host
@@ -618,6 +624,8 @@ mod tests {
     fn config_accepts_only_explicit_local_test_databases() {
         assert!(Config::new("postgresql://localhost/tenkai_test").is_ok());
         assert!(Config::new("postgres://127.0.0.1:5432/ci_test").is_ok());
+        assert!(Config::new("postgres://[::1]:5432/ci_test").is_ok());
+        assert!(Config::new("postgres://[2001:db8::1]:5432/ci_test").is_err());
         assert!(Config::new("postgresql://db.example/tenkai_test").is_err());
         assert!(Config::new("postgresql://localhost/production").is_err());
         assert!(Config::new("postgresql://localhost/tenkai_test?dbname=production").is_err());
