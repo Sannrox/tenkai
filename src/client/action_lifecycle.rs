@@ -177,7 +177,7 @@ impl ActionLifecycle<'_> {
                     });
                 }
 
-                let parameters_json = parameters_json(&params)?;
+                let parameters_json = parameters_json(&definition, &params)?;
                 let response: SubmitActionInstanceResponse = remote_unary(
                     client,
                     "/sekai.SekaiService/SubmitActionInstance",
