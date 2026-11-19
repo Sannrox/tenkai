@@ -395,6 +395,31 @@ fn bind_first_delivery_metadata(
 /// retryable, but out of the due set for hours rather than minutes.
 pub const DENIED_RETRY_MS: i64 = 6 * 60 * 60 * 1_000;
 
+/// `next_attempt_at` of an outbox row dropped for good. Every store claims
+/// only rows with `next_attempt_at <= now`, so no version claims it again;
+/// it stays listed, undelivered, with the reason in `last_error`.
+pub const DROPPED_NEXT_ATTEMPT_AT: i64 = i64::MAX;
+
+/// Drop a claimed event for good: it is never delivered and its row records
+/// `reason`. Used when the event's destination no longer exists.
+pub fn drop_claimed_event(
+    store: &(impl ProviderEventStore + ?Sized),
+    record: &ProviderEventRecord,
+    reason: &str,
+) -> Result<(), ProviderError> {
+    let claim_token = record.claim_token.as_deref().ok_or_else(|| {
+        ProviderError::InvalidEvidence("durable event is not claimed for delivery".into())
+    })?;
+    store.record_provider_failure(
+        &record.provider_kind,
+        &record.id,
+        claim_token,
+        DROPPED_NEXT_ATTEMPT_AT,
+        &format!("dropped: {reason}"),
+    )?;
+    Ok(())
+}
+
 fn defer_after_delivery_failure(
     store: &(impl ProviderEventStore + ?Sized),
     record: &ProviderEventRecord,

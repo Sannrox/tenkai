@@ -195,7 +195,12 @@ interrupt deployment. The posted body is the captured observation
 (`tenkai.feedback_observation.v1`): identity, environment, product, plan,
 step, status, reason, lease generation, and `observed_at_ms`. It is signed
 and retried exactly like apply outcomes, on its own outbox kind, so a down
-sink never blocks apply or recovery. The outbox identity is a digest of the
+sink never blocks apply or recovery. Each queued observation is checked
+against the environment's endpoints when it is sent: if its URL and
+`secret_env` no longer name an endpoint subscribed to `feedback.observation`,
+it is dropped with that reason instead of posted to the old target. An
+environment whose endpoints cannot be read fails the delivery pass, and the
+observation is retried. The outbox identity is a digest of the
 destination URL and the observation id; replaying the same outcome reuses
 that row and `X-Tenkai-Idempotency-Key`.
 
@@ -212,8 +217,9 @@ outcomes, operational events, and feedback observations. Pass `limit` (1 to
 100, default 50) and the previous page's `next_cursor` as `cursor` to read
 older deliveries; `next_cursor` is omitted on the last page. Cursors are
 opaque, and a malformed one is refused. Each delivery shows its state
-(`pending`, `retrying`, `delivered`), attempts, next attempt, delivery time
-and the last error. The environment list's first page also carries the
+(`pending`, `retrying`, `delivered`, `dropped`), attempts, next attempt,
+delivery time and the last error. A `dropped` delivery is never sent; its last
+error says why, and it does not count against the endpoint's reachability. The environment list's first page also carries the
 `owner.unconfigured` row described above.
 
 One delivery goes to each URL even when an environment and a product both

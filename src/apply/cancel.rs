@@ -17,7 +17,9 @@ const CANCEL_DETAIL: &str = "deployment command interrupted: apply cancelled";
 pub struct CancelApplyReport {
     /// False when the requested generation was not the live apply.
     pub matched: bool,
-    pub generation: Option<u64>,
+    /// Generation of the live apply lease. A cancel with no live apply is
+    /// refused, so a report always names one.
+    pub generation: u64,
     pub hold: Option<DeliveryHold>,
     pub message: String,
 }
@@ -68,7 +70,7 @@ pub async fn request(
     };
     Ok(CancelApplyReport {
         matched: true,
-        generation: Some(generation),
+        generation,
         hold: Some(hold),
         message: format!(
             "asked apply generation {generation} to stop after the current step and held {environment}"
@@ -82,7 +84,7 @@ fn stale_cancel_report(
 ) -> CancelApplyReport {
     CancelApplyReport {
         matched: false,
-        generation: Some(live_generation),
+        generation: live_generation,
         hold: None,
         message: format!(
             "cancel generation {} does not match live apply {live_generation}; nothing changed",
@@ -182,7 +184,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            crate::management_lifecycle::ApplyCancelResult::from_report(&report, 0),
+            crate::management_lifecycle::ApplyCancelResult::from_report(&report),
             crate::management_lifecycle::ApplyCancelResult {
                 outcome: crate::management_lifecycle::ApplyCancelMatch::Stale,
                 live_generation: lease.generation,
@@ -217,7 +219,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            crate::management_lifecycle::ApplyCancelResult::from_report(&report, lease.generation),
+            crate::management_lifecycle::ApplyCancelResult::from_report(&report),
             crate::management_lifecycle::ApplyCancelResult {
                 outcome: crate::management_lifecycle::ApplyCancelMatch::Matched,
                 live_generation: lease.generation,

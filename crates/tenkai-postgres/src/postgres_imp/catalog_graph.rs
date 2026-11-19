@@ -1317,15 +1317,22 @@ fn upsert_release(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {
 }
 
 /// The revision a removed channel head reached, kept on the headless
-/// catalog object (#1174).
+/// catalog object (#1174). A floor that does not parse is corrupt state and
+/// fails with `InvalidData`, as in the SQLite store.
 pub(super) fn channel_revision_floor(tx: &mut Transaction<'_>, id: &str) -> Result<Option<u64>> {
-    Ok(tx
-        .query_opt(
-            "SELECT value FROM catalog_object_properties WHERE object_id=$1 AND key=$2",
-            &[&id, &CHANNEL_REVISION_FLOOR],
-        )
-        .map_err(pg)?
-        .and_then(|row| row.get::<_, String>(0).parse().ok()))
+    tx.query_opt(
+        "SELECT value FROM catalog_object_properties WHERE object_id=$1 AND key=$2",
+        &[&id, &CHANNEL_REVISION_FLOOR],
+    )
+    .map_err(pg)?
+    .map(|row| {
+        let value = row.get::<_, String>(0);
+        value.parse().map_err(|_| StoreError::InvalidData {
+            kind: "channel",
+            detail: format!("channel {id} revision floor {value:?} is not a revision"),
+        })
+    })
+    .transpose()
 }
 
 /// Write the typed channel row and return the object for the sidecar: a

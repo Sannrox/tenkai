@@ -250,10 +250,6 @@ pub fn load_installed(installed: &Path, authorities: &TrustRoots) -> Result<()> 
     Ok(())
 }
 
-/// Install the revocation list an offline bundle carries, before the bundle
-/// itself is verified, so a bundle signed by a key it revokes is refused.
-/// The list is authenticated by its own signature. Returns whether one was
-/// installed.
 /// True when `bundle` carries a key revocation list.
 pub fn bundle_carries_revocations(bundle: &crate::offline_bundle::BundleEnvelope) -> bool {
     bundle
@@ -307,6 +303,10 @@ pub fn preflight_bundle_revocations(bundle: &crate::offline_bundle::BundleEnvelo
     Ok(())
 }
 
+/// Install the revocation list an offline bundle carries, before the bundle
+/// itself is verified, so a bundle signed by a key it revokes is refused.
+/// The list is authenticated by its own signature. Returns whether one was
+/// installed.
 pub fn import_from_bundle(bundle: &crate::offline_bundle::BundleEnvelope) -> Result<bool> {
     let Some(entry) = bundle
         .entries

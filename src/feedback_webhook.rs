@@ -114,13 +114,19 @@ fn event_id(url: &str, observation_id: &str) -> String {
 
 /// Deliver claimed feedback webhooks, as
 /// [`crate::deploy_webhook::deliver_webhook_batch`] does for apply outcomes.
+/// Each event is first checked against the environment's endpoints in
+/// `ctx`: one whose `url` and `secret_env` no longer name an endpoint
+/// subscribed to observations is dropped with a recorded reason, not posted.
+/// Returns `(delivered, deferred, dropped)`. An unreadable environment fails
+/// the batch; its claimed rows are retried once their claim lapses.
 pub async fn deliver_batch<S, K>(
     store: &S,
+    ctx: &mut crate::client::Ctx,
     secrets: &K,
     timeout: Duration,
     now: i64,
     limit: usize,
-) -> Result<(usize, usize), ProviderError>
+) -> Result<(usize, usize, usize), ProviderError>
 where
     S: ProviderEventStore + ?Sized,
     K: WebhookSecrets,
@@ -139,7 +145,7 @@ where
         claim_until,
     )?;
     if records.is_empty() {
-        return Ok((0, 0));
+        return Ok((0, 0, 0));
     }
     let client = crate::outbound_tls::client()
         .map_err(|error| ProviderError::Unavailable(format!("webhook client: {error:#}")))?
@@ -150,7 +156,32 @@ where
         .map_err(|error| ProviderError::Unavailable(format!("webhook client: {error}")))?;
     let mut delivered = 0;
     let mut deferred = 0;
+    let mut dropped = 0;
+    let mut endpoints_by_env = std::collections::HashMap::new();
     for record in &records {
+        if let Some(envelope) = claimed_envelope(record) {
+            let environment = envelope.body.environment.clone();
+            if !endpoints_by_env.contains_key(&environment) {
+                let endpoints =
+                    environment_endpoints(ctx, &environment)
+                        .await
+                        .map_err(|error| {
+                            ProviderError::Unavailable(format!(
+                                "feedback webhook endpoints of {environment}: {error:#}"
+                            ))
+                        })?;
+                endpoints_by_env.insert(environment.clone(), endpoints);
+            }
+            if !still_configured(&endpoints_by_env[&environment], &envelope) {
+                crate::provider_event::drop_claimed_event(
+                    store,
+                    record,
+                    "the endpoint is no longer configured for feedback.observation",
+                )?;
+                dropped += 1;
+                continue;
+            }
+        }
         let client = client.clone();
         match deliver_optional_event(store, record, timeout, now, |event, kind| async move {
             if kind != FEEDBACK_WEBHOOK_KIND {
@@ -181,7 +212,39 @@ where
             DeliveryStatus::Deferred => deferred += 1,
         }
     }
-    Ok((delivered, deferred))
+    Ok((delivered, deferred, dropped))
+}
+
+/// The envelope of a claimed row, or `None` when it does not parse; such a
+/// row goes to [`deliver_optional_event`], which defers it as invalid.
+fn claimed_envelope(record: &ProviderEventRecord) -> Option<Envelope> {
+    let event: ProviderEvent = serde_json::from_str(&record.payload_json).ok()?;
+    serde_json::from_str(&event.payload_json).ok()
+}
+
+/// The environment's endpoints now. A missing environment has none; an
+/// unreadable endpoint list is an error, never an empty list.
+async fn environment_endpoints(
+    ctx: &mut crate::client::Ctx,
+    environment: &str,
+) -> anyhow::Result<Vec<WebhookEndpoint>> {
+    if environment.is_empty() {
+        return Ok(Vec::new());
+    }
+    match ctx.get(&crate::ontology::env_id(environment)).await? {
+        Some(object) => crate::deploy_webhook::parse_endpoints(&object),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Whether an endpoint still sends this envelope where it was queued to go.
+fn still_configured(endpoints: &[WebhookEndpoint], envelope: &Envelope) -> bool {
+    endpoints.iter().any(|endpoint| {
+        endpoint.url == envelope.url
+            && endpoint.secret_env == envelope.secret_env
+            && endpoint.validate().is_ok()
+            && endpoint.notifies_feedback(FeedbackEvent::Observation)
+    })
 }
 
 #[cfg(test)]
@@ -449,8 +512,9 @@ mod tests {
             "FEEDBACK_HOOK_SECRET".into(),
             "test-secret".into(),
         )]));
-        let (delivered, deferred) = deliver_batch(
+        let (delivered, deferred, dropped) = deliver_batch(
             store.as_ref(),
+            &mut ctx,
             &secrets,
             Duration::from_secs(2),
             crate::now_millis(),
@@ -458,7 +522,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!((delivered, deferred), (1, 0));
+        assert_eq!((delivered, deferred, dropped), (1, 0, 0));
         let received = fixture.received();
         assert_eq!(received.len(), 1, "{received:?}");
         let (headers, body) = &received[0];
@@ -489,8 +553,9 @@ mod tests {
                 "missing {key} in {posted_value}"
             );
         }
-        let (delivered, deferred) = deliver_batch(
+        let (delivered, deferred, dropped) = deliver_batch(
             store.as_ref(),
+            &mut ctx,
             &secrets,
             Duration::from_secs(2),
             crate::now_millis(),
@@ -498,8 +563,75 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!((delivered, deferred), (0, 0));
+        assert_eq!((delivered, deferred, dropped), (0, 0, 0));
         assert_eq!(fixture.received().len(), 1);
+        let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[tokio::test]
+    async fn an_event_queued_for_a_removed_endpoint_is_dropped_not_posted() {
+        let fixture = Fixture::start(StatusCode::NO_CONTENT).await;
+        let mut ctx = fixture.ctx();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "prod", "feedback-webhooks")
+            .await
+            .unwrap();
+        let mut subscribed = endpoint(vec![FeedbackEvent::Observation]);
+        subscribed.url = fixture.url.clone();
+        set_environment_webhook(&mut ctx, "prod", subscribed.clone())
+            .await
+            .unwrap();
+        let note = crate::pb::sekai::Object {
+            id: "note-1".into(),
+            kind: "note".into(),
+            name: "a".into(),
+            namespace: "test".into(),
+            ..Default::default()
+        };
+        ctx.put(note.clone()).await.unwrap();
+        ctx.put_with_provider_events(note, &[], &[observation()])
+            .await
+            .unwrap();
+        crate::deploy_webhook::clear_environment_webhooks(&mut ctx, "prod", Some(&subscribed.url))
+            .await
+            .unwrap();
+        let store = ctx.embedded_arc().unwrap();
+        let secrets = MapSecrets(HashMap::from([(
+            "FEEDBACK_HOOK_SECRET".into(),
+            "test-secret".into(),
+        )]));
+        let now = crate::now_millis();
+        let counts = deliver_batch(
+            store.as_ref(),
+            &mut ctx,
+            &secrets,
+            Duration::from_secs(2),
+            now,
+            8,
+        )
+        .await
+        .unwrap();
+        assert_eq!(counts, (0, 0, 1));
+        assert!(fixture.received().is_empty());
+        let deliveries = crate::operational_events::deliveries(store.as_ref(), "prod", 8).unwrap();
+        assert_eq!(deliveries.len(), 1, "{deliveries:?}");
+        assert_eq!(deliveries[0].state, "dropped");
+        assert!(
+            deliveries[0].last_error.contains("no longer configured"),
+            "{deliveries:?}"
+        );
+        // Never claimed again, even far in the future.
+        let later = deliver_batch(
+            store.as_ref(),
+            &mut ctx,
+            &secrets,
+            Duration::from_secs(2),
+            now + 86_400_000,
+            8,
+        )
+        .await
+        .unwrap();
+        assert_eq!(later, (0, 0, 0));
         let _ = std::fs::remove_dir_all(&fixture.root);
     }
 

@@ -661,7 +661,8 @@ pub struct WebhookDelivery {
     pub id: String,
     pub event: String,
     pub url: String,
-    /// `pending`, `retrying` or `delivered`. The environment list also shows
+    /// `pending`, `retrying`, `delivered`, or `dropped` (never delivered;
+    /// `last_error` says why). The environment list also shows
     /// one synthetic `unconfigured` row (event `owner.unconfigured`) while
     /// the environment owner has no notification endpoint.
     pub state: String,
@@ -775,6 +776,8 @@ fn project_delivery(record: ProviderEventRecord) -> Option<WebhookDelivery> {
         url: addressed.url,
         state: if record.delivered_at.is_some() {
             "delivered"
+        } else if record.next_attempt_at == crate::provider_event::DROPPED_NEXT_ATTEMPT_AT {
+            "dropped"
         } else if record.attempts > 0 {
             "retrying"
         } else {
