@@ -338,6 +338,10 @@ where
     )?;
     let mut delivered = 0;
     let mut deferred = 0;
+    // One record's store error must not strand the rest of the claimed
+    // batch: every record is attempted, then the first error is returned
+    // (#1339).
+    let mut failure = None;
     for record in &records {
         match deliver_optional_event(store, record, timeout, now, |event, kind| async move {
             if kind != OUTCOME_PROVIDER_KIND {
@@ -347,13 +351,16 @@ where
             }
             provider.record(&event).await
         })
-        .await?
+        .await
         {
-            DeliveryStatus::Delivered => delivered += 1,
-            DeliveryStatus::Deferred => deferred += 1,
+            Ok(DeliveryStatus::Delivered) => delivered += 1,
+            Ok(DeliveryStatus::Deferred) => deferred += 1,
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
         }
     }
-    Ok((delivered, deferred))
+    failure.map_or(Ok((delivered, deferred)), Err)
 }
 
 fn bind_first_delivery_metadata(
@@ -420,7 +427,7 @@ pub fn drop_claimed_event(
     Ok(())
 }
 
-fn defer_after_delivery_failure(
+pub(crate) fn defer_after_delivery_failure(
     store: &(impl ProviderEventStore + ?Sized),
     record: &ProviderEventRecord,
     claim_token: &str,
@@ -454,4 +461,118 @@ fn defer(
         error,
     )?;
     Ok(())
+}
+
+/// A store whose delivery mark fails for one event, for tests of how batch
+/// workers settle the rest of a claimed batch.
+#[cfg(test)]
+pub(crate) mod failing_mark {
+    use crate::storage::{OperationalStore, ProviderEventRecord, SqliteStore};
+
+    /// Delegates to SQLite but fails to mark one event delivered.
+    pub(crate) struct FailingMark {
+        pub(crate) inner: SqliteStore,
+        pub(crate) failing_id: String,
+    }
+
+    impl crate::provider_event::ProviderEventStore for FailingMark {
+        fn enqueue_provider_event(
+            &self,
+            event: &ProviderEventRecord,
+        ) -> crate::storage::Result<()> {
+            OperationalStore::enqueue_provider_event(&self.inner, event)
+        }
+        fn list_provider_events(
+            &self,
+            kind: &str,
+            environment_id: &str,
+            limit: usize,
+        ) -> crate::storage::Result<Vec<ProviderEventRecord>> {
+            OperationalStore::list_provider_events(&self.inner, kind, environment_id, limit)
+        }
+        fn claim_provider_events(
+            &self,
+            now: i64,
+            limit: usize,
+            token: &str,
+            until: i64,
+        ) -> crate::storage::Result<Vec<ProviderEventRecord>> {
+            OperationalStore::claim_provider_events(&self.inner, now, limit, token, until)
+        }
+        fn claim_provider_events_for_kind(
+            &self,
+            kind: &str,
+            now: i64,
+            limit: usize,
+            token: &str,
+            until: i64,
+        ) -> crate::storage::Result<Vec<ProviderEventRecord>> {
+            OperationalStore::claim_provider_events_for_kind(
+                &self.inner,
+                kind,
+                now,
+                limit,
+                token,
+                until,
+            )
+        }
+        fn reserve_provider_event_sequence(
+            &self,
+            kind: &str,
+            id: &str,
+            token: &str,
+        ) -> crate::storage::Result<i64> {
+            OperationalStore::reserve_provider_event_sequence(&self.inner, kind, id, token)
+        }
+        fn bind_provider_event_collection_time(
+            &self,
+            kind: &str,
+            id: &str,
+            token: &str,
+            payload_json: &str,
+        ) -> crate::storage::Result<()> {
+            OperationalStore::bind_provider_event_collection_time(
+                &self.inner,
+                kind,
+                id,
+                token,
+                payload_json,
+            )
+        }
+        fn record_provider_failure(
+            &self,
+            kind: &str,
+            id: &str,
+            token: &str,
+            next_attempt_at: i64,
+            error: &str,
+        ) -> crate::storage::Result<()> {
+            OperationalStore::record_provider_failure(
+                &self.inner,
+                kind,
+                id,
+                token,
+                next_attempt_at,
+                error,
+            )
+        }
+        fn mark_provider_event_delivered(
+            &self,
+            kind: &str,
+            id: &str,
+            token: &str,
+            delivered_at: i64,
+        ) -> crate::storage::Result<()> {
+            if id == self.failing_id {
+                return Err(crate::storage::StoreError::Database("disk full".into()));
+            }
+            OperationalStore::mark_provider_event_delivered(
+                &self.inner,
+                kind,
+                id,
+                token,
+                delivered_at,
+            )
+        }
+    }
 }

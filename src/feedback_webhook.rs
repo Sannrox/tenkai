@@ -117,8 +117,11 @@ fn event_id(url: &str, observation_id: &str) -> String {
 /// Each event is first checked against the environment's endpoints in
 /// `ctx`: one whose `url` and `secret_env` no longer name an endpoint
 /// subscribed to observations is dropped with a recorded reason, not posted.
-/// Returns `(delivered, deferred, dropped)`. An unreadable environment fails
-/// the batch; its claimed rows are retried once their claim lapses.
+/// Returns `(delivered, deferred, dropped)`. The HTTP client is built before
+/// anything is claimed. An event whose environment cannot be read is
+/// deferred with the reason, and a store error on one event does not stop
+/// the others: every claimed event is delivered, deferred or dropped, then
+/// the first store error is returned (#1339).
 pub async fn deliver_batch<S, K>(
     store: &S,
     ctx: &mut crate::client::Ctx,
@@ -131,6 +134,13 @@ where
     S: ProviderEventStore + ?Sized,
     K: WebhookSecrets,
 {
+    let client = crate::outbound_tls::client()
+        .map_err(|error| ProviderError::Unavailable(format!("webhook client: {error:#}")))?
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("tenkai-webhook/1")
+        .build()
+        .map_err(|error| ProviderError::Unavailable(format!("webhook client: {error}")))?;
     let claim_token = format!("feedback-webhook-worker:{}", uuid::Uuid::new_v4());
     let claim_until = now.saturating_add(
         i64::try_from(timeout.saturating_mul(limit.max(1) as u32).as_millis())
@@ -147,13 +157,7 @@ where
     if records.is_empty() {
         return Ok((0, 0, 0));
     }
-    let client = crate::outbound_tls::client()
-        .map_err(|error| ProviderError::Unavailable(format!("webhook client: {error:#}")))?
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent("tenkai-webhook/1")
-        .build()
-        .map_err(|error| ProviderError::Unavailable(format!("webhook client: {error}")))?;
+    let mut failure = None;
     let mut delivered = 0;
     let mut deferred = 0;
     let mut dropped = 0;
@@ -162,23 +166,40 @@ where
         if let Some(envelope) = claimed_envelope(record) {
             let environment = envelope.body.environment.clone();
             if !endpoints_by_env.contains_key(&environment) {
-                let endpoints =
-                    environment_endpoints(ctx, &environment)
-                        .await
-                        .map_err(|error| {
-                            ProviderError::Unavailable(format!(
-                                "feedback webhook endpoints of {environment}: {error:#}"
-                            ))
-                        })?;
+                let endpoints = environment_endpoints(ctx, &environment)
+                    .await
+                    .map_err(|error| {
+                        format!("feedback webhook endpoints of {environment}: {error:#}")
+                    });
                 endpoints_by_env.insert(environment.clone(), endpoints);
             }
-            if !still_configured(&endpoints_by_env[&environment], &envelope) {
-                crate::provider_event::drop_claimed_event(
-                    store,
-                    record,
-                    "the endpoint is no longer configured for feedback.observation",
-                )?;
-                dropped += 1;
+            let settled = match &endpoints_by_env[&environment] {
+                // Unreadable now: retried on the usual backoff, not held
+                // until the claim lapses.
+                Err(reason) => Some(
+                    crate::provider_event::defer_after_delivery_failure(
+                        store,
+                        record,
+                        &claim_token,
+                        now,
+                        reason,
+                    )
+                    .map(|()| deferred += 1),
+                ),
+                Ok(endpoints) if !still_configured(endpoints, &envelope) => Some(
+                    crate::provider_event::drop_claimed_event(
+                        store,
+                        record,
+                        "the endpoint is no longer configured for feedback.observation",
+                    )
+                    .map(|()| dropped += 1),
+                ),
+                Ok(_) => None,
+            };
+            if let Some(settled) = settled {
+                if let Err(error) = settled {
+                    failure.get_or_insert(error);
+                }
                 continue;
             }
         }
@@ -206,13 +227,16 @@ where
             )
             .await
         })
-        .await?
+        .await
         {
-            DeliveryStatus::Delivered => delivered += 1,
-            DeliveryStatus::Deferred => deferred += 1,
+            Ok(DeliveryStatus::Delivered) => delivered += 1,
+            Ok(DeliveryStatus::Deferred) => deferred += 1,
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
         }
     }
-    Ok((delivered, deferred, dropped))
+    failure.map_or(Ok((delivered, deferred, dropped)), Err)
 }
 
 /// The envelope of a claimed row, or `None` when it does not parse; such a

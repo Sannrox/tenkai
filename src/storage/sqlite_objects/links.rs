@@ -67,23 +67,13 @@ impl SqliteStore {
         self.find_by_property_matching(PropertyIndexQuery::new(kind, key, value))
     }
 
+    /// Catalog objects matching `query`, paged in SQL. A plan object is
+    /// listed only while its operational plan row exists; that filter is a
+    /// join, so it runs before `LIMIT`/`OFFSET` and pages come back full.
     pub fn find_by_property_matching(
         &self,
         query: PropertyIndexQuery<'_>,
     ) -> AnyResult<Vec<Object>> {
-        let mut objects = self.find_catalog(query)?;
-        if query.kind == KIND_PLAN {
-            objects.retain(|object| {
-                OperationalStore::get_plan(self, &object.id)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            });
-        }
-        Ok(objects)
-    }
-
-    pub(super) fn find_catalog(&self, query: PropertyIndexQuery<'_>) -> AnyResult<Vec<Object>> {
         anyhow::ensure!(
             !query.kind.trim().is_empty() && !query.key.trim().is_empty(),
             "find_by_property requires non-empty kind and key"
@@ -98,6 +88,9 @@ impl SqliteStore {
             Value::Text(query.key.to_string()),
             Value::Text(query.value.to_string()),
         ];
+        if query.kind == KIND_PLAN {
+            sql.push_str(" INNER JOIN plans pl ON pl.id = o.id");
+        }
         if let Some(filter_key) = query.matching_key {
             if query.matching_values.is_empty() {
                 return Ok(Vec::new());

@@ -1875,6 +1875,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_store_error_on_one_outcome_does_not_strand_the_batch() {
+        let inner = SqliteStore::open_in_memory().unwrap();
+        let first = terminal_event_for("prod", "tenkai:deployment:prod:api:1", 1_000);
+        let second = terminal_event_for("prod", "tenkai:deployment:prod:api:2", 1_001);
+        enqueue_optional_event(&inner, OUTCOME_PROVIDER_KIND, &first, 100).unwrap();
+        enqueue_optional_event(&inner, OUTCOME_PROVIDER_KIND, &second, 100).unwrap();
+        let store = crate::provider_event::failing_mark::FailingMark {
+            inner,
+            failing_id: first.id.clone(),
+        };
+        let sink = LocalEventSink::default();
+
+        let error = deliver_outcome_batch(&store, &sink, Duration::from_secs(1), 100, 10)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("disk full"), "{error}");
+        assert_eq!(sink.received().len(), 2);
+        // The second event was acknowledged even though the first failed,
+        // so once the claims lapse only the first is redelivered.
+        let retried = store
+            .inner
+            .claim_provider_events_for_kind(
+                OUTCOME_PROVIDER_KIND,
+                1_000_000,
+                10,
+                "retry",
+                1_001_000,
+            )
+            .unwrap();
+        assert_eq!(
+            retried.iter().map(|record| &record.id).collect::<Vec<_>>(),
+            vec![&first.id]
+        );
+    }
+
+    #[tokio::test]
     async fn outcome_worker_claims_only_outcomes_and_acknowledges_idempotently() {
         let store = SqliteStore::open_in_memory().unwrap();
         let event = terminal_event();

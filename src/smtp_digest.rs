@@ -277,12 +277,20 @@ where
 {
     let mut delivered = 0;
     let mut deferred = 0;
+    // One sink's store error does not hold back the other sinks.
+    let mut failure = None;
     for sink in sinks {
-        let (sent, held) = deliver_sink(store, sink, trust, timeout, clock()).await?;
-        delivered += sent;
-        deferred += held;
+        match deliver_sink(store, sink, trust, timeout, clock()).await {
+            Ok((sent, held)) => {
+                delivered += sent;
+                deferred += held;
+            }
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
+        }
     }
-    Ok((delivered, deferred))
+    failure.map_or(Ok((delivered, deferred)), Err)
 }
 
 /// One sink's due lines, claimed in one transaction under the sink's own
@@ -313,6 +321,7 @@ where
     }
     let mut lines = Vec::new();
     let mut deferred = 0;
+    let mut failure = None;
     for record in claimed {
         let line = serde_json::from_str::<ProviderEvent>(&record.payload_json)
             .ok()
@@ -320,20 +329,22 @@ where
             .filter(|line| line.schema == DIGEST_SCHEMA && line.sink == sink.id);
         match line {
             Some(line) => lines.push((record, line)),
-            None => {
-                store.record_provider_failure(
-                    &kind,
-                    &record.id,
-                    &claim_token,
-                    now.saturating_add(RETRY_MS),
-                    "digest line is unreadable",
-                )?;
-                deferred += 1;
-            }
+            None => match store.record_provider_failure(
+                &kind,
+                &record.id,
+                &claim_token,
+                now.saturating_add(RETRY_MS),
+                "digest line is unreadable",
+            ) {
+                Ok(()) => deferred += 1,
+                Err(error) => {
+                    failure.get_or_insert(ProviderError::from(error));
+                }
+            },
         }
     }
     if lines.is_empty() {
-        return Ok((0, deferred));
+        return failure.map_or(Ok((0, deferred)), Err);
     }
     let body = digest_body(sink, &lines);
     let outcome = match tokio::time::timeout(timeout, send(sink, trust, &body)).await {
@@ -350,23 +361,27 @@ where
         Ok(Err(error)) => Err(format!("{error:#}")),
         Err(_) => Err(format!("smtp sink {} timed out", sink.id)),
     };
+    // Every line is settled even when one store write fails, so a line the
+    // relay accepted is not left claimed and mailed again because an
+    // earlier line could not be marked (#1339). The first error is returned.
     let mut delivered = 0;
     for (record, _) in &lines {
-        match &outcome {
-            Ok(()) => {
-                store.mark_provider_event_delivered(&kind, &record.id, &claim_token, now)?;
-                delivered += 1;
-            }
-            Err(error) => {
-                store.record_provider_failure(
+        let settled = match &outcome {
+            Ok(()) => store
+                .mark_provider_event_delivered(&kind, &record.id, &claim_token, now)
+                .map(|()| delivered += 1),
+            Err(error) => store
+                .record_provider_failure(
                     &kind,
                     &record.id,
                     &claim_token,
                     now.saturating_add(RETRY_MS),
                     error,
-                )?;
-                deferred += 1;
-            }
+                )
+                .map(|()| deferred += 1),
+        };
+        if let Err(error) = settled {
+            failure.get_or_insert(error.into());
         }
     }
     if let Err(error) = &outcome {
@@ -375,7 +390,7 @@ where
             sink.id
         );
     }
-    Ok((delivered, deferred))
+    failure.map_or(Ok((delivered, deferred)), Err)
 }
 
 /// The outbox kind of `sink_id`'s digest lines.
@@ -683,6 +698,46 @@ mod tests {
         assert!(messages[0].contains("Subject: Tenkai operational digest: 2 event(s)"));
         assert!(messages[0].contains("backup.stale host backup stale"));
         assert!(messages[0].contains("clock.drift host clock warn"));
+    }
+
+    #[tokio::test]
+    async fn a_store_error_on_one_line_still_marks_the_others_delivered() {
+        let (address, received) = relay(1).await;
+        let sinks = [sink(&address)];
+        let inner = SqliteStore::open_in_memory().unwrap();
+        enqueue(
+            &inner,
+            &sinks,
+            &transition(OperationalEvent::BackupStale, "stale", "a"),
+            1_000,
+        );
+        enqueue(
+            &inner,
+            &sinks,
+            &transition(OperationalEvent::ClockDrift, "warn", "b"),
+            2_000,
+        );
+        let mut ids = inner
+            .list_provider_events(&digest_kind("oncall"), HOST_SCOPE, 10)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.id);
+        let failing_id = ids.next().unwrap();
+        let other_id = ids.next().unwrap();
+        let store = crate::provider_event::failing_mark::FailingMark { inner, failing_id };
+
+        let error = deliver_due(&store, &sinks, &trust(), Duration::from_secs(5), || 60_000)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("disk full"), "{error}");
+        assert_eq!(received.await.unwrap().len(), 1);
+        let pending = store
+            .inner
+            .list_provider_events(&digest_kind("oncall"), HOST_SCOPE, 10)
+            .unwrap();
+        let other = pending.iter().find(|record| record.id == other_id).unwrap();
+        assert!(other.delivered_at.is_some());
     }
 
     #[tokio::test]

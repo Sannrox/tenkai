@@ -84,10 +84,18 @@ impl SqliteStore {
         let ids = self
             .list_active_catalog_environment_ids()
             .map_err(anyhow::Error::from)?;
-        ids.into_iter()
-            .filter_map(|id| self.get_environment(&id).ok().flatten())
-            .map(|record| environment_record_to_object(&record))
-            .collect()
+        // A lookup error fails the listing instead of dropping the row; an
+        // id whose record has since gone is skipped.
+        let mut objects = Vec::with_capacity(ids.len());
+        for id in ids {
+            let record = self
+                .get_environment(&id)
+                .with_context(|| format!("reading environment {id}"))?;
+            if let Some(record) = record {
+                objects.push(environment_record_to_object(&record)?);
+            }
+        }
+        Ok(objects)
     }
 
     pub(super) fn list_releases(&self) -> AnyResult<Vec<Object>> {

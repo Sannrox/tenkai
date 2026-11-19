@@ -52,6 +52,9 @@ pub struct InstanceExplainReport {
 pub(crate) struct ExplainStoreFacts {
     pub recalled_release: Option<String>,
     pub superseded_plan: Option<String>,
+    /// The stored plan and why it could not be classified; apply would fail
+    /// the same way, so it is reported as a blocker, not as admissible.
+    pub unclassified_plan: Option<(String, String)>,
     pub product_maintenance: Option<EnvironmentMaintenanceInspect>,
     /// Constrained desired version from planning; absent when selection failed.
     pub desired_version: Option<String>,
@@ -314,6 +317,14 @@ pub(crate) fn from_inspect(
         });
     }
 
+    if let Some((plan_id, error)) = facts.unclassified_plan {
+        blockers.push(InstanceExplainBlocker {
+            check: "superseded_plan".into(),
+            evidence: format!("stored plan {plan_id} could not be classified: {error}"),
+            unblock: format!("tenkaictl plan --env {environment}"),
+        });
+    }
+
     let next_change = if blockers.is_empty() {
         Some(next_change_from_row(
             &row,
@@ -488,7 +499,7 @@ async fn load_store_facts(
         crate::maintenance::list_product(ctx, &row.product).await,
         now,
     ));
-    let superseded_plan = match inspect.latest_plan.as_ref() {
+    let (superseded_plan, unclassified_plan) = match inspect.latest_plan.as_ref() {
         Some(summary)
             if selection_error.is_none()
                 && plan_touches_instance(summary, instance)
@@ -496,11 +507,12 @@ async fn load_store_facts(
         {
             let plan = crate::plan::load(ctx, &summary.id).await?;
             match crate::apply::classify_candidate(ctx, &plan).await {
-                Ok(crate::apply::CandidateAdmission::Superseded) => Some(plan.id),
-                Ok(crate::apply::CandidateAdmission::Admissible) | Err(_) => None,
+                Ok(crate::apply::CandidateAdmission::Superseded) => (Some(plan.id), None),
+                Ok(crate::apply::CandidateAdmission::Admissible) => (None, None),
+                Err(error) => (None, Some((plan.id, format!("{error:#}")))),
             }
         }
-        _ => None,
+        _ => (None, None),
     };
     let upgrade_pace = if empty_channel {
         None
@@ -518,6 +530,7 @@ async fn load_store_facts(
     Ok(ExplainStoreFacts {
         recalled_release,
         superseded_plan,
+        unclassified_plan,
         product_maintenance,
         desired_version,
         selection_error,
@@ -660,6 +673,39 @@ mod tests {
         for blocker in &report.blockers {
             assert!(!blocker.unblock.is_empty(), "{blocker:?}");
         }
+        assert!(report.next_change.is_none());
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_plan_that_cannot_be_classified_is_a_blocker() {
+        let (database, mut ctx, root) = seeded("unclassified").await;
+        let rows = status(&mut ctx, "local").await.unwrap();
+        let inspect = crate::environment::inspect_environment_for_policy(
+            &mut ctx,
+            "local",
+            crate::approval_policy::ExecutionPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let facts = ExplainStoreFacts {
+            unclassified_plan: Some(("plan-1".into(), "store unavailable".into())),
+            ..ExplainStoreFacts::default()
+        };
+
+        let report = from_inspect("local", "api", &inspect, &rows, facts).unwrap();
+
+        let blocker = report
+            .blockers
+            .iter()
+            .find(|blocker| blocker.check == "superseded_plan")
+            .unwrap();
+        assert!(blocker.evidence.contains("plan-1"), "{blocker:?}");
+        assert!(
+            blocker.evidence.contains("store unavailable"),
+            "{blocker:?}"
+        );
         assert!(report.next_change.is_none());
         let _ = std::fs::remove_file(&database);
         let _ = std::fs::remove_dir_all(&root);
