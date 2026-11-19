@@ -235,8 +235,13 @@ fn a_renewal_never_widens_or_revives_a_certificate() {
     // A certificate for a name the approved step did not grant.
     let wider = host.issue(&host.grant(Reload::Runtime, &["api.edge.internal", "bank.example"]));
     let instance = host.spool_renewal(&record, &wider);
-    host.refused(&instance);
-    assert_eq!(host.installed_certificate(), first.certificate);
+    let reason = host.refused(&instance);
+    assert!(
+        reason.contains("names are not the granted ones"),
+        "{reason}"
+    );
+    host.unchanged(&first);
+    assert!(store::refusal(&host.paths, &instance).unwrap().is_some());
 
     // A restart-reload workload renews with a restart, not in place.
     let restart = host.grant(Reload::Restart, &["api.edge.internal"]);
@@ -246,8 +251,9 @@ fn a_renewal_never_widens_or_revives_a_certificate() {
     let reason = host.refused(&instance);
     assert!(reason.contains("restart"), "{reason}");
     host.unchanged(&current);
+    assert!(store::refusal(&host.paths, &instance).unwrap().is_some());
 
-    // An uninstalled product's certificate stays gone.
+    // An uninstalled product's certificate is not renewed.
     let current = host.issue(&grant);
     let record = host.installed(&current);
     let product = AppliedStateRecord::empty(ENVIRONMENT, "api");
@@ -260,7 +266,6 @@ fn a_renewal_never_widens_or_revives_a_certificate() {
     let reason = host.refused(&instance);
     assert!(reason.contains("not installed"), "{reason}");
     host.unchanged(&current);
-    // Each refusal is recorded for the runtime to report.
     assert!(store::refusal(&host.paths, &instance).unwrap().is_some());
 }
 

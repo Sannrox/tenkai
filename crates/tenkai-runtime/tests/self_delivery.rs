@@ -36,8 +36,9 @@ fn operator() -> AuthenticatedRequestContext {
     .unwrap()
 }
 
-/// Sign and publish `tenkai-server` `version`. Install writes `marks/<version>`;
-/// `healthy: false` fails health after that write.
+/// Sign and publish `tenkai-server` `version`. Install writes `marks/<version>`
+/// and appends `version` to `installs.log` beside `marks`, which no restore
+/// touches; `healthy: false` fails health after those writes.
 async fn publish(ctx: &mut Ctx, root: &Path, version: &str, marks: &Path, healthy: bool) {
     let dir = root.join("releases").join(version);
     std::fs::create_dir_all(dir.join("bin")).unwrap();
@@ -53,12 +54,13 @@ version = "{version}"
 description = "Tenkai control-plane host, including the web console"
 
 [deploy]
-install = "cat bin/version > {mark}"
+install = "cat bin/version > {mark} && echo {version} >> {log}"
 uninstall = "rm -f {mark}"
 health = "{health}"
 inputs = ["bin"]
 "#,
             mark = mark.display(),
+            log = marks.with_file_name("installs.log").display(),
             health = if healthy {
                 format!("test -f {}", mark.display())
             } else {
@@ -185,14 +187,24 @@ async fn a_runtime_upgrades_tenkai_server_and_restores_a_bad_build() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     let upgrade = finished(&mut ctx, &upgrade.id).await;
-    assert_ne!(
+    assert_eq!(
         upgrade.state,
-        PlanState::Succeeded,
+        PlanState::Failed,
         "a bad Tenkai build must not stay applied: {} / {stderr}",
         upgrade.status_detail
     );
     assert!(
-        stderr.contains("restored"),
+        upgrade.status_detail.contains("failed step"),
+        "{} / {stderr}",
+        upgrade.status_detail
+    );
+    // 1.1.0 really installed, then the restore reinstalled 1.0.0.
+    assert_eq!(
+        std::fs::read_to_string(root.join("installs.log")).unwrap(),
+        "1.0.0\n1.1.0\n1.0.0\n"
+    );
+    assert!(
+        stderr.contains("restored tenkai-server to 1.0.0"),
         "rollback through the plan path must restore 1.0.0: {} / {stderr}",
         upgrade.status_detail
     );

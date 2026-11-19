@@ -646,8 +646,10 @@ mapping, and directory or issuer outage failing closed). It builds the drills
 normally, then
 runs each test binary in a fresh network namespace that has only loopback,
 under `strace`. Any `connect()` or addressed send (as unconnected UDP uses)
-to a non-loopback address, and any DNS lookup
-to any address, is an outbound attempt. The report lists every attempted
+to a non-loopback address, any DNS lookup
+to any address, and any `connect()` to a host resolver or daemon Unix socket
+(systemd-resolved, nscd, D-Bus, Docker), which the network namespace does not
+isolate, is an outbound attempt. The report lists every attempted
 destination with the process that made it, and the expected list is `none`.
 CI runs it as the "Isolated-network conformance" job on pull requests that
 touch executors, server configuration or the build, and on every push to

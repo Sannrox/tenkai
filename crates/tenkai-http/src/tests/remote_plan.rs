@@ -69,23 +69,26 @@ async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
         .unwrap();
     assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
 
+    // The signed apply request that succeeds below, plus the development
+    // bypass flag: the flag is the only reason it is refused.
+    let mut with_bypass = serde_json::to_value(&apply_a).unwrap();
+    with_bypass["allow_unapproved_development"] = serde_json::Value::Bool(true);
     let bypass = reqwest::Client::new()
         .post(format!(
             "{base}/v1/plans/{}/apply",
             encode_plan_path(&plan_a_id)
         ))
         .bearer_auth("management-secret")
-        .json(&serde_json::json!({
-            "version": 1,
-            "operation": "apply",
-            "environment": "stage",
-            "expected_generation": 0,
-            "allow_unapproved_development": true
-        }))
+        .json(&with_bypass)
         .send()
         .await
         .unwrap();
     assert_eq!(bypass.status(), StatusCode::BAD_REQUEST);
+    let refusal = bypass.text().await.unwrap();
+    assert!(
+        refusal.contains("allow_unapproved_development"),
+        "{refusal}"
+    );
 
     let applied_a = client.apply_plan(&plan_a_id, &apply_a).await.unwrap();
     // The client asks for steps (#1076); each carries its recorded attempt.

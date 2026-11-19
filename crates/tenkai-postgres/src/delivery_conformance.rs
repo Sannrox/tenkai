@@ -7,36 +7,51 @@ pub const VERSION: &str = "tenkai.delivery-conformance/v1";
 pub const SCHEMA_JSON: &str = include_str!("../../../tests/fixtures/delivery_conformance/v1.json");
 pub const MAX_CHECKS: usize = 10;
 
-const IMPLEMENTATION_SOURCES: &[&str] = &[
-    include_str!("delivery_conformance.rs"),
-    include_str!("bin/tenkai-delivery-conformance.rs"),
-    include_str!("lib.rs"),
-    include_str!("capabilities.rs"),
-    include_str!("config.rs"),
-    include_str!("partition.rs"),
-    include_str!("partition_store.rs"),
-    include_str!("store.rs"),
-    include_str!("tenant_store.rs"),
-    include_str!("catalog_graph.rs"),
-    include_str!("postgres_imp/mod.rs"),
-    include_str!("postgres_imp/catalog.rs"),
-    include_str!("postgres_imp/catalog_graph.rs"),
-    include_str!("postgres_imp/channels.rs"),
-    include_str!("postgres_imp/connect.rs"),
-    include_str!("postgres_imp/fixtures.rs"),
-    include_str!("postgres_imp/fixtures_reset.rs"),
-    include_str!("postgres_imp/leases.rs"),
-    include_str!("postgres_imp/plans.rs"),
-    include_str!("postgres_imp/provider_claim.rs"),
-    include_str!("postgres_imp/provider_lifecycle.rs"),
-    include_str!("postgres_imp/provider_queue.rs"),
-    include_str!("postgres_imp/receipts.rs"),
-    include_str!("postgres_imp/rollbacks.rs"),
-    include_str!("postgres_imp/runtime.rs"),
-    include_str!("postgres_imp/runtime_enrollment.rs"),
-    include_str!("postgres_imp/schema.rs"),
-    include_str!("../../../src/storage.rs"),
-    include_str!("../../../src/runtime_capabilities.rs"),
+/// Declares the hashed implementation sources once, as both their paths
+/// (checked against the crate's `mod` declarations) and their contents.
+macro_rules! implementation_sources {
+    ($($path:literal),* $(,)?) => {
+        #[cfg(test)]
+        const IMPLEMENTATION_PATHS: &[&str] = &[$($path),*];
+        const IMPLEMENTATION_SOURCES: &[&str] = &[$(include_str!($path)),*];
+    };
+}
+
+implementation_sources![
+    "delivery_conformance.rs",
+    "bin/tenkai-delivery-conformance.rs",
+    "lib.rs",
+    "capabilities.rs",
+    "config.rs",
+    "partition.rs",
+    "partition_store.rs",
+    "store.rs",
+    "tenant_store.rs",
+    "catalog_graph.rs",
+    "postgres_imp/mod.rs",
+    "postgres_imp/catalog.rs",
+    "postgres_imp/catalog_graph.rs",
+    "postgres_imp/channels.rs",
+    "postgres_imp/connect.rs",
+    "postgres_imp/fixtures.rs",
+    "postgres_imp/fixtures_reset.rs",
+    "postgres_imp/leases.rs",
+    "postgres_imp/plans.rs",
+    "postgres_imp/provider_claim.rs",
+    "postgres_imp/provider_lifecycle.rs",
+    "postgres_imp/provider_queue.rs",
+    "postgres_imp/receipts.rs",
+    "postgres_imp/rollbacks.rs",
+    "postgres_imp/runtime.rs",
+    "postgres_imp/runtime_enrollment.rs",
+    "postgres_imp/schema.rs",
+    "../../../src/storage.rs",
+    "../../../src/runtime_capabilities.rs",
+    "tenant_schema.rs",
+    "writer_lease.rs",
+    "postgres_imp/change_events.rs",
+    "postgres_imp/grant_rules.rs",
+    "postgres_imp/writer_lease.rs",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -619,6 +634,41 @@ fn run_postgres(config: &Config) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every module the crate declares is hashed into `evidence_ref`, so a
+    /// change to any of them changes the evidence.
+    #[test]
+    fn evidence_covers_every_declared_module() {
+        let declared = |source: &str, dir: &str| {
+            source
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    let name = line
+                        .strip_prefix("pub mod ")
+                        .or_else(|| line.strip_prefix("mod "))?
+                        .strip_suffix(';')?;
+                    (name != "tests").then(|| match name {
+                        "postgres_imp" => "postgres_imp/mod.rs".to_string(),
+                        _ => format!("{dir}{name}.rs"),
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let modules = declared(include_str!("lib.rs"), "")
+            .into_iter()
+            .chain(declared(
+                include_str!("postgres_imp/mod.rs"),
+                "postgres_imp/",
+            ));
+        let missing = modules
+            .filter(|path| !IMPLEMENTATION_PATHS.contains(&path.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "not hashed into evidence_ref: {missing:?}"
+        );
+    }
 
     #[test]
     fn config_accepts_only_explicit_local_test_databases() {
