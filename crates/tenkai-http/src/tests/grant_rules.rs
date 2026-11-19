@@ -226,6 +226,63 @@ async fn the_management_token_sets_up_the_first_administrator() {
     assert!(!recorded.contains("management-secret"), "{recorded}");
 }
 
+/// A create with a blank or oversized reason is refused before anything is
+/// audited; a padded reason is recorded trimmed.
+#[tokio::test]
+async fn a_create_reason_is_checked_before_it_is_audited() {
+    let signer = Signer::new("k1");
+    let hub = hub(&signer);
+    let (_, list) = call(
+        &hub.app,
+        "GET",
+        "/v1/grant-rules",
+        Some("management-secret"),
+        None,
+    )
+    .await;
+    let generation = list["generation"].as_i64().unwrap();
+    for reason in ["   ".to_string(), "x".repeat(1025)] {
+        let mut body = admins_rule(generation);
+        body["reason"] = reason.into();
+        let (code, refused) = call(
+            &hub.app,
+            "POST",
+            "/v1/grant-rules",
+            Some("management-secret"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{refused}");
+    }
+    let audit = tenkai::storage::OperationalStore::audit_events(hub.store.as_ref()).unwrap();
+    assert!(
+        !audit
+            .iter()
+            .any(|record| record.operation.starts_with("grant_rule.create")),
+        "{audit:?}"
+    );
+
+    let mut padded = admins_rule(generation);
+    padded["reason"] = "  first administrator  ".into();
+    let (code, created) = call(
+        &hub.app,
+        "POST",
+        "/v1/grant-rules",
+        Some("management-secret"),
+        Some(padded),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED, "{created}");
+    let audit = tenkai::storage::OperationalStore::audit_events(hub.store.as_ref()).unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|record| record.operation == "grant_rule.create.requested"
+                && record.resource == "grant-rule/tenkai-admins reason=first administrator"),
+        "{audit:?}"
+    );
+}
+
 /// Without fleet management nothing is written: a signed-in reader, an
 /// environment-scoped manager and an anonymous caller are refused, and the
 /// rules and their generation stay as they were.

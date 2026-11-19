@@ -99,7 +99,9 @@ pub struct CertificateStatus {
 impl CertificateReport {
     /// What `status` shows of this report at `now_secs`.
     pub fn status(&self, now_secs: i64) -> CertificateStatus {
-        let lifetime = self.not_after.saturating_sub(self.not_before);
+        // Inverted bounds are refused at admission; a stored one still
+        // counts as no lifetime, so an expired certificate is near expiry.
+        let lifetime = self.not_after.saturating_sub(self.not_before).max(0);
         CertificateStatus {
             expires_at: self.not_after,
             near_expiry: now_secs >= self.not_after.saturating_sub(lifetime / 6),
@@ -168,6 +170,12 @@ pub async fn admit(
             );
         }
         crate::ontology::validate_identifier("instance", &report.instance)?;
+        if report.not_after < report.not_before {
+            bail!(
+                "certificate report of {} expires before it becomes valid",
+                report.instance
+            );
+        }
         if report
             .last_renewal
             .as_ref()
@@ -398,6 +406,30 @@ mod tests {
         let status = renewed.status(expires - 3600);
         assert!(!status.near_expiry);
         assert!(status.renewal_failure.is_none());
+    }
+
+    /// Inverted bounds are refused, and a stored one never hides expiry.
+    #[tokio::test]
+    async fn inverted_bounds_are_refused_and_never_hide_expiry() {
+        let mut inverted = report(100_000, None);
+        inverted.not_before = 200_000;
+        assert!(inverted.status(100_000).near_expiry);
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-certificate-inverted-{}-{}.db",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::plan::env_add(&mut ctx, "prod", "runtime")
+            .await
+            .unwrap();
+        let error = admit(&mut ctx, "prod", &[inverted])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("expires before it becomes valid"), "{error}");
+        let _ = std::fs::remove_file(database);
     }
 
     /// A late or repeated report never moves an instance back, a later

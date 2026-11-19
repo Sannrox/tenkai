@@ -60,6 +60,24 @@ impl Drop for ScanSnapshot {
     }
 }
 
+/// Longest scan `TENKAI_IMPORT_SCANNER_TIMEOUT_SECS` may allow: one day.
+const MAX_TIMEOUT_SECS: u64 = 24 * 60 * 60;
+
+/// The scanner timeout from its setting: 600 s when unset, refused when it
+/// is not between 1 s and one day, before any work starts.
+fn parse_timeout(value: Option<&str>) -> Result<Duration> {
+    let Some(value) = value else {
+        return Ok(Duration::from_secs(600));
+    };
+    let seconds: u64 = value
+        .parse()
+        .with_context(|| format!("{TIMEOUT_ENV} must be a whole number of seconds"))?;
+    if !(1..=MAX_TIMEOUT_SECS).contains(&seconds) {
+        anyhow::bail!("{TIMEOUT_ENV} must be between 1 and {MAX_TIMEOUT_SECS} seconds");
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
 /// Run the configured scanner; `None` when none is configured. A refusal
 /// names the scanner's exit and summary.
 ///
@@ -76,14 +94,7 @@ pub fn scan_from_env(
     let Some(scanner) = configured() else {
         return Ok(None);
     };
-    let timeout = match std::env::var(TIMEOUT_ENV) {
-        Ok(value) => Duration::from_secs(
-            value
-                .parse()
-                .with_context(|| format!("{TIMEOUT_ENV} must be a whole number of seconds"))?,
-        ),
-        Err(_) => Duration::from_secs(600),
-    };
+    let timeout = parse_timeout(std::env::var(TIMEOUT_ENV).ok().as_deref())?;
     let bundle_path =
         bundle_path.context("the import scanner needs the archive path; pass the bundle file")?;
     let snapshot = snapshot(bundle, bundle_path)?;
@@ -311,6 +322,17 @@ pub fn scan(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_out_of_range_timeout_is_refused_before_any_work() {
+        use super::parse_timeout;
+        use std::time::Duration;
+        assert_eq!(parse_timeout(None).unwrap(), Duration::from_secs(600));
+        assert_eq!(parse_timeout(Some("30")).unwrap(), Duration::from_secs(30));
+        for refused in ["0", "86401", "18446744073709551615", "soon"] {
+            assert!(parse_timeout(Some(refused)).is_err(), "{refused}");
+        }
+    }
+
     use super::*;
 
     fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
