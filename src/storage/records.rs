@@ -282,6 +282,11 @@ pub struct RuntimeActivityRecord {
     pub last_work_at: Option<i64>,
     pub last_heartbeat_at: Option<i64>,
     pub last_inventory_at: Option<i64>,
+    /// Installed executor kinds, comma-separated canonical names, from the
+    /// runtime's last work pull that sent them (ADR 0057). `None` until a
+    /// runtime that reports them pulls; a report without them keeps these.
+    #[serde(default)]
+    pub executors: Option<String>,
 }
 
 /// A runner's HPKE sealing public key (ADR 0045). Bound to one enrolled

@@ -247,6 +247,30 @@ pub(crate) async fn readable_manifest(
     }))
 }
 
+/// Refuse a plan with a step whose release declares an executor that a
+/// process which may run it lacks (ADR 0057). Releases without a declared
+/// executor run on each process's default, which apply checks.
+async fn refuse_unsupported_executors(
+    ctx: &mut Ctx,
+    executors: &crate::software_executor::SoftwareExecutors,
+    env: &str,
+    steps: &[Step],
+) -> Result<()> {
+    let mut declared = Vec::new();
+    for step in steps.iter().filter(|step| step.deploys_release()) {
+        if let Some(kind) = readable_manifest(ctx, &step.release_id)
+            .await?
+            .and_then(|manifest| manifest.deploy.executor)
+            && !declared
+                .iter()
+                .any(|(release, _)| release == &step.release_id)
+        {
+            declared.push((step.release_id.clone(), kind));
+        }
+    }
+    crate::execution_capabilities::refuse_unsupported(ctx, env, executors, &declared).await
+}
+
 /// The workload certificate grant (ADR 0046 §3) a step deploying `release`
 /// to `instance` carries, if the release declares `[deploy.identity]`. Every
 /// step that runs the release carries it, so each run re-issues and keeps
@@ -2809,6 +2833,7 @@ async fn create_with_content(
     default_proposer: &str,
 ) -> Result<Plan> {
     let mut steps = bind_host_steps(ctx, executors, env, steps).await?;
+    refuse_unsupported_executors(ctx, executors, env, &steps).await?;
     // An identity issuer step names no release to check.
     for step in steps.iter().filter(|step| step.issuer.is_none()) {
         require_same_executor(ctx, executors, step).await?;

@@ -282,6 +282,7 @@ impl FixtureEnvironmentProjection {
                 0
             },
             certificates: None,
+            runtimes: Vec::new(),
             posture: posture.into(),
             criticality: None,
             open_exposures: Vec::new(),

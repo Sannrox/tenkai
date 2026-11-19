@@ -77,6 +77,7 @@ impl Ctx {
             plan_kind_list: Arc::new(PlanKindListTick::default()),
             health_metrics: None,
             trust_sources: None,
+            execution_capabilities: None,
             held_execution_leases: Vec::new(),
             plan_proposer: None,
         }
@@ -112,6 +113,7 @@ impl Ctx {
             plan_kind_list: Arc::new(PlanKindListTick::default()),
             health_metrics: None,
             trust_sources: None,
+            execution_capabilities: None,
             held_execution_leases: Vec::new(),
             plan_proposer: None,
         })
@@ -126,6 +128,23 @@ impl Ctx {
 
     pub(crate) fn trust_sources(&self) -> Option<&crate::trust_posture::TrustSources> {
         self.trust_sources.as_deref()
+    }
+
+    /// Where planning reads the executor sets of the replicas and runtimes
+    /// that run steps (ADR 0057). Without one, the planning process's own
+    /// executors are the set.
+    pub fn with_execution_capabilities(
+        mut self,
+        source: Arc<dyn crate::execution_capabilities::ExecutionCapabilitySource>,
+    ) -> Self {
+        self.execution_capabilities = Some(source);
+        self
+    }
+
+    pub fn execution_capabilities(
+        &self,
+    ) -> Option<Arc<dyn crate::execution_capabilities::ExecutionCapabilitySource>> {
+        self.execution_capabilities.clone()
     }
 
     /// Inject a Prometheus-compatible instant-query source for SLO gates (#590).

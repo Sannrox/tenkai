@@ -23,6 +23,7 @@ async fn health_and_ready_advertise_capability_names() {
             serde_json::json!(["tenkai.http.v1", "tenkai.management-lifecycle.v1"])
         );
         assert_eq!(status["version"], tenkai::version_skew::SERVER_VERSION);
+        assert!(status.get("replica_executors_differ").is_none(), "{body}");
         assert!(!body.contains("management-secret"));
         assert!(!body.contains("runtime-secret"));
         assert!(!body.contains("tenant-a"));
@@ -251,6 +252,67 @@ async fn a_standby_replica_is_live_but_not_ready() {
         generation: 1,
     });
     assert_eq!(status("/readyz").await, StatusCode::OK);
+}
+
+/// ADR 0057: a peer with a different executor set is named on `/readyz`
+/// and never changes readiness.
+#[tokio::test]
+async fn readyz_names_peers_whose_executors_differ_without_failing() {
+    use tenkai::execution_capabilities::{
+        ExecutionCapabilitySource, ProcessExecutors, ProcessKind, ReplicaView, parse_names,
+    };
+
+    struct ReplicaSets {
+        view: ReplicaView,
+    }
+
+    impl ExecutionCapabilitySource for ReplicaSets {
+        fn replicas(&self) -> ReplicaView {
+            self.view.clone()
+        }
+
+        fn runtimes(&self) -> anyhow::Result<Vec<(String, ProcessExecutors)>> {
+            Ok(Vec::new())
+        }
+    }
+
+    let replica = |id: &str, executors: &str| ProcessExecutors {
+        kind: ProcessKind::Replica,
+        id: id.into(),
+        version: None,
+        executors: Some(parse_names(executors)),
+        checked_in_at: 1,
+    };
+    let mut config = ServerConfig::community("management-secret", HashMap::new());
+    config.execution_capabilities = Some(Arc::new(ReplicaSets {
+        view: ReplicaView {
+            this: Some("hub-a".into()),
+            leader: Some("hub-a".into()),
+            replicas: vec![replica("hub-a", "shell,docker"), replica("hub-b", "shell")],
+        },
+    }));
+    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let app = router(
+        config,
+        Arc::new(super::support::FixedReconciler::default()),
+        store,
+    )
+    .unwrap();
+    let response = app
+        .oneshot(Request::get("/readyz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["status"], "ready", "{body}");
+    assert_eq!(
+        body["replica_executors_differ"],
+        serde_json::json!(["hub-b"]),
+        "{body}"
+    );
 }
 
 /// #815: `/healthz` says whether a first administrator is configured, as

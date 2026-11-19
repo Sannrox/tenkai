@@ -175,6 +175,16 @@ Capability diagnostics never include tokens, secrets, or tenant identifiers.
 Until profile selection is implemented, operators must not interpret the
 diagnostic `profile` value as activation of an ADR 0010 operating profile.
 
+## Executors across processes
+
+These capabilities describe one process. Which executors every process that
+may run a step has installed is recorded durably instead: each server
+replica on its writer-lease renewals and each runtime on work pull. Plan
+creation refuses a release whose declared executor one of them lacks
+([ADR 0057](decisions/0057-advertise-and-enforce-execution-capabilities.md)).
+On a leader, `/readyz` adds `replica_executors_differ` naming peers whose
+set differs.
+
 ## Compatibility matrix
 
 Automated coverage lives in `community_sqlite_compatibility_matrix()` and the

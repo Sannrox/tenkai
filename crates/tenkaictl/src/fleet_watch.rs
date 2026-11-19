@@ -428,6 +428,7 @@ mod tests {
                 awaiting_approval: false,
                 drifted_instances: 0,
                 certificates: None,
+                runtimes: Vec::new(),
                 posture: posture.into(),
                 criticality: None,
                 open_exposures,
@@ -440,6 +441,7 @@ mod tests {
             environments_unhealthy: usize::from(posture == "unhealthy"),
             environments_empty: 0,
             promotion_policies: Vec::new(),
+            replicas: Vec::new(),
         }
     }
 

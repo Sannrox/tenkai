@@ -803,11 +803,15 @@ async fn main() -> Result<()> {
     let writer = if cli.tenant_mode && cli.replica_count > 1 {
         let fence = Arc::new(tenkai::writer_fence::WriterFence::default());
         let holder = format!("tenkai-server:{}", uuid::Uuid::new_v4());
+        // Each renewal records this replica's executors first (ADR 0057),
+        // so a peer's planner sees them before this replica can lead.
+        let executors = software_executors.installed_names();
         let lease = Arc::new(
             run_blocking_startup("writer lease", {
                 let fence = fence.clone();
                 move || {
                     tenkai_postgres::open_hub_writer_lease(holder, WRITER_LEASE_TTL_MS, fence)
+                        .map(|lease| lease.with_executors(executors))
                         .map_err(anyhow::Error::from)
                 }
             })
@@ -1049,11 +1053,31 @@ async fn main() -> Result<()> {
             .await
             .context("connecting explicitly configured remote provider")?,
     };
+    // Plans are refused against the executors of whichever replica or
+    // runtime may run them (ADR 0057): runtimes from activity records,
+    // replicas from the writer lease's last renewal.
+    let execution_capabilities: Arc<dyn tenkai::execution_capabilities::ExecutionCapabilitySource> =
+        Arc::new(
+            tenkai::execution_capabilities::StoreExecutionCapabilities::new(
+                store.clone(),
+                {
+                    let lease = writer.as_ref().map(|(_, lease)| lease.clone());
+                    move || {
+                        lease
+                            .as_ref()
+                            .map(|lease| lease.replicas())
+                            .unwrap_or_default()
+                    }
+                },
+                runtime_assignments.values().cloned().collect(),
+            ),
+        );
     let ctx = ctx
         .with_release_trust_roots(
             std::env::var_os("TENKAI_RELEASE_TRUST_ROOTS").map(std::path::PathBuf::from),
         )
         .with_trust_sources(trust_sources.clone())
+        .with_execution_capabilities(execution_capabilities.clone())
         .with_feedback_export(feedback_provider.is_some());
     let runtime_environments = runtime_assignments
         .values()
@@ -1123,6 +1147,7 @@ async fn main() -> Result<()> {
             imports: imports.clone(),
             exports,
             writer_fence: writer_fence.clone(),
+            execution_capabilities: Some(execution_capabilities.clone()),
             runner_ca: runner_ca.clone(),
             runner_certificates_admitted: runner_ca.is_some() && cli.tls_client_ca.is_some(),
             trust_sources: (*trust_sources).clone(),

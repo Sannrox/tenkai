@@ -6,7 +6,7 @@ There is no served gRPC `RuntimeService`.
 
 | HTTP | Request | Result |
 | --- | --- | --- |
-| `GET /v1/runtime/environments/{environment}/work` | Bearer token and `x-tenkai-runtime-instance`; optional `x-tenkai-runtime-capabilities`. No body. | JSON `RuntimeWork` (`environment`, optional `plan`, optional `claim`, optional `approvals`, optional `issuer_candidate`, optional `health_observations`) |
+| `GET /v1/runtime/environments/{environment}/work` | Bearer token and `x-tenkai-runtime-instance`; optional `x-tenkai-runtime-capabilities` and `x-tenkai-runtime-executors`. No body. | JSON `RuntimeWork` (`environment`, optional `plan`, optional `claim`, optional `approvals`, optional `issuer_candidate`, optional `health_observations`) |
 | `POST /v1/runtime/environments/{environment}/identity-issuer/candidate` | JSON `IssuerKey` (`generation`, `fingerprint`, `certificate`, `sealed_key`) | JSON `IssuerKey`: the candidate the server keeps ([below](#identity-issuer)); `409` when none was asked for |
 | `POST /v1/runtime/environments/{environment}/complete` | JSON `RuntimeCompletion` (`plan_id`, `generation`, `succeeded`, `detail`, `receipts`) | `204` |
 | `POST /v1/runtime/environments/{environment}/progress` | `x-tenkai-runtime-capabilities` naming `os_image`. JSON `RuntimeProgressReport` (`plan_id`, `generation`, `awaiting_boot`, `receipts`) | `204` ([below](#os-image-reboots)); `409` when the claim is not live or another runner recorded it |
@@ -116,6 +116,13 @@ credential as the bearer
 ([enrolling a runtime](run-tenkai-server.md#enrolling-a-runtime)). An agent may
 send `x-tenkai-runtime-version`, which the
 [runner registry](run-tenkai-server.md#runner-registry) shows.
+
+A runtime that runs the built-in executors names its installed executor
+kinds, comma-separated canonical names, in `x-tenkai-runtime-executors` on
+work pull (ADR 0057). The server records them on the runtime's activity
+and refuses a plan whose release declares an executor the runtime lacks.
+A pull without the header keeps the recorded set; a server that predates
+it ignores the header.
 
 Work pull does not accept supported versions and does not negotiate. The
 capabilities are `workload_identity`, `peer_grants`, `issuer_rotation`,

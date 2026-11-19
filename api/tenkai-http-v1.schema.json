@@ -4357,6 +4357,10 @@
         },
         "environment": {
           "type": "string"
+        },
+        "supported_executors": {
+          "$ref": "#/$defs/SupportedExecutors",
+          "description": "What the processes that run this environment's steps can execute\n(ADR 0057): its runtime's set, or the server replicas' common set."
         }
       },
       "required": [
@@ -5226,6 +5230,13 @@
           "minimum": 0,
           "type": "integer"
         },
+        "runtimes": {
+          "description": "The environment's runtime instances and their recorded executors\n(ADR 0057). Empty when no runtime runs it.",
+          "items": {
+            "$ref": "#/$defs/ProcessExecutors"
+          },
+          "type": "array"
+        },
         "subscription_count": {
           "format": "uint",
           "minimum": 0,
@@ -5293,6 +5304,13 @@
           "description": "Active channel promotion policies and soak state (#899).",
           "items": {
             "$ref": "#/$defs/ChannelPromotionPolicyStatus"
+          },
+          "type": "array"
+        },
+        "replicas": {
+          "description": "Server replicas that checked in recently and their installed\nexecutors (ADR 0057). Empty on a single-replica server.",
+          "items": {
+            "$ref": "#/$defs/ProcessExecutors"
           },
           "type": "array"
         },
@@ -7164,6 +7182,60 @@
       ],
       "type": "object"
     },
+    "ProcessExecutors": {
+      "description": "One process's recorded executor set.",
+      "properties": {
+        "checked_in_at": {
+          "description": "Last check-in, Unix milliseconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "executors": {
+          "description": "Installed executor kinds. Absent when the process recorded none, as\na version before ADR 0057 does.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "id": {
+          "description": "Writer-lease holder, or `<runner>/<instance>` for a runtime.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ProcessKind"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "checked_in_at"
+      ],
+      "type": "object"
+    },
+    "ProcessKind": {
+      "description": "Which kind of process a [`ProcessExecutors`] describes.",
+      "oneOf": [
+        {
+          "const": "replica",
+          "description": "A `tenkai-server` replica, named by its writer-lease holder.",
+          "type": "string"
+        },
+        {
+          "const": "runtime",
+          "description": "An environment runtime instance, named by runner and instance.",
+          "type": "string"
+        },
+        {
+          "const": "local",
+          "description": "The planning process itself, when no host source is installed.",
+          "type": "string"
+        }
+      ]
+    },
     "ProductDependencyView": {
       "description": "One subscribed or deployed product in contract plan order.",
       "properties": {
@@ -8637,6 +8709,13 @@
         "profile": {
           "type": "string"
         },
+        "replica_executors_differ": {
+          "description": "Writer-lease holders of peer replicas whose installed executors\ndiffer from this one's (ADR 0057). Plans are refused for executors\na peer lacks. Absent when all match; it never fails readiness.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "status": {
           "type": "string"
         },
@@ -9030,6 +9109,62 @@
         "spec"
       ],
       "type": "object"
+    },
+    "SupportedExecutors": {
+      "description": "What an environment's executing processes can run.",
+      "oneOf": [
+        {
+          "description": "Every process that may run a step has these kinds installed.",
+          "properties": {
+            "executors": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "processes": {
+              "items": {
+                "$ref": "#/$defs/ProcessExecutors"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "known",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "executors",
+            "processes"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Planning cannot tell; apply checks on the process that runs it.",
+          "properties": {
+            "processes": {
+              "items": {
+                "$ref": "#/$defs/ProcessExecutors"
+              },
+              "type": "array"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "TargetChange": {
       "description": "Desired-versus-live change for one object, stored on a Plan step (#1077).",

@@ -110,6 +110,11 @@ pub(super) struct ServiceStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(transform = tenkai::schema_contract::omitted_when_none)]
     pub(super) clock: Option<tenkai::clock_guard::ClockHealth>,
+    /// Writer-lease holders of peer replicas whose installed executors
+    /// differ from this one's (ADR 0057). Plans are refused for executors
+    /// a peer lacks. Absent when all match; it never fails readiness.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) replica_executors_differ: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]

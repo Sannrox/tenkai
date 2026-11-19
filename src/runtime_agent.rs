@@ -1053,6 +1053,15 @@ impl RuntimeClient {
             capabilities.push(crate::runtime_delivery::OS_IMAGE_CAPABILITY);
         }
         request = request.header("x-tenkai-runtime-capabilities", capabilities.join(","));
+        // What this runtime can run, so the server refuses a plan it could
+        // not apply (ADR 0057). An operator program's executors are its own
+        // business, so that mode names none and planning reads `unknown`.
+        if let StepExecutor::Builtin(config) = &self.executor {
+            request = request.header(
+                crate::runtime_delivery::EXECUTORS_HEADER,
+                config.executors.installed_names(),
+            );
+        }
         let response = request.send().await?;
         // What the server admits is read on every pull, so a server rolled
         // back to an older version is followed within one poll.

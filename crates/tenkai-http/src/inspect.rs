@@ -427,6 +427,11 @@ fn service_status(status: &'static str, config: &ServerConfig) -> ServiceStatus 
             .as_ref()
             .map(|backups| backups.health(tenkai::now_millis())),
         clock: tenkai::clock_guard::installed().map(|guard| guard.health()),
+        replica_executors_differ: config
+            .execution_capabilities
+            .as_ref()
+            .map(|source| source.replicas().differing_peers())
+            .unwrap_or_default(),
     }
 }
 

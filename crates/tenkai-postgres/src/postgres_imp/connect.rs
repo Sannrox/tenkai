@@ -170,6 +170,15 @@ fn connect_client(config: &Config, tls: MakeRustlsConnect) -> Result<Client> {
                     holder TEXT NOT NULL,
                     generation BIGINT NOT NULL,
                     expires_at BIGINT NOT NULL
+                 );
+             -- Each replica's installed executors (ADR 0057), written on
+             -- every lease renewal, by standbys too. Additive; older
+             -- binaries ignore it.
+             CREATE TABLE IF NOT EXISTS tenkai_hub_replicas (
+                    holder TEXT PRIMARY KEY,
+                    executors TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    checked_in_at BIGINT NOT NULL
                  );",
         )
         .map_err(pg)?;

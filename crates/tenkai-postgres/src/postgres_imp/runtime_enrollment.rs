@@ -279,11 +279,12 @@ impl Inner {
             // GREATEST ignores NULL, so an unset timestamp keeps the recorded one.
             tx.execute(
                 "INSERT INTO runtime_activity(runner_id,instance_id,environment_id,owner,
-                     runtime_version,last_work_at,last_heartbeat_at,last_inventory_at)
-                 VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+                     runtime_version,last_work_at,last_heartbeat_at,last_inventory_at,executors)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
                  ON CONFLICT(runner_id,instance_id) DO UPDATE SET
                      environment_id=excluded.environment_id, owner=excluded.owner,
                      runtime_version=COALESCE(excluded.runtime_version, runtime_activity.runtime_version),
+                     executors=COALESCE(excluded.executors, runtime_activity.executors),
                      last_work_at=GREATEST(excluded.last_work_at, runtime_activity.last_work_at),
                      last_heartbeat_at=GREATEST(excluded.last_heartbeat_at, runtime_activity.last_heartbeat_at),
                      last_inventory_at=GREATEST(excluded.last_inventory_at, runtime_activity.last_inventory_at)",
@@ -296,6 +297,7 @@ impl Inner {
                     &activity.last_work_at,
                     &activity.last_heartbeat_at,
                     &activity.last_inventory_at,
+                    &activity.executors,
                 ],
             )
             .map_err(pg)?;
@@ -308,7 +310,7 @@ impl Inner {
             let rows = tx
                 .query(
                     "SELECT runner_id,instance_id,environment_id,owner,runtime_version,
-                            last_work_at,last_heartbeat_at,last_inventory_at
+                            last_work_at,last_heartbeat_at,last_inventory_at,executors
                      FROM runtime_activity ORDER BY runner_id, instance_id",
                     &[],
                 )
@@ -324,6 +326,7 @@ impl Inner {
                     last_work_at: row.get(5),
                     last_heartbeat_at: row.get(6),
                     last_inventory_at: row.get(7),
+                    executors: row.get(8),
                 })
                 .collect())
         })

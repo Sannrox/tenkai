@@ -377,6 +377,7 @@ fn partition_local_fleet_row(name: &str) -> crate::plan::FleetEnvironmentRow {
         awaiting_approval: false,
         drifted_instances: 0,
         certificates: None,
+        runtimes: Vec::new(),
         posture: "empty".into(),
         criticality: None,
         open_exposures: Vec::new(),
