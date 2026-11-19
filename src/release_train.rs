@@ -184,6 +184,11 @@ pub async fn admit(
 /// Move a `candidate` train to `stable`. Promoting a stable train is a no-op.
 /// A train whose members carry gate flags needs `approve_gates`, which records
 /// the approving principal; without it the promotion is refused.
+///
+/// The read and write happen under a short promotion lease and the write is
+/// fenced by it, so of two concurrent promotions one records its audit fields
+/// and the other sees the stable train or is refused; neither overwrites the
+/// other (#1336).
 pub async fn promote_stable(
     ctx: &mut Ctx,
     actor: &AuthenticatedRequestContext,
@@ -192,6 +197,43 @@ pub async fn promote_stable(
 ) -> Result<Train> {
     require_publish(actor)?;
     validate_identifier("release train", name)?;
+    let owner = format!("release-train-promote:{}", uuid::Uuid::new_v4().simple());
+    let lease = match ctx
+        .acquire_lease(PROMOTE_NAMESPACE, name, &owner, PROMOTE_TTL_MS)
+        .await
+    {
+        Ok(lease) => lease,
+        Err(crate::client::LeaseError::AlreadyExists) => {
+            if let Some(object) = ctx.get(&train_id(name)).await? {
+                let train = stored(&object)?;
+                if train.channel == TrainChannel::Stable {
+                    return Ok(train);
+                }
+            }
+            bail!("release train {name} is being promoted concurrently; retry");
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let promoted = promote_under_lease(ctx, actor, name, approve_gates, &lease.fencing_token).await;
+    let released = ctx
+        .release_lease(PROMOTE_NAMESPACE, name, &lease.fencing_token)
+        .await;
+    let train = promoted?;
+    released?;
+    Ok(train)
+}
+
+const PROMOTE_NAMESPACE: &str = "release-train-promote";
+/// A promotion holds its lease only while it reads and writes the train.
+const PROMOTE_TTL_MS: i64 = 30_000;
+
+async fn promote_under_lease(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    name: &str,
+    approve_gates: bool,
+    fencing_token: &str,
+) -> Result<Train> {
     let Some(mut object) = ctx.get(&train_id(name)).await? else {
         bail!("release train {name} is not admitted");
     };
@@ -216,8 +258,10 @@ pub async fn promote_stable(
         .properties
         .insert("promoted_by".into(), actor.principal_id().to_string());
     object.updated = crate::now_millis();
-    ctx.put(object.clone()).await?;
-    stored(&object)
+    let written = ctx
+        .guarded_update(object, PROMOTE_NAMESPACE, name, fencing_token)
+        .await?;
+    stored(&written)
 }
 
 /// Read an admitted train.
@@ -642,6 +686,23 @@ mod tests {
             show(&mut ctx, "train-2026.11").await.unwrap().channel,
             TrainChannel::Candidate
         );
+
+        // A promotion in flight elsewhere refuses this one instead of both
+        // writing the train.
+        let rival = ctx
+            .acquire_lease(PROMOTE_NAMESPACE, "train-2026.11", "rival", 60_000)
+            .await
+            .unwrap();
+        let error = promote_stable(&mut ctx, &actor, "train-2026.11", false)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("promoted concurrently"),
+            "{error}"
+        );
+        ctx.release_lease(PROMOTE_NAMESPACE, "train-2026.11", &rival.fencing_token)
+            .await
+            .unwrap();
 
         let stable = promote_stable(&mut ctx, &actor, "train-2026.11", false)
             .await

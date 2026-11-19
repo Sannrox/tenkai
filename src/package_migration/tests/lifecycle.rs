@@ -1,4 +1,4 @@
-use super::super::types::MIGRATION_EXEC_NAMESPACE;
+use super::super::types::{MIGRATION_EXEC_NAMESPACE, record_catalog_id};
 use super::super::*;
 use super::helpers::{deploy_source, publish_pins, temp_root};
 
@@ -22,6 +22,11 @@ async fn compatible_migration_approves_executes_resumes_and_rolls_back() {
         .await
         .unwrap();
     assert_eq!(previewed.identity_digest, created.identity_digest);
+    // Backdate the stored object: every later update must keep `created`.
+    let id = record_catalog_id(&created);
+    let mut stored = ctx.get(&id).await.unwrap().unwrap();
+    stored.created = 1;
+    ctx.put(stored).await.unwrap();
     approve(&mut ctx, "cutover", auth).await.unwrap();
     let first = execute(&mut ctx, "cutover", auth, None).await.unwrap();
     assert_eq!(first.receipts.len(), 1);
@@ -107,6 +112,7 @@ async fn compatible_migration_approves_executes_resumes_and_rolls_back() {
         .await
         .unwrap();
     assert_eq!(rolled.status, MigrationStatus::RolledBack);
+    assert_eq!(ctx.get(&id).await.unwrap().unwrap().created, 1);
     assert!(
         rolled
             .receipts

@@ -60,7 +60,8 @@ pub(super) async fn persist_new(ctx: &mut Ctx, record: &MigrationRecord) -> Resu
 
 pub(super) async fn persist(ctx: &mut Ctx, record: &MigrationRecord) -> Result<()> {
     require_package_migration_schema(ctx).await?;
-    ctx.put(record_object(record, crate::now_millis())?).await?;
+    let object = updated_object(ctx, record).await?;
+    ctx.put(object).await?;
     Ok(())
 }
 
@@ -73,14 +74,25 @@ pub(super) async fn persist_fenced(
     fencing_token: &str,
 ) -> Result<()> {
     require_package_migration_schema(ctx).await?;
+    let object = updated_object(ctx, record).await?;
     ctx.guarded_update(
-        record_object(record, crate::now_millis())?,
+        object,
         super::types::MIGRATION_EXEC_NAMESPACE,
         lease_name,
         fencing_token,
     )
     .await?;
     Ok(())
+}
+
+/// The object for an update of `record`: stamped `updated` now, keeping the
+/// stored object's `created` (#1336).
+async fn updated_object(ctx: &mut Ctx, record: &MigrationRecord) -> Result<Object> {
+    let mut object = record_object(record, crate::now_millis())?;
+    if let Some(existing) = ctx.get(&object.id).await? {
+        object.created = existing.created;
+    }
+    Ok(object)
 }
 
 fn record_object(record: &MigrationRecord, now: i64) -> Result<Object> {

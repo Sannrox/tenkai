@@ -342,7 +342,7 @@ pub async fn build(ctx: &mut Ctx, request: &BundleBuildRequest<'_>) -> Result<Bu
         .map(|(path, bytes)| {
             sbom_file(
                 &crate::offline_docs::entry_path(version, path),
-                "text/plain",
+                crate::offline_docs::media_type(path),
                 bytes,
             )
         })
@@ -1790,6 +1790,19 @@ inputs = ["schemas"]
         }
         let checksums = String::from_utf8(payload(&built, CHECKSUM_MANIFEST_PATH)).unwrap();
         assert!(checksums.contains(crate::offline_docs::DOCS_INDEX_PATH));
+        // The docs SBOM names each file under the media type it is signed as.
+        let sbom: ComponentSbom =
+            serde_json::from_slice(&payload(&built, "sbom/docs.json")).unwrap();
+        assert!(!sbom.files.is_empty());
+        for file in &sbom.files {
+            let signed = built
+                .statement
+                .entries
+                .iter()
+                .find(|entry| entry.path == file.path)
+                .unwrap();
+            assert_eq!(file.media_type, signed.media_type, "{}", file.path);
+        }
         // A second extraction to the same place is refused, not merged.
         let err = crate::offline_docs::extract(&verified, &out).unwrap_err();
         assert!(err.to_string().contains("already exists"), "{err}");

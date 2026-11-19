@@ -41,7 +41,19 @@ impl tonic::server::UnaryService<PutGovernedActionTypeRequest> for PutGovernedAc
                 action.created_at_ms = mock_now_ms();
             }
             action.enabled = true;
-            state.governed_actions.lock().unwrap().push(action.clone());
+            let mut governed = state.governed_actions.lock().unwrap();
+            // Like a real host: a pinned type version is written once.
+            if governed.iter().any(|existing| {
+                existing.namespace == action.namespace
+                    && existing.type_id == action.type_id
+                    && existing.version == action.version
+            }) {
+                return Err(tonic::Status::already_exists(
+                    "governed action type already exists",
+                ));
+            }
+            governed.push(action.clone());
+            drop(governed);
             Ok(tonic::Response::new(PutGovernedActionTypeResponse {
                 r#type: Some(action),
             }))

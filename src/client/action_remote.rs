@@ -191,7 +191,12 @@ pub(super) async fn remote_get_object(client: &RemoteClient, id: &str) -> Result
     }
 }
 
-pub(super) async fn remote_governed_action_exists(client: &RemoteClient, name: &str) -> bool {
+/// The governed action type registered remotely under `name`, or `None` when
+/// it is absent or cannot be read.
+pub(super) async fn remote_governed_action(
+    client: &RemoteClient,
+    name: &str,
+) -> Option<crate::pb::sekai::GovernedActionType> {
     let response: std::result::Result<GetGovernedActionTypeResponse, tonic::Status> = remote_unary(
         client,
         "/sekai.SekaiService/GetGovernedActionType",
@@ -202,5 +207,40 @@ pub(super) async fn remote_governed_action_exists(client: &RemoteClient, name: &
         },
     )
     .await;
-    response.is_ok_and(|response| response.r#type.is_some())
+    response.ok().and_then(|response| response.r#type)
+}
+
+/// Refuse a remote type that differs from the definition this release
+/// registers. The remote version is pinned, so a changed definition can
+/// never reach it; accepting it would let local and remote schemas diverge.
+pub(super) fn refuse_divergent_type(
+    local: &crate::pb::sekai::GovernedActionType,
+    remote: &crate::pb::sekai::GovernedActionType,
+) -> Result<()> {
+    let differs: Vec<&str> = [
+        ("description", local.description != remote.description),
+        (
+            "parameter schema",
+            local.parameter_schema_json != remote.parameter_schema_json,
+        ),
+        (
+            "allowed effects",
+            local.allowed_effect_kinds != remote.allowed_effect_kinds,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(field, differs)| differs.then_some(field))
+    .collect();
+    if !differs.is_empty() {
+        bail!(
+            "remote action type {}/{} version {} already exists with a different {}; \
+             this release cannot change it in place. Remove or disable the remote type, \
+             or run the Tenkai release that registered it",
+            local.namespace,
+            local.type_id,
+            local.version,
+            differs.join(", ")
+        );
+    }
+    Ok(())
 }
