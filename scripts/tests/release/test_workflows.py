@@ -227,6 +227,21 @@ class Ci(unittest.TestCase):
         ci = load("ci.yml")
         self.assertIn("release-*", ci["on"]["push"]["branches"])
 
+    def test_a_cold_rebuild_must_match_the_dry_run_hosts(self):
+        jobs = load("ci.yml")["jobs"]
+        dry_run, rebuild = jobs["release-dry-run"], jobs["release-reproducible"]
+        self.assertEqual(rebuild["needs"], "release-dry-run")
+        self.assertIn("needs.release-dry-run.outputs.run", rebuild["if"])
+        self.assertIn("steps.scope.outputs.run", dry_run["outputs"]["run"])
+        # The rebuild restores no build state, so it is an independent build.
+        self.assertFalse([s for s in rebuild["steps"] if "cache" in uses(s)])
+        commands = [runs(s) for s in rebuild["steps"]]
+        build = next(i for i, c in enumerate(commands) if "scripts/build-linux-release-hosts.sh" in c)
+        compare = next(
+            i for i, c in enumerate(commands) if "scripts/package-release-binaries.sh compare" in c
+        )
+        self.assertLess(build, compare)
+
 
 if __name__ == "__main__":
     unittest.main()
