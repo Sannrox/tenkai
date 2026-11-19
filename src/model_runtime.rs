@@ -386,6 +386,9 @@ pub struct WeightCache {
     hub_endpoint: String,
     hub_token: Option<String>,
     hub_origin: HubOrigin,
+    /// `Some` in an isolated environment: the mirror hosts an `http(s)://`
+    /// cache miss may reach. Any other host is refused (#1351).
+    isolated_mirrors: Option<HashSet<String>>,
     artifacts: Option<(
         Arc<dyn crate::oci_artifact::ArtifactRegistry>,
         BTreeMap<String, String>,
@@ -411,6 +414,7 @@ impl WeightCache {
             hub_endpoint: DEFAULT_HUB_ENDPOINT.into(),
             hub_token: None,
             hub_origin: HubOrigin::Open,
+            isolated_mirrors: None,
             artifacts: None,
         }
     }
@@ -435,7 +439,8 @@ impl WeightCache {
 
     /// Apply one environment's weight-origin policy. An `artifact_mirror.<hub host>` entry
     /// moves `hf://` resolution onto `https://<mirror>`; an isolated environment without
-    /// one refuses hub origin pulls, so only cached (bundle-imported) blobs resolve. The
+    /// one refuses hub origin pulls, so only cached (bundle-imported) blobs resolve, and
+    /// an `http(s)://` source resolves only from a configured mirror host. The
     /// registry, when present, serves `oci://` sources through the same mirrors.
     pub fn with_environment(mut self, environment: ModelRuntimeArtifacts) -> Self {
         let hub_host = endpoint_host(&self.hub_endpoint).to_string();
@@ -450,6 +455,9 @@ impl WeightCache {
             (true, true) => HubOrigin::MirrorOnly,
             (true, false) => HubOrigin::Refused,
         };
+        self.isolated_mirrors = environment
+            .isolated
+            .then(|| environment.mirrors.values().cloned().collect());
         if let Some(registry) = environment.registry {
             self.artifacts = Some((registry, environment.mirrors));
         }
@@ -559,6 +567,15 @@ impl WeightCache {
                 endpoint_host(&self.hub_endpoint)
             );
         }
+        if let (Some(mirrors), WeightSource::Http(url)) = (&self.isolated_mirrors, &source)
+            && !mirrors.contains(endpoint_host(url))
+        {
+            bail!(
+                "model {} is not in the weight cache and {} is not an artifact mirror of this isolated environment; origin pull is refused (import an offline bundle carrying {artifact_digest} or serve it from a mirror)",
+                model.source,
+                endpoint_host(url)
+            );
+        }
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating weight cache {}", parent.display()))?;
@@ -601,7 +618,10 @@ impl WeightCache {
                 })?;
                 Ok(())
             }
-            WeightSource::Http(url) => download_to(url, None, false, destination),
+            // A mirror download in an isolated environment stays on the mirror.
+            WeightSource::Http(url) => {
+                download_to(url, None, self.isolated_mirrors.is_some(), destination)
+            }
             WeightSource::Hub {
                 repo,
                 path,
@@ -1965,6 +1985,46 @@ mod tests {
         let stored = cache.fetch_and_verify(&model).unwrap();
         assert_eq!(std::fs::read(stored).unwrap(), payload);
         assert!(listener.accept().is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #1351: an isolated environment refuses an `http(s)://` cache miss
+    /// unless it names a configured mirror host, and never dials the origin.
+    #[test]
+    fn isolated_environment_refuses_an_http_origin_pull() {
+        let root = std::env::temp_dir().join(format!("tenkai-http-{}", uuid::Uuid::new_v4()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let origin = listener.local_addr().unwrap().to_string();
+        let payload: &'static [u8] = b"mirrored-model-bytes";
+        let (mirror_endpoint, mirror) = fake_hub(payload);
+        let mirror_host = endpoint_host(&mirror_endpoint).to_string();
+        let model = |host: &str| ModelSection {
+            source: format!("http://{host}/weights.gguf"),
+            artifact_digest: format!("sha256:{:x}", Sha256::digest(payload)),
+            ..sample_descriptor().model
+        };
+        let cache = WeightCache::new(root.join("cache")).with_environment(isolated(
+            BTreeMap::from([("hub.example".to_string(), mirror_host.clone())]),
+        ));
+
+        let err = cache
+            .fetch_and_verify(&model(&origin))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("{origin} is not an artifact mirror")),
+            "{err}"
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "refusal must not reach the network"
+        );
+        // A source on a configured mirror host still downloads.
+        let stored = cache.fetch_and_verify(&model(&mirror_host)).unwrap();
+        assert_eq!(std::fs::read(stored).unwrap(), payload);
+        mirror.join().unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 

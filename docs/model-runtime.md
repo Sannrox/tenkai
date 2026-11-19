@@ -104,7 +104,9 @@ removed.
   mirror is refused. An `isolated` environment without that mirror refuses
   `hf://` before any network attempt, naming the model and the missing mirror;
   blobs already in the cache, such as weights imported from an offline bundle,
-  still resolve.
+  still resolve. An `isolated` environment also refuses an `http(s)://` source
+  whose host is not one of its configured mirror hosts, before any network
+  attempt. A source on a mirror host downloads without leaving that origin.
 - `oci://<registry>/<repository>@sha256:<hex>` names a single-blob artifact of
   media type `application/vnd.tenkai.model.weights.v1`; the digest must equal
   `model.artifact_digest`. The cache pulls through

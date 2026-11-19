@@ -27,7 +27,7 @@ pub struct InstanceExplainBlocker {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[non_exhaustive]
 pub struct InstanceNextChange {
-    /// `install`, `upgrade`, `restart`, or `current`.
+    /// `install`, `upgrade`, `downgrade`, `restart`, or `current`.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
@@ -379,8 +379,10 @@ fn next_change_from_row(
             deployed: None,
             head,
         },
+        // A constrained head can sit below what is deployed: name the change
+        // the planner would make, not always an upgrade.
         (Some(deployed), _) if deployed != head => InstanceNextChange {
-            action: "upgrade".into(),
+            action: crate::plan::classify_change(deployed, &head).to_string(),
             deployed: Some(deployed.into()),
             head,
         },
@@ -544,6 +546,28 @@ async fn load_store_facts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1351: a head below the deployed version is a downgrade, as the
+    /// planner classifies it.
+    #[test]
+    fn a_head_below_the_deployed_version_is_a_downgrade() {
+        let row = |deployed: &str, head: &str| -> StatusRow {
+            serde_json::from_value(serde_json::json!({
+                "product": "api",
+                "channel": "stable",
+                "deployed": deployed,
+                "health": null,
+                "error": null,
+                "head": head,
+            }))
+            .unwrap()
+        };
+        let action =
+            |deployed, head| next_change_from_row(&row(deployed, head), None, false).action;
+        assert_eq!(action("1.2.0", "1.1.0"), "downgrade");
+        assert_eq!(action("1.1.0", "1.2.0"), "upgrade");
+        assert_eq!(action("1.2.0", "1.2.0"), "current");
+    }
     use crate::client::Ctx;
     use crate::delivery_hold::HoldScope;
     use chrono::Datelike as _;
