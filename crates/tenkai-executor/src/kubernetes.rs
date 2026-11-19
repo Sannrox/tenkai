@@ -666,26 +666,16 @@ fn apply_dependency_configmap(
     let Some(json) = tenkai::dependency_document::configmap_json(request) else {
         return Ok(());
     };
-    let path = std::env::temp_dir().join(format!(
-        "tenkai-dependencies-cm-{}-{}.json",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
-    let path_s = path.to_string_lossy().into_owned();
-    let result = run_kubectl(
+    let doc = crate::temp_doc::TempDoc::write("dependencies-cm.json", json.as_bytes())?;
+    let path_s = doc.path().to_string_lossy().into_owned();
+    run_kubectl(
         executor.kubectl(request),
         &["apply", "-f", &path_s, "--namespace", &request.environment],
         phase,
         "apply dependency ConfigMap",
         &request.product,
         &request.environment,
-    );
-    let _ = std::fs::remove_file(&path);
-    result
+    )
 }
 
 fn delete_dependency_configmap(

@@ -493,11 +493,38 @@ fn bind_unix_socket(path: &std::path::Path) -> Result<tokio::net::UnixListener> 
     }
     tenkai::host_identity::remove_stale_unix_socket(path)
         .with_context(|| format!("preparing unix socket {}", path.display()))?;
-    let listener = tokio::net::UnixListener::bind(path)
-        .with_context(|| format!("binding unix socket {}", path.display()))?;
-    tenkai::host_identity::apply_host_socket_permissions(path)
-        .with_context(|| format!("setting unix socket permissions {}", path.display()))?;
-    Ok(listener)
+    // Bind inside a directory only this process can enter, set the final
+    // mode and group there, then rename the socket into place: under a
+    // permissive umask a socket bound at `path` would accept connections
+    // before its mode is narrowed.
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let staging = parent.join(format!(".tenkai-bind-{}", std::process::id()));
+    let staged = staging.join("s");
+    // Left by an earlier process that had this pid and died mid-bind.
+    let _ = std::fs::remove_file(&staged);
+    let _ = std::fs::remove_dir(&staging);
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&staging)
+            .with_context(|| format!("creating {}", staging.display()))?;
+    }
+    let bound = (|| {
+        let listener = tokio::net::UnixListener::bind(&staged)
+            .with_context(|| format!("binding unix socket {}", path.display()))?;
+        tenkai::host_identity::apply_host_socket_permissions(&staged)
+            .with_context(|| format!("setting unix socket permissions {}", path.display()))?;
+        std::fs::rename(&staged, path)
+            .with_context(|| format!("placing unix socket {}", path.display()))?;
+        anyhow::Ok(listener)
+    })();
+    let _ = std::fs::remove_file(&staged);
+    let _ = std::fs::remove_dir(&staging);
+    bound
 }
 
 fn parse_cli() -> Cli {
@@ -632,6 +659,11 @@ async fn main() -> Result<()> {
             format!("creating operational state directory {}", parent.display())
         })?;
     }
+
+    // Catalog snapshots live here; one other users can write is refused
+    // now, not at the first publish.
+    tenkai::management_lifecycle::remote_catalog_state_dir()
+        .context("checking the catalog state directory")?;
 
     // A host that must run shell-executor deploys refuses before it binds.
     if cli.require_executor {
@@ -2177,6 +2209,35 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use ed25519_dalek::SigningKey;
+
+    /// The host-identity socket appears at its path only with its final
+    /// mode, and the staging directory it was bound in is gone.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_host_socket_is_placed_with_its_final_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // A short base: a socket path is limited to about 100 bytes.
+        let dir = std::path::Path::new("/tmp").join(format!(
+            "tenkai-sock-{}-{}",
+            std::process::id(),
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("s.sock");
+        let _listener = bind_unix_socket(&path).unwrap();
+        let mode = std::fs::symlink_metadata(&path)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o660);
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, ["s.sock"]);
+        tokio::net::UnixStream::connect(&path).await.unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn trust_file() -> PathBuf {
         let path = std::env::temp_dir().join(format!(

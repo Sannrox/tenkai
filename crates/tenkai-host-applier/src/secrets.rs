@@ -177,6 +177,54 @@ fn write_generation(dir: &Path, files: &[(&str, impl AsRef<[u8]>)]) -> Result<Pa
     Ok(current)
 }
 
+/// Remove the instance directory of `instance` in `tree` ([`SECRETS`] or
+/// [`IDENTITY`]) with everything in it, when a step no longer needs it. It
+/// is first renamed to the staging name [`create_owned`] clears, so a crash
+/// mid-removal never leaves a half-emptied directory at the served path,
+/// and a later write of the instance removes the rest. A missing directory
+/// is already removed; one Tenkai did not create is refused and kept.
+pub fn remove_instance(
+    paths: &ApplierPaths,
+    tree: &str,
+    environment: &str,
+    instance: &str,
+) -> Result<()> {
+    let dir = target_dir(paths, tree, environment, instance)?;
+    match std::fs::symlink_metadata(&dir) {
+        Ok(metadata) if metadata.is_dir() && metadata.uid() == euid() => {}
+        Ok(_) => bail!("{} is not a directory Tenkai made", dir.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    if !std::fs::symlink_metadata(dir.join(OWNED_MARKER)).is_ok_and(|metadata| metadata.is_file()) {
+        bail!(
+            "{} was not created by Tenkai; it is not removed",
+            dir.display()
+        );
+    }
+    let parent = dir
+        .parent()
+        .context("the instance directory has no parent")?;
+    let doomed = parent.join(format!(
+        "{}{}",
+        staging_prefix(instance),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::rename(&dir, &doomed).with_context(|| format!("removing {}", dir.display()))?;
+    sync_dir(parent)?;
+    std::fs::remove_dir_all(&doomed).with_context(|| format!("removing {}", doomed.display()))?;
+    sync_dir(parent)
+}
+
+/// The prefix of `instance`'s staging directories: a digest of the name,
+/// not the name, so any valid instance name keeps the staging name short.
+fn staging_prefix(instance: &str) -> String {
+    format!(
+        "{TEMP_PREFIX}{}-",
+        &tenkai::host_apply::product_key(instance, "")[..16]
+    )
+}
+
 /// The instance directory of `step` in `tree`, created marked as Tenkai's
 /// if it is missing, and refused if someone else created it.
 fn owned_dir(
@@ -214,12 +262,8 @@ fn create_owned(parent: &Path, dir: &Path) -> Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .context("the instance directory has no name")?;
-    // A digest of the name, not the name: any valid instance name keeps the
-    // staging name short, and cleanup still finds only this instance's.
-    let staging_prefix = format!(
-        "{TEMP_PREFIX}{}-",
-        &tenkai::host_apply::product_key(name, "")[..16]
-    );
+    // Cleanup finds only this instance's staging, and a removal's leftovers.
+    let staging_prefix = staging_prefix(name);
     for entry in std::fs::read_dir(parent)? {
         let entry = entry?;
         // Exactly this instance's staging, never a longer name's such as

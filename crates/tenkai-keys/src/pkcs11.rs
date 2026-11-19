@@ -229,12 +229,16 @@ impl KeyProvider for Pkcs11KeyProvider {
         let Some(previous) = inner.previous.take() else {
             return persist_inner(&inner);
         };
-        if let Err(error) = persist_inner(&inner) {
+        // Destroy before the state forgets it. The reverse order strands
+        // the key on the token, unnamed, when the destroy fails or the
+        // process dies between the two. This way a failed persist leaves
+        // state naming a key the token no longer holds, which a retry
+        // persists again and a restore reads as a completed rotation.
+        if let Err(error) = destroy_kek(&inner.session, previous.handle) {
             inner.previous = Some(previous);
             return Err(error);
         }
-        destroy_kek(&inner.session, previous.handle)?;
-        Ok(())
+        persist_inner(&inner)
     }
 
     fn revoke_kek(&self) -> Result<(), KeyError> {
@@ -531,8 +535,14 @@ fn restore_or_mint(session: &Session) -> Result<Restored, KeyError> {
         Some(meta) if meta.revoked => Err(KeyError::Revoked),
         Some(meta) => {
             let current = find_kek(session, &KeyId::new(meta.current)?)?;
+            // A previous key already destroyed is a completed rotation
+            // whose state was not yet persisted; see `complete_kek_rotation`.
             let previous = match meta.previous {
-                Some(id) => Some(find_kek(session, &KeyId::new(id)?)?),
+                Some(id) => match find_kek(session, &KeyId::new(id)?) {
+                    Ok(previous) => Some(previous),
+                    Err(KeyError::UnknownKey) => None,
+                    Err(error) => return Err(error),
+                },
                 None => None,
             };
             Ok(Restored {
@@ -784,5 +794,44 @@ mod tests {
         drop(wrapped);
 
         sekai_keys::conformance::assert_provider_contract(&provider);
+    }
+
+    /// Completing a rotation destroys the previous key before the state
+    /// forgets it, and a state still naming a destroyed previous key (a
+    /// crash between the two) restores as a completed rotation.
+    #[test]
+    fn a_completed_rotation_never_strands_the_previous_key() {
+        let Some(provider) = provider() else {
+            return;
+        };
+        let previous_of = |provider: &Pkcs11KeyProvider| {
+            let inner = provider.lock().expect("lock");
+            inner.previous.as_ref().expect("previous").id.clone()
+        };
+        provider.rotate_kek().expect("rotate");
+        let previous = previous_of(&provider);
+        provider.complete_kek_rotation().expect("complete");
+        {
+            let inner = provider.lock().expect("lock");
+            assert!(matches!(
+                find_kek(&inner.session, &previous),
+                Err(KeyError::UnknownKey)
+            ));
+            assert!(
+                load_meta(&inner.session)
+                    .unwrap()
+                    .unwrap()
+                    .previous
+                    .is_none()
+            );
+        }
+
+        // The crash: the key is gone, the state still names it.
+        provider.rotate_kek().expect("rotate");
+        let inner = provider.lock().expect("lock");
+        destroy_kek(&inner.session, inner.previous.as_ref().unwrap().handle).expect("destroy");
+        let restored = restore_or_mint(&inner.session).expect("restore");
+        assert!(restored.previous.is_none());
+        assert_eq!(restored.current.id, inner.current.id);
     }
 }

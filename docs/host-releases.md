@@ -106,7 +106,12 @@ install wrote.
 
 The applier also records the certificate it installed, without the key, in
 `/var/lib/tenkai-host/identities/<key>.json`; an install of a release
-without a certificate, or an uninstall, removes the record. The runtime
+without a certificate, or an uninstall, removes the record and then the
+instance's certificate directory, every generation with its key. A
+successful uninstall also removes the instance's sealed values; an install
+without a certificate keeps them. Only a directory holding Tenkai's
+ownership marker is removed. A directory Tenkai did not create is kept, and
+the step's result names it. The runtime
 reads it to renew a `reload = "runtime"` certificate past two thirds of its
 lifetime ([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md)
 §3). It spools `renewal.json` and the new certificate and key, with no

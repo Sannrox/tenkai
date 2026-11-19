@@ -239,12 +239,7 @@ pub(crate) async fn recover(
     let opener = tenkai::sealed_secret::SealedOpener::from_pem_file(key_path)?;
     let offered = client.list_environment_recipients(env).await?.recipients;
     let keys = pinned_recipients(server_url, env, &offered)?;
-    let runtime = offered
-        .iter()
-        .zip(keys)
-        .find(|(offered, _)| !offered.recovery && offered.fingerprint == recipient)
-        .map(|(_, key)| key)
-        .with_context(|| format!("{recipient} is not a runtime recipient key {env} offers"))?;
+    let runtime = runtime_recipient(env, &offered, keys, &recipient)?;
     let list = client.list_sealed_secrets(env, true).await?;
     if list.recovery_key.as_deref() != Some(opener.fingerprint()) {
         bail!("{} is not the recovery key of {env}", opener.fingerprint());
@@ -259,6 +254,32 @@ pub(crate) async fn recover(
         .await?;
     print_plan(&result);
     Ok(())
+}
+
+/// The offered runtime key whose fingerprint, computed here from its
+/// public key, is `recipient`. A server that reports a fingerprint other
+/// than its key's is refused: pinning checks computed fingerprints, so
+/// selection never trusts a reported one.
+fn runtime_recipient(
+    env: &str,
+    offered: &[tenkai::management_operations::EnvironmentRecipient],
+    keys: Vec<tenkai::sealing_key::SealingPublicKey>,
+    recipient: &str,
+) -> Result<tenkai::sealing_key::SealingPublicKey> {
+    let mut runtime = None;
+    for (offered, key) in offered.iter().zip(keys) {
+        let computed = key.fingerprint();
+        if offered.fingerprint != computed {
+            bail!(
+                "{env} reports fingerprint {} for a key whose fingerprint is {computed}",
+                offered.fingerprint
+            );
+        }
+        if !offered.recovery && computed == recipient {
+            runtime = Some(key);
+        }
+    }
+    runtime.with_context(|| format!("{recipient} is not a runtime recipient key {env} offers"))
 }
 
 /// Wraps for `runtime` of every value it cannot open yet, by instance,
@@ -336,6 +357,51 @@ mod tests {
         assert!(read_value(&b""[..], false).is_err());
         let oversized = vec![b'x'; tenkai::sealed_secret::MAX_VALUE_BYTES + 1];
         assert!(read_value(oversized.as_slice(), false).is_err());
+    }
+
+    /// The runtime key is selected by the fingerprint computed from its
+    /// public key; a server reporting another key's fingerprint is refused.
+    #[test]
+    fn recover_refuses_a_reported_fingerprint_that_is_not_the_keys() {
+        use tenkai::management_operations::EnvironmentRecipient;
+        let root = std::env::temp_dir().join(format!(
+            "tenkaictl-select-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let key = |name: &str| {
+            tenkai::sealing_key::SealingKey::open_or_generate(&root.join(name))
+                .unwrap()
+                .public()
+                .clone()
+        };
+        let (a, b) = (key("a"), key("b"));
+        let offer = |key: &tenkai::sealing_key::SealingPublicKey, fingerprint: String| {
+            EnvironmentRecipient {
+                runtime_id: "runtime".into(),
+                fingerprint,
+                public_key: key.to_wire(),
+                capability: "sealing".into(),
+                recovery: false,
+            }
+        };
+        let honest = [offer(&a, a.fingerprint()), offer(&b, b.fingerprint())];
+        let selected = runtime_recipient(
+            "prod",
+            &honest,
+            vec![a.clone(), b.clone()],
+            &b.fingerprint(),
+        )
+        .unwrap();
+        assert_eq!(selected.fingerprint(), b.fingerprint());
+
+        // The server labels key a with b's fingerprint.
+        let lying = [offer(&a, b.fingerprint()), offer(&b, a.fingerprint())];
+        let error = runtime_recipient("prod", &lying, vec![a.clone(), b.clone()], &b.fingerprint())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("reports fingerprint"), "{error}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Recovery opens only values sealed with a recovery wrap; one sealed

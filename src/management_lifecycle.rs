@@ -73,6 +73,16 @@ fn prepare_catalog_state_dir(dir: &Path) -> Result<()> {
                         dir.display()
                     );
                 }
+                // Another user who can write here could swap the files the
+                // server trusts. A new directory is 0700.
+                if metadata.mode() & 0o022 != 0 {
+                    bail!(
+                        "catalog state directory {} is writable by group or others (mode {:o}); restrict it with `chmod 700 {}`",
+                        dir.display(),
+                        metadata.mode() & 0o7777,
+                        dir.display()
+                    );
+                }
                 return Ok(());
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2942,6 +2952,21 @@ mod tests {
             ("STATE_DIRECTORY", Some(root.as_os_str())),
         ]);
         assert_eq!(remote_catalog_state_dir().unwrap(), root);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A state directory others can write is refused, naming the fix;
+    /// restricting it is enough.
+    #[test]
+    fn a_catalog_state_directory_others_can_write_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = unique_temp("loose-state-dir");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let error = prepare_catalog_state_dir(&root).unwrap_err().to_string();
+        assert!(error.contains("writable by group or others"), "{error}");
+        assert!(error.contains("chmod 700"), "{error}");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o750)).unwrap();
+        prepare_catalog_state_dir(&root).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 

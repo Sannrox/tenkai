@@ -41,30 +41,22 @@ fn hpke_suite() -> Vec<u8> {
     .concat()
 }
 
-/// RFC 9180 `LabeledExtract`: the PRK, which keys the next step.
-fn labeled_extract(suite: &[u8], salt: &[u8], label: &[u8], ikm: &[u8]) -> Hkdf<Sha256> {
+/// RFC 9180 `LabeledExtract`: the PRK, held only in a zeroizing buffer.
+fn labeled_extract(suite: &[u8], salt: &[u8], label: &[u8], ikm: &[u8]) -> Zeroizing<Vec<u8>> {
+    use zeroize::Zeroize as _;
     let labeled = Zeroizing::new([b"HPKE-v1".as_slice(), suite, label, ikm].concat());
-    let (_, hkdf) = Hkdf::<Sha256>::extract(Some(salt), &labeled);
-    hkdf
+    let (mut prk, _) = Hkdf::<Sha256>::extract(Some(salt), &labeled);
+    let out = Zeroizing::new(prk.to_vec());
+    prk.as_mut_slice().zeroize();
+    out
 }
 
-/// RFC 9180 `LabeledExtract`, as bytes: a PRK that is input to another
-/// extract rather than a key.
-fn labeled_extract_bytes(
-    suite: &[u8],
-    salt: &[u8],
-    label: &[u8],
-    ikm: &[u8],
-) -> Zeroizing<Vec<u8>> {
-    let labeled = Zeroizing::new([b"HPKE-v1".as_slice(), suite, label, ikm].concat());
-    let (prk, _) = Hkdf::<Sha256>::extract(Some(salt), &labeled);
-    Zeroizing::new(prk.to_vec())
-}
-
-/// RFC 9180 `LabeledExpand`.
+/// RFC 9180 `LabeledExpand` from the PRK bytes. The output is zeroizing.
+/// The HKDF keyed from `prk` lives only for this call and is not cleared:
+/// the HMAC state inside it cannot be zeroized.
 fn labeled_expand(
     suite: &[u8],
-    prk: &Hkdf<Sha256>,
+    prk: &[u8],
     label: &[u8],
     info: &[u8],
     length: usize,
@@ -72,7 +64,9 @@ fn labeled_expand(
     let length_prefix = u16::try_from(length)?.to_be_bytes();
     let labeled_info = [length_prefix.as_slice(), b"HPKE-v1", suite, label, info].concat();
     let mut out = Zeroizing::new(vec![0; length]);
-    prk.expand(&labeled_info, &mut out)
+    Hkdf::<Sha256>::from_prk(prk)
+        .map_err(|_| anyhow::anyhow!("HPKE PRK length"))?
+        .expand(&labeled_info, &mut out)
         .map_err(|_| anyhow::anyhow!("HPKE expand length"))?;
     Ok(out)
 }
@@ -81,6 +75,11 @@ fn labeled_expand(
 /// P-256 point). `ecdh` returns the x coordinate of the shared point with
 /// `encapsulated`, the sender's ephemeral public key: the only step that
 /// needs the private key. Errors never carry key material.
+///
+/// The shared secret, PRKs, AEAD key and nonce are held in zeroizing
+/// buffers. Known limit: the AES-GCM key schedule `ring` expands from the
+/// key, and the short-lived HKDF states, cannot be cleared and stay in
+/// freed memory until reused.
 pub(super) fn open(
     recipient: &[u8],
     encapsulated: &[u8],
@@ -105,8 +104,8 @@ pub(super) fn open(
 
     // KeySchedule, base mode: no PSK.
     let hpke = hpke_suite();
-    let psk_id_hash = labeled_extract_bytes(&hpke, b"", b"psk_id_hash", b"");
-    let info_hash = labeled_extract_bytes(&hpke, b"", b"info_hash", info);
+    let psk_id_hash = labeled_extract(&hpke, b"", b"psk_id_hash", b"");
+    let info_hash = labeled_extract(&hpke, b"", b"info_hash", info);
     let context = [&[0x00][..], &psk_id_hash, &info_hash].concat();
     let secret = labeled_extract(&hpke, &shared_secret, b"secret", b"");
     let key = labeled_expand(&hpke, &secret, b"key", &context, KEY_BYTES)?;

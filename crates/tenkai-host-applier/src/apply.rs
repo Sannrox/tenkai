@@ -194,11 +194,25 @@ pub async fn apply<F: Future<Output = ()>>(
     // would later settle as Interrupted and leave the product dirty (#1310).
     let detail = if forgets_identity && outcome.succeeded() {
         let step = &intake.verified;
-        match store::remove_identity_record(paths, &step.environment, secrets::step_instance(step))
-        {
+        let instance = secrets::step_instance(step);
+        // The record first, so renewal never reads one whose files are gone.
+        // An uninstall also drops the sealed values: nothing runs to read
+        // them. An install without a certificate keeps them; its command
+        // may still read the ones this step wrote.
+        let forgotten = store::remove_identity_record(paths, &step.environment, instance)
+            .and_then(|()| {
+                secrets::remove_instance(paths, secrets::IDENTITY, &step.environment, instance)
+            })
+            .and_then(|()| match action {
+                HostAction::Uninstall => {
+                    secrets::remove_instance(paths, secrets::SECRETS, &step.environment, instance)
+                }
+                _ => Ok(()),
+            });
+        match forgotten {
             Ok(()) => detail,
             Err(error) => format!(
-                "{detail}{}forgetting the instance's workload certificate record failed: {error:#}",
+                "{detail}{}forgetting the instance's workload certificate or sealed values failed: {error:#}",
                 if detail.is_empty() { "" } else { "; " }
             ),
         }

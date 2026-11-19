@@ -239,9 +239,16 @@ fn run_software_ceremony(request: CeremonyRequest<'_>) -> Result<CeremonyEvidenc
                 provider_dir.display()
             );
         }
-        if provider_dir.join(ROOT_KEK).exists() || provider_dir.join(ROOT_ID).exists() {
+        // Not only an earlier root key: anything already there, such as a
+        // planted tenant directory or a file other users can read, would
+        // end up beside the new keys.
+        if fs::read_dir(provider_dir)
+            .with_context(|| format!("reading provider dir {}", provider_dir.display()))?
+            .next()
+            .is_some()
+        {
             bail!(
-                "software provider dir {} already holds a root key; use a new directory, or remove the key files an older failed ceremony left behind",
+                "software provider dir {} is not empty; use a new or empty directory, or remove what an older failed ceremony left behind",
                 provider_dir.display()
             );
         }
@@ -251,35 +258,17 @@ fn run_software_ceremony(request: CeremonyRequest<'_>) -> Result<CeremonyEvidenc
         refuse_symlink(provider_dir, "software provider dir")?;
     }
     restrict_dir(provider_dir)?;
-    let tenants_root = provider_dir.join("tenants");
-    create_owned_dir(&tenants_root)?;
-    let mut tenant_dirs = Vec::with_capacity(tenants.len());
-    for tenant in &tenants {
-        let tenant_dir = tenants_root.join(tenant);
-        create_owned_dir(&tenant_dir)?;
-        if tenant_dir.join(TENANT_DEK_WRAP).exists() || tenant_dir.join(TENANT_ID).exists() {
-            bail!(
-                "software provider dir {} already holds tenant keys for {tenant}; use a new directory, or remove the key files an older failed ceremony left behind",
-                provider_dir.display()
-            );
-        }
-        tenant_dirs.push(tenant_dir);
-    }
-    let mut unique_dirs = std::collections::BTreeSet::new();
-    for tenant_dir in &tenant_dirs {
-        let resolved = fs::canonicalize(tenant_dir)
-            .with_context(|| format!("resolving tenant directory {}", tenant_dir.display()))?;
-        if !unique_dirs.insert(resolved) {
-            bail!("tenant directories collide on this filesystem; use distinct directory names");
-        }
-    }
 
-    // Each key file is recorded as it is written. On any later failure the
-    // ceremony removes exactly those files, so a retry on the same directory
-    // starts clean instead of tripping the "already holds" guards above.
-    let mut written = Vec::new();
-    let result = write_software_keys(provider_dir, &tenants, tenant_dirs, &mut written).and_then(
-        |(root_key_id, data_keys)| {
+    // The directory was empty, so everything in it is this ceremony's. Each
+    // directory and key file is recorded as it is created; on any later
+    // failure exactly those are removed, so a retry on the same directory
+    // starts from an empty one again.
+    let mut created = Created::default();
+    let result = create_tenant_dirs(provider_dir, &tenants, &mut created)
+        .and_then(|tenant_dirs| {
+            write_software_keys(provider_dir, &tenants, tenant_dirs, &mut created.files)
+        })
+        .and_then(|(root_key_id, data_keys)| {
             let statement = CeremonyStatement {
                 issued_at: request.issued_at,
                 class: request.profile.class,
@@ -289,26 +278,77 @@ fn run_software_ceremony(request: CeremonyRequest<'_>) -> Result<CeremonyEvidenc
                 custodians,
             };
             sign_statement(statement, &signer)
-        },
-    );
-    result.map_err(|error| {
-        let leftovers: Vec<String> = written
+        });
+    result.map_err(|error| match created.remove() {
+        Ok(()) => error,
+        Err(leftovers) => error.context(format!(
+            "and removing the partial key files failed, remove them by hand: {leftovers}"
+        )),
+    })
+}
+
+/// What a ceremony created inside its provider directory, in order.
+#[derive(Default)]
+struct Created {
+    dirs: Vec<PathBuf>,
+    files: Vec<PathBuf>,
+}
+
+impl Created {
+    /// Remove every file, then every directory, newest first. A directory
+    /// is removed only once empty, so nothing else is ever deleted.
+    fn remove(&self) -> std::result::Result<(), String> {
+        let files = self
+            .files
             .iter()
-            .filter_map(|path| {
-                crate::atomic_state::remove_if_exists(path)
-                    .err()
-                    .map(|cleanup| format!("{cleanup:#}"))
-            })
+            .filter_map(|path| crate::atomic_state::remove_if_exists(path).err());
+        let dirs = self
+            .dirs
+            .iter()
+            .rev()
+            .filter_map(|dir| match fs::remove_dir(dir) {
+                Ok(()) => None,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    Some(anyhow::Error::new(error).context(format!("removing {}", dir.display())))
+                }
+            });
+        let leftovers: Vec<String> = files
+            .chain(dirs)
+            .map(|error| format!("{error:#}"))
             .collect();
         if leftovers.is_empty() {
-            error
+            Ok(())
         } else {
-            error.context(format!(
-                "and removing the partial key files failed, remove them by hand: {}",
-                leftovers.join("; ")
-            ))
+            Err(leftovers.join("; "))
         }
-    })
+    }
+}
+
+/// Create `tenants/<tenant>` for each tenant in the empty provider
+/// directory, recording each one, and refuse names that collide on this
+/// filesystem.
+fn create_tenant_dirs(
+    provider_dir: &Path,
+    tenants: &[String],
+    created: &mut Created,
+) -> Result<Vec<PathBuf>> {
+    let tenants_root = provider_dir.join("tenants");
+    create_owned_dir(&tenants_root)?;
+    created.dirs.push(tenants_root.clone());
+    let mut tenant_dirs = Vec::with_capacity(tenants.len());
+    for tenant in tenants {
+        let tenant_dir = tenants_root.join(tenant);
+        // The tree started empty, so an existing entry is an earlier
+        // tenant's name on a case-insensitive filesystem.
+        if fs::symlink_metadata(&tenant_dir).is_ok() {
+            bail!("tenant directories collide on this filesystem; use distinct directory names");
+        }
+        create_owned_dir(&tenant_dir)?;
+        created.dirs.push(tenant_dir.clone());
+        tenant_dirs.push(tenant_dir);
+    }
+    Ok(tenant_dirs)
 }
 
 /// Write the root KEK, its id, and each tenant's wrapped DEK and id, pushing
@@ -810,54 +850,60 @@ mod tests {
     fn failed_ceremony_removes_its_key_files_so_a_retry_succeeds() {
         let dir = temp_dir();
         let provider = dir.join("provider");
-        let profile = lab_profile();
-        let custodians = ["alice".into(), "bob".into()];
+        fs::create_dir(&provider).unwrap();
         let tenants = ["acme".into(), "contoso".into()];
-        let signing = seed_file(&dir);
-        // A dangling symlink passes the "already holds" check, then makes the
-        // exclusive create of contoso's wrapped key fail after the root and
-        // acme keys are already on disk.
+        // A dangling symlink makes the exclusive create of contoso's wrapped
+        // key fail after the root and acme keys are already on disk. A
+        // ceremony refuses a provider directory holding it, so it is planted
+        // between creating the directories and writing the keys.
+        let mut created = Created::default();
+        let tenant_dirs = create_tenant_dirs(&provider, &tenants, &mut created).unwrap();
         let blocker = provider.join("tenants/contoso").join(TENANT_DEK_WRAP);
-        fs::create_dir_all(blocker.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(dir.join("absent"), &blocker).unwrap();
-
-        let error = run_ceremony(ceremony(
-            &profile,
-            &custodians,
-            &tenants,
-            &provider,
-            &signing,
-        ))
-        .unwrap_err();
+        let error =
+            write_software_keys(&provider, &tenants, tenant_dirs, &mut created.files).unwrap_err();
         assert!(format!("{error:#}").contains(TENANT_DEK_WRAP), "{error:#}");
+        assert!(provider.join(ROOT_KEK).exists());
         fs::remove_file(&blocker).unwrap();
-        let files: Vec<PathBuf> = walk_files(&provider);
-        assert!(files.is_empty(), "partial key files left behind: {files:?}");
+        created.remove().unwrap();
+        assert_eq!(fs::read_dir(&provider).unwrap().count(), 0);
 
+        let custodians = ["alice".into(), "bob".into()];
         run_ceremony(ceremony(
-            &profile,
+            &lab_profile(),
             &custodians,
             &tenants,
             &provider,
-            &signing,
+            &seed_file(&dir),
         ))
         .unwrap()
         .verify()
         .unwrap();
     }
 
-    fn walk_files(dir: &Path) -> Vec<PathBuf> {
-        fs::read_dir(dir)
-            .unwrap()
-            .flat_map(|entry| {
-                let path = entry.unwrap().path();
-                if fs::symlink_metadata(&path).unwrap().is_dir() {
-                    walk_files(&path)
-                } else {
-                    vec![path]
-                }
-            })
-            .collect()
+    /// A provider directory that already holds anything is refused before
+    /// its mode changes or a key is written.
+    #[test]
+    fn a_provider_directory_that_is_not_empty_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = temp_dir();
+        let provider = dir.join("provider");
+        fs::create_dir(&provider).unwrap();
+        fs::write(provider.join("notes.txt"), "unrelated").unwrap();
+        fs::set_permissions(&provider, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = run_ceremony(ceremony(
+            &lab_profile(),
+            &["alice".into(), "bob".into()],
+            &["acme".into()],
+            &provider,
+            &seed_file(&dir),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not empty"), "{error}");
+        assert!(!provider.join(ROOT_KEK).exists());
+        let mode = fs::metadata(&provider).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
     }
 
     #[test]
@@ -935,27 +981,6 @@ mod tests {
     }
 
     #[test]
-    fn leftover_tenant_wrap_does_not_leave_a_root() {
-        let dir = temp_dir();
-        let provider = dir.join("provider");
-        let leftover = provider.join("tenants").join("acme");
-        fs::create_dir_all(&leftover).unwrap();
-        fs::write(leftover.join(TENANT_ID), "sha256:leftover").unwrap();
-        let profile = lab_profile();
-        let error = run_ceremony(ceremony(
-            &profile,
-            &["alice".into(), "bob".into()],
-            &["acme".into()],
-            &provider,
-            &seed_file(&dir),
-        ))
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("already holds tenant keys"), "{error}");
-        assert!(!provider.join(ROOT_KEK).exists());
-    }
-
-    #[test]
     fn tenant_directory_symlink_is_refused() {
         let dir = temp_dir();
         let provider = dir.join("provider");
@@ -973,7 +998,7 @@ mod tests {
         ))
         .unwrap_err()
         .to_string();
-        assert!(error.contains("symlink"), "{error}");
+        assert!(error.contains("not empty"), "{error}");
         assert!(!outside.join(TENANT_DEK_WRAP).exists());
         assert!(!provider.join(ROOT_KEK).exists());
     }
