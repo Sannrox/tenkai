@@ -339,6 +339,10 @@ fn preceded_by_namespace_equals(chars: &[char], key_start: usize) -> bool {
 }
 
 /// If `chars[i..]` is `scheme://userinfo@host`, return the index of `@`.
+///
+/// The userinfo runs to the last `@` before whitespace or a quote, so a
+/// password holding a raw `/`, `?`, `#` or `@` is still covered. A URL whose
+/// path holds an `@` is over-redacted, which fails closed (#1342).
 fn uri_userinfo_at(chars: &[char], i: usize) -> Option<usize> {
     if i > 0 {
         let prev = chars[i - 1];
@@ -359,18 +363,14 @@ fn uri_userinfo_at(chars: &[char], i: usize) -> Option<usize> {
         return None;
     }
     let authority = j + 3;
-    let mut k = authority;
     let mut at = None;
-    while k < chars.len() {
-        let c = chars[k];
-        if c.is_whitespace() || matches!(c, '/' | '?' | '#' | '"' | '\'' | '<' | '>' | ')') {
+    for (k, &c) in chars.iter().enumerate().skip(authority) {
+        if c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`') {
             break;
         }
         if c == '@' {
             at = Some(k);
-            break;
         }
-        k += 1;
     }
     let at = at?;
     if at == authority {
@@ -543,6 +543,27 @@ mod tests {
                 cleaned.contains("[redacted]") || cleaned.contains("omitted"),
                 "{sample:?} -> {cleaned}"
             );
+        }
+    }
+
+    #[test]
+    fn redacts_userinfo_through_its_last_at() {
+        for (sample, password) in [
+            (
+                "dial postgres://u:pa/ss@h/db failed",
+                ["pa/ss", "pa", "ss@h"],
+            ),
+            (
+                "dial postgres://u:p@ss@h/db failed",
+                ["p@ss", "u:p", "ss@h"],
+            ),
+            (
+                "dial postgres://u:p?w#d@h/db failed",
+                ["p?w#d", "u:p", "w#d"],
+            ),
+        ] {
+            let cleaned = assert_no_leak(sample, &password);
+            assert!(cleaned.contains("//[redacted]@h/db failed"), "{cleaned}");
         }
     }
 

@@ -10,7 +10,8 @@
 # mismatch and a missing SHA256SUMS entry (nothing installed, existing files
 # kept), a refused self-upgrade home, --role host-applier leaving that home
 # alone (and refusing --prefix), and --with-host-applier refused for a
-# non-root user or a non-Linux system. The container run installs on
+# non-root user or a non-Linux system, a plain HTTP --base-url without
+# --allow-http, and (with only wget) an HTTPS origin redirecting to HTTP. The container run installs on
 # Ubuntu 22.04, Debian 12, RHEL 8 and 9 compatible images, also with
 # --with-host-applier as root (owners, modes, files), runs every installed
 # host, refuses the applier into a directory others can write, through a
@@ -43,7 +44,15 @@ done
 # Strip a trailing slash so the path matches what install.sh resolves with pwd.
 tmp_root="${TMPDIR:-/tmp}"
 tmp="$(mktemp -d "${tmp_root%/}/tenkai-install-test.$$.XXXXXX")"
-trap "rm -rf $(printf '%q' "$tmp")" EXIT
+server_pid=""
+cleanup() {
+  if [[ -n "$server_pid" ]]; then
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
 
 # Run install.sh under sh; print its output; return its status.
 run_install() {
@@ -168,6 +177,11 @@ self_test() {
   [[ "$(cat "${prefix}/tenkaictl")" == old ]] || fail "a refused install replaced tenkaictl"
   expect_refused "cannot download" "$script" --base-url "file://${tmp}/missing" --prefix "$prefix"
 
+  # A plain HTTP release root needs the explicit opt-in.
+  expect_refused "is not HTTPS; pass --allow-http" "$script" --base-url "http://127.0.0.1:9/releases" --prefix "${tmp}/http"
+  expect_refused "must be an https:// or file:// URL" "$script" --base-url "ftp://127.0.0.1/releases" --prefix "${tmp}/http"
+  [[ ! -e "${tmp}/http" ]] || fail "a refused base URL created the prefix"
+
   # A self-upgrade home, or a link into one, belongs to tenkaictl self-upgrade.
   local home="${tmp}/home-layout"
   mkdir -p "${home}/versions/abc"
@@ -202,7 +216,72 @@ self_test() {
     expect_files "$home" current upgrade.json versions
   fi
 
+  wget_redirect_test "$releases" "$script"
   printf 'install script self-test passed\n'
+}
+
+# With only wget (no curl), an HTTPS origin redirecting to plain HTTP is
+# refused and nothing is installed; --allow-http accepts a plain HTTP mirror.
+# Needs wget, openssl and python3; skipped without them, except in CI.
+wget_redirect_test() {
+  local releases="$1" script="$2" tool dir bin="${tmp}/wget-only"
+  for tool in wget openssl python3; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      [[ -z "${CI:-}" ]] || fail "the wget redirect test needs ${tool} in CI"
+      printf 'wget redirect test skipped: %s not found\n' "$tool"
+      return 0
+    fi
+  done
+  # A PATH holding every tool except curl, so install.sh takes the wget path.
+  mkdir -p "$bin"
+  local IFS=:
+  for dir in $PATH; do
+    [[ -d "$dir" ]] || continue
+    for tool in "$dir"/*; do
+      [[ -x "$tool" && ! -e "${bin}/${tool##*/}" && "${tool##*/}" != curl ]] || continue
+      ln -s "$tool" "${bin}/${tool##*/}"
+    done
+  done
+  unset IFS
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=127.0.0.1 \
+    -addext subjectAltName=IP:127.0.0.1 -keyout "${tmp}/tls.key" -out "${tmp}/tls.crt" 2>/dev/null
+  printf 'ca_certificate = %s\n' "${tmp}/tls.crt" >"${tmp}/wgetrc"
+  python3 -I - "$releases" "${tmp}/tls.crt" "${tmp}/tls.key" "${tmp}/ports" <<'PY' &
+import functools, http.server, os, ssl, sys, threading
+root, cert, key, ports = sys.argv[1:]
+plain = http.server.ThreadingHTTPServer(
+    ("127.0.0.1", 0), functools.partial(http.server.SimpleHTTPRequestHandler, directory=root))
+class Redirect(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", f"http://127.0.0.1:{plain.server_port}{self.path}")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+tls = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(cert, key)
+tls.socket = context.wrap_socket(tls.socket, server_side=True)
+threading.Thread(target=plain.serve_forever, daemon=True).start()
+with open(ports + ".tmp", "w") as out:
+    out.write(f"{plain.server_port} {tls.server_port}\n")
+os.rename(ports + ".tmp", ports)
+tls.serve_forever()
+PY
+  server_pid=$!
+  local waited
+  for waited in $(seq 50); do
+    [[ -s "${tmp}/ports" ]] && break
+    sleep 0.1
+  done
+  local plain_port tls_port
+  read -r plain_port tls_port <"${tmp}/ports" || fail "redirect server did not start"
+  PATH="$bin" WGETRC="${tmp}/wgetrc" expect_refused "a redirect left HTTPS" \
+    "$script" --base-url "https://127.0.0.1:${tls_port}" --prefix "${tmp}/wget-https"
+  expect_files "${tmp}/wget-https"
+  PATH="$bin" WGETRC="${tmp}/wgetrc" run_install "$script" --base-url "http://127.0.0.1:${plain_port}" \
+    --allow-http --prefix "${tmp}/wget-http" >/dev/null || fail "wget install from an --allow-http mirror failed"
+  expect_files "${tmp}/wget-http" tenkaictl
+  printf 'wget redirect test passed\n'
 }
 
 # Install $linux_hosts in clean containers through the baked script.

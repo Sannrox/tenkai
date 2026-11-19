@@ -59,7 +59,11 @@ Options:
                              management token under DIR/tenkai
                              (default: /etc)
   --base-url URL             release download root
-                             (default: https://github.com/${REPO}/releases/download)
+                             (default: https://github.com/${REPO}/releases/download);
+                             https:// or file:// unless --allow-http
+  --allow-http               accept an http:// --base-url and plain HTTP
+                             redirects (a trusted local mirror only; the
+                             SHA256SUMS file then travels unauthenticated)
 
 Supported: linux-x86_64 and linux-aarch64 with glibc ${GLIBC_FLOOR} or newer,
 darwin-aarch64.
@@ -75,6 +79,7 @@ sysconfdir=/etc
 sysconfdir_set=false
 base_url="https://github.com/${REPO}/releases/download"
 with_applier=false
+allow_http=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --role | --version | --prefix | --sysconfdir | --base-url)
@@ -98,6 +103,10 @@ while [ $# -gt 0 ]; do
       with_applier=true
       shift
       ;;
+    --allow-http)
+      allow_http=true
+      shift
+      ;;
     -h | --help) usage 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
@@ -118,6 +127,12 @@ if [ "$role" = host-applier ]; then
   $prefix_set && die "--role host-applier installs at fixed paths; do not pass --prefix"
   $sysconfdir_set && die "--role host-applier installs at fixed paths; do not pass --sysconfdir"
 fi
+
+case "$base_url" in
+  https://* | file://*) ;;
+  http://*) $allow_http || die "--base-url ${base_url} is not HTTPS; pass --allow-http only for a trusted mirror" ;;
+  *) die "--base-url ${base_url} must be an https:// or file:// URL" ;;
+esac
 
 [ -n "$version" ] || die "no release version; pass --version X.Y.Z"
 version="${version#v}"
@@ -245,14 +260,17 @@ if [ -n "$binaries" ]; then
   done
 fi
 
+redirects=https
+$allow_http && redirects=https,http
 if command -v curl >/dev/null 2>&1; then
-  fetch() { curl -fsSL --proto-redir =https -o "$2" "$1"; }
+  fetch() { curl -fsSL --proto-redir "=${redirects}" -o "$2" "$1"; }
 elif command -v wget >/dev/null 2>&1; then
-  # wget has no redirect protocol filter like curl's --proto-redir, so read
-  # the redirects it followed and refuse a download that left HTTPS.
+  # wget has no redirect protocol filter like curl's --proto-redir (its
+  # --https-only applies to recursive downloads), so read the redirects it
+  # followed and refuse a download that left HTTPS.
   fetch() {
     wget -S -o "$2.log" -O "$2" "$1" || { rm -f "$2.log"; return 1; }
-    if grep -iq '^ *location: *http://' "$2.log"; then
+    if ! $allow_http && grep -iq '^ *location: *http://' "$2.log"; then
       rm -f "$2" "$2.log"
       say "refused ${1}: a redirect left HTTPS"
       return 1
