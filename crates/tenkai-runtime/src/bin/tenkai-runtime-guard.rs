@@ -7,6 +7,7 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 use tokio::io::AsyncReadExt as _;
 use tokio::process::Command;
+use tokio::signal::unix::{Signal, SignalKind, signal};
 
 #[derive(Parser)]
 #[command(name = "tenkai-runtime-guard", hide = true, trailing_var_arg = true)]
@@ -20,6 +21,11 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    // Handlers exist before the executor does, so a SIGINT or SIGTERM always
+    // reaches `terminate_group` and never leaves the executor behind. A guard
+    // that cannot register them refuses to start (#1337).
+    let interrupt = signal(SignalKind::interrupt()).context("registering SIGINT handler")?;
+    let terminate = signal(SignalKind::terminate()).context("registering SIGTERM handler")?;
     let mut command = Command::new(args.executor);
     command
         .args(args.arguments)
@@ -42,28 +48,16 @@ async fn main() -> Result<()> {
             }
         }),
         read = parent.read(&mut byte) => read,
-        _ = shutdown_signal() => Ok(0),
+        _ = shutdown_signal(interrupt, terminate) => Ok(0),
     };
     let _ = status;
     terminate_group();
 }
 
-async fn shutdown_signal() {
-    let mut interrupt =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok();
-    let mut terminate =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+async fn shutdown_signal(mut interrupt: Signal, mut terminate: Signal) {
     tokio::select! {
-        _ = async {
-            if let Some(signal) = interrupt.as_mut() {
-                signal.recv().await;
-            }
-        } => {}
-        _ = async {
-            if let Some(signal) = terminate.as_mut() {
-                signal.recv().await;
-            }
-        } => {}
+        _ = interrupt.recv() => {}
+        _ = terminate.recv() => {}
     }
 }
 

@@ -29,7 +29,13 @@ const AUTO_RECALL_AUTHENTICATOR: &str = "deployed-exposure-auto-recall";
 pub(super) const ASSESSMENT_LEASE_NAMESPACE: &str = "tenkai/exposure-assessment";
 pub(super) const ASSESSMENT_LEASE_KEY: &str = "write";
 const ASSESSMENT_LEASE_TTL_MS: i64 = 120_000;
-const ASSESSMENT_LEASE_ATTEMPTS: usize = 8;
+/// A pass that meets a held lease backs off from the first delay, doubling up
+/// to the cap, for as long as one TTL plus a margin: long enough for a
+/// crashed holder's lease to expire (#1337).
+const ASSESSMENT_LEASE_FIRST_RETRY: std::time::Duration = std::time::Duration::from_millis(25);
+const ASSESSMENT_LEASE_MAX_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+const ASSESSMENT_LEASE_WAIT: std::time::Duration =
+    std::time::Duration::from_millis(ASSESSMENT_LEASE_TTL_MS as u64 + 5_000);
 const ASSESSMENT_LEASE_REFRESH_EVERY: usize = 16;
 
 /// Durable (release, advisory) match with its first-seen time.
@@ -80,7 +86,9 @@ pub(super) async fn begin_assessment_write(ctx: &mut Ctx) -> Result<String> {
         std::process::id(),
         uuid::Uuid::new_v4()
     );
-    for _ in 0..ASSESSMENT_LEASE_ATTEMPTS {
+    let deadline = tokio::time::Instant::now() + ASSESSMENT_LEASE_WAIT;
+    let mut delay = ASSESSMENT_LEASE_FIRST_RETRY;
+    loop {
         match ctx
             .acquire_lease(
                 ASSESSMENT_LEASE_NAMESPACE,
@@ -91,13 +99,17 @@ pub(super) async fn begin_assessment_write(ctx: &mut Ctx) -> Result<String> {
             .await
         {
             Ok(lease) => return Ok(lease.fencing_token),
-            Err(LeaseError::AlreadyExists) => {
-                tokio::task::yield_now().await;
+            Err(LeaseError::AlreadyExists) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(ASSESSMENT_LEASE_MAX_RETRY);
             }
+            Err(LeaseError::AlreadyExists) => bail!(
+                "exposure assessment lease is held by another pass after waiting {}s; retry",
+                ASSESSMENT_LEASE_WAIT.as_secs()
+            ),
             Err(error) => return Err(error.into()),
         }
     }
-    bail!("exposure assessment lease is held")
 }
 
 pub(super) async fn end_assessment_write(ctx: &mut Ctx, fencing_token: &str) -> Result<()> {

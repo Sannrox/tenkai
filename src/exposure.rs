@@ -2799,6 +2799,56 @@ install = "true"
         let _ = std::fs::remove_dir_all(root);
     }
 
+    async fn lease_ctx(name: &str) -> (Ctx, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-exposure-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        (ctx, root)
+    }
+
+    // #1337: a pass that meets a crashed holder's lease waits for it to
+    // lapse instead of failing at once.
+    #[tokio::test]
+    async fn an_assessment_waits_out_a_lapsed_holder() {
+        let (mut ctx, root) = lease_ctx("lease-lapse").await;
+        ctx.acquire_lease(
+            ASSESSMENT_LEASE_NAMESPACE,
+            ASSESSMENT_LEASE_KEY,
+            "crashed-pass",
+            300,
+        )
+        .await
+        .unwrap();
+        let token = begin_assessment_write(&mut ctx).await.unwrap();
+        end_assessment_write(&mut ctx, &token).await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // A lease held for longer than the wait is refused with a lease-held error.
+    #[tokio::test(start_paused = true)]
+    async fn an_assessment_refuses_a_lease_held_past_the_wait() {
+        let (mut ctx, root) = lease_ctx("lease-held").await;
+        ctx.acquire_lease(
+            ASSESSMENT_LEASE_NAMESPACE,
+            ASSESSMENT_LEASE_KEY,
+            "live-pass",
+            3_600_000,
+        )
+        .await
+        .unwrap();
+        let error = begin_assessment_write(&mut ctx).await.unwrap_err();
+        assert!(
+            error.to_string().contains("held by another pass"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     async fn stamp_deployed(ctx: &mut Ctx, env: &str, version: &str) {
         let mut object = crate::environment::environment(ctx, env).await.unwrap();
         object
