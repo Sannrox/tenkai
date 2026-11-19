@@ -58,8 +58,21 @@ or plan bodies. Not a metrics TSDB; scrape and store externally.
 ## Fleet status (operator table)
 
 Cross-environment delivery posture is **not** the same as tick counters above.
-Use the fleet status report for drift/health/lease at a glance. Plan state
-stays on `env inspect`; fleet status does not scan the plan catalog.
+Use the fleet status report for drift, health and lease at a glance. Each
+row also carries what needs a person, read the way the per-environment reads
+report it:
+
+| Field | Meaning | Per-environment source |
+| --- | --- | --- |
+| `latest_plan_state` | State of the latest plan | `env inspect` |
+| `awaiting_approval` | The latest plan is still to run and needs a human approval | `env inspect` approval source `required` |
+| `drifted_instances` | Instances whose live spec was modified outside Tenkai | `status` spec drift |
+| `certificates.nearest_expires_at` | Earliest workload certificate expiry, Unix seconds | `status` certificate |
+| `certificates.near_expiry` | Some certificate is in the last sixth of its lifetime | `status` certificate |
+| `certificates.renewal_failing` | Instances whose latest renewal attempt failed | `status` certificate |
+
+`awaiting_approval`, `drifted_instances` and `certificates` are omitted when
+false, zero, or absent.
 
 ```bash
 # embedded

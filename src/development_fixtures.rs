@@ -275,6 +275,13 @@ impl FixtureEnvironmentProjection {
                 .latest_plan
                 .as_ref()
                 .map(|plan| plan.status.as_str().into()),
+            awaiting_approval: self.posture == "awaiting_approval",
+            drifted_instances: if self.posture == "drifted" {
+                product_count
+            } else {
+                0
+            },
+            certificates: None,
             posture: posture.into(),
             criticality: None,
             open_exposures: Vec::new(),

@@ -32,9 +32,22 @@ pub struct FleetEnvironmentRow {
     /// `ok` | `unknown` | `error` | `n/a` (no subscriptions).
     pub health_summary: String,
     pub lease_held: bool,
-    /// Latest plan state when a plan exists. Fleet status leaves this empty;
-    /// `inspect_environment` is the source for plan detail.
+    /// Latest plan state when a plan exists, as `inspect_environment`
+    /// reports it (#1372).
     pub latest_plan_state: Option<String>,
+    /// True while the latest plan waits for a person to approve it: it is
+    /// still to run and its approval source is `required`. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub awaiting_approval: bool,
+    /// Instances whose live spec was modified outside Tenkai (#1028), as
+    /// `status` reports them. Omitted when zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub drifted_instances: usize,
+    /// Workload certificates reported in this environment (ADR 0046 §3).
+    /// Omitted when none was reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub certificates: Option<FleetCertificateSummary>,
     /// Aggregate posture: `empty` | `unhealthy` | `behind` | `current`.
     pub posture: String,
     /// Effective environment criticality when set (#694).
@@ -52,6 +65,47 @@ pub struct FleetEnvironmentRow {
     /// of its own. Product endpoints are not counted. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unrouted: bool,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+/// The workload certificates of one environment, folded for the fleet table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FleetCertificateSummary {
+    /// The earliest expiry among the reported certificates, in Unix seconds.
+    pub nearest_expires_at: i64,
+    /// True when any certificate is in the last sixth of its lifetime.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub near_expiry: bool,
+    /// Instances whose latest renewal attempt failed. Omitted when zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub renewal_failing: usize,
+}
+
+impl FleetCertificateSummary {
+    /// Fold the `status` view of each instance's certificate; `None` when
+    /// the environment reported none.
+    pub fn from_statuses<'a>(
+        statuses: impl IntoIterator<Item = &'a crate::certificate_reports::CertificateStatus>,
+    ) -> Option<Self> {
+        statuses.into_iter().fold(None, |summary, status| {
+            let failing = usize::from(status.renewal_failure.is_some());
+            Some(match summary {
+                None => Self {
+                    nearest_expires_at: status.expires_at,
+                    near_expiry: status.near_expiry,
+                    renewal_failing: failing,
+                },
+                Some(summary) => Self {
+                    nearest_expires_at: summary.nearest_expires_at.min(status.expires_at),
+                    near_expiry: summary.near_expiry || status.near_expiry,
+                    renewal_failing: summary.renewal_failing + failing,
+                },
+            })
+        })
+    }
 }
 
 /// One open deployed exposure, with age, on a fleet row (#900).
@@ -173,6 +227,23 @@ pub fn fleet_row_from_inspect(report: &EnvironmentInspectReport) -> FleetEnviron
         health_summary,
         lease_held: report.lease.held,
         latest_plan_state: report.latest_plan.as_ref().map(|plan| plan.state.clone()),
+        awaiting_approval: report.latest_plan.as_ref().is_some_and(|plan| {
+            matches!(plan.state.as_str(), "computed" | "blocked")
+                && plan
+                    .approval
+                    .as_ref()
+                    .is_some_and(|approval| approval.source == "required")
+        }),
+        drifted_instances: report
+            .subscriptions
+            .iter()
+            .filter(|sub| {
+                sub.spec_drift
+                    .as_ref()
+                    .is_some_and(|drift| drift.is_modified())
+            })
+            .count(),
+        certificates: None,
         posture,
         criticality: report
             .criticality
@@ -476,6 +547,116 @@ mod tests {
         EnvironmentInspectReport, EnvironmentPlanSummary, EnvironmentSubscriptionView,
     };
     use std::collections::BTreeMap;
+
+    fn current_subscription(
+        product: &str,
+        spec_drift: Option<crate::spec_drift::SpecDriftView>,
+    ) -> EnvironmentSubscriptionView {
+        EnvironmentSubscriptionView {
+            product: product.into(),
+            instance: product.into(),
+            channel: "stable".into(),
+            head: "1.0.0".into(),
+            deployed: Some("1.0.0".into()),
+            health: Some("healthy".into()),
+            error: None,
+            overlay_digest: None,
+            applied_overlay: None,
+            state: "current".into(),
+            delivery_hold: None,
+            spec_drift,
+        }
+    }
+
+    fn empty_inspect(subscriptions: Vec<EnvironmentSubscriptionView>) -> EnvironmentInspectReport {
+        EnvironmentInspectReport {
+            name: "alpha".into(),
+            id: "tenkai:env:alpha".into(),
+            description: String::new(),
+            subscriptions,
+            facts: Default::default(),
+            overlays: Default::default(),
+            config: Vec::new(),
+            lease: crate::apply::EnvironmentLeaseInspect {
+                held: false,
+                owner: None,
+                generation: None,
+                expires_at_ms: None,
+                status: "absent".into(),
+            },
+            latest_plan: None,
+            maintenance: None,
+            constraints: Vec::new(),
+            webhooks: Vec::new(),
+            owner: None,
+            approval_policy: None,
+            exposure_grace_ms: None,
+            terminal_outcomes: Vec::new(),
+            execution_note: String::new(),
+            observed_type_digest: None,
+            observed_runtime_digest: None,
+            module_activations: Vec::new(),
+            retirement: None,
+            preview: None,
+            delivery_hold: None,
+            delivery_freezes: Vec::new(),
+            criticality: None,
+            latest_failures: Vec::new(),
+            sealed_recovery_warning: None,
+            identity_issuer: None,
+            identity_issuer_waiting: Vec::new(),
+        }
+    }
+
+    fn certificate(
+        expires_at: i64,
+        near_expiry: bool,
+        failure: Option<&str>,
+    ) -> crate::certificate_reports::CertificateStatus {
+        crate::certificate_reports::CertificateStatus {
+            expires_at,
+            near_expiry,
+            renewal_failure: failure.map(Into::into),
+        }
+    }
+
+    // #1372: the nearest expiry wins, and near expiry or a failing renewal on
+    // any instance shows, not only on the nearest one.
+    #[test]
+    fn certificate_summary_folds_every_instance() {
+        assert_eq!(FleetCertificateSummary::from_statuses([]), None);
+        let statuses = [
+            certificate(300, false, Some("issuer unreachable")),
+            certificate(200, false, None),
+            certificate(900, true, Some("refused")),
+        ];
+        assert_eq!(
+            FleetCertificateSummary::from_statuses(&statuses),
+            Some(FleetCertificateSummary {
+                nearest_expires_at: 200,
+                near_expiry: true,
+                renewal_failing: 2,
+            })
+        );
+    }
+
+    // #1372: only instances modified outside Tenkai count as drifted.
+    #[test]
+    fn drifted_instances_count_modified_specs_only() {
+        let drift = |status: &str| {
+            Some(crate::spec_drift::SpecDriftView {
+                status: status.into(),
+                objects: Vec::new(),
+            })
+        };
+        let report = empty_inspect(vec![
+            current_subscription("api", drift(crate::spec_drift::SPEC_DRIFT_MODIFIED)),
+            current_subscription("web", drift(crate::spec_drift::SPEC_DRIFT_CURRENT)),
+            current_subscription("worker", drift(crate::spec_drift::SPEC_DRIFT_MODIFIED)),
+            current_subscription("cron", None),
+        ]);
+        assert_eq!(fleet_row_from_inspect(&report).drifted_instances, 2);
+    }
 
     #[test]
     fn fleet_status_classifies_current_behind_unhealthy_and_empty() {
@@ -873,6 +1054,9 @@ mod tests {
             health_summary: "n/a".into(),
             lease_held: false,
             latest_plan_state: None,
+            awaiting_approval: false,
+            drifted_instances: 0,
+            certificates: None,
             posture: "empty".into(),
             criticality: None,
             open_exposures: vec![
