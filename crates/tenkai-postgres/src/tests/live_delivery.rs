@@ -19,6 +19,7 @@ fn live_postgres_delivery_effects_are_idempotent_and_fenced() {
 
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let replica_a = config.open().expect("connect replica a");
     let replica_b = config.open().expect("connect replica b");
     let authority = TenantDerivationAuthority::new("test");
@@ -30,7 +31,7 @@ fn live_postgres_delivery_effects_are_idempotent_and_fenced() {
         },
         "test",
     )
-    .with_tenant(format!("ha-{suffix}"), &authority)
+    .with_tenant(tenants.adopt_id(format!("ha-{suffix}")), &authority)
     .unwrap()
     .build()
     .unwrap();

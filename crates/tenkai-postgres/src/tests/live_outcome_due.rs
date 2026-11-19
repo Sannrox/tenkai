@@ -25,14 +25,18 @@ fn event(id: &str, provider_kind: &str, next_attempt_at: i64) -> ProviderEventRe
 #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
 fn live_postgres_export_sweep_visits_only_tenants_with_an_outcome_due() {
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
     let suffix = format!(
         "{}{}",
         std::process::id(),
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     );
-    let busy = store.partition_by_id(&format!("od{suffix}")).unwrap();
-    let quiet = store.partition_by_id(&format!("oq{suffix}")).unwrap();
+    let (busy, quiet) = (format!("od{suffix}"), format!("oq{suffix}"));
+    tenants.adopt(&busy);
+    tenants.adopt(&quiet);
+    let busy = store.partition_by_id(&busy).unwrap();
+    let quiet = store.partition_by_id(&quiet).unwrap();
     busy.enqueue_provider_event(&event("outcome-1", OUTCOME_PROVIDER_KIND, 1_000))
         .unwrap();
     quiet

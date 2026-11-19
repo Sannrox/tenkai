@@ -11,12 +11,9 @@ fn live_postgres_retirement_column_backfills_and_filters() {
     };
 
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
-    let tenant = format!(
-        "retire-{}-{}",
-        std::process::id(),
-        &uuid::Uuid::new_v4().simple().to_string()[..8]
-    );
+    let tenant = tenants.tenant("retire-");
     let schema = tenant_schema_name(&tenant).unwrap();
     let ctx = AuthenticatedRequestContextBuilder::new(
         "r-retire",
@@ -72,11 +69,4 @@ fn live_postgres_retirement_column_backfills_and_filters() {
             ("by-tenant-key".into(), Some(9)),
         ]
     );
-    raw.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
-        .unwrap();
-    raw.execute(
-        "DELETE FROM public.tenkai_tenant_schema_versions WHERE schema_name = $1",
-        &[&schema],
-    )
-    .unwrap();
 }

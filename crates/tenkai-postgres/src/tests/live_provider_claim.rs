@@ -11,12 +11,9 @@ use tenkai::storage::{OperationalStore as _, ProviderEventRecord};
 #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
 fn live_postgres_concurrent_claimers_take_disjoint_events() {
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
-    let tenant = format!(
-        "pc{}{}",
-        std::process::id(),
-        &uuid::Uuid::new_v4().simple().to_string()[..8]
-    );
+    let tenant = tenants.tenant("pc");
     let partition = store.partition_by_id(&tenant).unwrap();
     for n in 0..10 {
         partition

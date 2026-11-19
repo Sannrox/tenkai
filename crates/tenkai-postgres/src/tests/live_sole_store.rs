@@ -30,6 +30,7 @@ fn live_postgres_sole_store_survives_reconnect() {
     .expect("ADR 0010 enterprise capability check passes with PostgreSQL only");
 
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
     let hub = store.hub_partition().expect("hub schema");
     let audit_id = format!("audit-{}", uuid::Uuid::new_v4());
@@ -52,14 +53,7 @@ fn live_postgres_sole_store_survives_reconnect() {
         },
         "test",
     )
-    .with_tenant(
-        format!(
-            "sole-store-{}-{}",
-            std::process::id(),
-            &uuid::Uuid::new_v4().simple().to_string()[..8]
-        ),
-        &authority,
-    )
+    .with_tenant(tenants.tenant("sole-store-"), &authority)
     .unwrap()
     .build()
     .unwrap();

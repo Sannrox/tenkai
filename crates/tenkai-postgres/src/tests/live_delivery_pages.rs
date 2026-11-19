@@ -12,13 +12,16 @@ use tenkai::storage::OperationalStore;
 #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
 fn live_postgres_delivery_pages_follow_the_cursor() {
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
     let suffix = format!(
         "{}{}",
         std::process::id(),
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     );
-    let partition = store.partition_by_id(&format!("dp{suffix}")).unwrap();
+    let partition = store
+        .partition_by_id(&tenants.adopt_id(format!("dp{suffix}")))
+        .unwrap();
     let partition: &dyn OperationalStore = &partition;
     let endpoint = WebhookEndpoint {
         url: "https://hooks.example/ops".into(),

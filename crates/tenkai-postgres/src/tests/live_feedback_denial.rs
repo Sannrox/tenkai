@@ -39,13 +39,16 @@ fn reply(status: &str, replay: bool) -> SubmitActionInstanceResponse {
 #[ignore = "requires Postgres; set TENKAI_POSTGRES_URL and cargo test --features postgres -- --ignored"]
 async fn live_postgres_denied_feedback_replay_stays_retryable() {
     let config = PostgresTenantConfig::from_env().expect("TENKAI_POSTGRES_URL");
+    let tenants = super::LiveTenants::new(&config);
     let store = config.open().expect("connect");
     let suffix = format!(
         "{}{}",
         std::process::id(),
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     );
-    let partition = store.partition_by_id(&format!("fd{suffix}")).unwrap();
+    let partition = store
+        .partition_by_id(&tenants.adopt_id(format!("fd{suffix}")))
+        .unwrap();
     let observation = FeedbackObservation::capture(Capture {
         id: &format!("deployment:prod:api:{suffix}"),
         operation: Operation::ApplyStep,
