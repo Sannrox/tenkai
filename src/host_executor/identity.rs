@@ -132,12 +132,22 @@ impl HostExecutor {
                 &HostSealedValues::new(Vec::new(), Some(issued.into()), issuer_proofs),
             )
         });
+        // From here a cancelled renewal discards its spool and stops its
+        // unit, as a host step does.
+        let mut guard = RenewalGuard {
+            host: self,
+            instance: &instance,
+            armed: true,
+        };
         if let Err(error) = spooled {
-            self.discard_spool(&instance);
+            guard.armed = false;
             return Err(error.context("spooling the renewal"));
         }
         let started = self.units.start(&instance).await;
-        self.discard_spool(&instance);
+        // A start that returned can leave the unit still running: wait until
+        // it is gone, so the applier has written the record before it is read.
+        guard.armed = !self.renewal_settled(&instance).await;
+        drop(guard);
         let path = identity_record_path(&self.state_dir, &renewal.environment, &renewal.instance);
         let installed_now = read_bounded(&path, super::MAX_RECORD_BYTES)?
             .map(|bytes| serde_json::from_slice::<HostIdentityRecord>(&bytes))
@@ -151,6 +161,24 @@ impl HostExecutor {
         match started {
             Err(error) => Err(error.context("the host applier did not install the renewal")),
             Ok(()) => bail!("the host applier did not install the renewal"),
+        }
+    }
+
+    /// Whether the renewal unit `instance` stopped running within
+    /// [`super::step::STOP_GRACE`]. A failed listing counts as still running.
+    async fn renewal_settled(&self, instance: &str) -> bool {
+        let deadline = tokio::time::Instant::now() + super::step::STOP_GRACE;
+        let mut poll = tokio::time::interval(std::time::Duration::from_millis(200));
+        loop {
+            poll.tick().await;
+            if let Ok(running) = self.units.running().await
+                && !running.iter().any(|unit| unit == instance)
+            {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
         }
     }
 
@@ -177,6 +205,23 @@ impl HostExecutor {
         }
         std::fs::rename(&staging, self.spool_dir.join(instance))
             .with_context(|| format!("spooling renewal {instance}"))
+    }
+}
+
+/// Discards a renewal's spool when the renewal ends or is dropped, and stops
+/// its unit while armed (cancelled before the unit settled).
+struct RenewalGuard<'a> {
+    host: &'a HostExecutor,
+    instance: &'a str,
+    armed: bool,
+}
+
+impl Drop for RenewalGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.host.units().stop(self.instance);
+        }
+        self.host.discard_spool(self.instance);
     }
 }
 
@@ -383,6 +428,56 @@ mod tests {
             &AppliedStateRecord::empty("edge", "api"),
         );
         assert!(executor.installed_identities("edge").unwrap().is_empty());
+    }
+
+    /// Stands in for an applier unit that never finishes, recording each
+    /// stop it is sent.
+    #[derive(Default)]
+    struct Hung {
+        stops: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl HostUnits for Hung {
+        fn start<'a>(&'a self, _instance: &'a str) -> UnitFuture<'a> {
+            Box::pin(std::future::pending())
+        }
+
+        fn stop(&self, instance: &str) -> Result<()> {
+            self.stops.lock().unwrap().push(instance.into());
+            Ok(())
+        }
+
+        fn running(&self) -> UnitFuture<'_, Vec<String>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    /// #1351: a renewal cancelled while its unit runs stops that unit and
+    /// leaves nothing in the spool.
+    #[tokio::test]
+    async fn a_cancelled_renewal_stops_its_unit_and_discards_the_spool() {
+        let shm = Path::new("/dev/shm");
+        if crate::host_apply::sealed::require_memory_backed(shm).is_err() {
+            eprintln!("skipped: no memory-backed /dev/shm on this host");
+            return;
+        }
+        let case = Case::new(shm);
+        let units = Arc::new(Hung::default());
+        let executor = HostExecutor::new(case.spool.clone(), case.state.clone(), units.clone());
+        let (_, installed) = executor
+            .installed_identities("edge")
+            .unwrap()
+            .pop()
+            .unwrap();
+        let issued = case.issue();
+        let renewal = executor.renew_identity(installed.as_ref().unwrap(), &issued, Vec::new());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), renewal)
+                .await
+                .is_err()
+        );
+        assert_eq!(units.stops.lock().unwrap().len(), 1);
+        assert_eq!(std::fs::read_dir(&case.spool).unwrap().count(), 0);
     }
 
     /// #1307: a record the executor cannot read is reported as its own

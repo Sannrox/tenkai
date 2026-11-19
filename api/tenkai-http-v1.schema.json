@@ -5728,7 +5728,7 @@
       "description": "What the next change would be if nothing blocked it.",
       "properties": {
         "action": {
-          "description": "`install`, `upgrade`, `restart`, or `current`.",
+          "description": "`install`, `upgrade`, `downgrade`, `restart`, or `current`.",
           "type": "string"
         },
         "deployed": {

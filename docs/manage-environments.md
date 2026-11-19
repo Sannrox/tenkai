@@ -16,7 +16,7 @@ tenkaictl env retire prod --reason "service ended"
 `tenkaictl explain <env> <instance>` lists every check that currently blocks
 that instance's next change, in admission order, each with its evidence and
 the action that lifts it. When nothing blocks, it names the next change from
-deployed versus head (`install`, `upgrade`, `restart`, or current) and does
+deployed versus head (`install`, `upgrade`, `downgrade`, `restart`, or current) and does
 not write a plan or take a lease. Remote mode reads
 `GET /v1/environments/{environment}/instances/{instance}/explain`.
 `tenkaictl env history <env> [--product <instance>] [--limit N]` lists recorded
