@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Captured first: a failing git ls-files (for example on dubious ownership)
+# must fail the check, not read as an empty, clean list.
+files="$(git ls-files -c -o --exclude-standard -- '*.rs')"
+
 fail=0
 while IFS= read -r path; do
   [[ -n "$path" ]] || continue
@@ -19,7 +23,7 @@ while IFS= read -r path; do
     printf 'rust filename uses a hyphen outside src/bin/: %s\n' "$path" >&2
     fail=1
   fi
-done < <(git ls-files -c -o --exclude-standard -- '*.rs')
+done <<<"$files"
 
 if [[ "$fail" -ne 0 ]]; then
   exit 1
