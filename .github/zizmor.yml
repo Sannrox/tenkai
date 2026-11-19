@@ -5,3 +5,8 @@ rules:
       # CI only builds and tests; it publishes nothing, and the release
       # workflow restores no cache.
       - ci.yml
+  self-repository:
+    ignore:
+      # The publish step proof runs this checkout's own action; the pinned
+      # actionlint does not accept the newer self-repository syntax.
+      - ci.yml

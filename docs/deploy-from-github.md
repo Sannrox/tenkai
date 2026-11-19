@@ -34,27 +34,39 @@ tenkaictl apply <plan-id> \
 
 ## Publish from CI without a fleet management token
 
-A GitHub Actions job can authenticate as a machine principal with
-`tenkaictl login --client-credentials` instead of `TENKAI_MANAGEMENT_TOKEN`.
-The runner holds `TENKAI_OIDC_CLIENT_SECRET` as an environment-protected
-secret. The Tenkai server still only verifies the access token.
+A GitHub Actions job publishes with the `publish-release` step from this
+repository. It authenticates as a machine principal with
+`tenkaictl login --client-credentials`, never with `TENKAI_MANAGEMENT_TOKEN`,
+and refuses to run when that token is set. The runner holds the client secret
+as an environment-protected secret. The Tenkai server still only verifies the
+access token. The step takes no signing key: sign the manifest first.
 
 Grant the CI client's group `capabilities = ["publish"]`, optional
 `channels = ["stable"]`, and `kind = "service"`. See
 [configure server authentication](configure-server-authentication.md#ci-client-credentials-login)
 and the sample workflow in [examples/ci-publish](../examples/ci-publish/).
 
-```bash
-tenkaictl login --client-credentials
-tenkaictl --target remote publish tenkai.toml \
-  --signature tenkai.sig.json \
-  --trust-roots "$TRUST_ROOTS"
-tenkaictl --target remote promote "$PRODUCT@$VERSION" stable
+```yaml
+- id: tenkai
+  uses: Sannrox/tenkai/.github/actions/publish-release@<tag or commit SHA>
+  with:
+    manifest: deploy/tenkai.rendered.toml
+    signature: ${{ runner.temp }}/tenkai.sig.json
+    trust-roots: ${{ runner.temp }}/release-trust.toml
+    server-url: ${{ vars.TENKAI_SERVER_URL }}
+    client-id: ${{ vars.TENKAI_OIDC_CLIENT_ID }}
+    client-secret: ${{ secrets.TENKAI_OIDC_CLIENT_SECRET }}
+    channel: stable        # optional; empty publishes only
+    # tenkaictl: ./tenkaictl  # default: tenkaictl on PATH
 ```
 
+The step's `release` output is the published `product@version`. Pin the step
+to a Tenkai release tag or full commit SHA, and install a `tenkaictl` of the
+same release.
+
 Re-running the same job is safe: the same version with the same signed
-manifest is a no-op (`already published`). A changed manifest for the same
-version is rejected; bump `product.version`. Signing stays fail-closed; do
+manifest is a no-op, and promoting it again changes nothing. A changed
+manifest for the same version fails the step; bump `product.version`. Signing stays fail-closed; do
 not pass `--allow-unsigned-development`.
 
 Container executors are just shell commands in the manifest; Apple `container`
