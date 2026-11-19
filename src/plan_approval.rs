@@ -528,6 +528,22 @@ pub fn verify(
     verify_envelope(plan, &envelope, &roots, now, skip_gates)
 }
 
+/// An approval signed for another plan digest, environment, or gate
+/// policy. Typed so a caller can refuse it outright instead of waiting for
+/// more approvals; no further approval makes this one count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApprovalBindingMismatch;
+
+impl std::fmt::Display for ApprovalBindingMismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "plan approval is bound to different executable content, environment, or gate policy",
+        )
+    }
+}
+
+impl std::error::Error for ApprovalBindingMismatch {}
+
 pub fn verify_envelope(
     plan: &Plan,
     envelope: &ApprovalEnvelope,
@@ -540,9 +556,7 @@ pub fn verify_envelope(
         || envelope.statement.environment != plan.environment
         || envelope.statement.skip_gates != skip_gates
     {
-        bail!(
-            "plan approval is bound to different executable content, environment, or gate policy"
-        );
+        return Err(ApprovalBindingMismatch.into());
     }
     let signer = envelope.verify_signature(roots, now)?;
     if !signer.environments.is_empty() && !signer.environments.contains(&plan.environment) {

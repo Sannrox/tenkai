@@ -153,7 +153,9 @@ impl CustomerKeyRelease {
                 return Err(ReleaseError::TruncatedKey(key.key_id.clone()));
             }
         }
-        if matches!(self.provider.kind.as_str(), "software" | "file" | "memory") {
+        if crate::KeyProviderKind::parse(&self.provider.kind)
+            .is_some_and(crate::KeyProviderKind::is_lab_only)
+        {
             return Err(ReleaseError::LabOnlyProvider(self.provider.kind.clone()));
         }
         Ok(())

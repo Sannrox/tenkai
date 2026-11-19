@@ -688,3 +688,17 @@ async fn a_recovery_key_is_offered_and_accepted_as_a_recipient() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A malformed management body is a 400 that names no route; it once said
+/// "invalid package migration request" on every management route.
+#[tokio::test]
+async fn a_malformed_management_body_names_no_route() {
+    let response = *crate::auth::parse_management_json::<serde_json::Value>(b"{").unwrap_err();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("invalid request body"), "{body}");
+    assert!(!body.contains("migration"), "{body}");
+}

@@ -149,6 +149,7 @@ impl HostApprovalPolicy {
         let roots = self.trust_roots();
         let mut candidates = Vec::new();
         let mut rejected = Vec::new();
+        let mut binding_mismatch = false;
         for envelope in envelopes {
             let statement = &envelope.statement;
             if statement.policy_provider == crate::approval_policy::POLICY_PROVIDER {
@@ -192,7 +193,12 @@ impl HostApprovalPolicy {
                         ),
                     })
                 }
-                Err(error) => rejected.push(format!("{}: {error:#}", envelope.key_id)),
+                Err(error) => {
+                    binding_mismatch |= error
+                        .downcast_ref::<crate::plan_approval::ApprovalBindingMismatch>()
+                        .is_some();
+                    rejected.push(format!("{}: {error:#}", envelope.key_id));
+                }
             }
         }
         let rules = [
@@ -209,6 +215,7 @@ impl HostApprovalPolicy {
             rules,
             candidates,
             rejected,
+            binding_mismatch,
         }
     }
 
@@ -288,6 +295,9 @@ pub struct HostApprovals {
     rules: BTreeMap<QuorumPurpose, Vec<QuorumRule>>,
     candidates: Vec<Candidate>,
     rejected: Vec<String>,
+    /// Some envelope was signed for other content, environment, or gate
+    /// policy ([`crate::plan_approval::ApprovalBindingMismatch`]).
+    binding_mismatch: bool,
 }
 
 impl HostApprovals {
@@ -312,7 +322,14 @@ impl HostApprovals {
             rules: self.rules.clone(),
             candidates: valid,
             rejected,
+            binding_mismatch: self.binding_mismatch,
         }
+    }
+
+    /// Whether an envelope was refused because it approves other content,
+    /// environment, or gate policy: waiting cannot make it count.
+    pub fn rejected_a_binding_mismatch(&self) -> bool {
+        self.binding_mismatch
     }
 
     /// Refuse unless every purpose in `purposes` is met.

@@ -414,6 +414,7 @@ mod tests {
         assert_eq!(outcomes[1].status, "succeeded");
         assert_eq!(outcomes[2].status, "failed");
         assert_eq!(outcomes[2].detail, SKIP_DETAIL);
+        assert_eq!(outcomes[2].cause, None, "a skipped step deployed nothing");
         let wire = |outcome| {
             crate::management_lifecycle::ApplyStepResult::from_outcome(outcome)
                 .unwrap()

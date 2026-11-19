@@ -212,6 +212,9 @@ async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport>
     .await?;
     let permits = Arc::new(Semaphore::new(request.config.max_concurrency));
     let mut jobs = tokio::task::JoinSet::new();
+    // Which environment each task reconciles, so a panicked one is still
+    // reported under its environment.
+    let mut task_environments = HashMap::new();
     let mut report = TickReport::default();
 
     for name in names {
@@ -245,8 +248,9 @@ async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport>
                     completed: false,
                 };
                 let permits = Arc::clone(&permits);
+                let environment = name.clone();
                 // Carried, so the environment's apply stays in this tick's trace.
-                jobs.spawn(crate::telemetry::carry(async move {
+                let task = jobs.spawn(crate::telemetry::carry(async move {
                     let _permit = permits
                         .acquire_owned()
                         .await
@@ -270,6 +274,7 @@ async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport>
                     guard.finish(result.is_ok());
                     (name, result)
                 }));
+                task_environments.insert(task.id(), environment);
             }
         }
     }
@@ -284,7 +289,9 @@ async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport>
                 },
             ),
             Err(error) => (
-                "unknown".into(),
+                task_environments
+                    .remove(&error.id())
+                    .unwrap_or_else(|| "unknown".into()),
                 EnvironmentStatus::Failed {
                     error: format!("reconciler environment task failed: {error}"),
                 },

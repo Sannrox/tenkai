@@ -85,6 +85,12 @@ async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<E
     .await?
     {
         if plan.state == PlanState::Running || !held_candidate(ctx, &plan).await? {
+            // As above: queued work reports its hold, not awaiting runtime.
+            if plan.state == PlanState::Computed
+                && let Some(held) = held(ctx, &plan).await?
+            {
+                return Ok(held);
+            }
             return Ok(awaiting_runtime(plan));
         }
     }
@@ -643,6 +649,17 @@ mod tests {
                 assert!(
                     matches!(reconcile_runtime_managed(&mut ctx, "local").await.unwrap(),
                     EnvironmentStatus::AwaitingRuntime { plan_id, .. } if plan_id == retry.id)
+                );
+                // The retry is reached past the failed plan; a hold on it
+                // reports the hold, not awaiting runtime.
+                let hold = crate::delivery_hold::HoldScope::environment("local");
+                crate::delivery_hold::set(&mut ctx, &hold, "freeze", "alice")
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(reconcile_runtime_managed(&mut ctx, "local").await.unwrap(),
+                    EnvironmentStatus::Held { plan_id, reason, .. }
+                        if plan_id == retry.id && reason == "freeze"),
                 );
                 drop(ctx);
                 std::fs::remove_dir_all(root).unwrap();

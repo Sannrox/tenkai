@@ -45,8 +45,14 @@ impl ExecutionCompletion {
         plan_detail: &str,
     ) {
         for step in steps {
-            self.outcomes
-                .push(Outcome::new(step, StepOutcomeStatus::Failed, skip_detail));
+            // Nothing ran, so there is no deployment cause to classify.
+            self.outcomes.push(Outcome::recorded(
+                step,
+                StepOutcomeStatus::Failed,
+                skip_detail,
+                None,
+                None,
+            ));
         }
         self.terminal_state = PlanState::Failed;
         self.detail = plan_detail.into();
