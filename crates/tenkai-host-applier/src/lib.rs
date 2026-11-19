@@ -102,10 +102,26 @@ pub fn intake(
             identity,
         })
     })();
-    if result.is_err() {
-        discard_work(&work)?;
+    // The intake error is the result; a failed discard is attached to it,
+    // never put in its place (#1338).
+    result.map_err(|error| match discard_work(&work) {
+        Ok(()) => error,
+        Err(cleanup) => {
+            anyhow::anyhow!("{error:#}; discarding the work copy also failed: {cleanup:#}")
+        }
+    })
+}
+
+/// [`discard_work`] once the step's result is settled: the result stands,
+/// and a failed discard is reported on stderr (the unit's journal). Under
+/// the unit, systemd removes the work directory when the unit stops.
+pub(crate) fn discard_settled_work(work: &Path) {
+    if let Err(error) = discard_work(work) {
+        eprintln!(
+            "tenkai-host-applier: discarding {} failed after the result was settled: {error:#}",
+            work.display()
+        );
     }
-    result
 }
 
 /// Remove an instance's root-owned copy, if there is one. Under the unit the

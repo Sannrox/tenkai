@@ -246,3 +246,39 @@ fn a_renewal_never_widens_or_revives_a_certificate() {
     // Each refusal is recorded for the runtime to report.
     assert!(store::refusal(&host.paths, &instance).unwrap().is_some());
 }
+
+// #1338: a record write that fails after the renewed certificate is switched
+// in is reported as an installed-but-unrecorded failure, never as "refused,
+// nothing written".
+#[test]
+fn a_renewal_that_cannot_be_recorded_is_not_reported_as_refused() {
+    let Some(shm) = memory_backed() else {
+        eprintln!("skipped: no memory-backed /dev/shm on this host");
+        return;
+    };
+    let host = Host::new(&shm);
+    let grant = host.grant(Reload::Runtime, &["api.edge.internal"]);
+    let first = host.issue(&grant);
+    let record = host.installed(&first);
+    let renewed = host.issue(&grant);
+    let instance = host.spool_renewal(&record, &renewed);
+
+    let records = host.paths.state_dir.join("identities");
+    let mode = |bits| std::fs::set_permissions(&records, std::fs::Permissions::from_mode(bits));
+    mode(0o555).unwrap();
+    // Root ignores directory modes; there is no write failure to observe.
+    if std::fs::write(records.join("probe"), b"").is_ok() {
+        mode(0o755).unwrap();
+        eprintln!("skipped: directory modes do not bind this user");
+        return;
+    }
+    let error = renew::renew(&host.paths, &instance).expect_err("must not be refused");
+    mode(0o755).unwrap();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("certificate is installed, but recording it failed"),
+        "{message}"
+    );
+    assert_eq!(host.installed_certificate(), renewed.certificate);
+    assert!(store::refusal(&host.paths, &instance).unwrap().is_none());
+}

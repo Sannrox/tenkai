@@ -8,7 +8,9 @@
 //! still applied, that the record still holds the certificate the renewal
 //! replaces, and that the new certificate proves the recorded grant, is
 //! valid now and matches its key. Anything else is refused and recorded in
-//! `refused.json`; nothing is written.
+//! `refused.json`; nothing is written. The one failure after the new
+//! certificate is switched in, recording it, is not a refusal: the run fails
+//! with an error that says the certificate is installed (#1338).
 
 use anyhow::{Context as _, Result, bail};
 use tenkai::host_apply::identity::{HostIdentityRecord, certificate_digest};
@@ -50,11 +52,26 @@ pub fn renew(paths: &ApplierPaths, instance: &str) -> Result<Renewal> {
     tenkai::host_apply::validate_instance_name(instance)?;
     match install(paths, instance) {
         Ok(()) => Ok(Renewal::Installed),
+        Err(error) if error.downcast_ref::<Unrecorded>().is_some() => Err(error),
         Err(error) => {
             let reason = format!("{error:#}");
             store::record_refusal(paths, instance, &reason, tenkai::now_millis())?;
             Ok(Renewal::Refused(reason))
         }
+    }
+}
+
+/// Context on the one [`install`] failure that comes after the renewed
+/// certificate is switched in: not a refusal, since something was written.
+#[derive(Debug)]
+struct Unrecorded;
+
+impl std::fmt::Display for Unrecorded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "the renewed workload certificate is installed, but recording it failed; \
+             the identity record still names the replaced certificate",
+        )
     }
 }
 
@@ -111,4 +128,5 @@ fn install(paths: &ApplierPaths, instance: &str) -> Result<()> {
         paths,
         &HostIdentityRecord::new(environment, product, &renewal.instance, &issued),
     )
+    .context(Unrecorded)
 }

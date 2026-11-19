@@ -120,7 +120,9 @@ applier installs it only while the product is installed, the record still
 holds the certificate the renewal replaces, and the new certificate proves
 exactly the recorded grant, is valid now and matches its key. Otherwise it
 records the refusal in `refused.json`, and the runtime retries on a later
-pass. A renewal never writes a result or advances the generation.
+pass. If the new certificate is installed but recording it fails, the run
+fails with an error that says so instead of a refusal. A renewal never writes
+a result or advances the generation.
 
 During an issuer rotation
 ([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md) §7) the
