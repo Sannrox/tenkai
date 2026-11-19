@@ -923,6 +923,8 @@ mod tests {
     /// succeeds.
     #[test]
     fn a_cut_off_replica_stops_applying_stored_rules() {
+        // Far above any scheduling delay, so "within the bound" holds under load.
+        const STALE_BOUND: Duration = Duration::from_secs(5);
         let dir = std::env::temp_dir().join(format!(
             "tenkai-grant-rules-stale-{}-{}",
             std::process::id(),
@@ -932,12 +934,9 @@ mod tests {
         let store = Flaky::new(Arc::new(
             crate::storage::SqliteStore::open(dir.join("tenkai.db")).unwrap(),
         ));
-        let grants = StoredGrants::load_with_stale_after(
-            store.clone(),
-            Vec::<String>::new(),
-            Duration::from_millis(50),
-        )
-        .unwrap();
+        let grants =
+            StoredGrants::load_with_stale_after(store.clone(), Vec::<String>::new(), STALE_BOUND)
+                .unwrap();
         let rule = OidcGrantRule {
             value: "tenkai-admins".into(),
             capabilities: vec!["read".into(), "management".into()],
@@ -953,7 +952,11 @@ mod tests {
         store.down.store(true, Ordering::SeqCst);
         assert!(grants.refresh().is_err());
         assert_eq!(grants.rules().rules.len(), 1, "within the stale bound");
-        std::thread::sleep(Duration::from_millis(80));
+        // Age the last successful check past the bound instead of sleeping,
+        // so neither half depends on how long the machine takes to run it.
+        grants.snapshot.write().unwrap().checked_at = Instant::now()
+            .checked_sub(STALE_BOUND + Duration::from_secs(1))
+            .expect("the monotonic clock is older than the stale bound");
         assert!(grants.refresh().is_err());
         assert!(grants.is_stale());
         assert!(grants.rules().rules.is_empty(), "fails closed");
