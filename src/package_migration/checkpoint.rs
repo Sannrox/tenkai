@@ -33,8 +33,13 @@ pub(super) async fn execute_checkpoint(
             let owner = format!("package-migration:{}", record.name);
             let lease = apply::claim_environment(ctx, &record.environment, &owner).await?;
             let result = revalidate_pins(ctx, record).await;
-            apply::release_environment(ctx, &lease).await?;
-            result?;
+            let released = apply::release_environment(ctx, &lease).await;
+            primary_first(
+                result,
+                released,
+                "revalidation passed",
+                "releasing the environment lease",
+            )?;
             Ok(CheckpointProgress::Accepted { plan_id: None })
         }
         "apply_target" => {
@@ -147,9 +152,17 @@ pub(super) async fn apply_pin(
         },
     )
     .await;
-    clear_authorized_plan(ctx, record).await?;
-    refresh_execution_lease(ctx, &record.name, record.partition.as_deref(), exec_lease).await?;
-    applied?;
+    // Both run whatever the apply did; neither replaces its result (#1338).
+    // A lost execution lease still fails the checkpoint: it is a fence.
+    let cleared = clear_authorized_plan(ctx, record).await;
+    let refreshed =
+        refresh_execution_lease(ctx, &record.name, record.partition.as_deref(), exec_lease).await;
+    primary_first(
+        applied.map(drop),
+        cleared.and(refreshed.map(drop)),
+        &format!("plan {plan_id} applied"),
+        "clearing its authorization or refreshing the migration execution lease",
+    )?;
     let plan = plan::load(ctx, &plan_id).await?;
     if plan.state != plan::PlanState::Succeeded {
         bail!("package migration plan {plan_id} ended in {}", plan.state);
@@ -279,4 +292,52 @@ pub(super) async fn create_pin_plan(
         target_changes: Vec::new(),
     };
     plan::create_from_steps(ctx, &record.environment, vec![step]).await
+}
+
+/// The primary step's result with a cleanup failure attached to it, never in
+/// its place (#1338): a failed step keeps its own error first, and a step
+/// that took effect says so (`done`) before naming the failed `cleanup`.
+pub(super) fn primary_first<T>(
+    primary: Result<T>,
+    cleanup: Result<()>,
+    done: &str,
+    cleanup_name: &str,
+) -> Result<T> {
+    match (primary, cleanup) {
+        (primary, Ok(())) => primary,
+        (Err(error), Err(cleanup)) => Err(anyhow::anyhow!(
+            "{error:#}; {cleanup_name} also failed: {cleanup:#}"
+        )),
+        (Ok(_), Err(cleanup)) => Err(cleanup.context(format!("{done}, but {cleanup_name} failed"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::primary_first;
+
+    #[test]
+    fn a_cleanup_failure_never_replaces_the_primary_result() {
+        let cleanup = || Err(anyhow::anyhow!("lock store unavailable"));
+        let applied =
+            primary_first(Ok(()), cleanup(), "plan p applied", "clearing it").unwrap_err();
+        assert!(
+            format!("{applied:#}").starts_with("plan p applied, but clearing it failed"),
+            "{applied:#}"
+        );
+        let refused = primary_first::<()>(
+            Err(anyhow::anyhow!("gate refused")),
+            cleanup(),
+            "plan p applied",
+            "clearing it",
+        )
+        .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .starts_with("gate refused; clearing it also failed"),
+            "{refused}"
+        );
+        assert!(primary_first(Ok(7), Ok(()), "", "").is_ok_and(|value| value == 7));
+    }
 }

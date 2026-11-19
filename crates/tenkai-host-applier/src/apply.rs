@@ -9,7 +9,9 @@ use tenkai::host_apply::os_image::{AwaitingBoot, confirm_verdict};
 use tenkai::host_apply::state::{HostApplyOutcome, HostApplyResult};
 
 use crate::store::{self, Admission, Ended};
-use crate::{ApplierConfig, ApplierPaths, config, discard_work, intake, run, secrets};
+use crate::{
+    ApplierConfig, ApplierPaths, config, discard_settled_work, discard_work, intake, run, secrets,
+};
 
 /// How one run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,19 +75,25 @@ pub async fn apply<F: Future<Output = ()>>(
     let (config, intake, admission) = match admitted {
         Ok(admitted) => admitted,
         Err(error) => {
-            let reason = format!("{error:#}");
-            discard_work(&paths.work_dir(instance))?;
+            // The refusal is recorded whatever the cleanup does; a failed
+            // discard is part of the recorded reason (#1338).
+            let mut reason = format!("{error:#}");
+            if let Err(cleanup) = discard_work(&paths.work_dir(instance)) {
+                reason.push_str(&format!(
+                    "; discarding the work copy also failed: {cleanup:#}"
+                ));
+            }
             store::record_refusal(paths, instance, &reason, tenkai::now_millis())?;
             return Ok(Applied::Refused(reason));
         }
     };
     let running = match admission {
         Admission::Recorded(result) => {
-            discard_work(&paths.work_dir(instance))?;
+            discard_settled_work(&paths.work_dir(instance));
             return Ok(Applied::Result(result));
         }
         Admission::AwaitingBoot(awaiting) => {
-            discard_work(&paths.work_dir(instance))?;
+            discard_settled_work(&paths.work_dir(instance));
             return Ok(Applied::AwaitingBoot(awaiting));
         }
         Admission::Run(running) => running,
@@ -171,7 +179,7 @@ pub async fn apply<F: Future<Output = ()>>(
     // leave the start for `verify` (or the deadline) to settle.
     if action == HostAction::Reboot && outcome != HostApplyOutcome::Failed {
         let awaiting = running.await_boot()?;
-        discard_work(&paths.work_dir(instance))?;
+        discard_settled_work(&paths.work_dir(instance));
         return Ok(Applied::AwaitingBoot(awaiting));
     }
     // A confirm succeeds only when the updater then reports the expected
@@ -220,6 +228,6 @@ pub async fn apply<F: Future<Output = ()>>(
         detail
     };
     let result = running.finish(outcome, exit_status, detail, tenkai::now_millis())?;
-    discard_work(&paths.work_dir(instance))?;
+    discard_settled_work(&paths.work_dir(instance));
     Ok(Applied::Result(result))
 }

@@ -472,8 +472,28 @@ pub async fn register(
     } else {
         "failed"
     };
-    append_audit(ctx, environment, "register", outcome, actor, reason).await?;
-    result
+    let audited = append_audit(ctx, environment, "register", outcome, actor, reason).await;
+    with_outcome_audit(result, audited, outcome)
+}
+
+/// The change's own result, with a failed outcome audit attached to it
+/// instead of replacing it (#1338). A change that took effect still reports
+/// success, and the message carries the audit failure as a warning so it is
+/// never silently dropped; a failed change keeps its own error first.
+fn with_outcome_audit(
+    result: Result<String>,
+    audited: Result<()>,
+    outcome: &str,
+) -> Result<String> {
+    match (result, audited) {
+        (result, Ok(())) => result,
+        (Ok(message), Err(audit)) => Ok(format!(
+            "{message}; warning: the change applied, but recording the {outcome} audit event failed: {audit:#}"
+        )),
+        (Err(error), Err(audit)) => Err(anyhow::anyhow!(
+            "{error:#}; recording the {outcome} audit event also failed: {audit:#}"
+        )),
+    }
 }
 
 /// Set the connectivity class of a newly registered environment under the
@@ -549,8 +569,8 @@ pub async fn apply(
         } else {
             "failed"
         };
-        append_audit(ctx, environment, action, outcome, actor, reason).await?;
-        result
+        let audited = append_audit(ctx, environment, action, outcome, actor, reason).await;
+        with_outcome_audit(result, audited, outcome)
     }
     .await;
     let unlock = crate::apply::release_environment(ctx, &lease).await;
@@ -560,7 +580,9 @@ pub async fn apply(
         (Err(error), Err(unlock)) => Err(error.context(format!(
             "releasing the environment configuration lease also failed: {unlock}"
         ))),
-        (Ok(_), Err(error)) => Err(error.context("releasing the environment configuration lease")),
+        (Ok(_), Err(error)) => Err(error.context(
+            "the change applied, but releasing the environment configuration lease failed",
+        )),
     }
 }
 
@@ -844,6 +866,26 @@ async fn append_audit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #1338: the outcome audit failing never replaces the change's result.
+    #[test]
+    fn a_failed_outcome_audit_is_attached_not_substituted() {
+        let audit = || Err(anyhow::anyhow!("audit store unavailable"));
+        let applied = with_outcome_audit(Ok("class set".into()), audit(), "completed").unwrap();
+        assert!(
+            applied.starts_with("class set; warning: the change applied"),
+            "{applied}"
+        );
+        assert!(applied.contains("audit store unavailable"), "{applied}");
+        let refused =
+            with_outcome_audit(Err(anyhow::anyhow!("stale generation")), audit(), "failed")
+                .unwrap_err()
+                .to_string();
+        assert!(
+            refused.starts_with("stale generation; recording the failed audit"),
+            "{refused}"
+        );
+    }
 
     fn change(raw: serde_json::Value) -> Result<EnvironmentConfigChange> {
         Ok(serde_json::from_value(raw)?)

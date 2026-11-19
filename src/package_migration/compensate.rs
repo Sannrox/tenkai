@@ -141,8 +141,13 @@ async fn apply_pin_plan(
         },
     )
     .await;
-    clear_authorized_plan(ctx, record).await?;
-    applied?;
+    let cleared = clear_authorized_plan(ctx, record).await;
+    super::checkpoint::primary_first(
+        applied.map(drop),
+        cleared,
+        &format!("plan {plan_id} applied"),
+        "clearing its authorization",
+    )?;
     let plan = plan::load(ctx, plan_id).await?;
     if plan.state != PlanState::Succeeded {
         bail!("package migration plan {plan_id} ended in {}", plan.state);

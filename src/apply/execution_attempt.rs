@@ -306,8 +306,10 @@ async fn execute_with_options_inner(
                 "; after verifying no apply is running, retry `tenkaictl env unlock {environment}` once the lease expires"
             ),
         )),
+        // The plan's recorded state already says it applied; the error says
+        // so too, so a lease failure never reads as "not applied" (#1338).
         (Ok(_), Err(error)) => Err(error.context(format!(
-            "releasing environment apply lease failed; after verifying no apply is running, retry `tenkaictl env unlock {environment}` once the lease expires"
+            "apply of plan {plan_id} completed, but releasing the environment apply lease failed; after verifying no apply is running, retry `tenkaictl env unlock {environment}` once the lease expires"
         ))),
     };
     match (released_result, canary_finalization_error) {

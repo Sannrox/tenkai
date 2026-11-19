@@ -321,6 +321,29 @@ fn a_reboot_stopped_by_the_shutdown_still_awaits_its_boot() {
     assert!(updater.result(&verify, 0).outcome.succeeded());
 }
 
+// #1338: a refusal is recorded even when discarding the work copy fails,
+// and the reason keeps the refusal first with the cleanup failure attached.
+#[test]
+fn a_refusal_is_recorded_when_its_cleanup_fails() {
+    let updater = Updater::new();
+    let install = updater.spool(HostAction::Install, 0);
+    // A file where the work directory goes: the copy is refused, and the
+    // discard after it cannot empty a file either.
+    let work = updater.host.paths.work_dir(&install);
+    std::fs::create_dir_all(work.parent().unwrap()).unwrap();
+    std::fs::write(&work, b"not a directory").unwrap();
+    updater.refused(&install);
+    let recorded = store::refusal(&updater.host.paths, &install)
+        .unwrap()
+        .expect("refused.json is written");
+    let (refusal, cleanup) = recorded
+        .reason
+        .split_once("; discarding the work copy also failed: ")
+        .unwrap_or_else(|| panic!("{}", recorded.reason));
+    assert!(refusal.starts_with("creating "), "{refusal}");
+    assert!(cleanup.contains("Not a directory"), "{cleanup}");
+}
+
 #[test]
 fn image_steps_are_fenced_to_one_pending_update() {
     let updater = Updater::new();
