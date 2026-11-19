@@ -641,15 +641,8 @@ fn require_has_steps_index(object: &Object, steps_empty: bool) -> Result<()> {
 async fn reject_environment_index_retarget(ctx: &mut Ctx, environment: &str) -> Result<()> {
     // FindByProperty(environment=…) cannot see rows retargeted off this
     // index (ADR 0025). Kind-wide list_kind / ListObjects can: peek payload
-    // environment, then fail closed when the index no longer matches.
-    if let Some(store) = ctx.embedded_arc() {
-        let environment = environment.to_string();
-        return crate::client::block_embedded(store, move |store| {
-            let objects = store.list_kind(KIND_PLAN)?;
-            reject_retargeted_environment_index(&objects, &environment)
-        })
-        .await;
-    }
+    // environment, then fail closed when the index no longer matches. A
+    // reconcile tick shares one list across environments on every host.
     let objects = ctx.list_plans_for_retarget().await?;
     reject_retargeted_environment_index(objects.as_slice(), environment)
 }

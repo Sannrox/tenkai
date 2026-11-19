@@ -1363,6 +1363,44 @@ mod tests {
         let _ = std::fs::remove_file(&database);
     }
 
+    // #1477: an embedded reconcile tick lists plans once. A row retargeted
+    // after that snapshot still fails closed; a fresh list per call would
+    // report the payload mismatch instead of the omission.
+    #[tokio::test]
+    async fn embedded_tick_shares_one_plan_list_and_fails_closed_on_a_later_retarget() {
+        let database = std::env::temp_dir().join(format!(
+            "tenkai-plan-tick-retarget-{}-{}.db",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = Ctx::embedded(&database).unwrap();
+        let (mut tick, _guard) = ctx.with_shared_plan_retarget_tick();
+        let env_a = plan_for("env_a", 100, PlanState::Computed);
+        let env_b = plan_for("env_b", 200, PlanState::Computed);
+        store(&mut tick, &env_a).await.unwrap();
+        store(&mut tick, &env_b).await.unwrap();
+
+        require_environment_indexes_match_payloads(&mut tick, "env_a")
+            .await
+            .unwrap();
+        let mut retargeted = tick.get(&env_b.id).await.unwrap().unwrap();
+        retargeted
+            .properties
+            .insert("environment".into(), "other".into());
+        tick.put(retargeted).await.unwrap();
+
+        let error = require_environment_indexes_match_payloads(&mut tick, "env_b")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("omitted from environment env_b after shared retarget snapshot"),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_file(&database);
+    }
+
     #[tokio::test]
     async fn latest_and_oldest_fail_closed_on_missing_has_steps_for_stepped_plan() {
         let database = std::env::temp_dir().join(format!(

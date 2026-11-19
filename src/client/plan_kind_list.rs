@@ -1,4 +1,4 @@
-//! Tick-scoped remote Plan kind-list sharing for retarget detection.
+//! Tick-scoped Plan kind-list sharing for retarget detection.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -6,7 +6,7 @@ use tokio::sync::OnceCell;
 
 use crate::pb::sekai::Object;
 
-/// Tick-scoped remote `ListObjects` of `KIND_PLAN` for retarget detection.
+/// Tick-scoped list of `KIND_PLAN` (embedded `list_kind` or remote `ListObjects`) for retarget detection.
 ///
 /// Reconcile environments run concurrently and must share one catalog
 /// transfer. Inspect and other one-shot paths leave the cell empty and list
