@@ -197,6 +197,12 @@ pub(super) async fn run(request: TickRequest<'_>) -> Result<TickReport> {
 }
 
 async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport> {
+    // A tenant hub's process-level context holds no tenant, so the periodic
+    // tick has no environments of its own to reconcile; its catalog reads
+    // would refuse. A requested, scoped tick still reaches the refusal.
+    if ctx.tenant_unbound() && request.allowed_environments.is_none() {
+        return Ok(TickReport::default());
+    }
     let mut promotion = ctx.clone();
     crate::channel_promotion::reconcile_tick(
         &mut promotion,

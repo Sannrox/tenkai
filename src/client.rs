@@ -111,6 +111,11 @@ enum Backend {
     },
 }
 
+/// A read on a tenant hub whose catalog is configured but whose tenant is
+/// not bound yet; an unbound hub must not look like an empty catalog.
+pub(super) const TENANT_NOT_BOUND: &str =
+    "tenant not bound: this hub serves catalog reads only for an authenticated tenant";
+
 pub(super) const TENANT_HUB_UNAVAILABLE: &str =
     "the enterprise hub does not open SQLite; catalog lifecycle is not available in tenant mode";
 
@@ -126,7 +131,9 @@ impl Backend {
                 catalog: Arc::clone(catalog),
                 tenant: tenant.clone(),
             },
-            Self::TenantHub { .. } => object_lifecycle::ObjectLifecycle::Unavailable,
+            Self::TenantHub { catalog, .. } => object_lifecycle::ObjectLifecycle::Unavailable {
+                tenant_unbound: catalog.is_some(),
+            },
         }
     }
 
@@ -143,7 +150,9 @@ impl Backend {
                 catalog: Arc::clone(catalog),
                 tenant: tenant.clone(),
             },
-            Self::TenantHub { .. } => relation_lifecycle::RelationLifecycle::Unavailable,
+            Self::TenantHub { catalog, .. } => relation_lifecycle::RelationLifecycle::Unavailable {
+                tenant_unbound: catalog.is_some(),
+            },
         }
     }
 
@@ -158,7 +167,9 @@ impl Backend {
                 catalog: Arc::clone(catalog),
                 tenant: tenant.clone(),
             },
-            Self::TenantHub { .. } => lease_lifecycle::LeaseLifecycle::Unavailable,
+            Self::TenantHub { catalog, .. } => lease_lifecycle::LeaseLifecycle::Unavailable {
+                tenant_unbound: catalog.is_some(),
+            },
         }
     }
 
@@ -179,7 +190,9 @@ impl Backend {
                 catalog: Arc::clone(catalog),
                 tenant: tenant.clone(),
             },
-            Self::TenantHub { .. } => action_lifecycle::ActionLifecycle::Unavailable,
+            Self::TenantHub { catalog, .. } => action_lifecycle::ActionLifecycle::Unavailable {
+                tenant_unbound: catalog.is_some(),
+            },
         }
     }
 }

@@ -94,7 +94,7 @@ impl PostgresTenantOperationalStore {
             let schema = self
                 .inner
                 .open_tenant_schema(tenant_id)
-                .map_err(|error| IsolationError::Contract(error.to_string()))?;
+                .map_err(IsolationError::from)?;
             Ok(PostgresTenantPartition {
                 tenant_id: tenant_id.to_string(),
                 schema,
@@ -103,8 +103,7 @@ impl PostgresTenantOperationalStore {
         }
         #[cfg(not(feature = "postgres"))]
         {
-            crate::tenant_schema_name(tenant_id)
-                .map_err(|error| IsolationError::Contract(error.to_string()))?;
+            crate::tenant_schema_name(tenant_id).map_err(IsolationError::from)?;
             Err(IsolationError::Contract(
                 "postgres feature is not enabled in this binary".into(),
             ))
@@ -120,7 +119,7 @@ impl PostgresTenantOperationalStore {
         match partition.get_environment(environment_id) {
             Ok(Some(record)) => Ok(record),
             Ok(None) => Err(IsolationError::NotFound),
-            Err(error) => Err(IsolationError::Contract(error.to_string())),
+            Err(error) => Err(IsolationError::from(error)),
         }
     }
 
@@ -132,20 +131,20 @@ impl PostgresTenantOperationalStore {
         let partition = self.partition_for(context)?;
         if partition
             .get_environment(&environment.id)
-            .map_err(|error| IsolationError::Contract(error.to_string()))?
+            .map_err(IsolationError::from)?
             .is_some_and(|stored| {
                 tenkai::environment::retirement_from_configuration_json(&stored.configuration_json)
                     .is_some()
             })
         {
-            return Err(IsolationError::Contract(format!(
+            return Err(IsolationError::Conflict(format!(
                 "environment {} is retired; registering it again requires a new environment name",
                 environment.id
             )));
         }
         partition
             .put_environment_record(environment)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn list_environment_ids_for(
@@ -155,7 +154,7 @@ impl PostgresTenantOperationalStore {
         let partition = self.partition_for(context)?;
         partition
             .list_environment_ids()
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn list_active_environment_ids_for(
@@ -165,7 +164,7 @@ impl PostgresTenantOperationalStore {
         let partition = self.partition_for(context)?;
         partition
             .list_active_environment_ids()
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     /// Catalog apply leases are the object-graph hold. Read them before the
@@ -189,7 +188,7 @@ impl PostgresTenantOperationalStore {
                 if let Some(lease) = self
                     .inner
                     .catalog_get_lease(partition.schema(), "tenkai/environment-execution", key)
-                    .map_err(|error| IsolationError::Contract(error.to_string()))?
+                    .map_err(IsolationError::from)?
                     && lease.status == "active"
                     && lease.expires_at_ms > now
                 {
@@ -203,7 +202,7 @@ impl PostgresTenantOperationalStore {
             }
             partition
                 .current_lease(environment)
-                .map_err(|error| IsolationError::Contract(error.to_string()))
+                .map_err(IsolationError::from)
         }
         #[cfg(not(feature = "postgres"))]
         {
@@ -222,7 +221,7 @@ impl PostgresTenantOperationalStore {
         let partition = self.partition_for(context)?;
         partition
             .import_development_fixture(fixture, context.principal_id(), &context.request_id)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn reset_development_fixture_for(
@@ -233,7 +232,7 @@ impl PostgresTenantOperationalStore {
         let partition = self.partition_for(context)?;
         partition
             .reset_development_fixture(fixture_id, context.principal_id(), &context.request_id)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn development_fixture_environment_for(
@@ -246,7 +245,7 @@ impl PostgresTenantOperationalStore {
     > {
         self.partition_for(context)?
             .development_fixture_environment(environment_id)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 }
 

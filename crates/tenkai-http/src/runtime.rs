@@ -361,13 +361,15 @@ fn runtime_instance(headers: &HeaderMap) -> Option<&str> {
     (!instance.is_empty() && instance.len() <= 128 && instance.is_ascii()).then_some(instance)
 }
 
+/// The token of an `Authorization: Bearer <token>` header. The scheme is
+/// case-insensitive, as every HTTP authentication scheme is.
 pub(super) fn bearer(headers: &HeaderMap) -> Option<&str> {
-    headers
+    let value = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
-        .filter(|token| !token.is_empty())
+        .ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
 }
 
 pub(crate) fn error_response(status: StatusCode, error: impl Into<String>) -> Response {
@@ -616,4 +618,25 @@ pub(super) async fn inspect_runtime_runner(
             .inspect_runtime_runner(&credential, &credential_id)
             .await,
     )
+}
+
+#[cfg(test)]
+mod bearer_tests {
+    use super::*;
+
+    fn with_authorization(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::AUTHORIZATION, value.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn the_bearer_scheme_is_case_insensitive() {
+        for value in ["Bearer abc", "bearer abc", "BEARER abc"] {
+            assert_eq!(bearer(&with_authorization(value)), Some("abc"), "{value}");
+        }
+        for value in ["Basic abc", "Bearer ", "Bearerabc", "abc"] {
+            assert_eq!(bearer(&with_authorization(value)), None, "{value}");
+        }
+    }
 }

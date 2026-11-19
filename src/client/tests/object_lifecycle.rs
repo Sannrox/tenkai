@@ -125,6 +125,32 @@ async fn tenant_hub_catalog_serves_bound_tenant() {
 }
 
 #[tokio::test]
+async fn a_tenant_hub_with_a_catalog_but_no_tenant_refuses_reads() {
+    use crate::storage::{CatalogGraph, MemoryCatalogGraph};
+    use std::sync::Arc;
+
+    let graph = Arc::new(MemoryCatalogGraph::new());
+    let object = Object {
+        id: "tenkai:conformance:object".into(),
+        kind: "tenkai.conformance".into(),
+        name: "original".into(),
+        ..Default::default()
+    };
+    graph.create(Some("tenant-a"), object.clone()).unwrap();
+    let mut ctx = Ctx::tenant_hub_catalog(graph);
+
+    let get = ctx.get(&object.id).await.unwrap_err();
+    assert!(get.to_string().contains("tenant not bound"), "{get}");
+    let list = ctx.list_kind(&object.kind).await.unwrap_err();
+    assert!(list.to_string().contains("tenant not bound"), "{list}");
+    let find = ctx
+        .find_by_property(&object.kind, "name", "original")
+        .await
+        .unwrap_err();
+    assert!(find.to_string().contains("tenant not bound"), "{find}");
+}
+
+#[tokio::test]
 async fn tenant_hub_catalog_enqueues_provider_events() {
     use crate::storage::{CatalogGraph, MemoryCatalogGraph};
     use std::sync::Arc;

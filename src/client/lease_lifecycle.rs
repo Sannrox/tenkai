@@ -18,7 +18,12 @@ pub(super) enum LeaseLifecycle<'a> {
         catalog: Arc<dyn crate::storage::CatalogGraph>,
         tenant: String,
     },
-    Unavailable,
+    /// A tenant hub without a usable catalog binding. `tenant_unbound` is a
+    /// hub that has a catalog but no tenant yet: its reads fail with
+    /// [`super::TENANT_NOT_BOUND`] instead of looking like an empty catalog.
+    Unavailable {
+        tenant_unbound: bool,
+    },
 }
 
 impl LeaseLifecycle<'_> {
@@ -30,7 +35,7 @@ impl LeaseLifecycle<'_> {
         ttl_ms: i64,
     ) -> std::result::Result<Lease, super::LeaseError> {
         match self {
-            Self::Unavailable => Err(super::LeaseError::Failed(anyhow::anyhow!(
+            Self::Unavailable { .. } => Err(super::LeaseError::Failed(anyhow::anyhow!(
                 super::TENANT_HUB_UNAVAILABLE
             ))),
             Self::Catalog { catalog, tenant } => {
@@ -90,7 +95,10 @@ impl LeaseLifecycle<'_> {
 
     pub(super) async fn get(&self, namespace: &str, key: &str) -> Result<Option<Lease>> {
         match self {
-            Self::Unavailable => Ok(None),
+            Self::Unavailable {
+                tenant_unbound: true,
+            } => anyhow::bail!(super::TENANT_NOT_BOUND),
+            Self::Unavailable { .. } => Ok(None),
             Self::Catalog { catalog, tenant } => {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
@@ -137,7 +145,7 @@ impl LeaseLifecycle<'_> {
         ttl_ms: i64,
     ) -> Result<Lease> {
         match self {
-            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Unavailable { .. } => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Catalog { catalog, tenant } => {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
@@ -188,7 +196,7 @@ impl LeaseLifecycle<'_> {
         fencing_token: &str,
     ) -> Result<Lease> {
         match self {
-            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Unavailable { .. } => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Catalog { catalog, tenant } => {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
@@ -241,7 +249,7 @@ impl LeaseLifecycle<'_> {
         ttl_ms: i64,
     ) -> Result<Lease> {
         match self {
-            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Unavailable { .. } => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Catalog { catalog, tenant } => {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();

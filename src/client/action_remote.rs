@@ -41,27 +41,56 @@ pub(super) async fn preview_remote_decision(client: &RemoteClient, action: &str)
         ListActionPoliciesRequest {},
     )
     .await;
-    let Ok(response) = response else {
-        // No policy listing permission or empty surface: default matches Sekai
-        // admit-time implicit allow when no ActionPolicy is configured.
-        return Ok("allow".into());
+    preview_decision(response, action)
+}
+
+/// The dry-run decision for `action` from the provider's policy listing.
+///
+/// Only a provider without a policy surface (unimplemented or absent) previews
+/// as "allow", matching admit-time implicit allow; any other listing error is
+/// returned. Each policy decides by its override for `action`, then its
+/// `submit_action_instance` override, then its `write` risk override, then
+/// its default. Which policy scope applies is decided at admission, so the
+/// preview reports the most restrictive decision: deny, then
+/// require_approval, then allow. Real admission is enforced by the provider.
+fn preview_decision(
+    response: std::result::Result<ListActionPoliciesResponse, tonic::Status>,
+    action: &str,
+) -> Result<String> {
+    let response = match response {
+        Ok(response) => response,
+        Err(status)
+            if matches!(
+                status.code(),
+                tonic::Code::Unimplemented | tonic::Code::NotFound
+            ) =>
+        {
+            return Ok("allow".into());
+        }
+        Err(status) => {
+            return Err(anyhow::Error::new(status))
+                .with_context(|| format!("previewing the policy decision for {action}"));
+        }
     };
-    let mut decision = "allow".to_string();
-    for policy in response.policies {
-        if let Some(override_decision) = policy.action_overrides.get("submit_action_instance") {
-            decision = override_decision.clone();
-            continue;
-        }
-        if let Some(override_decision) = policy.risk_overrides.get("write") {
-            decision = override_decision.clone();
-            continue;
-        }
-        if !policy.default_decision.is_empty() {
-            decision = policy.default_decision;
-        }
-        let _ = action;
-    }
-    Ok(decision)
+    let restrictiveness = |decision: &str| match decision {
+        "deny" => 2,
+        "require_approval" => 1,
+        _ => 0,
+    };
+    let decision = response
+        .policies
+        .iter()
+        .filter_map(|policy| {
+            policy
+                .action_overrides
+                .get(action)
+                .or_else(|| policy.action_overrides.get("submit_action_instance"))
+                .or_else(|| policy.risk_overrides.get("write"))
+                .or((!policy.default_decision.is_empty()).then_some(&policy.default_decision))
+        })
+        .max_by_key(|decision| restrictiveness(decision))
+        .map_or("allow", String::as_str);
+    Ok(decision.to_string())
 }
 
 pub(super) async fn apply_remote_ops(
@@ -243,4 +272,62 @@ pub(super) fn refuse_divergent_type(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use crate::pb::sekai::ActionPolicy;
+
+    fn policies(
+        policies: Vec<ActionPolicy>,
+    ) -> std::result::Result<ListActionPoliciesResponse, tonic::Status> {
+        Ok(ListActionPoliciesResponse { policies })
+    }
+
+    #[test]
+    fn a_missing_policy_surface_allows_and_other_errors_surface() {
+        for code in [tonic::Code::Unimplemented, tonic::Code::NotFound] {
+            let decision = preview_decision(Err(tonic::Status::new(code, "none")), "act").unwrap();
+            assert_eq!(decision, "allow");
+        }
+        let error = preview_decision(Err(tonic::Status::unavailable("down")), "act").unwrap_err();
+        assert!(format!("{error:#}").contains("down"), "{error:#}");
+        assert!(preview_decision(Err(tonic::Status::permission_denied("no")), "act").is_err());
+    }
+
+    #[test]
+    fn the_named_action_and_the_most_restrictive_policy_decide() {
+        let named = ActionPolicy {
+            default_decision: "allow".into(),
+            action_overrides: [("act".to_string(), "require_approval".to_string())].into(),
+            ..ActionPolicy::default()
+        };
+        let other_action = ActionPolicy {
+            default_decision: "allow".into(),
+            action_overrides: [("other".to_string(), "deny".to_string())].into(),
+            ..ActionPolicy::default()
+        };
+        assert_eq!(
+            preview_decision(policies(vec![named.clone(), other_action.clone()]), "act").unwrap(),
+            "require_approval"
+        );
+        // Order does not matter: a later permissive policy does not win.
+        let permissive = ActionPolicy {
+            default_decision: "allow".into(),
+            ..ActionPolicy::default()
+        };
+        assert_eq!(
+            preview_decision(policies(vec![named, permissive]), "act").unwrap(),
+            "require_approval"
+        );
+        assert_eq!(
+            preview_decision(policies(vec![other_action]), "act").unwrap(),
+            "allow"
+        );
+        assert_eq!(
+            preview_decision(policies(Vec::new()), "act").unwrap(),
+            "allow"
+        );
+    }
 }

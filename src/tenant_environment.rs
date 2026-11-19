@@ -244,7 +244,7 @@ impl TenantEnvironmentOperations {
         let environment = environment.to_owned();
         let reason = reason.trim().to_owned();
         let actor = actor.to_owned();
-        let result = run_store(move || {
+        run_store(move || {
             let mut record = store.get_environment_for(&context, &environment)?;
             if let Some(retirement) =
                 crate::environment::retirement_from_configuration_json(&record.configuration_json)
@@ -255,7 +255,7 @@ impl TenantEnvironmentOperations {
                 .development_fixture_environment_for(&context, &environment)?
                 .is_some()
             {
-                return Err(IsolationError::Contract(
+                return Err(IsolationError::Conflict(
                     "development fixture environments are immutable".into(),
                 ));
             }
@@ -263,7 +263,7 @@ impl TenantEnvironmentOperations {
                 .current_lease_for(&context, &environment)?
                 .is_some_and(|lease| lease.expires_at > crate::now_millis())
             {
-                return Err(IsolationError::Contract(format!(
+                return Err(IsolationError::Conflict(format!(
                     "environment {environment} has an apply in progress; unlock it before retiring"
                 )));
             }
@@ -286,16 +286,7 @@ impl TenantEnvironmentOperations {
                 },
             }
         })
-        .await;
-        result.map_err(|error| match error {
-            TenantEnvironmentError::Internal(message)
-                if message.contains("apply in progress")
-                    || message.contains("active delivery work") =>
-            {
-                TenantEnvironmentError::Conflict(message)
-            }
-            error => error,
-        })
+        .await
     }
 
     async fn retirement(
@@ -354,7 +345,15 @@ fn map_isolation_error(error: IsolationError) -> TenantEnvironmentError {
         IsolationError::Unauthenticated | IsolationError::InvalidCredential(_) => {
             TenantEnvironmentError::Denied(error.public_message())
         }
-        IsolationError::Contract(_) => TenantEnvironmentError::Internal(error.public_message()),
+        IsolationError::Conflict(message) => TenantEnvironmentError::Conflict(message),
+        IsolationError::Contract(ref detail) => {
+            eprintln!("tenant isolation contract violation: {detail}");
+            TenantEnvironmentError::Internal(error.public_message())
+        }
+        IsolationError::Unavailable(detail) => {
+            eprintln!("tenant store unavailable: {detail}");
+            TenantEnvironmentError::StoreUnavailable
+        }
     }
 }
 
@@ -761,5 +760,30 @@ mod tests {
 
         let status = operations.status(&tenant_b, "prod").await.unwrap();
         assert!(status.is_empty(), "{status:?}");
+    }
+
+    #[test]
+    fn store_failures_are_unavailable_and_never_return_storage_text() {
+        use crate::storage::StoreError;
+        let backend = map_isolation_error(IsolationError::from(StoreError::Database(
+            "disk I/O error at /var/lib/tenkai/a.db".into(),
+        )));
+        assert!(matches!(backend, TenantEnvironmentError::StoreUnavailable));
+        assert_eq!(backend.to_string(), "tenant store unavailable");
+
+        let unreadable = map_isolation_error(IsolationError::from(StoreError::InvalidData {
+            kind: "environment",
+            detail: "expected value at line 1 column 1".into(),
+        }));
+        assert!(!unreadable.to_string().contains("line 1"), "{unreadable}");
+
+        let busy = map_isolation_error(IsolationError::from(StoreError::InvalidData {
+            kind: "environment",
+            detail: "environment prod has active delivery work".into(),
+        }));
+        assert!(
+            matches!(&busy, TenantEnvironmentError::Conflict(message) if message.contains("active delivery work")),
+            "{busy}"
+        );
     }
 }

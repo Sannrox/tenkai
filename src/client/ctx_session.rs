@@ -172,6 +172,18 @@ impl Ctx {
         )
     }
 
+    /// A tenant hub with a catalog but no bound tenant: the process-level
+    /// context. Its catalog reads fail with "tenant not bound".
+    pub(crate) fn tenant_unbound(&self) -> bool {
+        matches!(
+            self.backend,
+            Backend::TenantHub {
+                catalog: Some(_),
+                tenant: None,
+            }
+        )
+    }
+
     pub(crate) fn catalog_binding(
         &self,
     ) -> Option<(Arc<dyn crate::storage::CatalogGraph>, Option<String>)> {

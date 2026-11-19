@@ -40,7 +40,12 @@ pub(super) enum ActionLifecycle<'a> {
         catalog: Arc<dyn crate::storage::CatalogGraph>,
         tenant: String,
     },
-    Unavailable,
+    /// A tenant hub without a usable catalog binding. `tenant_unbound` is a
+    /// hub that has a catalog but no tenant yet: its reads fail with
+    /// [`super::TENANT_NOT_BOUND`] instead of looking like an empty catalog.
+    Unavailable {
+        tenant_unbound: bool,
+    },
 }
 
 impl ActionLifecycle<'_> {
@@ -49,7 +54,7 @@ impl ActionLifecycle<'_> {
         action: ActionTypeDef,
     ) -> std::result::Result<(), super::ClientError> {
         match self {
-            Self::Unavailable => Err(super::ClientError::Failed(anyhow!(
+            Self::Unavailable { .. } => Err(super::ClientError::Failed(anyhow!(
                 super::TENANT_HUB_UNAVAILABLE
             ))),
             Self::Catalog { catalog, tenant } => {
@@ -127,7 +132,7 @@ impl ActionLifecycle<'_> {
         dry_run: bool,
     ) -> Result<ActionResult> {
         match self {
-            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Unavailable { .. } => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Catalog { catalog, tenant } => {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
@@ -222,7 +227,7 @@ impl ActionLifecycle<'_> {
 
     pub(super) async fn deny(&self, approval_id: &str, reason: &str) -> Result<()> {
         match self {
-            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Unavailable { .. } => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Catalog { .. } | Self::Embedded(_) => anyhow::bail!(
                 "embedded mode has no deferred approvals; action {approval_id} cannot be denied"
             ),
@@ -242,7 +247,10 @@ impl ActionLifecycle<'_> {
         after: i64,
     ) -> Result<Vec<Decision>> {
         match self {
-            Self::Unavailable => Ok(Vec::new()),
+            Self::Unavailable {
+                tenant_unbound: true,
+            } => anyhow::bail!(super::TENANT_NOT_BOUND),
+            Self::Unavailable { .. } => Ok(Vec::new()),
             Self::Catalog { catalog, tenant } => {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();

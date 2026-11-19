@@ -101,6 +101,7 @@ impl Ctx {
             return apply_remote_property_index(objects, &query);
         }
         if self.is_tenant_hub() {
+            anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
             return Ok(Vec::new());
         }
         if let Some(store) = self.embedded_arc() {
@@ -171,6 +172,7 @@ impl Ctx {
             .await;
         }
         if self.is_tenant_hub() {
+            anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
             return Ok(Vec::new());
         }
         if let Some(store) = self.embedded_arc() {
@@ -215,6 +217,7 @@ impl Ctx {
             .await;
         }
         if self.is_tenant_hub() {
+            anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
             return Ok(Vec::new());
         }
         if let Some(store) = self.embedded_arc() {

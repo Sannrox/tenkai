@@ -17,7 +17,12 @@ pub(super) enum RelationLifecycle<'a> {
         catalog: Arc<dyn crate::storage::CatalogGraph>,
         tenant: String,
     },
-    Unavailable,
+    /// A tenant hub without a usable catalog binding. `tenant_unbound` is a
+    /// hub that has a catalog but no tenant yet: its reads fail with
+    /// [`super::TENANT_NOT_BOUND`] instead of looking like an empty catalog.
+    Unavailable {
+        tenant_unbound: bool,
+    },
 }
 
 impl RelationLifecycle<'_> {
@@ -30,7 +35,7 @@ impl RelationLifecycle<'_> {
             created: crate::now_millis(),
         };
         match self {
-            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Unavailable { .. } => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Catalog { catalog, tenant } => {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
@@ -83,7 +88,7 @@ impl RelationLifecycle<'_> {
         link: Link,
     ) -> std::result::Result<(), super::ClientError> {
         match self {
-            Self::Unavailable => Err(super::ClientError::Failed(anyhow::anyhow!(
+            Self::Unavailable { .. } => Err(super::ClientError::Failed(anyhow::anyhow!(
                 super::TENANT_HUB_UNAVAILABLE
             ))),
             Self::Catalog { catalog, tenant } => {
@@ -131,7 +136,7 @@ impl RelationLifecycle<'_> {
     pub(super) async fn unlink(&self, from_id: &str, to_id: &str, relation: &str) -> Result<()> {
         let id = format!("{from_id}--{relation}--{to_id}");
         match self {
-            Self::Unavailable => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
+            Self::Unavailable { .. } => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Catalog { catalog, tenant } => {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
@@ -166,7 +171,10 @@ impl RelationLifecycle<'_> {
         direction: &str,
     ) -> Result<Vec<Object>> {
         match self {
-            Self::Unavailable => Ok(Vec::new()),
+            Self::Unavailable {
+                tenant_unbound: true,
+            } => anyhow::bail!(super::TENANT_NOT_BOUND),
+            Self::Unavailable { .. } => Ok(Vec::new()),
             Self::Catalog { catalog, tenant } => {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
@@ -206,7 +214,10 @@ impl RelationLifecycle<'_> {
 
     pub(super) async fn links(&self, object_id: &str, relation: &str) -> Result<Vec<Link>> {
         match self {
-            Self::Unavailable => Ok(Vec::new()),
+            Self::Unavailable {
+                tenant_unbound: true,
+            } => anyhow::bail!(super::TENANT_NOT_BOUND),
+            Self::Unavailable { .. } => Ok(Vec::new()),
             Self::Catalog { catalog, tenant } => {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();

@@ -210,7 +210,7 @@ impl InMemoryTenantOperationalStore {
         let mut partitions = self
             .partitions
             .lock()
-            .map_err(|_| IsolationError::Contract("tenant store mutex poisoned".into()))?;
+            .map_err(|_| IsolationError::Unavailable("tenant store mutex poisoned".into()))?;
         if let Some(store) = partitions.get(tenant_id) {
             return Ok(tenant_partition(
                 tenant_id.to_string(),
@@ -219,7 +219,7 @@ impl InMemoryTenantOperationalStore {
             ));
         }
         let store = Arc::new(SqliteStore::open_in_memory().map_err(|error| {
-            IsolationError::Contract(format!("opening tenant partition: {error}"))
+            IsolationError::Unavailable(format!("opening tenant partition: {error}"))
         })?);
         partitions.insert(tenant_id.to_string(), store.clone());
         Ok(tenant_partition(
@@ -252,13 +252,13 @@ impl InMemoryTenantOperationalStore {
         if partition
             .store
             .get_environment(&environment.id)
-            .map_err(|error| IsolationError::Contract(error.to_string()))?
+            .map_err(IsolationError::from)?
             .is_some_and(|stored| {
                 crate::environment::retirement_from_configuration_json(&stored.configuration_json)
                     .is_some()
             })
         {
-            return Err(IsolationError::Contract(format!(
+            return Err(IsolationError::Conflict(format!(
                 "environment {} is retired; registering it again requires a new environment name",
                 environment.id
             )));
@@ -266,7 +266,7 @@ impl InMemoryTenantOperationalStore {
         partition
             .store
             .put_environment(environment)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn list_environment_ids_for(
@@ -277,7 +277,7 @@ impl InMemoryTenantOperationalStore {
         partition
             .store
             .list_environment_ids()
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn list_active_environment_ids_for(
@@ -288,7 +288,7 @@ impl InMemoryTenantOperationalStore {
         partition
             .store
             .list_active_environment_ids()
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn current_lease_for(
@@ -299,7 +299,7 @@ impl InMemoryTenantOperationalStore {
         self.partition_for(context)?
             .store
             .current_lease(environment)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn import_development_fixture_for(
@@ -310,7 +310,7 @@ impl InMemoryTenantOperationalStore {
         let partition = self.partition_for(context)?;
         partition
             .import_development_fixture(fixture, context.principal_id(), &context.request_id)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn reset_development_fixture_for(
@@ -321,7 +321,7 @@ impl InMemoryTenantOperationalStore {
         let partition = self.partition_for(context)?;
         partition
             .reset_development_fixture(fixture_id, context.principal_id(), &context.request_id)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn development_fixture_environment_for(
@@ -334,7 +334,7 @@ impl InMemoryTenantOperationalStore {
     > {
         self.partition_for(context)?
             .development_fixture_environment(environment_id)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn append_change_event_for(
@@ -348,7 +348,7 @@ impl InMemoryTenantOperationalStore {
         self.partition_for(context)?
             .store
             .append_change_event(occurred_at, kind, resource, environment_id)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn list_change_events_for(
@@ -360,7 +360,7 @@ impl InMemoryTenantOperationalStore {
         self.partition_for(context)?
             .store
             .list_change_events_after(cursor, limit)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn list_provider_events_for(
@@ -373,7 +373,7 @@ impl InMemoryTenantOperationalStore {
         self.partition_for(context)?
             .store
             .list_provider_events(provider_kind, environment_id, limit)
-            .map_err(|error| IsolationError::Contract(error.to_string()))
+            .map_err(IsolationError::from)
     }
 
     pub fn provider_event_partitions(&self) -> Result<Vec<Arc<dyn OperationalStore>>> {
