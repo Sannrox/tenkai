@@ -488,7 +488,9 @@ pub fn pull_reference(
             reference.registry
         );
     };
-    validate_registry_host(
+    // A single-label mirror would be read as a Docker Hub namespace, so the
+    // pull would leave the environment's mirror for the public origin.
+    validate_pull_registry(
         &format!("artifact mirror for registry {}", reference.registry),
         mirror,
     )?;
@@ -901,6 +903,22 @@ mod tests {
             .to_string();
         assert!(err.contains("ghcr.io"), "{err}");
         assert!(err.contains("origin pull is refused"), "{err}");
+    }
+
+    /// #1354: a single-label mirror would resolve to the public hub.
+    #[test]
+    fn a_single_label_mirror_is_refused() {
+        let reference = sample("ghcr.io", b"payload-a");
+        let mirrors = BTreeMap::from([("ghcr.io".to_string(), "seed".to_string())]);
+        let err = pull_reference(&reference, &mirrors)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must contain a '.' or a port"), "{err}");
+        let mirrors = BTreeMap::from([("ghcr.io".to_string(), "seed:5000".to_string())]);
+        assert_eq!(
+            pull_reference(&reference, &mirrors).unwrap().registry,
+            "seed:5000"
+        );
     }
 
     #[test]

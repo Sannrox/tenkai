@@ -180,22 +180,28 @@ esac
 
 # Refuse unless absolute directory $1 and every directory above it are owned
 # by root, writable by nobody else, and not symbolic links, so no other user
-# can swap what root installs or runs.
+# can swap what root installs or runs. $2 names what is refused; it defaults
+# to installing the host applier.
 require_root_only() {
   checked="$1"
+  refusing="${2:-install the host applier}"
   while :; do
     if [ -L "$checked" ]; then
-      die "${checked} is a symbolic link; refusing to install the host applier (install it by hand: docs/host-releases.md#install)"
+      case "$refusing" in
+        "install the host applier")
+          die "${checked} is a symbolic link; refusing to ${refusing} (install it by hand: docs/host-releases.md#install)" ;;
+        *) die "${checked} is a symbolic link; refusing to ${refusing}" ;;
+      esac
     fi
     # shellcheck disable=SC2046 # split ls -ldn into mode, links, uid, ...
     set -- $(ls -ldn "$checked")
     case "$1" in
       d*) ;;
-      *) die "${checked} is not a directory; refusing to install the host applier" ;;
+      *) die "${checked} is not a directory; refusing to ${refusing}" ;;
     esac
-    [ "$3" = 0 ] || die "${checked} is owned by uid $3, not root; refusing to install the host applier"
+    [ "$3" = 0 ] || die "${checked} is owned by uid $3, not root; refusing to ${refusing}"
     case "$1" in
-      ?????w* | ????????w*) die "${checked} is writable by group or others; refusing to install the host applier" ;;
+      ?????w* | ????????w*) die "${checked} is writable by group or others; refusing to ${refusing}" ;;
     esac
     [ "$checked" = / ] && break
     checked="$(dirname "$checked")"
@@ -393,35 +399,32 @@ esac
 # to the local server instead of an empty embedded store. The token stays in
 # a root-only file, never in client.toml.
 write_server_client_config() {
+  as_root=false
+  [ "$(id -u)" = 0 ] && as_root=true
+  relative=false
   case "$sysconfdir" in
     /*) ;;
     *)
-      mkdir -p "$sysconfdir" || die "cannot create ${sysconfdir}"
-      sysconfdir="$(CDPATH= cd -- "$sysconfdir" && pwd)" || die "cannot resolve ${sysconfdir}"
+      relative=true
+      sysconfdir="$(pwd)/${sysconfdir}"
       ;;
   esac
   conf_dir="${sysconfdir}/tenkai"
+  # As root, nothing is created or chmodded until every existing directory
+  # above it is root-only, so a symlinked or user-owned sysconfdir cannot
+  # redirect what root changes.
+  if $as_root; then
+    require_root_only "$(existing_parent "$conf_dir")" "write client config"
+  fi
   mkdir -p "$conf_dir" || die "cannot create ${conf_dir}"
-  if [ "$(id -u)" = 0 ]; then
+  if $relative; then
+    sysconfdir="$(CDPATH='' cd -- "$sysconfdir" && pwd)" || die "cannot resolve ${sysconfdir}"
+    conf_dir="${sysconfdir}/tenkai"
+  fi
+  if $as_root; then
+    [ -L "$conf_dir" ] && die "${conf_dir} is a symbolic link; refusing to write client config"
     chmod 0755 "$conf_dir" || die "cannot set permissions on ${conf_dir}"
-    checked="$conf_dir"
-    while :; do
-      if [ -L "$checked" ]; then
-        die "${checked} is a symbolic link; refusing to write client config"
-      fi
-      # shellcheck disable=SC2046 # split ls -ldn into mode, links, uid, ...
-      set -- $(ls -ldn "$checked")
-      case "$1" in
-        d*) ;;
-        *) die "${checked} is not a directory; refusing to write client config" ;;
-      esac
-      [ "$3" = 0 ] || die "${checked} is owned by uid $3, not root; refusing to write client config"
-      case "$1" in
-        ?????w* | ????????w*) die "${checked} is writable by group or others; refusing to write client config" ;;
-      esac
-      [ "$checked" = / ] && break
-      checked="$(dirname "$checked")"
-    done
+    require_root_only "$conf_dir" "write client config"
   fi
   token_file="${conf_dir}/management.token"
   client_file="${conf_dir}/client.toml"

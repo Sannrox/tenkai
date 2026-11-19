@@ -240,8 +240,16 @@ pub fn reconcile(
     })
 }
 
+/// Whether `observed` is exactly `spec.replicas` distinct workers, all ready
+/// at the desired version. Two snapshots of one worker count once, so they
+/// never stand in for a missing replica.
 pub fn pool_is_converged(spec: &WorkerPoolSpec, observed: &[WorkerLifecycleSnapshot]) -> bool {
+    let distinct = observed
+        .iter()
+        .map(|snapshot| snapshot.worker_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
     !observed.is_empty()
+        && distinct.len() == observed.len()
         && observed.len() as u32 == spec.replicas
         && observed.iter().all(|snapshot| {
             snapshot.version == spec.version
@@ -344,6 +352,16 @@ pub fn load_snapshots(
         let raw = std::fs::read(&path)?;
         let snapshot: WorkerLifecycleSnapshot = serde_json::from_slice(&raw)?;
         validate_snapshot(&snapshot, spec)?;
+        if snapshots
+            .iter()
+            .any(|seen: &WorkerLifecycleSnapshot| seen.worker_id == snapshot.worker_id)
+        {
+            bail!(
+                "worker {} has more than one lifecycle snapshot in {}; remove the stale one",
+                snapshot.worker_id,
+                dir.display()
+            );
+        }
         snapshots.push(snapshot);
     }
     Ok(snapshots)
@@ -490,6 +508,31 @@ mod tests {
         assert_eq!(observed.observed_replicas, 1);
         assert!(!pool_is_converged(&desired, &[]));
         assert!(!pool_is_converged(&desired, std::slice::from_ref(&one)));
+    }
+
+    /// #1354: two snapshots of one worker are not two replicas.
+    #[test]
+    fn a_duplicated_worker_is_not_a_second_replica() {
+        let desired = spec(2);
+        let one = ready_snapshot(&desired, "w1");
+        let twice = [one.clone(), one];
+        assert!(!pool_is_converged(&desired, &twice));
+
+        let dir = std::env::temp_dir().join(format!(
+            "tenkai-worker-dup-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.json", "b.json"] {
+            std::fs::write(dir.join(name), serde_json::to_vec(&twice[0]).unwrap()).unwrap();
+        }
+        let error = load_snapshots(&dir, &desired).unwrap_err().to_string();
+        assert!(
+            error.contains("more than one lifecycle snapshot"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -786,6 +829,25 @@ replicas = 1
             .unwrap_err()
             .to_string();
         assert!(err.contains("stale fencing generation"), "{err}");
+    }
+
+    /// #1354: a stamp just ahead of now is live; one far ahead is refused,
+    /// so a future-dated file cannot skip the staleness check.
+    #[test]
+    fn a_far_future_observation_cannot_authorize_replacement() {
+        let desired = spec(1);
+        let at = |observed_at_ms| LiveWorkerObservation {
+            snapshot: ready_snapshot(&desired, "w1"),
+            observed_at_ms,
+            fencing_generation: 1,
+            source: LifecycleObservationSource::Live,
+        };
+        let now = 60_000;
+        assert!(authorize_observations(&desired, &[at(now + 1_000)], 1, now).is_ok());
+        let err = authorize_observations(&desired, &[at(now + 3_600_000)], 1, now)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("in the future"), "{err}");
     }
 
     #[test]

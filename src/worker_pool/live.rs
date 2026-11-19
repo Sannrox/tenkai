@@ -21,6 +21,10 @@ use super::{
 };
 
 pub const LIVE_OBSERVATION_MIN_TTL_MS: u64 = 5_000;
+/// How far ahead of `now` a live observation may be stamped: a heartbeat
+/// written while observing, or modest clock skew between writers. Anything
+/// later is not trusted as live evidence.
+pub const LIVE_OBSERVATION_MAX_FUTURE_MS: i64 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -92,7 +96,12 @@ pub fn authorize_observations(
                 observation.fencing_generation
             );
         }
-        if observation.observed_at_ms > now_ms {
+        if observation.observed_at_ms > now_ms.saturating_add(LIVE_OBSERVATION_MAX_FUTURE_MS) {
+            bail!(
+                "worker-lifecycle observation is stamped {} ms in the future and cannot authorize replacement",
+                observation.observed_at_ms.saturating_sub(now_ms)
+            );
+        } else if observation.observed_at_ms > now_ms {
             // Heartbeats published during observe are still live evidence.
         } else if now_ms.saturating_sub(observation.observed_at_ms) as u64 > max_age {
             bail!("stale worker-lifecycle observation cannot authorize replacement completion");

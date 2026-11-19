@@ -1,5 +1,5 @@
 use super::remote_client::RemoteClient;
-use super::runtime::encode_plan_path;
+use super::runtime::encode_path_segment;
 
 impl RemoteClient {
     pub async fn retire_environment(
@@ -9,7 +9,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/retire"),
+            &format!(
+                "/v1/environments/{}/retire",
+                encode_path_segment(environment)
+            ),
             Some(&tenkai::management_lifecycle::RetireEnvironmentRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Retire
@@ -28,7 +31,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::package_migration::PackageMigrationResult> {
         self.package_migration_result(
             reqwest::Method::POST,
-            &format!("/v1/migrations/{name}/preview"),
+            &format!("/v1/migrations/{}/preview", encode_path_segment(name)),
             Some(request),
         )
         .await
@@ -41,7 +44,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::package_migration::PackageMigrationResult> {
         self.package_migration_result(
             reqwest::Method::POST,
-            &format!("/v1/migrations/{name}/apply"),
+            &format!("/v1/migrations/{}/apply", encode_path_segment(name)),
             Some(request),
         )
         .await
@@ -53,7 +56,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::package_migration::PackageMigrationResult> {
         self.package_migration_result(
             reqwest::Method::GET,
-            &format!("/v1/migrations/{name}"),
+            &format!("/v1/migrations/{}", encode_path_segment(name)),
             None::<&tenkai::package_migration::PackageMigrationPreviewRequest>,
         )
         .await
@@ -66,7 +69,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::package_migration::PackageMigrationResult> {
         self.package_migration_result(
             reqwest::Method::POST,
-            &format!("/v1/migrations/{name}/resume"),
+            &format!("/v1/migrations/{}/resume", encode_path_segment(name)),
             Some(request),
         )
         .await
@@ -98,7 +101,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/channels/{channel}/promote"),
+            &format!("/v1/channels/{}/promote", encode_path_segment(channel)),
             Some(&tenkai::management_lifecycle::PromoteHttpRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Promote
@@ -115,10 +118,9 @@ impl RemoteClient {
         &self,
         spec: &str,
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
-        let encoded = spec.replace('@', "%40");
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/releases/{encoded}/recall"),
+            &format!("/v1/releases/{}/recall", encode_path_segment(spec)),
             Some(&tenkai::management_lifecycle::RecallRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Recall
@@ -130,10 +132,9 @@ impl RemoteClient {
     }
 
     pub async fn inspect_recall(&self, spec: &str) -> anyhow::Result<tenkai::catalog::RecallView> {
-        let encoded = spec.replace('@', "%40");
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/releases/{encoded}/recall"),
+            &format!("/v1/releases/{}/recall", encode_path_segment(spec)),
         )
         .await
     }
@@ -144,7 +145,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::catalog::RecallRangePage> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/products/{product}/recall-ranges"),
+            &format!(
+                "/v1/products/{}/recall-ranges",
+                encode_path_segment(product)
+            ),
         )
         .await
     }
@@ -158,7 +162,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/products/{product}/recall-range"),
+            &format!("/v1/products/{}/recall-range", encode_path_segment(product)),
             Some(&tenkai::management_lifecycle::RecallRangeRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Recall
@@ -181,7 +185,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/products/{product}/recall-range/close"),
+            &format!(
+                "/v1/products/{}/recall-range/close",
+                encode_path_segment(product)
+            ),
             Some(&tenkai::management_lifecycle::RecallRangeCloseRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Recall
@@ -261,7 +268,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/subscriptions"),
+            &format!(
+                "/v1/environments/{}/subscriptions",
+                encode_path_segment(environment)
+            ),
             Some(&tenkai::management_lifecycle::SubscribeRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Subscribe
@@ -286,7 +296,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::DELETE,
-            &format!("/v1/environments/{environment}/subscriptions/{product}"),
+            &format!(
+                "/v1/environments/{}/subscriptions/{}",
+                encode_path_segment(environment),
+                encode_path_segment(product)
+            ),
             Some(&tenkai::management_lifecycle::UnsubscribeRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Unsubscribe
@@ -311,7 +325,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/deployments/{product}/reconcile"),
+            &format!(
+                "/v1/environments/{}/deployments/{}/reconcile",
+                encode_path_segment(environment),
+                encode_path_segment(product)
+            ),
             Some(&tenkai::management_lifecycle::ReconcileDeploymentRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Reconcile
@@ -333,7 +351,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/plans"),
+            &format!(
+                "/v1/environments/{}/plans",
+                encode_path_segment(environment)
+            ),
             Some(&tenkai::management_lifecycle::PlanRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Plan
@@ -352,7 +373,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::environment::EnvironmentPlanSummary> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/plans/{}", encode_plan_path(plan_id)),
+            &format!("/v1/plans/{}", encode_path_segment(plan_id)),
         )
         .await
     }
@@ -363,7 +384,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::plan_approval::PlanApprovalsView> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/plans/{}/approvals", encode_plan_path(plan_id)),
+            &format!("/v1/plans/{}/approvals", encode_path_segment(plan_id)),
         )
         .await
     }
@@ -375,7 +396,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/plans/{}/approve", encode_plan_path(plan_id)),
+            &format!("/v1/plans/{}/approve", encode_path_segment(plan_id)),
             Some(request),
         )
         .await
@@ -391,7 +412,10 @@ impl RemoteClient {
         // refused apply's 422 body then carries `steps` too.
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/plans/{}/apply?steps=true", encode_plan_path(plan_id)),
+            &format!(
+                "/v1/plans/{}/apply?steps=true",
+                encode_path_segment(plan_id)
+            ),
             Some(request),
         )
         .await
@@ -403,7 +427,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::delivery_hold::DeliveryHoldView> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/environments/{environment}/hold"),
+            &format!("/v1/environments/{}/hold", encode_path_segment(environment)),
         )
         .await
     }
@@ -420,7 +444,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/hold"),
+            &format!("/v1/environments/{}/hold", encode_path_segment(environment)),
             Some(&tenkai::management_lifecycle::DeliveryHoldRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Hold
@@ -442,7 +466,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/hold/release"),
+            &format!(
+                "/v1/environments/{}/hold/release",
+                encode_path_segment(environment)
+            ),
             Some(&tenkai::management_lifecycle::DeliveryHoldRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Release
@@ -468,7 +495,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/hold/schedule"),
+            &format!(
+                "/v1/environments/{}/hold/schedule",
+                encode_path_segment(environment)
+            ),
             Some(&tenkai::management_lifecycle::DeliveryFreezeRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::HoldSchedule
@@ -493,7 +523,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/hold/cancel"),
+            &format!(
+                "/v1/environments/{}/hold/cancel",
+                encode_path_segment(environment)
+            ),
             Some(&tenkai::management_lifecycle::DeliveryFreezeRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::HoldCancel
@@ -519,7 +552,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/hold/threshold"),
+            &format!(
+                "/v1/environments/{}/hold/threshold",
+                encode_path_segment(environment)
+            ),
             Some(
                 &tenkai::management_lifecycle::DeliveryFailureThresholdRequest {
                     version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
@@ -544,7 +580,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/hold/threshold/clear"),
+            &format!("/v1/environments/{}/hold/threshold/clear", encode_path_segment(environment)),
             Some(
                 &tenkai::management_lifecycle::DeliveryFailureThresholdRequest {
                     version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
@@ -571,7 +607,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/failed-targets/{product}/retry"),
+            &format!(
+                "/v1/environments/{}/failed-targets/{}/retry",
+                encode_path_segment(environment),
+                encode_path_segment(product)
+            ),
             Some(&tenkai::management_lifecycle::RetryFailedTargetRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Retry
@@ -593,7 +633,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::delivery_hold::DeliveryHoldView> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/products/{product}/channels/{channel}/hold"),
+            &format!(
+                "/v1/products/{}/channels/{}/hold",
+                encode_path_segment(product),
+                encode_path_segment(channel)
+            ),
         )
         .await
     }
@@ -606,7 +650,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/products/{product}/channels/{channel}/hold"),
+            &format!(
+                "/v1/products/{}/channels/{}/hold",
+                encode_path_segment(product),
+                encode_path_segment(channel)
+            ),
             Some(&tenkai::management_lifecycle::ChannelHoldRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::ChannelHold
@@ -625,7 +673,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/products/{product}/channels/{channel}/hold/release"),
+            &format!(
+                "/v1/products/{}/channels/{}/hold/release",
+                encode_path_segment(product),
+                encode_path_segment(channel)
+            ),
             Some(&tenkai::management_lifecycle::ChannelHoldRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation:
@@ -645,7 +697,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::upgrade_pace::PaceProgress> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/products/{product}/channels/{channel}/pace"),
+            &format!(
+                "/v1/products/{}/channels/{}/pace",
+                encode_path_segment(product),
+                encode_path_segment(channel)
+            ),
         )
         .await
     }
@@ -657,7 +713,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::channel_promotion::ChannelPromotionPolicyView> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/products/{product}/channels/{channel}/policy"),
+            &format!(
+                "/v1/products/{}/channels/{}/policy",
+                encode_path_segment(product),
+                encode_path_segment(channel)
+            ),
         )
         .await
     }
@@ -675,7 +735,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::PUT,
-            &format!("/v1/products/{product}/channels/{channel}/policy"),
+            &format!(
+                "/v1/products/{}/channels/{}/policy",
+                encode_path_segment(product),
+                encode_path_segment(channel)
+            ),
             Some(&tenkai::management_lifecycle::ChannelRecallRuleRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation:
@@ -698,7 +762,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/products/{product}/channels/{channel}/policy/pause"),
+            &format!(
+                "/v1/products/{}/channels/{}/policy/pause",
+                encode_path_segment(product),
+                encode_path_segment(channel)
+            ),
             Some(&tenkai::management_lifecycle::ChannelPolicyPauseRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation:
@@ -717,7 +785,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/products/{product}/channels/{channel}/policy/resume"),
+            &format!(
+                "/v1/products/{}/channels/{}/policy/resume",
+                encode_path_segment(product),
+                encode_path_segment(channel)
+            ),
             Some(&tenkai::management_lifecycle::ChannelPolicyPauseRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation:
@@ -743,7 +815,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/products/{product}/channels/{channel}/pace"),
+            &format!(
+                "/v1/products/{}/channels/{}/pace",
+                encode_path_segment(product),
+                encode_path_segment(channel)
+            ),
             Some(&tenkai::management_lifecycle::ChannelConfigureRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation:
@@ -788,7 +864,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/exposure-grace"),
+            &format!(
+                "/v1/environments/{}/exposure-grace",
+                encode_path_segment(environment)
+            ),
             Some(&tenkai::management_lifecycle::ExposureGraceRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation:
@@ -813,7 +892,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::PUT,
-            &format!("/v1/releases/{product}/{version}/labels"),
+            &format!(
+                "/v1/releases/{}/{}/labels",
+                encode_path_segment(product),
+                encode_path_segment(version)
+            ),
             Some(&tenkai::management_lifecycle::ReleaseLabelRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation:
@@ -837,7 +920,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::DELETE,
-            &format!("/v1/releases/{product}/{version}/labels"),
+            &format!(
+                "/v1/releases/{}/{}/labels",
+                encode_path_segment(product),
+                encode_path_segment(version)
+            ),
             Some(&tenkai::management_lifecycle::ReleaseLabelRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation:
@@ -860,7 +947,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/products/{product}/channels/{channel}/exposure-grace"),
+            &format!(
+                "/v1/products/{}/channels/{}/exposure-grace",
+                encode_path_segment(product),
+                encode_path_segment(channel)
+            ),
             Some(&tenkai::management_lifecycle::ChannelExposureGraceRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation:
@@ -883,7 +974,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/products/{product}/channels/{channel}/admit"),
+            &format!(
+                "/v1/products/{}/channels/{}/admit",
+                encode_path_segment(product),
+                encode_path_segment(channel)
+            ),
             Some(&tenkai::management_lifecycle::ChannelAdmitRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::ChannelAdmit
@@ -907,7 +1002,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/products/{product}/channels/{channel}/remove"),
+            &format!(
+                "/v1/products/{}/channels/{}/remove",
+                encode_path_segment(product),
+                encode_path_segment(channel)
+            ),
             Some(&tenkai::management_lifecycle::ChannelRemoveRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation:
@@ -928,7 +1027,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/apply/cancel"),
+            &format!(
+                "/v1/environments/{}/apply/cancel",
+                encode_path_segment(environment)
+            ),
             Some(&tenkai::management_lifecycle::DeliveryHoldRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Cancel
@@ -952,7 +1054,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/rollback"),
+            &format!(
+                "/v1/environments/{}/rollback",
+                encode_path_segment(environment)
+            ),
             Some(&tenkai::management_lifecycle::RollbackRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Rollback
@@ -975,7 +1080,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_operations::RuntimeEnrollmentIssued> {
         self.request_json_body(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/runtime-enrollments"),
+            &format!(
+                "/v1/environments/{}/runtime-enrollments",
+                encode_path_segment(environment)
+            ),
             Some(request),
         )
         .await
@@ -989,7 +1097,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_operations::RuntimeCredentialRevoked> {
         self.request_json_body(
             reqwest::Method::POST,
-            &format!("/v1/runners/{credential_id}/revoke"),
+            &format!("/v1/runners/{}/revoke", encode_path_segment(credential_id)),
             Some(&tenkai::management_operations::RuntimeRevokeRequest {
                 reason: reason.into(),
             }),
@@ -1011,7 +1119,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_operations::EnvironmentRecipients> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/environments/{environment}/recipient-keys"),
+            &format!(
+                "/v1/environments/{}/recipient-keys",
+                encode_path_segment(environment)
+            ),
         )
         .await
     }
@@ -1028,7 +1139,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/sealed-secrets/rewrap"),
+            &format!(
+                "/v1/environments/{}/sealed-secrets/rewrap",
+                encode_path_segment(environment)
+            ),
             Some(&tenkai::management_lifecycle::SealedRewrapRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Plan
@@ -1075,7 +1189,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/identity-issuer/rewrap"),
+            &format!(
+                "/v1/environments/{}/identity-issuer/rewrap",
+                encode_path_segment(environment)
+            ),
             Some(&tenkai::management_lifecycle::SealedRewrapRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Plan
@@ -1098,7 +1215,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/identity-issuer/{action}"),
+            &format!(
+                "/v1/environments/{}/identity-issuer/{}",
+                encode_path_segment(environment),
+                encode_path_segment(action)
+            ),
             Some(&tenkai::management_lifecycle::PlanRequest {
                 version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Plan
@@ -1121,7 +1242,11 @@ impl RemoteClient {
         let query = if with_sealed { "?sealed=true" } else { "" };
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/environments/{environment}/sealed-secrets{query}"),
+            &format!(
+                "/v1/environments/{}/sealed-secrets{}",
+                encode_path_segment(environment),
+                query
+            ),
         )
         .await
     }
@@ -1131,8 +1256,11 @@ impl RemoteClient {
         &self,
         runner_id: &str,
     ) -> anyhow::Result<tenkai::management_operations::RuntimeRunner> {
-        self.request_json(reqwest::Method::GET, &format!("/v1/runners/{runner_id}"))
-            .await
+        self.request_json(
+            reqwest::Method::GET,
+            &format!("/v1/runners/{}", encode_path_segment(runner_id)),
+        )
+        .await
     }
 
     async fn lifecycle_result<B: serde::Serialize>(
@@ -1154,7 +1282,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::package_migration::PackageMigrationResult> {
         self.package_migration_result(
             reqwest::Method::POST,
-            &format!("/v1/migrations/{name}/rollback"),
+            &format!("/v1/migrations/{}/rollback", encode_path_segment(name)),
             Some(request),
         )
         .await

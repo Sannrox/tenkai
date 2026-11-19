@@ -79,7 +79,7 @@ async fn plan_step_target_changes_are_readable_over_http() {
     drop(ctx);
 
     let unauthenticated = reqwest::Client::new()
-        .get(format!("{base}/v1/plans/{}", encode_plan_path(&plan_id)))
+        .get(format!("{base}/v1/plans/{}", encode_path_segment(&plan_id)))
         .send()
         .await
         .unwrap();

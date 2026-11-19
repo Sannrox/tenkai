@@ -2927,7 +2927,7 @@ pub async fn set_artifact_mirror(
 ) -> Result<String> {
     validate_identifier("environment", env)?;
     crate::oci_artifact::validate_registry_host("artifact registry", registry)?;
-    crate::oci_artifact::validate_registry_host("artifact mirror", mirror)?;
+    crate::oci_artifact::validate_pull_registry("artifact mirror", mirror)?;
     let mut env_obj = environment(ctx, env).await?;
     env_obj.properties.insert(
         format!("{}{registry}", crate::oci_artifact::MIRROR_PROPERTY_PREFIX),

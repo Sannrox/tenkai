@@ -117,7 +117,10 @@ require them.
 
 Apply pulls those artifacts only from the environment's
 `artifact_mirror.<registry>` host (`tenkaictl env artifact-mirror set`). A
-missing mirror refuses origin pull. Cached files and retained references do
+missing mirror refuses origin pull. A mirror host must read as a registry:
+it contains a `.` or a port, or is `localhost`. A single label such as
+`mirror` is refused, because a client would read it as a public hub
+namespace. Cached files and retained references do
 not grant execution authority. Signed offline bundles may carry the same
 digest-bound layers for air-gapped import; see
 [offline bundles](offline-bundles.md).
