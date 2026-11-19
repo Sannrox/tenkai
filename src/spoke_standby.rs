@@ -603,7 +603,9 @@ fn sign_drill(statement: DrillStatement, seed_path: &Path) -> Result<SignedDrill
     sign(statement, &signer)
 }
 
-/// Lease lifetime of the drill's writer, so the takeover happens quickly.
+/// Lease lifetime the drill's writer renews to just before it is killed, so
+/// the takeover happens quickly. Until then it leads on `LEASE_TTL`, so a
+/// slow first apply cannot lapse its leadership.
 const DRILL_LEASE_TTL: Duration = Duration::from_millis(500);
 /// The drill only asserts that a live lease blocks promotion while at least
 /// this much of the writer's lease is left, so a slow disk cannot fail it.
@@ -665,6 +667,16 @@ impl Drop for DrillDir {
 /// backup on the standby, promote it, prove no duplicate apply, and refuse
 /// the old generation when it returns.
 pub fn drill(profile: &SpokeStandbyProfile, seed_path: &Path) -> Result<SignedDrill> {
+    drill_after(profile, seed_path, Duration::ZERO)
+}
+
+/// The drill, waiting `before_first_apply` between acquiring and the first
+/// apply so a test can stand in for a loaded machine.
+fn drill_after(
+    profile: &SpokeStandbyProfile,
+    seed_path: &Path,
+    before_first_apply: Duration,
+) -> Result<SignedDrill> {
     profile.validate()?;
     if profile.members != 2 {
         bail!("the spoke-standby drill is the two-node procedure");
@@ -678,16 +690,23 @@ pub fn drill(profile: &SpokeStandbyProfile, seed_path: &Path) -> Result<SignedDr
         "spoke-a",
         DRILL_ENVIRONMENT,
         drill_store(&dir.0.join("spoke-a.db"))?,
-        DRILL_LEASE_TTL,
+        LEASE_TTL,
         Arc::clone(&runtime),
     )?;
-    let acquired = Instant::now();
     writer.acquire()?;
+    std::thread::sleep(before_first_apply);
     match writer.apply(&drill_step("apply-1", "edge@1.0.0"))? {
         ApplyOutcome::Applied { generation: 1 } => {}
         other => bail!("expected first apply at generation 1, got {other:?}"),
     }
     writer.plan_or_rollback()?;
+    // Renew the still-live lease (same holder, same generation) to the short
+    // drill lifetime; every wait below is timed from this renewal.
+    writer.ttl = DRILL_LEASE_TTL;
+    let renewed = Instant::now();
+    if writer.acquire()? != 1 {
+        bail!("renewing the writer's lease must keep generation 1");
+    }
     let backup = dir.0.join("shipped.db");
     writer.store().backup(&backup)?;
 
@@ -713,13 +732,13 @@ pub fn drill(profile: &SpokeStandbyProfile, seed_path: &Path) -> Result<SignedDr
         LEASE_TTL,
         Arc::clone(&runtime),
     )?;
-    if acquired.elapsed() + DRILL_LIVE_MARGIN < DRILL_LEASE_TTL
+    if renewed.elapsed() + DRILL_LIVE_MARGIN < DRILL_LEASE_TTL
         && standby.prepare_promotion(seed_path, 0).is_ok()
     {
         bail!("promotion must wait for the old writer's lease to lapse");
     }
     std::thread::sleep(
-        DRILL_LEASE_TTL.saturating_sub(acquired.elapsed()) + Duration::from_millis(20),
+        DRILL_LEASE_TTL.saturating_sub(renewed.elapsed()) + Duration::from_millis(20),
     );
     let promotion = standby.promote(seed_path, 0)?;
     let interruption_window_ms = u64::try_from(killed_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1036,6 +1055,23 @@ mod tests {
             s.remaining_spofs
         );
         assert!(!serde_json::to_string(s).unwrap().contains("available"));
+    }
+
+    /// A first apply slower than the drill's short lease still runs as the
+    /// writer, and the takeover still waits out the renewed lease.
+    #[test]
+    fn a_slow_first_apply_does_not_lapse_the_drill_writer() {
+        let root = tmp_root("drill-slow");
+        let seed = write_seed(&root);
+        let evidence = drill_after(
+            &profile(),
+            &seed,
+            DRILL_LEASE_TTL + Duration::from_millis(100),
+        )
+        .unwrap();
+        assert_eq!(evidence.statement.fenced_generation, 1);
+        assert_eq!(evidence.statement.generation, 2);
+        assert!(evidence.statement.passed);
     }
 
     #[test]
