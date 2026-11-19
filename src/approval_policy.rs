@@ -3039,6 +3039,24 @@ n = 2
             .unwrap_err();
         assert!(error.contains("older than"), "{error}");
 
+        // Evidence slightly ahead of this clock is inside the skew window;
+        // further ahead is refused as clock skew, not as stale (#1337).
+        let ahead = record(vec![check(true)], now + 30_000, &preflight_key);
+        crate::host_preflight::record(&mut ctx, &ahead)
+            .await
+            .unwrap();
+        execute(&mut ctx, &plan, &envelope, &roots, now)
+            .await
+            .unwrap();
+        let skewed = record(vec![check(true)], now + 120_000, &preflight_key);
+        crate::host_preflight::record(&mut ctx, &skewed)
+            .await
+            .unwrap();
+        let error = execute(&mut ctx, &plan, &envelope, &roots, now)
+            .await
+            .unwrap_err();
+        assert!(error.contains("ahead of this clock"), "{error}");
+
         let wrong_signer = record(vec![check(true)], now, &key);
         crate::host_preflight::record(&mut ctx, &wrong_signer)
             .await

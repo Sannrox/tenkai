@@ -202,8 +202,11 @@ pub fn reconcile(
             .iter()
             .any(|snapshot| snapshot.active_claims > 0 || snapshot.state == "active");
         if busy {
+            // A drain start ahead of now (clock skew between writers) has
+            // zero elapsed time, not a wrapped huge one (#1337).
             if let Some(started) = drain_started_at_ms
-                && now_ms.saturating_sub(started) as u64 >= spec.drain_timeout_ms
+                && u64::try_from(now_ms.saturating_sub(started)).unwrap_or(0)
+                    >= spec.drain_timeout_ms
             {
                 return Ok(WorkerPoolDecision::Degraded {
                     reason:
@@ -443,6 +446,11 @@ mod tests {
         busy.active_claims = 1;
         let previous = spec(2);
         let _ = previous;
+        let ahead = reconcile(&desired, std::slice::from_ref(&busy), 2, Some(9_000), 5_000);
+        assert!(
+            matches!(ahead, Ok(WorkerPoolDecision::WaitDrain)),
+            "{ahead:?}"
+        );
         let decision = reconcile(&desired, &[busy], 2, Some(0), 5_000).unwrap();
         match decision {
             WorkerPoolDecision::Degraded { reason } => {

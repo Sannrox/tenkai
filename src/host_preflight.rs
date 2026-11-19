@@ -360,8 +360,17 @@ fn sntp_exchange(target: SocketAddr, timeout: Duration) -> Result<i64> {
 }
 
 /// A 64-bit NTP timestamp (seconds since 1900, 32-bit fraction) in Unix ms.
+/// The seconds field wraps in February 2036; per the SNTP era rule, a value
+/// with the top bit clear is in era 1 (2036 to 2104), set is era 0
+/// (1968 to 2036).
 fn ntp_timestamp_ms(bytes: &[u8]) -> i64 {
-    let seconds = i64::from(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+    let raw = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let era = if raw & 0x8000_0000 == 0 {
+        1_i64 << 32
+    } else {
+        0
+    };
+    let seconds = i64::from(raw) + era;
     let fraction = i64::from(u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]));
     (seconds - NTP_UNIX_OFFSET_SECS) * 1_000 + ((fraction * 1_000) >> 32)
 }
@@ -546,7 +555,15 @@ pub fn require_passing(
         &canonical_bytes(&evidence.statement)?,
     )?;
     let statement = &evidence.statement;
-    if statement.checked_at > now_ms || now_ms - statement.checked_at > max_age_ms {
+    let skew = crate::runner_attestation::FUTURE_SKEW_MS;
+    if statement.checked_at > now_ms.saturating_add(skew) {
+        bail!(
+            "host preflight from {} is {} ms ahead of this clock, beyond the allowed {skew} ms skew; check clock synchronization",
+            statement.checked_at,
+            statement.checked_at - now_ms
+        );
+    }
+    if now_ms.saturating_sub(statement.checked_at) > max_age_ms {
         bail!(
             "host preflight from {} is older than {max_age_ms} ms",
             statement.checked_at
@@ -596,6 +613,19 @@ pub(crate) fn fake_time_server_replying(skew_ms: i64, first: u8, stratum: u8) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ntp_timestamps_decode_on_both_sides_of_the_2036_rollover() {
+        let encode = |unix_secs: i64| {
+            let mut bytes = [0_u8; 8];
+            bytes[..4].copy_from_slice(&((unix_secs + NTP_UNIX_OFFSET_SECS) as u32).to_be_bytes());
+            bytes
+        };
+        // 2026-01-01, 2036-02-07 06:28:16 (the wrap), and 2040-01-01.
+        for unix_secs in [1_767_225_600, 2_085_978_496, 2_208_988_800] {
+            assert_eq!(ntp_timestamp_ms(&encode(unix_secs)), unix_secs * 1_000);
+        }
+    }
 
     /// Self-signed P-256 test certificate, `notAfter` 2126 (GeneralizedTime).
     const VALID_UNTIL_2126: &str = "-----BEGIN CERTIFICATE-----

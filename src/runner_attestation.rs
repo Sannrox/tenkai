@@ -52,8 +52,9 @@ const SIGNING_DOMAIN: &[u8] = b"TENKAI-RUNNER-ATTESTATION-V2\0";
 pub const POLICY_PROPERTY: &str = "runner_attestation_policy";
 /// Longest accepted `max_age_ms`: seven days.
 pub const MAX_POLICY_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
-/// Evidence may be dated this far ahead of the server's clock.
-const FUTURE_SKEW_MS: i64 = 60_000;
+/// Evidence may be dated this far ahead of the server's clock. Host
+/// preflight evidence uses the same bound.
+pub(crate) const FUTURE_SKEW_MS: i64 = 60_000;
 /// Private, non-critical extension in a runner certificate: a DER sequence
 /// of two 32-byte octet strings, the evidence digest and the key
 /// fingerprint. Under the UUID arc 2.25, so it needs no registration.
