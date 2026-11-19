@@ -87,6 +87,10 @@ The script:
 - downloads `SHA256SUMS` and the role's hosts and checks every file before
   installing any. A checksum mismatch or a host missing from `SHA256SUMS`
   installs nothing;
+- downloads over HTTPS only. `--base-url` must be `https://` or `file://`, and
+  a redirect to plain HTTP is refused with curl and with wget. A trusted plain
+  HTTP mirror needs `--allow-http`, which also accepts plain HTTP redirects;
+  `SHA256SUMS` then arrives unauthenticated, so verify the attestation;
 - renames each host into `--prefix` (default `/usr/local/bin` as root,
   `~/.local/bin` otherwise) under its unsuffixed name;
 - refuses a [self-upgrade home](#upgrade-a-server-host), or a host in the

@@ -28,6 +28,7 @@ if [[ "$path_ok" -ne 0 ]]; then
   exit 1
 fi
 
+# Only these exact placeholder values may follow a Tenkai token assignment.
 token_value_allowed() {
   local value="$1"
   case "$value" in
@@ -36,9 +37,6 @@ token_value_allowed() {
       return 0
       ;;
   esac
-  if printf '%s' "$value" | grep -Eq 'secret-store'; then
-    return 0
-  fi
   return 1
 }
 
@@ -85,6 +83,14 @@ scan_line() {
   done < <(printf '%s\n' "$line" | grep -oE 'TENKAI_(MANAGEMENT|RUNTIME)_TOKEN=[^[:space:]]*')
 }
 
+# Self-check on every run: only exact placeholders pass, so a real token
+# that merely contains an allowed word is still flagged (#1342).
+(scan_line docs/self-check.md "TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'") \
+  || fail "self-check: an allowlisted placeholder was flagged"
+if (scan_line docs/self-check.md "TENKAI_RUNTIME_TOKEN=tk9f2c7a1e-secret-store-4b8d") 2>/dev/null; then
+  fail "self-check: a token containing secret-store passed the allowlist"
+fi
+
 scan_diff() {
   local diff="$1"
   [[ -n "$diff" ]] || return 0
@@ -94,6 +100,8 @@ scan_diff() {
     case "$line" in
       +++\ *)
         file="${line#+++ }"
+        # Every diff below pins b/, whatever diff.mnemonicPrefix or
+        # diff.noprefix the local git config sets.
         file="${file#b/}"
         pem=0
         continue
@@ -143,12 +151,12 @@ if [[ "$(git rev-parse "$base")" == "$(git rev-parse HEAD)" ]]; then
 fi
 if [[ "$base" == "${GITHUB_EVENT_BEFORE:-}" ]]; then
   # A force-push's old tip need not be an ancestor; diff the two trees.
-  committed="$(git diff -U0 "${base}" HEAD)" || fail "cannot diff ${base} HEAD"
+  committed="$(git diff --src-prefix=a/ --dst-prefix=b/ -U0 "${base}" HEAD)" || fail "cannot diff ${base} HEAD"
 else
-  committed="$(git diff -U0 "${base}...HEAD")" || fail "cannot diff ${base}...HEAD"
+  committed="$(git diff --src-prefix=a/ --dst-prefix=b/ -U0 "${base}...HEAD")" || fail "cannot diff ${base}...HEAD"
 fi
-worktree="$(git diff -U0)" || fail "cannot diff the working tree"
-cached="$(git diff --cached -U0)" || fail "cannot diff the index"
+worktree="$(git diff --src-prefix=a/ --dst-prefix=b/ -U0)" || fail "cannot diff the working tree"
+cached="$(git diff --src-prefix=a/ --dst-prefix=b/ --cached -U0)" || fail "cannot diff the index"
 scan_diff "${committed}"$'\n'"${worktree}"$'\n'"${cached}"
 
 printf 'secret path and diff checks ok\n'
