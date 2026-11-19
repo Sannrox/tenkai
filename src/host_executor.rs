@@ -320,13 +320,29 @@ impl HostExecutor {
     /// `reboot` started and no `verify` settled it yet (ADR 0051 §2). The
     /// runtime only uses it to tell whether to wait; the applier judges.
     pub fn awaiting_boot(&self) -> Result<Option<crate::host_apply::os_image::AwaitingBoot>> {
+        Ok(self
+            .os_image_record()?
+            .and_then(|record| record.awaiting_boot))
+    }
+
+    /// The applier's host-wide OS image record (ADR 0051 §2), once any OS
+    /// image step started. It names the environment and product of the
+    /// image release that first started; planning binds image steps to its
+    /// generation, and a runtime reports it with the per-product records.
+    pub fn os_image_record(&self) -> Result<Option<AppliedStateRecord>> {
         let path = crate::host_apply::os_image::os_image_record_path(&self.state_dir);
         let Some(bytes) = read_record(&path)? else {
             return Ok(None);
         };
         let record: AppliedStateRecord = serde_json::from_slice(&bytes)
             .with_context(|| format!("parsing the OS image record {}", path.display()))?;
-        Ok(record.awaiting_boot)
+        if record.schema != APPLIED_STATE_SCHEMA {
+            bail!(
+                "the OS image record {} is not a {APPLIED_STATE_SCHEMA} record",
+                path.display()
+            );
+        }
+        Ok(Some(record))
     }
 
     /// Every applied-state record the applier keeps for `environment`.

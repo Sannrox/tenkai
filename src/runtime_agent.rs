@@ -1630,9 +1630,23 @@ impl RuntimeClient {
         let Ok(host) = config.executors.host() else {
             return Ok(());
         };
-        let report = crate::runtime_delivery::RuntimeHostRecordsReport {
-            records: host.applied_states(&self.environment)?,
-        };
+        let mut records = host.applied_states(&self.environment)?;
+        // The host-wide OS image record goes under the product it names,
+        // when it is this environment's (ADR 0051 §2). A product record of
+        // the same product wins: a report carries one record per product.
+        // An unreadable image record keeps only itself out of the report;
+        // the applier refuses image steps against it either way.
+        let image = host.os_image_record().unwrap_or_else(|error| {
+            eprintln!("OS image record not reported: {error:#}");
+            None
+        });
+        if let Some(image) = image
+            && image.environment == self.environment
+            && !records.iter().any(|record| record.product == image.product)
+        {
+            records.push(image);
+        }
+        let report = crate::runtime_delivery::RuntimeHostRecordsReport { records };
         let response = self
             .client()?
             .post(format!(

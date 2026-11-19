@@ -502,9 +502,12 @@ async fn failed_on_instance(
 /// its product (ADR 0041 section 2). The step installs its target from the
 /// release the record holds, at the record's generation; both are part of
 /// the plan, so its digest and approvals cover them. It gets no restore pin:
-/// a failed host step is never restored automatically. When the release
-/// declares `deploy.health`, an approved `health` step follows at the
-/// generation the install leaves. Steps of other releases are unchanged.
+/// a failed host step is never restored automatically. A release that
+/// declares `[os_image]` takes `stage`, `reboot`, `verify` and `confirm` in
+/// place of the install, bound to the host-wide OS image record (ADR 0051).
+/// When the release declares `deploy.health`, an approved `health` step
+/// follows at the generation the install or confirm leaves. Steps of other
+/// releases are unchanged.
 async fn bind_host_steps(
     ctx: &mut Ctx,
     executors: &crate::software_executor::SoftwareExecutors,
@@ -549,7 +552,7 @@ async fn bind_host_steps(
         if matches!(records, crate::host_records::HostRecords::Local(_)) {
             executors.admit_host_plans()?;
         }
-        let record = records.applied_state(env, &step.product)?;
+        let record = host_record(records, env, &step.product, &manifest)?;
         match step.host {
             // An applied release's outstanding health step, at the record's
             // generation.
@@ -615,16 +618,45 @@ async fn bind_host_steps(
         // A failed host step is never restored.
         step.restore = None;
         step.restore_identity = None;
-        step.host = Some(HostStep {
-            action: HostAction::Install,
-            expected_generation: record.generation,
-        });
-        if declares_health(&manifest) {
-            let installed = record
+        let generation = |advanced: u64| {
+            record
                 .generation
-                .checked_add(1)
-                .context("host applied-state generation overflow")?;
+                .checked_add(advanced)
+                .context("host applied-state generation overflow")
+        };
+        // An OS image release updates through stage, reboot, verify and
+        // confirm against the host-wide image record (ADR 0051 §2). Stage,
+        // reboot and confirm each advance its generation when they start;
+        // verify runs at the one reboot left.
+        let applied = if let Some(os_image) = &manifest.os_image {
+            for (action, advanced) in [
+                (HostAction::Stage, 0),
+                (HostAction::Reboot, 1),
+                (HostAction::Verify, 2),
+                (HostAction::Confirm, 2),
+            ] {
+                let mut image = step.clone();
+                image.host = Some(HostStep {
+                    action,
+                    expected_generation: generation(advanced)?,
+                });
+                if action == HostAction::Reboot {
+                    require_boot_fits_window(ctx, env, &image, os_image.boot_deadline_seconds)
+                        .await?;
+                }
+                bound.push(image);
+            }
+            3
+        } else {
+            step.host = Some(HostStep {
+                action: HostAction::Install,
+                expected_generation: record.generation,
+            });
             bound.push(step.clone());
+            1
+        };
+        if declares_health(&manifest) {
+            let installed = generation(applied)?;
             // The health step of a rollback is part of that rollback, so it
             // keeps the rollback's admission, recalled recovery included.
             if step.action != Action::Rollback {
@@ -637,10 +669,26 @@ async fn bind_host_steps(
                 action: HostAction::Health,
                 expected_generation: installed,
             });
+            bound.push(step);
         }
-        bound.push(step);
     }
     Ok(bound)
+}
+
+/// The applier's record a host release's steps are planned against: the
+/// host-wide OS image record for an `[os_image]` release (ADR 0051 §2), its
+/// product's record otherwise.
+fn host_record(
+    records: &crate::host_records::HostRecords,
+    env: &str,
+    product: &str,
+    manifest: &crate::manifest::Manifest,
+) -> Result<crate::host_apply::state::AppliedStateRecord> {
+    if manifest.os_image.is_some() {
+        records.os_image_state(env, product)
+    } else {
+        records.applied_state(env, product)
+    }
 }
 
 /// Whether a release declares a `deploy.health` command.
@@ -881,9 +929,12 @@ async fn compute_snapshot_with_policy(
                     == Some(crate::software_executor::SoftwareExecutorKind::Host) =>
             {
                 Some((
-                    crate::host_records::HostRecords::of(ctx, executors, env)
-                        .await?
-                        .applied_state(env, &product)?,
+                    host_record(
+                        &crate::host_records::HostRecords::of(ctx, executors, env).await?,
+                        env,
+                        &product,
+                        &manifest,
+                    )?,
                     declares_health(&manifest),
                 ))
             }
@@ -1217,6 +1268,11 @@ async fn compute_snapshot_with_policy(
             // was never recorded). A record of a product it never managed
             // here is not its to remove.
             for record in host.applied_states(env)? {
+                // An OS image is never uninstalled: the host always boots
+                // one. Only a newer image release replaces it.
+                if crate::host_records::is_os_image_record(&record) {
+                    continue;
+                }
                 let recorded = ["deployed", "deployed_prev", "deployment_health"]
                     .iter()
                     .any(|key| {

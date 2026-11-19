@@ -459,6 +459,77 @@ async fn install_and_health_run_through_the_applier_at_the_planned_generations()
     );
 }
 
+/// Manifest sections that make `cluster` an OS image release.
+const OS_IMAGE: &str = "confirm = \"true\"\n\n[os_image]\ndigest = \"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\nboot_deadline_seconds = 900\n";
+
+/// An `[os_image]` release plans stage, reboot, verify and confirm, never
+/// install, bound to the generations of the host-wide image record (ADR
+/// 0051 §2), and a declared health check follows the confirm.
+#[tokio::test]
+async fn an_os_image_release_plans_its_four_steps_at_the_image_record_generations() {
+    let mut host = Host::new("os-image").await;
+    let bindings = |plan: &Plan| {
+        plan.steps
+            .iter()
+            .map(|step| {
+                let host = step.host.unwrap();
+                (
+                    step.action,
+                    step.from.clone(),
+                    host.action,
+                    host.expected_generation,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    host.release_with("2.0.0", true, OS_IMAGE).await;
+    assert_eq!(
+        bindings(&host.plan().await),
+        [
+            (Action::Install, None, HostAction::Stage, 0),
+            (Action::Install, None, HostAction::Reboot, 1),
+            (Action::Install, None, HostAction::Verify, 2),
+            (Action::Install, None, HostAction::Confirm, 2),
+            (Action::Restart, Some("2.0.0".into()), HostAction::Health, 3),
+        ]
+    );
+
+    // The image record, not a product record, says what the host boots.
+    let image_record = |product: &str| AppliedStateRecord {
+        generation: 3,
+        state: AppliedState::Applied {
+            release: crate::host_apply::HostRelease {
+                version: "1.5.0".into(),
+                manifest_digest: "a".repeat(64),
+            },
+        },
+        ..AppliedStateRecord::empty("edge", product)
+    };
+    let path = crate::host_apply::os_image::os_image_record_path(&host.applier.state);
+    Applier::write(&path, &image_record("cluster")).unwrap();
+    host.release_with("2.1.0", false, OS_IMAGE).await;
+    let from = Some("1.5.0".to_string());
+    assert_eq!(
+        bindings(&host.plan().await),
+        [
+            (Action::Upgrade, from.clone(), HostAction::Stage, 3),
+            (Action::Upgrade, from.clone(), HostAction::Reboot, 4),
+            (Action::Upgrade, from.clone(), HostAction::Verify, 5),
+            (Action::Upgrade, from, HostAction::Confirm, 5),
+        ]
+    );
+
+    // One host updates one image release; another's record is refused.
+    Applier::write(&path, &image_record("other-os")).unwrap();
+    let error = crate::plan::create_with(&mut host.ctx, "edge", &host.executors)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("belongs to other-os in edge"),
+        "{error:#}"
+    );
+}
+
 #[tokio::test]
 async fn host_steps_run_before_the_releases_that_need_what_they_install() {
     let mut host = Host::new("order").await;
