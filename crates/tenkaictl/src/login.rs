@@ -738,8 +738,14 @@ fn require_https(raw: &str) -> Result<()> {
     if url.scheme() == "https" {
         return Ok(());
     }
-    let host = url.host_str().unwrap_or_default();
-    if url.scheme() == "http" && matches!(host, "localhost" | "127.0.0.1" | "::1") {
+    // Matched on the parsed host: `host_str()` brackets an IPv6 literal, so
+    // comparing it against `::1` never matches.
+    let loopback = url.host().is_some_and(|host| match host {
+        url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(address) => address.is_loopback(),
+        url::Host::Ipv6(address) => address.is_loopback(),
+    });
+    if url.scheme() == "http" && loopback {
         return Ok(());
     }
     bail!("refusing non-HTTPS URL {raw:?}");
@@ -824,6 +830,23 @@ mod tests {
         .expect("the oversized body must be refused without waiting for its end");
         let err = read.unwrap_err();
         assert!(err.to_string().contains("exceeded"), "{err:#}");
+    }
+
+    /// #1346: plain HTTP is allowed to every loopback form, IPv6 included, and
+    /// to nothing else.
+    #[test]
+    fn require_https_allows_plain_http_only_to_loopback() {
+        for url in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+            "https://idp.example",
+        ] {
+            assert!(require_https(url).is_ok(), "{url}");
+        }
+        for url in ["http://idp.example", "http://[2001:db8::1]:8080"] {
+            assert!(require_https(url).is_err(), "{url}");
+        }
     }
 
     struct FakeAuth {

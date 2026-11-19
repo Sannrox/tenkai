@@ -24,6 +24,13 @@ pub(crate) async fn run(
             reason: hold_skip_reason,
         } => {
             let env = crate::client_config::require_env(env)?;
+            // Refuse an invalid flag combination before a plan is stored, so
+            // it cannot leave an orphan rollback plan behind.
+            if no_hold && !bypass.allow_unapproved_development {
+                bail!(
+                    "--no-hold applies only when rollback executes now; pass --allow-unapproved-development or clear the hold after apply"
+                );
+            }
             if output == OutputFormat::JsonV1 {
                 tenkai::command_result::validate_resource_reference(
                     "plan",
@@ -50,11 +57,6 @@ pub(crate) async fn run(
             if output == OutputFormat::Human {
                 println!("rolling back in {env}:");
                 print_steps(&stored.steps);
-            }
-            if no_hold && !bypass.allow_unapproved_development {
-                bail!(
-                    "--no-hold applies only when rollback executes now; pass --allow-unapproved-development or clear the hold after apply"
-                );
             }
             let had_hold = tenkai::delivery_hold::get(
                 ctx,
@@ -92,6 +94,8 @@ pub(crate) async fn run(
                 )
                 .await?;
                 if no_hold && !had_hold {
+                    // `--reason` is required by `--no-hold` but not yet stored: the
+                    // hold audit record has no field for it (#1346).
                     let _ = hold_skip_reason;
                     let actor = crate::authorization::embedded_management_actor()?;
                     tenkai::delivery_hold::clear_if_reason(
