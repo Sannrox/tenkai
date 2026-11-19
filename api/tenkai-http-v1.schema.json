@@ -63,7 +63,7 @@
           "type": "boolean"
         },
         "live_generation": {
-          "description": "Generation of the live apply lease.",
+          "description": "Generation of the live apply lease, read from the lease, never the\ncaller's `expected_generation`. A cancel with no live apply is refused\nrather than answered with this result.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -9463,7 +9463,7 @@
           "type": "array"
         },
         "state": {
-          "description": "`pending`, `retrying` or `delivered`. The environment list also shows\none synthetic `unconfigured` row (event `owner.unconfigured`) while\nthe environment owner has no notification endpoint.",
+          "description": "`pending`, `retrying`, `delivered`, or `dropped` (never delivered;\n`last_error` says why). The environment list also shows\none synthetic `unconfigured` row (event `owner.unconfigured`) while\nthe environment owner has no notification endpoint.",
           "type": "string"
         },
         "url": {

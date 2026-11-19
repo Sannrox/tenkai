@@ -4276,7 +4276,6 @@ impl ManagementOperations {
         );
         result.cancel = Some(crate::management_lifecycle::ApplyCancelResult::from_report(
             &report,
-            request.expected_generation,
         ));
         Ok(result)
     }

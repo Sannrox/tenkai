@@ -530,6 +530,81 @@ fn a_cleared_channel_head_reads_back_headless() {
     let _ = std::fs::remove_file(path);
 }
 
+/// A stored revision floor that does not parse fails the next channel write
+/// instead of reading as 0 and restarting the channel at revision 1.
+#[test]
+fn a_corrupt_channel_revision_floor_refuses_the_write() {
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-1323-floor-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let store = SqliteStore::open(&path).unwrap();
+    let release = crate::ontology::release_id("api", "1.0.0");
+    store
+        .put(Object {
+            id: release.clone(),
+            kind: crate::ontology::KIND_RELEASE.into(),
+            name: "api@1.0.0".into(),
+            properties: HashMap::from([
+                ("product".into(), "api".into()),
+                ("version".into(), "1.0.0".into()),
+                ("digest".into(), "a".repeat(64)),
+            ]),
+            ..Object::default()
+        })
+        .unwrap();
+    let id = crate::ontology::channel_id("api", "stable");
+    let channel = |head: Option<&str>| {
+        let mut properties = HashMap::from([
+            ("product".to_string(), "api".to_string()),
+            ("channel".to_string(), "stable".to_string()),
+        ]);
+        if let Some(head) = head {
+            properties.insert("current_version".into(), "1.0.0".into());
+            properties.insert("current_release".into(), head.into());
+        }
+        Object {
+            id: id.clone(),
+            kind: KIND_CHANNEL.into(),
+            name: "api/stable".into(),
+            properties,
+            ..Object::default()
+        }
+    };
+    store.put(channel(Some(&release))).unwrap();
+    store.put(channel(None)).unwrap();
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE catalog_object_properties SET value='corrupt' WHERE object_id=?1 AND key=?2",
+            params![id, crate::ontology::CHANNEL_REVISION_FLOOR],
+        )
+        .unwrap();
+
+    let object_write = store.put(channel(Some(&release))).unwrap_err();
+    assert!(
+        format!("{object_write:#}").contains("revision floor"),
+        "{object_write:#}"
+    );
+    let record_write = store
+        .promote_channel(&ChannelRecord {
+            id: id.clone(),
+            product: "api".into(),
+            name: "stable".into(),
+            release_id: release.clone(),
+            revision: 0,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(record_write, StoreError::InvalidData { .. }),
+        "{record_write:?}"
+    );
+    assert!(store.channel_record(&id).unwrap().is_none());
+    let _ = std::fs::remove_file(path);
+}
+
 /// A channel record read before its head was removed (#1174) is refused by
 /// the revision check, before and after a fresh promote recreates the row.
 #[test]

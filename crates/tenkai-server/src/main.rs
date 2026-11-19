@@ -1396,6 +1396,8 @@ async fn main() -> Result<()> {
     });
     let webhook_task = {
         let webhook_store = store.clone();
+        // Feedback delivery reads each environment's endpoints at send time.
+        let mut webhook_ctx = reconciler.ctx_clone();
         let mut webhook_shutdown_rx = shutdown_tx.subscribe();
         let standby_fence = writer_fence.clone();
         tokio::spawn(async move {
@@ -1457,15 +1459,18 @@ async fn main() -> Result<()> {
                         }
                         match tenkai::feedback_webhook::deliver_batch(
                             &*webhook_store,
+                            &mut webhook_ctx,
                             &ProcessWebhookSecrets,
                             Duration::from_secs(5),
                             tenkai::now_millis(),
                             10,
                         ).await {
-                            Ok((delivered, deferred)) if delivered > 0 || deferred > 0 => {
+                            Ok((delivered, deferred, dropped))
+                                if delivered > 0 || deferred > 0 || dropped > 0 =>
+                            {
                                 eprintln!(
-                                    "tenkai.feedback_webhook delivered={} deferred={}",
-                                    delivered, deferred
+                                    "tenkai.feedback_webhook delivered={} deferred={} dropped={}",
+                                    delivered, deferred, dropped
                                 );
                             }
                             Ok(_) => {}

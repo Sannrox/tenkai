@@ -43,6 +43,29 @@ pub trait InventoryProbe {
 
 struct SystemInventoryProbe;
 
+/// Installed memory in GiB from `/proc/meminfo`. `MemTotal` excludes firmware
+/// and kernel reservations, so it rounds to the nearest GiB: a 32 GiB host
+/// reads 32, not 31.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn meminfo_gib(meminfo: &str) -> Result<Option<u64>> {
+    const KIB_PER_GIB: u64 = 1024 * 1024;
+    let Some(rest) = meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))
+    else {
+        return Ok(None);
+    };
+    let kib: u64 = rest
+        .split_whitespace()
+        .next()
+        .unwrap_or("0")
+        .parse()
+        .context("parsing MemTotal")?;
+    Ok(Some(
+        (kib.saturating_add(KIB_PER_GIB / 2) / KIB_PER_GIB).max(1),
+    ))
+}
+
 impl InventoryProbe for SystemInventoryProbe {
     fn architecture(&self) -> Result<Option<String>> {
         let arch = std::env::consts::ARCH;
@@ -74,18 +97,7 @@ impl InventoryProbe for SystemInventoryProbe {
         {
             let content =
                 std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
-            for line in content.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    let kb: u64 = rest
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("0")
-                        .parse()
-                        .context("parsing MemTotal")?;
-                    return Ok(Some((kb / (1024 * 1024)).max(1)));
-                }
-            }
-            Ok(None)
+            meminfo_gib(&content)
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
@@ -178,6 +190,15 @@ pub fn facts_map(facts: &[InventoryFact]) -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meminfo_rounds_to_the_nearest_gib() {
+        // A 32 GiB host whose MemTotal lost ~400 MiB to reservations.
+        let host = "MemFree:  1000 kB\nMemTotal:       33144320 kB\n";
+        assert_eq!(meminfo_gib(host).unwrap(), Some(32));
+        assert_eq!(meminfo_gib("MemTotal: 1000 kB\n").unwrap(), Some(1));
+        assert_eq!(meminfo_gib("MemFree: 1 kB\n").unwrap(), None);
+    }
 
     struct FixedProbe {
         arch: Option<String>,

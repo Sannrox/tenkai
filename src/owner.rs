@@ -179,7 +179,9 @@ pub fn reachability(
                 .filter_map(|delivery| delivery.delivered_at)
                 .max();
             let consecutive_failures = to_url
-                .filter(|delivery| delivery.delivered_at.is_none())
+                // A dropped delivery is never retried, so it says nothing
+                // about whether the endpoint answers now.
+                .filter(|delivery| delivery.delivered_at.is_none() && delivery.state != "dropped")
                 .map(|delivery| delivery.attempts)
                 .max()
                 .unwrap_or(0);

@@ -201,8 +201,13 @@ pub(super) fn upsert_channel_in(tx: &Transaction<'_>, object: &Object) -> Result
 }
 
 /// The revision a removed channel head reached, kept on the headless
-/// catalog object (#1174).
-pub(super) fn channel_revision_floor(tx: &Transaction<'_>, id: &str) -> Result<Option<u64>> {
+/// catalog object (#1174). A floor that does not parse is corrupt state and
+/// fails with `InvalidData`; reading it as 0 would reuse revisions the
+/// removed head reached.
+pub(in crate::storage) fn channel_revision_floor(
+    tx: &Transaction<'_>,
+    id: &str,
+) -> Result<Option<u64>> {
     let value: Option<String> = tx
         .query_row(
             "SELECT value FROM catalog_object_properties WHERE object_id=?1 AND key=?2",
@@ -210,7 +215,14 @@ pub(super) fn channel_revision_floor(tx: &Transaction<'_>, id: &str) -> Result<O
             |row| row.get(0),
         )
         .optional()?;
-    Ok(value.and_then(|value| value.parse().ok()))
+    value
+        .map(|value| {
+            value.parse().map_err(|_| StoreError::InvalidData {
+                kind: "channel",
+                detail: format!("channel {id} revision floor {value:?} is not a revision"),
+            })
+        })
+        .transpose()
 }
 
 pub(super) fn upsert_plan_in(tx: &Transaction<'_>, object: &Object) -> Result<()> {

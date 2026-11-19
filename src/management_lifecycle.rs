@@ -440,21 +440,23 @@ pub enum ApplyCancelMatch {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApplyCancelResult {
     pub outcome: ApplyCancelMatch,
-    /// Generation of the live apply lease.
+    /// Generation of the live apply lease, read from the lease, never the
+    /// caller's `expected_generation`. A cancel with no live apply is refused
+    /// rather than answered with this result.
     pub live_generation: u64,
     /// True when this cancel set the environment hold.
     pub hold_set: bool,
 }
 
 impl ApplyCancelResult {
-    pub fn from_report(report: &crate::apply::CancelApplyReport, expected_generation: u64) -> Self {
+    pub fn from_report(report: &crate::apply::CancelApplyReport) -> Self {
         Self {
             outcome: if report.matched {
                 ApplyCancelMatch::Matched
             } else {
                 ApplyCancelMatch::Stale
             },
-            live_generation: report.generation.unwrap_or(expected_generation),
+            live_generation: report.generation,
             hold_set: report.hold.is_some(),
         }
     }

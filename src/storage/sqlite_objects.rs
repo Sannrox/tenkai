@@ -51,4 +51,5 @@ pub use codec::{
 pub(super) use legacy_import::*;
 use namespaced_leases::*;
 pub(super) use schema::*;
+pub(in crate::storage) use upserts::channel_revision_floor;
 use upserts::*;
