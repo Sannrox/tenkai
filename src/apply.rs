@@ -313,7 +313,15 @@ async fn execute_locked(
             plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, &detail).await?;
             return Err(error.context(detail));
         }
-        if cancel::matches_lease(ctx, lease).await? {
+        let cancelled = match cancel::matches_lease(ctx, lease).await {
+            Ok(cancelled) => cancelled,
+            Err(error) => {
+                return Err(
+                    fail_unless_fenced(ctx, lease, &mut stored_plan, skip_gates, error).await,
+                );
+            }
+        };
+        if cancelled {
             completion.skip_remaining(
                 std::iter::once(step).chain(remaining),
                 cancel::skip_detail(),
@@ -354,8 +362,14 @@ async fn execute_locked(
                 return Err(error);
             }
         };
-        if completion.record(outcome)? {
-            break;
+        match completion.record(outcome) {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(error) => {
+                return Err(
+                    fail_unless_fenced(ctx, lease, &mut stored_plan, skip_gates, error).await,
+                );
+            }
         }
     }
 
@@ -364,7 +378,13 @@ async fn execute_locked(
         .iter()
         .all(|step| step.action == Action::Rollback)
         && !stored_plan.steps.is_empty();
-    if options.rollback_hold && rollback_only && completion.all_succeeded() {
+    let hold = options.rollback_hold && rollback_only && completion.all_succeeded();
+    // The completion is recorded first: a hold that fails afterwards must
+    // not lose a rollback that succeeded.
+    let outcomes = completion
+        .finish(ctx, lease, &mut stored_plan, skip_gates)
+        .await?;
+    if hold {
         let actor = options.requester.as_deref().unwrap_or("apply");
         cancel::hold_after_rollback(
             ctx,
@@ -373,12 +393,36 @@ async fn execute_locked(
             lease.generation,
             &lease.fencing_token,
         )
-        .await?;
+        .await
+        .with_context(|| {
+            format!(
+                "plan {} rolled back and was recorded; holding environment {} failed",
+                stored_plan.id, stored_plan.environment
+            )
+        })?;
     }
-    let outcomes = completion
-        .finish(ctx, lease, &mut stored_plan, skip_gates)
-        .await?;
     Ok(outcomes)
+}
+
+/// Record `error` as the plan's failure and hand it back, unless the
+/// execution fence was lost: then the plan stays Running so min_available
+/// still refuses (#690).
+async fn fail_unless_fenced(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    plan: &mut Plan,
+    skip_gates: bool,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    if is_execution_fence_lost(&error) {
+        return error;
+    }
+    match plan_completion::fail(ctx, lease, plan, skip_gates, error.to_string()).await {
+        Ok(()) => error,
+        Err(record) => error.context(format!(
+            "recording the plan failure also failed: {record:#}"
+        )),
+    }
 }
 
 #[cfg(test)]

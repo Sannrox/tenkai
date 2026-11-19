@@ -207,7 +207,23 @@ where
     };
     let mut samples = 0u64;
     loop {
-        let report = sample().await?;
+        // A continuous watch outlives a failed sample: it reports error status,
+        // logs to stderr, and samples again after the interval. `--once` and a
+        // failed final `--max-samples` sample still exit non-zero.
+        let report = match sample().await {
+            Ok(report) => report,
+            Err(error) if !opts.once => {
+                samples += 1;
+                if opts.max_samples > 0 && samples >= opts.max_samples {
+                    return Err(error.context("fleet watch: the last sample failed"));
+                }
+                eprintln!("fleet watch: sampling failed, retrying: {error:#}");
+                report_status(status, STATUS_ERROR)?;
+                tokio::time::sleep(Duration::from_secs(opts.interval.max(1))).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let current = plan::fleet_posture_snapshot(&report);
         let delta = plan::compare_fleet_posture(&previous, &current);
         if opts.json {
@@ -502,19 +518,49 @@ mod tests {
     #[tokio::test]
     async fn every_failing_exit_reports_error_once() {
         let failing = [
-            vec![Err(anyhow!("server unreachable"))],
-            vec![Ok(report("current", true))],
-            vec![Ok(report("unhealthy", false))],
-            vec![Ok(report("current", false)), Err(anyhow!("token expired"))],
+            (vec![Err(anyhow!("server unreachable"))], true),
+            (vec![Ok(report("current", true))], false),
+            (vec![Ok(report("unhealthy", false))], false),
+            (
+                vec![Ok(report("current", false)), Err(anyhow!("token expired"))],
+                false,
+            ),
         ];
-        for (index, samples) in failing.into_iter().enumerate() {
+        for (index, (samples, once)) in failing.into_iter().enumerate() {
             let clean_before = samples.len() - 1;
-            let (result, out) = watch(samples, options(), true).await;
+            let opts = FleetWatchOptions {
+                once,
+                // A failed sample ends a continuous watch only as its last.
+                max_samples: samples.len() as u64,
+                ..options()
+            };
+            let (result, out) = watch(samples, opts, true).await;
             assert!(result.is_err(), "case {index} exits non-zero");
             let mut expected = vec![STATUS_IDLE; clean_before];
             expected.push(STATUS_ERROR);
             assert_eq!(out, statuses(&expected), "case {index}");
         }
+    }
+
+    /// #1349: one failed sample does not end a continuous watch.
+    #[tokio::test]
+    async fn a_continuous_watch_survives_a_failed_sample() {
+        let opts = FleetWatchOptions {
+            max_samples: 3,
+            ..options()
+        };
+        let (result, out) = watch(
+            vec![
+                Ok(report("current", false)),
+                Err(anyhow!("server unreachable")),
+                Ok(report("current", false)),
+            ],
+            opts,
+            true,
+        )
+        .await;
+        result.expect("a transient sampling error keeps watching");
+        assert_eq!(out, statuses(&[STATUS_IDLE, STATUS_ERROR, STATUS_IDLE]));
     }
 
     #[tokio::test]

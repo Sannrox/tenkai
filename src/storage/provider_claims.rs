@@ -63,10 +63,14 @@ impl SqliteStore {
                 claim_until: row.get(9)?,
             })
         })?;
-        let claimed = rows.map(|row| row.map_err(StoreError::from)).collect();
+        // Decode before committing: a row that does not decode drops the
+        // transaction, so no event stays claimed under a token never returned.
+        let claimed = rows
+            .map(|row| row.map_err(StoreError::from))
+            .collect::<Result<Vec<_>>>()?;
         drop(statement);
         tx.commit()?;
-        claimed
+        Ok(claimed)
     }
 
     pub(super) fn claim_provider_events_for_kind_sqlite(
@@ -133,10 +137,14 @@ impl SqliteStore {
                 claim_until: row.get(9)?,
             })
         })?;
-        let claimed = rows.map(|row| row.map_err(StoreError::from)).collect();
+        // Decode before committing: a row that does not decode drops the
+        // transaction, so no event stays claimed under a token never returned.
+        let claimed = rows
+            .map(|row| row.map_err(StoreError::from))
+            .collect::<Result<Vec<_>>>()?;
         drop(statement);
         tx.commit()?;
-        claimed
+        Ok(claimed)
     }
 
     pub(crate) fn require_claimed_undelivered_provider_event(

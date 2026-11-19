@@ -225,18 +225,18 @@ impl ActionLifecycle<'_> {
         }
     }
 
-    pub(super) async fn deny(&self, approval_id: &str, reason: &str) -> Result<()> {
+    pub(super) async fn deny(&self, approval_id: &str, _reason: &str) -> Result<()> {
         match self {
             Self::Unavailable { .. } => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Catalog { .. } | Self::Embedded(_) => anyhow::bail!(
                 "embedded mode has no deferred approvals; action {approval_id} cannot be denied"
             ),
-            Self::Remote { .. } => {
-                // Governed require_approval admissions are denied at submit time;
-                // there is no deferred approval queue to cancel.
-                let _ = reason;
-                Ok(())
-            }
+            // Governed admissions are decided at submit time. There is no
+            // deferred approval queue to cancel, so a deny that reported
+            // success would claim an effect that never happened.
+            Self::Remote { .. } => anyhow::bail!(
+                "governed actions are decided when submitted; there is no deferred approval {approval_id} to deny"
+            ),
         }
     }
 

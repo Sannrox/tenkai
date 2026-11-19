@@ -48,6 +48,8 @@ pub(crate) enum FleetCommand {
         backup: PathBuf,
     },
     /// Poll fleet status and report posture drift versus a baseline or prior sample.
+    /// A failed sample ends the watch only with --once or as the last
+    /// --max-samples sample; otherwise it is logged and retried.
     Watch {
         /// Seconds between samples when not using --once.
         #[arg(long, default_value_t = 10)]

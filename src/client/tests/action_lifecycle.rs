@@ -78,12 +78,13 @@ async fn assert_action_lifecycle(mut ctx: Ctx) {
             .any(|decision| decision.target_id == target.id)
     );
 
-    let deny = ctx.deny_action("approval-conformance", "blocked").await;
-    if ctx.is_embedded() {
-        assert!(deny.is_err());
-    } else {
-        deny.unwrap();
-    }
+    // No mode has a deferred approval to deny; each refuses instead of
+    // reporting an effect.
+    assert!(
+        ctx.deny_action("approval-conformance", "blocked")
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
