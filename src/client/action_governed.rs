@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use super::action_lifecycle::{
     GOVERNED_ACTION_NAMESPACE, GOVERNED_ACTION_VERSION, RemoteActionDefs,
 };
-use crate::pb::graph_action::ActionTypeDef;
+use crate::pb::graph_action::{ActionParamDef, ActionTypeDef};
 use crate::pb::sekai::GovernedActionType;
 
 pub(super) fn resolve_remote_action_def(
@@ -55,12 +55,7 @@ pub(super) fn parameter_schema_json(action: &ActionTypeDef) -> Result<String, St
     required.push("id".into());
     for param in &action.params {
         let mut property = serde_json::Map::new();
-        let ty = match param.r#type.as_str() {
-            "number" => "number",
-            "integer" => "integer",
-            "boolean" => "boolean",
-            _ => "string",
-        };
+        let ty = json_type(param);
         property.insert("type".into(), serde_json::Value::String(ty.into()));
         if ty == "string" {
             property.insert("minLength".into(), serde_json::json!(1));
@@ -91,7 +86,25 @@ pub(super) fn parameter_schema_json(action: &ActionTypeDef) -> Result<String, St
     .map_err(|error| error.to_string())
 }
 
-pub(super) fn parameters_json(params: &HashMap<String, String>) -> Result<String> {
+/// JSON Schema type a declared parameter type registers as; anything else
+/// is a string. [`parameters_json`] encodes values to match.
+fn json_type(param: &ActionParamDef) -> &'static str {
+    match param.r#type.as_str() {
+        "number" => "number",
+        "integer" => "integer",
+        "boolean" => "boolean",
+        _ => "string",
+    }
+}
+
+/// Encode `params` as the JSON object the registered schema of `action`
+/// admits: a typed parameter as a JSON number or boolean, anything else as
+/// a string. A value that is not of its declared type is refused here
+/// rather than sent as a string the schema rejects (#1330).
+pub(super) fn parameters_json(
+    action: &ActionTypeDef,
+    params: &HashMap<String, String>,
+) -> Result<String> {
     let mut object = serde_json::Map::new();
     let mut keys = params.keys().cloned().collect::<Vec<_>>();
     keys.sort();
@@ -99,7 +112,33 @@ pub(super) fn parameters_json(params: &HashMap<String, String>) -> Result<String
         let value = params
             .get(&key)
             .with_context(|| format!("missing parameter {key}"))?;
-        object.insert(key, serde_json::Value::String(value.clone()));
+        let declared = action
+            .params
+            .iter()
+            .find(|param| param.name == key)
+            .map_or("string", json_type);
+        let not_typed = || {
+            anyhow!(
+                "parameter {key} of action {} must be {declared}",
+                action.name
+            )
+        };
+        let encoded = match declared {
+            "integer" => serde_json::Value::from(value.parse::<i64>().map_err(|_| not_typed())?),
+            "number" => value
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(serde_json::Value::Number)
+                .ok_or_else(not_typed)?,
+            "boolean" => match value.as_str() {
+                "true" => serde_json::Value::Bool(true),
+                "false" => serde_json::Value::Bool(false),
+                _ => return Err(not_typed()),
+            },
+            _ => serde_json::Value::String(value.clone()),
+        };
+        object.insert(key, encoded);
     }
     Ok(serde_json::Value::Object(object).to_string())
 }
@@ -138,4 +177,98 @@ pub(super) fn map_instance_decision(instance: &crate::pb::sekai::ActionInstance)
         return "require_approval".into();
     }
     "deny".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn action() -> ActionTypeDef {
+        let param = |name: &str, ty: &str| ActionParamDef {
+            name: name.into(),
+            r#type: ty.into(),
+            required: true,
+            enum_values: Vec::new(),
+        };
+        ActionTypeDef {
+            name: "scale".into(),
+            params: vec![
+                param("count", "integer"),
+                param("ratio", "number"),
+                param("force", "boolean"),
+                param("reason", "string"),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).into(), (*value).into()))
+            .collect()
+    }
+
+    /// Every encoded value has the JSON type the registered schema declares
+    /// for its property, so a schema-validating server admits it.
+    #[test]
+    fn parameters_match_the_registered_schema_types() {
+        let action = action();
+        let schema: serde_json::Value =
+            serde_json::from_str(&parameter_schema_json(&action).unwrap()).unwrap();
+        let encoded: serde_json::Value = serde_json::from_str(
+            &parameters_json(
+                &action,
+                &params(&[
+                    ("id", "web"),
+                    ("count", "3"),
+                    ("ratio", "0.5"),
+                    ("force", "true"),
+                    ("reason", "42"),
+                ]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "id": "web", "count": 3, "ratio": 0.5, "force": true, "reason": "42"
+            })
+        );
+        for (key, value) in encoded.as_object().unwrap() {
+            let declared = schema["properties"][key]["type"].as_str().unwrap();
+            let actual = match value {
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Bool(_) => "boolean",
+                serde_json::Value::Number(number) if number.is_i64() => "integer",
+                serde_json::Value::Number(_) => "number",
+                other => panic!("unexpected value {other}"),
+            };
+            assert!(
+                actual == declared || (declared == "number" && actual == "integer"),
+                "{key}: schema {declared}, sent {actual}"
+            );
+        }
+    }
+
+    /// A value that is not its declared type is refused before submission,
+    /// naming the parameter and the type.
+    #[test]
+    fn a_value_of_the_wrong_type_is_refused() {
+        let action = action();
+        for (key, value, ty) in [
+            ("count", "3.5", "integer"),
+            ("count", "three", "integer"),
+            ("ratio", "NaN", "number"),
+            ("ratio", "inf", "number"),
+            ("force", "yes", "boolean"),
+        ] {
+            let error = parameters_json(&action, &params(&[(key, value)])).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("parameter {key} of action scale must be {ty}")
+            );
+        }
+    }
 }
