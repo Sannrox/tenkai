@@ -9,6 +9,7 @@
 #   scripts/package-release-binaries.sh install-script --out DIR --version X.Y.Z
 #   scripts/package-release-binaries.sh checksums --out DIR [--require-complete]
 #   scripts/package-release-binaries.sh check-glibc --out DIR [--platform ID]
+#   scripts/package-release-binaries.sh compare --out DIR --against DIR
 #   scripts/package-release-binaries.sh system-packages --out DIR --platform ID
 #       --version X.Y.Z
 #   scripts/package-release-binaries.sh names
@@ -29,7 +30,8 @@
 # and the host applier's systemd unit and polkit rule (copied by
 # install-script from examples/host-applier-systemd) are attached and
 # checksummed with them. These files are GitHub Release packaging, not
-# Catalog artifacts.
+# Catalog artifacts. compare fails unless two independent builds packaged the
+# same assets with byte-identical contents (reproducible builds, #1331).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -421,6 +423,52 @@ cmd_checksums() {
   verify_checksums "$out" >/dev/null
 }
 
+# Fail unless --out and --against hold the same packaged assets with the same
+# SHA-256, naming each asset that is missing on one side or differs. CI runs
+# it over two independent builds of one commit (#1331).
+cmd_compare() {
+  local out="" against=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --out)
+        [[ $# -ge 2 ]] || fail "--out requires a directory"
+        out="$2"
+        shift 2
+        ;;
+      --against)
+        [[ $# -ge 2 ]] || fail "--against requires a directory"
+        against="$2"
+        shift 2
+        ;;
+      -h | --help) usage 0 ;;
+      *) fail "unknown compare argument: $1" ;;
+    esac
+  done
+  [[ -n "$out" && -n "$against" ]] || fail "compare requires --out and --against"
+  [[ -d "$out" ]] || fail "output directory does not exist: ${out}"
+  [[ -d "$against" ]] || fail "comparison directory does not exist: ${against}"
+
+  local names other name ours theirs differs=0
+  names="$(list_packaged_files "$out")"
+  other="$(list_packaged_files "$against")"
+  [[ -n "$names" ]] || fail "no packaged host binaries in ${out}"
+  if [[ "$names" != "$other" ]]; then
+    diff <(printf '%s\n' "$names") <(printf '%s\n' "$other") >&2 || true
+    fail "${out} and ${against} package different assets"
+  fi
+  while IFS= read -r name; do
+    ours="$(checksum_file "${out}/${name}" | awk '{print $1}')"
+    theirs="$(checksum_file "${against}/${name}" | awk '{print $1}')"
+    if [[ "$ours" == "$theirs" ]]; then
+      printf '%s  %s\n' "$ours" "$name"
+    else
+      printf 'differs: %s (%s vs %s)\n' "$name" "$ours" "$theirs" >&2
+      differs=1
+    fi
+  done <<<"$names"
+  [[ "$differs" -eq 0 ]] || fail "builds are not reproducible: assets differ"
+}
+
 # Fail unless every Linux host asset in --out (of --platform, else of every
 # Linux platform) is an ELF executable for its CPU, linked to glibc, whose
 # versioned glibc symbols are all at or below LINUX_GLIBC_FLOOR, so it starts
@@ -724,6 +772,18 @@ cmd_self_test() {
     fi
   fi
 
+  # compare: identical builds pass; one changed byte or a missing asset fails.
+  local first="${tmp}/compare-a" second="${tmp}/compare-b" name
+  mkdir -p "$first" "$second"
+  bash "$0" package --out "$first" --bin-dir "$bin" --platform "$platform" >/dev/null
+  bash "$0" package --out "$second" --bin-dir "$bin" --platform "$platform" >/dev/null
+  bash "$0" compare --out "$first" --against "$second" >/dev/null
+  name="$(packaged_name tenkaictl "$platform")"
+  printf 'x' >>"${second}/${name}"
+  expect_fail "differs: ${name}" bash "$0" compare --out "$first" --against "$second"
+  rm "${second}/${name}"
+  expect_fail "package different assets" bash "$0" compare --out "$first" --against "$second"
+
   printf 'package-release-binaries self-test passed\n'
 }
 
@@ -737,6 +797,7 @@ main() {
     package-hub) cmd_package_hub "$@" ;;
     checksums) cmd_checksums "$@" ;;
     check-glibc) cmd_check_glibc "$@" ;;
+    compare) cmd_compare "$@" ;;
     install-script) cmd_install_script "$@" ;;
     system-packages) cmd_system_packages "$@" ;;
     names) complete_names ;;

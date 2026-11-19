@@ -129,6 +129,8 @@ jobs:
   release-dry-run:
     name: Release dry run
     runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -170,6 +172,13 @@ jobs:
       - name: Build Linux hosts
         if: steps.scope.outputs.run == 'true'
         run: bash scripts/build-linux-release-hosts.sh --out linux-hosts
+      - if: steps.scope.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-hosts
+          path: linux-hosts/*
+          if-no-files-found: error
+          retention-days: 1
       - name: Run Linux hosts on RHEL 8 and 9, Debian 12, Ubuntu 22.04
         if: steps.scope.outputs.run == 'true'
         run: |
@@ -192,6 +201,27 @@ jobs:
         run: bash scripts/test-system-packages.sh --linux-hosts linux-hosts
       - if: steps.scope.outputs.run == 'true'
         run: bash scripts/release-dry-run.sh --linux-hosts linux-hosts
+
+  # Reproducible builds (#1331): a second, cold build of the same commit on
+  # another runner, with no restored build state, must package byte-identical
+  # Linux hosts. Runs whenever the dry run built hosts.
+  release-reproducible:
+    name: Release reproducible
+    needs: release-dry-run
+    if: needs.release-dry-run.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Build Linux hosts from scratch
+        run: bash scripts/build-linux-release-hosts.sh --out rebuilt
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux-hosts
+          path: dry-run
+      - name: Compare with the dry run's hosts
+        run: bash scripts/package-release-binaries.sh compare --out rebuilt --against dry-run
 
   clippy:
     name: Clippy

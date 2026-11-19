@@ -56,6 +56,27 @@ grep " tenkaictl-${platform}$" SHA256SUMS | sha256sum -c -
   offline bundle instead
   ([disconnected sites](release-binaries.md#disconnected-sites)).
 
+## Reproduce a release build
+
+The Linux hosts build reproducibly: two builds of one commit package
+byte-identical binaries. CI checks it on every change to dependencies, the
+toolchain or release packaging. A second, cold build on another runner must
+match the release dry run's hosts. To rebuild a release yourself, check out
+its tag and run:
+
+```bash
+bash scripts/build-linux-release-hosts.sh --platform linux-x86_64 --out rebuilt
+bash scripts/package-release-binaries.sh compare --out rebuilt --against downloaded
+```
+
+`downloaded` holds that release's `linux-x86_64` hosts, and `compare` names
+any asset that differs. The build runs in a digest-pinned image with fixed
+paths. The C toolchain is installed from the image's package repositories,
+and the build log records its versions (`rpm -q gcc binutils glibc-devel`).
+A rebuild long after a release can pick up a newer toolchain and differ for
+that reason alone. The `darwin-aarch64` and `linux-aarch64` hosts are not
+checked.
+
 ## Report a vulnerability
 
 Report privately through

@@ -202,7 +202,8 @@ Stated plainly; each links to where it is decided.
   ([unsupported claims](delivery-effect-conformance.md#unsupported-claims)).
 - **Host identity** is Linux only
   ([ADR 0047 out of scope](decisions/0047-host-identity.md#out-of-scope)).
-- **Reproducible builds** are not yet checked, so a binary is trusted through
-  its attestation
-  ([packaging path](release-binaries.md#packaging-path)), not by
-  rebuilding it.
+- **Reproducible builds** are checked only for the `linux-x86_64` hosts
+  ([reproduce a release build](security.md#reproduce-a-release-build)). The
+  macOS and `linux-aarch64` hosts are trusted through their attestation
+  ([packaging path](release-binaries.md#packaging-path)), not by rebuilding
+  them.

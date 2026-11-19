@@ -90,6 +90,9 @@ docker run --rm --platform "$docker_platform" \
     cd /src
     # sed reads all input; head would close the pipe and fail pipefail with SIGPIPE.
     ldd --version | sed -n 1p
+    # The C toolchain is not pinned by the image digest; record it so a
+    # rebuild of an older tag can tell a toolchain change from a real one.
+    rpm -q gcc binutils glibc-devel
     # The macOS hosts in release-binaries.yml, plus the Linux-only
     # tenkai-host-applier.
     cargo build --release --locked --workspace --features tenkai-server/ui \
