@@ -465,6 +465,7 @@ mod tests {
                 base: None,
                 advisory_feed: None,
                 derived_criticality: None,
+                docs: &[("README.md", b"# fixture\n")],
             },
         )
         .await

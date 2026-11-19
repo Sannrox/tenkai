@@ -1,10 +1,11 @@
 //! Versioned docs inside the offline bundle (#646).
 //!
 //! A dark site cannot reach the online docs, so every bundle carries the docs
-//! of the Tenkai version that built it, embedded at compile time from `docs/`.
-//! They sit under `docs/<version>/` with an index naming each file's digest;
-//! the bundle signature covers both. `extract` verifies them against the
-//! index and writes them out as plain files, readable with no network.
+//! of the Tenkai version that built it. Production `tenkaictl` embeds this
+//! tree's `docs/` at compile time and passes the bytes in; tests inject a
+//! fixture. They sit under `docs/<version>/` with an index naming each file's
+//! digest; the bundle signature covers both. `extract` verifies them against
+//! the index and writes them out as plain files, readable with no network.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -14,10 +15,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::offline_bundle::VerifiedBundle;
-
-mod embedded {
-    include!(concat!(env!("OUT_DIR"), "/embedded_docs.rs"));
-}
 
 pub const DOCS_INDEX_SCHEMA: &str = "tenkai.offline-docs.v1";
 pub const DOCS_INDEX_MEDIA: &str = "application/vnd.tenkai.offline-docs.v1+json";
@@ -42,20 +39,26 @@ pub struct DocsFile {
     pub size: u64,
 }
 
-/// The docs embedded in this build, by relative path.
-pub fn embedded() -> impl Iterator<Item = (&'static str, &'static [u8])> {
-    embedded::DOCS.iter().copied()
-}
-
 /// The bundle entry path of one doc.
 pub fn entry_path(version: &str, path: &str) -> String {
     format!("docs/{version}/{path}")
 }
 
-/// Adds the embedded docs for `version` and their index to `payloads`.
-pub fn insert(payloads: &mut BTreeMap<String, (String, Vec<u8>)>, version: &str) -> Result<()> {
+/// Adds `docs` for `version` and their index to `payloads`.
+///
+/// `docs` is the operator-doc tree the bundle builder supplies. Production
+/// `tenkaictl` embeds this repository's `docs/`; tests inject a fixture.
+pub fn insert(
+    payloads: &mut BTreeMap<String, (String, Vec<u8>)>,
+    version: &str,
+    docs: &[(&str, &[u8])],
+) -> Result<()> {
+    if docs.is_empty() {
+        bail!("offline bundle requires at least one doc");
+    }
     let mut files = Vec::new();
-    for (path, bytes) in embedded() {
+    for &(path, bytes) in docs {
+        safe_relative(path)?;
         let entry = entry_path(version, path);
         if payloads.contains_key(&entry) {
             bail!("bundle already contains {entry}");
@@ -197,18 +200,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_embedded_docs_are_this_trees_docs() {
-        let readme = std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/docs/offline-bundles.md"
-        ))
-        .unwrap();
-        let embedded: BTreeMap<_, _> = embedded().collect();
-        assert_eq!(
-            embedded.get("offline-bundles.md").copied(),
-            Some(readme.as_slice())
-        );
-        assert!(embedded.keys().all(|path| safe_relative(path).is_ok()));
+    fn insert_refuses_an_empty_doc_set() {
+        let mut payloads = BTreeMap::new();
+        let err = insert(&mut payloads, "0.0.0", &[]).unwrap_err();
+        assert!(err.to_string().contains("at least one doc"), "{err}");
+        assert!(payloads.is_empty());
     }
 
     #[test]

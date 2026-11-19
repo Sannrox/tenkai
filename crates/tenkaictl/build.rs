@@ -1,13 +1,15 @@
 //! Embeds `docs/` so an offline bundle carries the docs of the exact Tenkai
-//! version that built it (#646). Generates `$OUT_DIR/embedded_docs.rs`: one
-//! `(path, bytes)` pair per file, sorted, paths relative to `docs/` with `/`.
+//! version that built it (#646). Lives in `tenkaictl` so a docs-only change
+//! does not rebuild the application core (#1519). Generates
+//! `$OUT_DIR/embedded_docs.rs`: one `(path, bytes)` pair per file, sorted,
+//! paths relative to `docs/` with `/`.
 
 use std::path::{Path, PathBuf};
 
 fn main() {
     let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    let docs = root.join("docs");
-    println!("cargo:rerun-if-changed=docs");
+    let docs = root.join("../../docs");
+    println!("cargo:rerun-if-changed=../../docs");
     let mut files = Vec::new();
     collect(&docs, &docs, &mut files);
     files.sort();
