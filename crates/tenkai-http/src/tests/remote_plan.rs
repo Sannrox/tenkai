@@ -55,7 +55,7 @@ async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
     let missing = reqwest::Client::new()
         .post(format!(
             "{base}/v1/plans/{}/apply",
-            encode_plan_path(&plan_a_id)
+            encode_path_segment(&plan_a_id)
         ))
         .bearer_auth("management-secret")
         .json(&serde_json::json!({
@@ -76,7 +76,7 @@ async fn remote_plan_apply_rollback_a_to_b_through_a_real_hub() {
     let bypass = reqwest::Client::new()
         .post(format!(
             "{base}/v1/plans/{}/apply",
-            encode_plan_path(&plan_a_id)
+            encode_path_segment(&plan_a_id)
         ))
         .bearer_auth("management-secret")
         .json(&with_bypass)

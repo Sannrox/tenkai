@@ -61,7 +61,7 @@ pub(super) use tenkai::storage::OperationalStore;
 pub(super) use tenkai::tenant_isolation::NON_DISCLOSING_DENY;
 
 pub(super) use super::auth::run_blocking_tenant_store;
-pub(super) use super::runtime::encode_plan_path;
+pub(super) use super::runtime::encode_path_segment;
 pub(super) use super::{
     CompletionFuture, DevelopmentFixtureConfig, FleetStatusFuture, HealthFuture, InspectEnvFuture,
     InventoryFuture, ListEnvFuture, ReconcileFuture, ReconcilePort, RemoteClient,

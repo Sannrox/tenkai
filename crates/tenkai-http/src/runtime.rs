@@ -476,7 +476,7 @@ pub(super) fn management_error(error: ManagementError) -> Response {
     }
 }
 
-pub(super) fn encode_plan_path(plan_id: &str) -> String {
+pub(super) fn encode_path_segment(plan_id: &str) -> String {
     plan_id
         .bytes()
         .map(|byte| match byte {

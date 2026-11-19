@@ -96,3 +96,39 @@ async fn failed_apply_steps_are_rejected_not_reported_as_applied() {
     assert!(body.steps[0].attempt_id.is_some(), "{body:?}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// #1354: caller-supplied path segments are percent-encoded, so a `/`, `?`
+/// or `@` in a name stays inside its segment.
+#[tokio::test]
+async fn path_segments_are_percent_encoded() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = tokio::spawn(async move {
+        let mut lines = Vec::new();
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0_u8; 4096];
+            let read = socket.read(&mut buffer).await.unwrap();
+            let head = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            lines.push(head.lines().next().unwrap_or_default().to_owned());
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await;
+        }
+        lines
+    });
+    let client = RemoteClient::new(format!("http://{addr}"), "token").unwrap();
+    let _ = client.inspect_environment("stage/../prod?x").await;
+    let _ = client.inspect_recall("api@1.0.0").await;
+    let lines = requests.await.unwrap();
+    assert_eq!(
+        lines,
+        [
+            "GET /v1/environments/stage%2F..%2Fprod%3Fx HTTP/1.1",
+            "GET /v1/releases/api%401.0.0/recall HTTP/1.1",
+        ]
+    );
+}

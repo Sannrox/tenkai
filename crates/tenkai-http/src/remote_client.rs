@@ -1,5 +1,7 @@
 use tenkai::reconciler::TickReport;
 
+use super::runtime::encode_path_segment;
+
 /// Why a remote call failed. Callers downcast the `anyhow::Error` to tell a
 /// refused request from one whose outcome is unknown.
 #[derive(Debug)]
@@ -111,7 +113,10 @@ impl RemoteClient {
     ) -> anyhow::Result<std::collections::BTreeMap<String, tenkai::labels::LabelView>> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/environments/{environment}/labels"),
+            &format!(
+                "/v1/environments/{}/labels",
+                encode_path_segment(environment)
+            ),
         )
         .await
     }
@@ -123,7 +128,10 @@ impl RemoteClient {
     ) -> anyhow::Result<Vec<tenkai::labels::LabelChange>> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/environments/{environment}/labels/history"),
+            &format!(
+                "/v1/environments/{}/labels/history",
+                encode_path_segment(environment)
+            ),
         )
         .await
     }
@@ -135,7 +143,11 @@ impl RemoteClient {
     ) -> anyhow::Result<std::collections::BTreeMap<String, tenkai::labels::LabelView>> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/releases/{product}/{version}/labels"),
+            &format!(
+                "/v1/releases/{}/{}/labels",
+                encode_path_segment(product),
+                encode_path_segment(version)
+            ),
         )
         .await
     }
@@ -148,7 +160,11 @@ impl RemoteClient {
     ) -> anyhow::Result<Vec<tenkai::labels::LabelChange>> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/releases/{product}/{version}/labels/history"),
+            &format!(
+                "/v1/releases/{}/{}/labels/history",
+                encode_path_segment(product),
+                encode_path_segment(version)
+            ),
         )
         .await
     }
@@ -159,7 +175,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::plan::EnvironmentInspectReport> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/environments/{environment}"),
+            &format!("/v1/environments/{}", encode_path_segment(environment)),
         )
         .await
     }
@@ -170,7 +186,10 @@ impl RemoteClient {
     ) -> anyhow::Result<Vec<tenkai::plan::StatusRow>> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/environments/{environment}/status"),
+            &format!(
+                "/v1/environments/{}/status",
+                encode_path_segment(environment)
+            ),
         )
         .await
     }
@@ -182,7 +201,11 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::instance_explain::InstanceExplainReport> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/environments/{environment}/instances/{instance}/explain"),
+            &format!(
+                "/v1/environments/{}/instances/{}/explain",
+                encode_path_segment(environment),
+                encode_path_segment(instance)
+            ),
         )
         .await
     }
@@ -193,7 +216,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::environment_dependencies::EnvironmentDependencies> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/environments/{environment}/dependencies"),
+            &format!(
+                "/v1/environments/{}/dependencies",
+                encode_path_segment(environment)
+            ),
         )
         .await
     }
@@ -215,9 +241,15 @@ impl RemoteClient {
         }
         let encoded = pairs.finish();
         let path = if encoded.is_empty() {
-            format!("/v1/environments/{environment}/history")
+            format!(
+                "/v1/environments/{}/history",
+                encode_path_segment(environment)
+            )
         } else {
-            format!("/v1/environments/{environment}/history?{encoded}")
+            format!(
+                "/v1/environments/{}/history?{encoded}",
+                encode_path_segment(environment)
+            )
         };
         self.request_json(reqwest::Method::GET, &path).await
     }
@@ -236,9 +268,15 @@ impl RemoteClient {
         }
         let encoded = pairs.finish();
         let path = if encoded.is_empty() {
-            format!("/v1/environments/{environment}/delivery-report")
+            format!(
+                "/v1/environments/{}/delivery-report",
+                encode_path_segment(environment)
+            )
         } else {
-            format!("/v1/environments/{environment}/delivery-report?{encoded}")
+            format!(
+                "/v1/environments/{}/delivery-report?{encoded}",
+                encode_path_segment(environment)
+            )
         };
         self.request_json(reqwest::Method::GET, &path).await
     }
@@ -249,7 +287,10 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::approval_policy::EffectiveApprovalPolicy> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/environments/{environment}/approval-policy"),
+            &format!(
+                "/v1/environments/{}/approval-policy",
+                encode_path_segment(environment)
+            ),
         )
         .await
     }
@@ -273,8 +314,9 @@ impl RemoteClient {
         self.request_json(
             reqwest::Method::GET,
             &format!(
-                "/v1/environments/{environment}/compatibility/{}",
-                super::runtime::encode_plan_path(release)
+                "/v1/environments/{}/compatibility/{}",
+                encode_path_segment(environment),
+                encode_path_segment(release)
             ),
         )
         .await
@@ -287,7 +329,10 @@ impl RemoteClient {
     ) -> anyhow::Result<()> {
         self.request_json_body(
             reqwest::Method::POST,
-            &format!("/v1/environments/{environment}/compatibility/evidence"),
+            &format!(
+                "/v1/environments/{}/compatibility/evidence",
+                encode_path_segment(environment)
+            ),
             Some(evidence),
         )
         .await
@@ -345,7 +390,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::criticality::EffectiveCriticality> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/products/{product}/criticality"),
+            &format!("/v1/products/{}/criticality", encode_path_segment(product)),
         )
         .await
     }
@@ -357,7 +402,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::criticality::EffectiveCriticality> {
         self.request_json_body(
             reqwest::Method::PUT,
-            &format!("/v1/products/{product}/criticality"),
+            &format!("/v1/products/{}/criticality", encode_path_segment(product)),
             Some(request),
         )
         .await
@@ -369,7 +414,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::criticality::EffectiveCriticality> {
         self.request_json(
             reqwest::Method::DELETE,
-            &format!("/v1/products/{product}/criticality"),
+            &format!("/v1/products/{}/criticality", encode_path_segment(product)),
         )
         .await
     }
@@ -390,7 +435,10 @@ impl RemoteClient {
         let encoded = pairs.finish();
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/products/{product}/webhooks/deliveries?{encoded}"),
+            &format!(
+                "/v1/products/{}/webhooks/deliveries?{encoded}",
+                encode_path_segment(product)
+            ),
         )
         .await
     }
@@ -419,7 +467,7 @@ impl RemoteClient {
     ) -> anyhow::Result<Option<tenkai::owner::OwnerView>> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/products/{product}/owner"),
+            &format!("/v1/products/{}/owner", encode_path_segment(product)),
         )
         .await
     }
@@ -431,7 +479,7 @@ impl RemoteClient {
     ) -> anyhow::Result<tenkai::owner::OwnerView> {
         self.request_json_body(
             reqwest::Method::PUT,
-            &format!("/v1/products/{product}/owner"),
+            &format!("/v1/products/{}/owner", encode_path_segment(product)),
             Some(request),
         )
         .await
@@ -443,7 +491,7 @@ impl RemoteClient {
     ) -> anyhow::Result<Option<tenkai::owner::OwnerView>> {
         self.request_json(
             reqwest::Method::DELETE,
-            &format!("/v1/products/{product}/owner"),
+            &format!("/v1/products/{}/owner", encode_path_segment(product)),
         )
         .await
     }
@@ -454,7 +502,7 @@ impl RemoteClient {
     ) -> anyhow::Result<Vec<tenkai::deploy_webhook::WebhookEndpoint>> {
         self.request_json(
             reqwest::Method::GET,
-            &format!("/v1/products/{product}/webhooks"),
+            &format!("/v1/products/{}/webhooks", encode_path_segment(product)),
         )
         .await
     }
@@ -466,7 +514,7 @@ impl RemoteClient {
     ) -> anyhow::Result<String> {
         self.request_json_body(
             reqwest::Method::PUT,
-            &format!("/v1/products/{product}/webhooks"),
+            &format!("/v1/products/{}/webhooks", encode_path_segment(product)),
             Some(endpoint),
         )
         .await
@@ -482,9 +530,12 @@ impl RemoteClient {
                 let query = url::form_urlencoded::Serializer::new(String::new())
                     .append_pair("url", url)
                     .finish();
-                format!("/v1/products/{product}/webhooks?{query}")
+                format!(
+                    "/v1/products/{}/webhooks?{query}",
+                    encode_path_segment(product)
+                )
             }
-            None => format!("/v1/products/{product}/webhooks"),
+            None => format!("/v1/products/{}/webhooks", encode_path_segment(product)),
         };
         self.request_json(reqwest::Method::DELETE, &path).await
     }
