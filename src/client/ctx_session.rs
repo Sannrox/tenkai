@@ -202,17 +202,15 @@ impl Ctx {
         self.plan_kind_list.tick_cell().is_some()
     }
 
-    /// Clone a tick-local context that shares one remote Plan kind-list among
-    /// concurrent environment workers. The original context is unchanged, so
+    /// Clone a tick-local context that shares one Plan kind-list among the
+    /// tick's environment workers, embedded or remote. The original context is unchanged, so
     /// inspect and other one-shot paths still list once per call.
     ///
     /// Dropping the returned guard ends the tick even if the caller is
     /// cancelled.
     pub(crate) fn with_shared_plan_retarget_tick(&self) -> (Self, PlanRetargetTickGuard) {
         let scan = Arc::new(PlanKindListTick::default());
-        if !self.is_embedded() {
-            scan.begin();
-        }
+        scan.begin();
         let mut ctx = self.clone();
         ctx.plan_kind_list = Arc::clone(&scan);
         (ctx, PlanRetargetTickGuard::new(scan))
@@ -220,7 +218,7 @@ impl Ctx {
 
     /// Kind-list plans for environment-index retarget detection.
     ///
-    /// During a reconcile tick this reuses one `ListObjects` transfer. Outside
+    /// During a reconcile tick this reuses one kind-list. Outside
     /// a tick it lists once per call so inspect is not served a stale catalog.
     pub(crate) async fn list_plans_for_retarget(&mut self) -> Result<Arc<Vec<Object>>> {
         Ok(Arc::clone(&self.list_plan_kind_snapshot().await?.objects))
