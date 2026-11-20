@@ -88,6 +88,15 @@ pub enum Action {
     Start,
     /// Record a live workload as deployed without mutating the target (#1082).
     Adopt,
+    /// Create a declared cluster namespace (#1096). Unknown to older replicas.
+    #[serde(rename = "create_cluster_namespace")]
+    CreateClusterNamespace,
+    /// Change a declared cluster namespace (#1096). Unknown to older replicas.
+    #[serde(rename = "update_cluster_namespace")]
+    UpdateClusterNamespace,
+    /// Delete a declared cluster namespace (#1096). Unknown to older replicas.
+    #[serde(rename = "delete_cluster_namespace")]
+    DeleteClusterNamespace,
 }
 
 impl std::fmt::Display for Action {
@@ -102,6 +111,9 @@ impl std::fmt::Display for Action {
             Action::Stop => "stop",
             Action::Start => "start",
             Action::Adopt => "adopt",
+            Action::CreateClusterNamespace => "create_cluster_namespace",
+            Action::UpdateClusterNamespace => "update_cluster_namespace",
+            Action::DeleteClusterNamespace => "delete_cluster_namespace",
         };
         f.write_str(s)
     }
@@ -195,6 +207,11 @@ pub struct Step {
     /// closed.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
+    /// Set only on a cluster-namespace step (#1096). Omitted on every other
+    /// step so their digests stay unchanged. A binary that predates the field
+    /// drops it; the action variants above still fail closed on deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_namespace: Option<crate::cluster_namespace::ClusterNamespaceStep>,
 }
 
 /// The issuer key an identity issuer step activates or re-wraps.
@@ -276,11 +293,22 @@ impl Step {
         !self.sealed.is_empty() || self.issuer.is_some() || self.identity_grants().next().is_some()
     }
 
-    /// Whether this step deploys its release. A re-wrap step and an
-    /// identity issuer step deploy nothing, so release checks (compatibility,
-    /// placement, deployment records) skip them.
+    /// Whether this step deploys its release. A re-wrap step, an identity
+    /// issuer step, and a cluster-namespace step deploy nothing, so release
+    /// checks (compatibility, placement, deployment records) skip them.
     pub fn deploys_release(&self) -> bool {
-        self.rewrap.is_none() && self.issuer.is_none()
+        self.rewrap.is_none() && self.issuer.is_none() && self.cluster_namespace.is_none()
+    }
+
+    /// Whether this step creates, changes, or deletes a cluster namespace.
+    pub fn is_cluster_namespace(&self) -> bool {
+        self.cluster_namespace.is_some()
+            || matches!(
+                self.action,
+                Action::CreateClusterNamespace
+                    | Action::UpdateClusterNamespace
+                    | Action::DeleteClusterNamespace
+            )
     }
 }
 
@@ -1072,6 +1100,7 @@ mod tests {
                 restore_identity: None,
                 target_changes: Vec::new(),
                 reason: String::new(),
+                cluster_namespace: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,

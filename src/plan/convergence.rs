@@ -1191,6 +1191,7 @@ async fn compute_snapshot_with_policy(
                             &instance
                         },
                     );
+                    crate::cluster_namespace::stamp_request(&mut request, &env_obj)?;
                     request.cluster_config_path =
                         crate::software_executor::cluster_config_path_from_properties(
                             &env_obj.properties,
@@ -1762,6 +1763,7 @@ async fn compute_snapshot_with_policy(
                 restore_identity,
                 target_changes: Vec::new(),
                 reason: String::new(),
+                cluster_namespace: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1770,7 +1772,82 @@ async fn compute_snapshot_with_policy(
     if stamp_live {
         persist_unmanaged_workloads(ctx, env, &env_obj).await?;
     }
+    let steps = with_cluster_namespace_steps(env, &env_obj, steps)?;
     Ok((inputs, steps, recalled_upgrade))
+}
+
+/// Create and update cluster-namespace steps run before product steps; deletes after.
+fn with_cluster_namespace_steps(
+    env: &str,
+    env_obj: &crate::pb::sekai::Object,
+    steps: Vec<Step>,
+) -> Result<Vec<Step>> {
+    let ns_steps = crate::cluster_namespace::plan_steps(env_obj)?;
+    if ns_steps.is_empty() {
+        return Ok(steps);
+    }
+    let env_id = env_id(env);
+    let to_step = |index: usize, ns: crate::cluster_namespace::ClusterNamespaceStep| {
+        let action = match ns.action {
+            crate::cluster_namespace::ClusterNamespaceAction::Create => {
+                Action::CreateClusterNamespace
+            }
+            crate::cluster_namespace::ClusterNamespaceAction::Update => {
+                Action::UpdateClusterNamespace
+            }
+            crate::cluster_namespace::ClusterNamespaceAction::Delete => {
+                Action::DeleteClusterNamespace
+            }
+        };
+        Step {
+            id: format!(
+                "{env_id}:cluster-namespace:{}:{}",
+                ns.name,
+                ns.action.as_str()
+            ),
+            order: index as u32,
+            product: String::new(),
+            instance: String::new(),
+            action,
+            from: None,
+            to: String::new(),
+            release_id: String::new(),
+            release_digest: String::new(),
+            artifact_digest: String::new(),
+            workdir: String::new(),
+            restore: None,
+            host: None,
+            sealed: Vec::new(),
+            rewrap: None,
+            issuer: None,
+            identity: None,
+            restore_identity: None,
+            target_changes: Vec::new(),
+            reason: String::new(),
+            cluster_namespace: Some(ns),
+        }
+    };
+    let mut prefix = Vec::new();
+    let mut suffix = Vec::new();
+    for ns in ns_steps {
+        if ns.action == crate::cluster_namespace::ClusterNamespaceAction::Delete {
+            suffix.push(ns);
+        } else {
+            prefix.push(ns);
+        }
+    }
+    let mut out = Vec::with_capacity(prefix.len() + steps.len() + suffix.len());
+    for ns in prefix {
+        out.push(to_step(out.len(), ns));
+    }
+    for mut step in steps {
+        step.order = out.len() as u32;
+        out.push(step);
+    }
+    for ns in suffix {
+        out.push(to_step(out.len(), ns));
+    }
+    Ok(out)
 }
 
 async fn attach_target_changes(
@@ -1810,6 +1887,7 @@ async fn attach_target_changes(
             &request.config_digest,
             step.instance_name(),
         );
+        crate::cluster_namespace::stamp_request(&mut request, env_obj)?;
         request.cluster_config_path =
             crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;
         request.secret_dir_path =
@@ -1993,6 +2071,9 @@ pub(super) fn model_routing_rollout_rank(kind: crate::manifest::ProductKind, act
         Action::Downgrade | Action::Rollback | Action::Remove | Action::Stop => {
             RolloutDirection::Reverse
         }
+        Action::CreateClusterNamespace
+        | Action::UpdateClusterNamespace
+        | Action::DeleteClusterNamespace => RolloutDirection::Forward,
     };
     kind.policy().rollout_rank(direction)
 }
@@ -3013,7 +3094,7 @@ async fn config_presets(
     steps: &[Step],
 ) -> Result<Vec<crate::environment::ConfigPresetView>> {
     let mut views: Vec<crate::environment::ConfigPresetView> = Vec::new();
-    for step in steps.iter().filter(|step| step.issuer.is_none()) {
+    for step in steps.iter().filter(|step| step.deploys_release()) {
         if views.iter().any(|view| view.product == step.product)
             || crate::environment::product_preset(env_obj, &step.product).is_none()
         {
@@ -3060,8 +3141,8 @@ async fn create_with_content(
 ) -> Result<Plan> {
     let mut steps = bind_host_steps(ctx, executors, env, steps).await?;
     refuse_unsupported_executors(ctx, executors, env, &steps).await?;
-    // An identity issuer step names no release to check.
-    for step in steps.iter().filter(|step| step.issuer.is_none()) {
+    // Identity issuer, re-wrap, and cluster-namespace steps name no release.
+    for step in steps.iter().filter(|step| step.deploys_release()) {
         require_same_executor(ctx, executors, step).await?;
         admit_step_overlay_schema(ctx, env, step).await?;
     }
@@ -3253,6 +3334,7 @@ pub(super) async fn rollback_step_with_recovery(
         restore_identity,
         target_changes: Vec::new(),
         reason: String::new(),
+        cluster_namespace: None,
     })
 }
 
@@ -3313,6 +3395,7 @@ async fn pin_same_version_step(ctx: &mut Ctx, pin: SameVersionPin<'_>) -> Result
         restore_identity: None,
         target_changes: Vec::new(),
         reason,
+        cluster_namespace: None,
     })
 }
 
@@ -3500,6 +3583,7 @@ pub(super) async fn adopt_step(
         restore_identity: None,
         target_changes: Vec::new(),
         reason: String::new(),
+        cluster_namespace: None,
     };
     attach_target_changes(
         ctx,
@@ -3607,6 +3691,7 @@ pub(super) async fn rewrap_steps(
             }),
             target_changes: Vec::new(),
             reason: String::new(),
+            cluster_namespace: None,
         });
     }
     Ok((steps, undeployed))

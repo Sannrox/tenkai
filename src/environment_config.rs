@@ -4,7 +4,8 @@
 //! `PUT`/`DELETE` routes under `/v1/environments/{environment}/` change its
 //! facts, labels, constraints, maintenance windows, webhooks, owner, approval policy,
 //! runner attestation policy (#675), declared criticality (#694),
-//! dependency bindings (ADR 0044), and sealed secret values (ADR 0045). Every
+//! dependency bindings (ADR 0044), sealed secret values (ADR 0045), and
+//! cluster namespaces (#1096). Every
 //! change runs the same embedded function, and so the same validation, as the
 //! CLI. Every change also appends an immutable audit event that records the
 //! actor and the reason.
@@ -165,6 +166,28 @@ pub enum EnvironmentConfigChange {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         present_in_target: bool,
     },
+    /// Declare or replace a cluster namespace (#1096). Does not create it in the cluster.
+    SetClusterNamespace {
+        name: String,
+        spec: crate::cluster_namespace::ClusterNamespaceSpec,
+    },
+    /// Drop a cluster namespace declaration. The namespace stays in the cluster.
+    ClearClusterNamespace {
+        name: String,
+    },
+    /// Queue an approved delete of a cluster namespace.
+    DeleteClusterNamespace {
+        name: String,
+    },
+    /// Bind an instance to a declared cluster namespace.
+    BindClusterNamespace {
+        instance: String,
+        name: String,
+    },
+    /// Restore the default cluster namespace (the environment name) for an instance.
+    UnbindClusterNamespace {
+        instance: String,
+    },
 }
 
 /// The configuration resource a route serves.
@@ -181,6 +204,9 @@ pub enum ConfigResource {
     Criticality,
     Bindings,
     SealedSecrets,
+    ClusterNamespaces,
+    ClusterNamespaceDelete,
+    ClusterNamespaceBindings,
 }
 
 impl ConfigResource {
@@ -197,6 +223,8 @@ impl ConfigResource {
             Self::Criticality => "criticality",
             Self::Bindings => "bindings",
             Self::SealedSecrets => "sealed-secrets",
+            Self::ClusterNamespaces | Self::ClusterNamespaceDelete => "cluster-namespaces",
+            Self::ClusterNamespaceBindings => "cluster-namespace-bindings",
         }
     }
 }
@@ -225,6 +253,13 @@ impl EnvironmentConfigChange {
             Self::SetSealedSecret { .. }
             | Self::SetSealedRecoveryKey { .. }
             | Self::DeleteSealedSecret { .. } => ConfigResource::SealedSecrets,
+            Self::SetClusterNamespace { .. } | Self::ClearClusterNamespace { .. } => {
+                ConfigResource::ClusterNamespaces
+            }
+            Self::DeleteClusterNamespace { .. } => ConfigResource::ClusterNamespaceDelete,
+            Self::BindClusterNamespace { .. } | Self::UnbindClusterNamespace { .. } => {
+                ConfigResource::ClusterNamespaceBindings
+            }
         }
     }
 
@@ -243,6 +278,8 @@ impl EnvironmentConfigChange {
                 | Self::ClearCriticality
                 | Self::Unbind { .. }
                 | Self::DeleteSealedSecret { .. }
+                | Self::ClearClusterNamespace { .. }
+                | Self::UnbindClusterNamespace { .. }
         )
     }
 
@@ -256,12 +293,27 @@ impl EnvironmentConfigChange {
         }
     }
 
+    /// Cluster namespace named in the route path.
+    pub fn cluster_namespace_name(&self) -> Option<&str> {
+        match self {
+            Self::SetClusterNamespace { name, .. }
+            | Self::ClearClusterNamespace { name }
+            | Self::DeleteClusterNamespace { name } => Some(name),
+            _ => None,
+        }
+    }
+
     /// Request path of this change for `environment`.
     pub fn path(&self, environment: &str) -> String {
         let segment = self.resource().segment();
-        match self.window_name() {
-            Some(name) => format!("/v1/environments/{environment}/{segment}/{name}"),
-            None => format!("/v1/environments/{environment}/{segment}"),
+        match self {
+            Self::DeleteClusterNamespace { name } => {
+                format!("/v1/environments/{environment}/{segment}/{name}/delete")
+            }
+            _ => match self.window_name().or_else(|| self.cluster_namespace_name()) {
+                Some(name) => format!("/v1/environments/{environment}/{segment}/{name}"),
+                None => format!("/v1/environments/{environment}/{segment}"),
+            },
         }
     }
 
@@ -291,6 +343,11 @@ impl EnvironmentConfigChange {
             Self::SetSealedSecret { .. } => "set_sealed_secret",
             Self::SetSealedRecoveryKey { .. } => "set_sealed_recovery_key",
             Self::DeleteSealedSecret { .. } => "delete_sealed_secret",
+            Self::SetClusterNamespace { .. } => "set_cluster_namespace",
+            Self::ClearClusterNamespace { .. } => "clear_cluster_namespace",
+            Self::DeleteClusterNamespace { .. } => "delete_cluster_namespace",
+            Self::BindClusterNamespace { .. } => "bind_cluster_namespace",
+            Self::UnbindClusterNamespace { .. } => "unbind_cluster_namespace",
         }
     }
 }
@@ -308,8 +365,8 @@ pub fn require_route(
             change.action()
         );
     }
-    if change.window_name() != path_window {
-        bail!("maintenance window in the body does not match the path");
+    if change.window_name() != path_window && change.cluster_namespace_name() != path_window {
+        bail!("name in the body does not match the path");
     }
     Ok(())
 }
@@ -441,6 +498,18 @@ pub fn validate(change: &EnvironmentConfigChange) -> Result<()> {
             validate_identifier("instance", instance)?;
             crate::sealed_secret::SecretRef::new(secret, key).map(drop)
         }
+        Change::SetClusterNamespace { name, spec } => {
+            crate::cluster_namespace::validate_name(name)?;
+            crate::cluster_namespace::validate_spec(spec)
+        }
+        Change::ClearClusterNamespace { name } | Change::DeleteClusterNamespace { name } => {
+            crate::cluster_namespace::validate_name(name)
+        }
+        Change::BindClusterNamespace { instance, name } => {
+            validate_identifier("instance", instance)?;
+            crate::cluster_namespace::validate_name(name)
+        }
+        Change::UnbindClusterNamespace { instance } => validate_identifier("instance", instance),
     }
 }
 
@@ -766,6 +835,21 @@ async fn mutate(
         Change::SetSealedRecoveryKey { public_key } => {
             let key = crate::sealing_key::SealingPublicKey::from_wire(public_key)?;
             crate::sealed_secret::set_recovery_key_locked(ctx, environment, &key, lease).await?
+        }
+        Change::SetClusterNamespace { name, spec } => {
+            crate::cluster_namespace::set(ctx, environment, name, spec.clone()).await?
+        }
+        Change::ClearClusterNamespace { name } => {
+            crate::cluster_namespace::clear(ctx, environment, name).await?
+        }
+        Change::DeleteClusterNamespace { name } => {
+            crate::cluster_namespace::request_delete(ctx, environment, name).await?
+        }
+        Change::BindClusterNamespace { instance, name } => {
+            crate::cluster_namespace::bind(ctx, environment, instance, name).await?
+        }
+        Change::UnbindClusterNamespace { instance } => {
+            crate::cluster_namespace::unbind(ctx, environment, instance).await?
         }
         Change::DeleteSealedSecret {
             instance,

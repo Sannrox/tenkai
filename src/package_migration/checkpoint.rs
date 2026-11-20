@@ -291,6 +291,7 @@ pub(super) async fn create_pin_plan(
         restore_identity,
         target_changes: Vec::new(),
         reason: String::new(),
+        cluster_namespace: None,
     };
     plan::create_from_steps(ctx, &record.environment, vec![step]).await
 }

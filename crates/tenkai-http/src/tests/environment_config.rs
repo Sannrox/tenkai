@@ -191,6 +191,14 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
             owner: "alice".into(),
             reason: "pci".into(),
         },
+        Change::SetClusterNamespace {
+            name: "payments".into(),
+            spec: tenkai::cluster_namespace::ClusterNamespaceSpec {
+                labels: std::collections::BTreeMap::from([("team".into(), "pay".into())]),
+                quota: std::collections::BTreeMap::from([("pods".into(), "10".into())]),
+                ..tenkai::cluster_namespace::ClusterNamespaceSpec::default()
+            },
+        },
     ];
 
     client
@@ -270,6 +278,11 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
                     }),
                 )
             }),
+            report
+                .cluster_namespaces
+                .into_iter()
+                .map(|row| (row.name, row.state, row.labels, row.quota))
+                .collect::<Vec<_>>(),
         )
     };
     let remote = configured(client.inspect_environment("edge").await.unwrap());
@@ -279,6 +292,8 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
         remote.1.get("architecture").map(String::as_str),
         Some("arm64")
     );
+    assert_eq!(remote.6[0].0, "payments");
+    assert_eq!(remote.6[0].1, "declared");
     assert_eq!(
         tenkai::deploy_webhook::list_environment_webhooks(&mut ctx, "edge")
             .await

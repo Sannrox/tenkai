@@ -188,6 +188,7 @@ pub mod change_stream;
 pub mod channel_promotion;
 pub mod client;
 pub mod clock_guard;
+pub mod cluster_namespace;
 pub mod command_result;
 pub mod connectivity;
 pub mod content_inventory;

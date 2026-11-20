@@ -13,10 +13,12 @@ use tenkai::tenant_store::TenantOperationalStore;
 use super::auth::{import_development_fixture, reset_development_fixture};
 use super::config::ServerConfig;
 use super::environment_config::{
-    configure_approval_policy, configure_bindings, configure_constraints, configure_criticality,
-    configure_facts, configure_labels, configure_maintenance_window, configure_owner,
-    configure_runner_attestation, configure_sealed_secrets, configure_webhooks,
-    environment_label_history, list_environment_labels, list_sealed_secrets, register_environment,
+    configure_approval_policy, configure_bindings, configure_cluster_namespace,
+    configure_cluster_namespace_bindings, configure_cluster_namespace_delete,
+    configure_constraints, configure_criticality, configure_facts, configure_labels,
+    configure_maintenance_window, configure_owner, configure_runner_attestation,
+    configure_sealed_secrets, configure_webhooks, environment_label_history,
+    list_environment_labels, list_sealed_secrets, register_environment,
 };
 use super::exports::{create_export, download_export, inspect_export, list_exports};
 use super::grant_rules::{create_grant_rule, list_grant_rules, remove_grant_rule};
@@ -298,6 +300,18 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/bindings",
             put(configure_bindings).delete(configure_bindings),
+        )
+        .route(
+            "/v1/environments/{environment}/cluster-namespaces/{name}",
+            put(configure_cluster_namespace).delete(configure_cluster_namespace),
+        )
+        .route(
+            "/v1/environments/{environment}/cluster-namespaces/{name}/delete",
+            put(configure_cluster_namespace_delete),
+        )
+        .route(
+            "/v1/environments/{environment}/cluster-namespace-bindings",
+            put(configure_cluster_namespace_bindings).delete(configure_cluster_namespace_bindings),
         )
         .route(
             "/v1/environments/{environment}/sealed-secrets/rewrap",

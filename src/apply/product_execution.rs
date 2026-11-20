@@ -644,6 +644,7 @@ pub(super) async fn removal_request(
     request.secret_dir_path =
         crate::software_executor::secret_dir_from_properties(&env_obj.properties)?;
     request.apply_attempt = apply_attempt;
+    crate::cluster_namespace::stamp_request(&mut request, &env_obj)?;
     Ok(request)
 }
 

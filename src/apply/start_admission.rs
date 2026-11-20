@@ -63,7 +63,7 @@ pub(super) async fn admit(
     for step in plan
         .steps
         .iter()
-        .filter(|step| step.action != Action::Remove)
+        .filter(|step| step.deploys_release() && step.action != Action::Remove)
     {
         crate::software_compatibility::require_release(
             ctx,
@@ -244,7 +244,12 @@ async fn maintenance_decision(
         },
     };
     let mut eligibility = env_eligibility;
-    let mut products: Vec<String> = plan.steps.iter().map(|step| step.product.clone()).collect();
+    let mut products: Vec<String> = plan
+        .steps
+        .iter()
+        .filter(|step| step.deploys_release())
+        .map(|step| step.product.clone())
+        .collect();
     products.sort();
     products.dedup();
     for product in products {
@@ -459,6 +464,7 @@ mod tests {
             restore_identity: None,
             target_changes: Vec::new(),
             reason: String::new(),
+            cluster_namespace: None,
         }
     }
 

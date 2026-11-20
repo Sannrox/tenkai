@@ -46,7 +46,7 @@ pub(super) async fn check(
 ) -> Result<Vec<ArtifactAvailability>> {
     let mut artifacts = Vec::new();
     let mut seen = BTreeSet::new();
-    for step in steps.iter().filter(|step| step.issuer.is_none()) {
+    for step in steps.iter().filter(|step| step.deploys_release()) {
         let restore = step.restore.as_ref().map(|pin| pin.release_id.as_str());
         for release_id in std::iter::once(step.release_id.as_str()).chain(restore) {
             if !seen.insert(release_id.to_string()) {

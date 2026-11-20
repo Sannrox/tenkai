@@ -278,7 +278,12 @@ pub(crate) async fn complete_runtime_work(
     // and issuer were stored under the environment lease before this ran.
     // Rewriting the environment here could restore wraps a revocation
     // dropped meanwhile, so only the plan moves on.
-    if deploying.is_empty() {
+    if deploying.is_empty()
+        && !stored
+            .steps
+            .iter()
+            .any(|step| step.cluster_namespace.is_some())
+    {
         crate::plan::transition(
             ctx,
             &mut stored,
@@ -360,6 +365,18 @@ pub(crate) async fn complete_runtime_work(
                 observed_at,
             )
             .await?;
+        }
+        for step in &stored.steps {
+            let Some(ns) = &step.cluster_namespace else {
+                continue;
+            };
+            let succeeded = completion
+                .receipts
+                .iter()
+                .any(|receipt| receipt.step_id == step.id && receipt.succeeded);
+            if succeeded {
+                crate::cluster_namespace::apply_record(object, ns)?;
+            }
         }
         let subscribed: std::collections::HashSet<String> =
             crate::environment::list_subscriptions(ctx, object)
@@ -3178,6 +3195,7 @@ mod tests {
             restore_identity: None,
             target_changes: Vec::new(),
             reason: String::new(),
+            cluster_namespace: None,
         };
         // What an older runtime sends: no removal field.
         let older: super::RuntimeReleaseRequest =
@@ -3294,6 +3312,7 @@ mod tests {
                     fingerprint: new.clone(),
                     recovered: Vec::new(),
                 }),
+                cluster_namespace: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,
@@ -3427,6 +3446,7 @@ mod tests {
                 fingerprint: recipient.clone(),
                 recovered,
             }),
+            cluster_namespace: None,
         };
         let plan = |step| Plan {
             format_version: crate::plan::PLAN_FORMAT_VERSION,
@@ -3559,6 +3579,7 @@ mod tests {
                 fingerprint: recipient.clone(),
                 recovered: Vec::new(),
             }),
+            cluster_namespace: None,
         };
         let wrap = |fingerprint: &str, digest: &str| crate::sealed_secret::RecipientWrap {
             secret: "db".into(),

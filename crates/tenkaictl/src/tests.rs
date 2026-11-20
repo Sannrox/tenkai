@@ -651,6 +651,51 @@ fn remote_configuration_commands_map_to_their_changes() {
     };
     assert!(crate::remote_env_config::change(&command).is_none());
 
+    let cluster_namespace = Cli::try_parse_from([
+        "tenkaictl",
+        "env",
+        "cluster-namespace",
+        "set",
+        "prod",
+        "payments",
+        "--label",
+        "team=pay",
+        "--annotation",
+        "owner=payments",
+        "--quota",
+        "pods=10",
+        "--generation",
+        "7",
+        "--reason",
+        "declare ns",
+    ])
+    .unwrap();
+    let Command::Env { command } = cluster_namespace.command else {
+        panic!("expected env command");
+    };
+    let (env, change, remote) = crate::remote_env_config::change(&command).unwrap().unwrap();
+    assert_eq!(env, "prod");
+    assert_eq!(
+        change.path(env),
+        "/v1/environments/prod/cluster-namespaces/payments"
+    );
+    match change {
+        tenkai::environment_config::EnvironmentConfigChange::SetClusterNamespace { name, spec } => {
+            assert_eq!(name, "payments");
+            assert_eq!(spec.labels.get("team").map(String::as_str), Some("pay"));
+            assert_eq!(
+                spec.annotations.get("owner").map(String::as_str),
+                Some("payments")
+            );
+            assert_eq!(spec.quota.get("pods").map(String::as_str), Some("10"));
+        }
+        other => panic!("expected set cluster namespace, got {other:?}"),
+    }
+    assert_eq!(
+        (remote.generation, remote.reason.as_deref()),
+        (Some(7), Some("declare ns"))
+    );
+
     let bind = Cli::try_parse_from([
         "tenkaictl",
         "env",

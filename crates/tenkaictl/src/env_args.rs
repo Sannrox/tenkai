@@ -127,6 +127,11 @@ pub(crate) enum EnvCommand {
     },
     /// Set the environment connectivity class (connected, intermittent, isolated).
     Connectivity { env: String, class: String },
+    /// Declare, bind, or delete cluster namespaces (#1096).
+    ClusterNamespace {
+        #[command(subcommand)]
+        command: ClusterNamespaceCommand,
+    },
     /// Bind a dependent instance's contract to a provider instance.
     Bind {
         env: String,
@@ -248,6 +253,57 @@ pub(crate) enum ArtifactMirrorCommand {
     Set { env: String, spec: String },
     /// Clear the mirror for one origin registry.
     Clear { env: String, registry: String },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ClusterNamespaceCommand {
+    /// Declare or replace a cluster namespace. Does not create it in the cluster.
+    Set {
+        env: String,
+        name: String,
+        /// `key=value` label. Repeatable.
+        #[arg(long = "label", value_name = "KEY=VALUE")]
+        labels: Vec<String>,
+        /// `key=value` annotation. Repeatable.
+        #[arg(long = "annotation", value_name = "KEY=VALUE")]
+        annotations: Vec<String>,
+        /// `resource=quantity` ResourceQuota hard entry. Repeatable.
+        #[arg(long = "quota", value_name = "RESOURCE=QUANTITY")]
+        quota: Vec<String>,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
+    /// Drop a declaration. The namespace stays in the cluster.
+    Clear {
+        env: String,
+        name: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
+    /// Queue an approved delete of the cluster namespace.
+    Delete {
+        env: String,
+        name: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
+    /// Bind an instance to a declared cluster namespace.
+    Bind {
+        env: String,
+        instance: String,
+        name: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
+    /// Restore the default cluster namespace (the environment name).
+    Unbind {
+        env: String,
+        instance: String,
+        #[command(flatten)]
+        remote: RemoteChange,
+    },
+    /// List declared cluster namespaces and the instances in them.
+    List { env: String },
 }
 
 #[derive(Subcommand)]

@@ -400,8 +400,14 @@ fn evidence_release(step: &crate::plan::Step) -> Option<&str> {
         Action::Install | Action::Upgrade | Action::Downgrade | Action::Restart | Action::Start => {
             Some(&step.release_id)
         }
-        // A removal, stop, or adopt deploys nothing to gather canary evidence on.
-        Action::Remove | Action::Stop | Action::Adopt => None,
+        // A removal, stop, adopt, or cluster-namespace step deploys no release
+        // to gather canary evidence on.
+        Action::Remove
+        | Action::Stop
+        | Action::Adopt
+        | Action::CreateClusterNamespace
+        | Action::UpdateClusterNamespace
+        | Action::DeleteClusterNamespace => None,
     }
 }
 
@@ -509,6 +515,7 @@ mod tests {
                 restore_identity: None,
                 target_changes: Vec::new(),
                 reason: String::new(),
+                cluster_namespace: None,
             }],
             state,
             gates_skipped: Some(false),

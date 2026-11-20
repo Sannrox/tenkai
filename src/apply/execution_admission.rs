@@ -170,6 +170,9 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
         }
     }
     for step in &plan.steps {
+        if step.is_cluster_namespace() {
+            continue;
+        }
         let instance = step.instance_name();
         // The plan digest and its approval cover the sealed digests a step
         // names; a rotation since then needs its own plan.
@@ -336,6 +339,7 @@ mod tests {
                 restore_identity: None,
                 target_changes: Vec::new(),
                 reason: String::new(),
+                cluster_namespace: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,
@@ -597,6 +601,7 @@ mod tests {
                 restore_identity: None,
                 target_changes: Vec::new(),
                 reason: String::new(),
+                cluster_namespace: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,

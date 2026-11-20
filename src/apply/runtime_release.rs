@@ -46,6 +46,12 @@ pub(crate) async fn runtime_release(
             step.id
         )));
     }
+    if step.is_cluster_namespace() {
+        return Err(refused(anyhow!(
+            "step {} manages a cluster namespace and has no release",
+            step.id
+        )));
+    }
     if step.rewrap.is_some() {
         if restore {
             return Err(refused(anyhow!(

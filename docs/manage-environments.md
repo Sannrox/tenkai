@@ -517,6 +517,38 @@ satisfying version is refused. Unbinding a required contract on an installed
 dependent is refused. The dependency document names the provider instance;
 changing a binding re-renders the dependent.
 
+## Cluster namespaces
+
+An environment may declare Kubernetes namespaces as managed objects. Create,
+change, and delete run only as approved plan steps. Removing a declaration
+never deletes the namespace in the cluster.
+
+```bash
+tenkaictl env cluster-namespace set prod payments --label team=pay --annotation owner=payments --quota pods=10
+tenkaictl env cluster-namespace bind prod api payments
+tenkaictl env cluster-namespace list prod
+tenkaictl env cluster-namespace delete prod payments   # queued; the next approved plan removes it
+tenkaictl env cluster-namespace clear prod payments    # drop the declaration; the cluster object stays
+```
+
+Remote calls take `--generation` and `--reason` like facts. HTTP is
+`PUT`/`DELETE /v1/environments/{environment}/cluster-namespaces/{name}`,
+`PUT .../cluster-namespaces/{name}/delete`, and
+`PUT`/`DELETE .../cluster-namespace-bindings`.
+
+- **Default.** With no declarations, instances deploy into a namespace named
+  for the environment, as they do today.
+- **Bind.** An instance may name one declared cluster namespace. The default
+  is the environment name. Changing a binding is refused while the instance
+  is deployed.
+- **Delete.** Only a namespace this environment has applied. Refused while any
+  instance is bound to that namespace. `default`, `kube-system`, `kube-public`,
+  and `kube-node-lease` are never deleted. A declaration that was never applied
+  is dropped with `clear`, which never deletes in the cluster.
+- **Status.** `env inspect` and `status` list declared cluster namespaces,
+  their labels and quota, the instances in each, and `declared` /
+  `applied` / `pending_delete`.
+
 A binding is also the only peer authorization
 ([ADR 0046](decisions/0046-workload-identity-and-peer-policy.md) §5). When
 the dependent or the provider holds a

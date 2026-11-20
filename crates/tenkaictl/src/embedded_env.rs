@@ -281,6 +281,9 @@ pub(crate) async fn run(
         EnvCommand::Criticality { command } => {
             crate::embedded_env_config::criticality(ctx, command).await?;
         }
+        EnvCommand::ClusterNamespace { command } => {
+            crate::embedded_env_config::cluster_namespace(ctx, command).await?;
+        }
         EnvCommand::Hold {
             env,
             generation: _,

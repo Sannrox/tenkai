@@ -1915,15 +1915,24 @@ impl RuntimeClient {
         step: &Step,
     ) -> Result<RuntimeStepReceipt> {
         // A sealed value is never handed to a command or program (ADR 0048
-        // §4), nor is the identity issuer key (ADR 0046 §2).
-        if !step.sealed.is_empty() || step.issuer.is_some() {
+        // §4), nor is the identity issuer key (ADR 0046 §2). Cluster-namespace
+        // steps run on the built-in cluster executor.
+        if !step.sealed.is_empty() || step.issuer.is_some() || step.is_cluster_namespace() {
+            let detail = if step.is_cluster_namespace() {
+                format!(
+                    "step {} manages a cluster namespace; operator executor programs never receive it (run the runtime in built-in mode)",
+                    step.id
+                )
+            } else {
+                format!(
+                    "step {} writes sealed secrets; operator executor programs never receive them (run the runtime in built-in mode)",
+                    step.id
+                )
+            };
             return Ok(RuntimeStepReceipt {
                 step_id: step.id.clone(),
                 succeeded: false,
-                detail: format!(
-                    "step {} writes sealed secrets; operator executor programs never receive them (run the runtime in built-in mode)",
-                    step.id
-                ),
+                detail,
                 wraps: Vec::new(),
             });
         }

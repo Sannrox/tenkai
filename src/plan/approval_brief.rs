@@ -451,6 +451,7 @@ mod tests {
             restore_identity: None,
             target_changes,
             reason: String::new(),
+            cluster_namespace: None,
         }
     }
 

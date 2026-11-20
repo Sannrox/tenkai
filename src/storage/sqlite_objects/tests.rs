@@ -447,6 +447,7 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
             restore_identity: None,
             target_changes: Vec::new(),
             reason: String::new(),
+            cluster_namespace: None,
         }],
         state: PlanState::Computed,
         gates_skipped: None,

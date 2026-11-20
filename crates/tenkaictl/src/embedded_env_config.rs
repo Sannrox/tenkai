@@ -2,9 +2,9 @@ use anyhow::{Result, bail};
 use tenkai::{client, inventory, maintenance, plan};
 
 use crate::env_args::{
-    ApprovalPolicyCommand, ArtifactMirrorCommand, ClusterConfigCommand, ConstraintsCommand,
-    CriticalityCommand, DockerSecretsCommand, FactsCommand, LabelsCommand, MaintenanceCommand,
-    OverlayCommand, OwnerCommand, RunnerAttestationCommand, WebhooksCommand,
+    ApprovalPolicyCommand, ArtifactMirrorCommand, ClusterConfigCommand, ClusterNamespaceCommand,
+    ConstraintsCommand, CriticalityCommand, DockerSecretsCommand, FactsCommand, LabelsCommand,
+    MaintenanceCommand, OverlayCommand, OwnerCommand, RunnerAttestationCommand, WebhooksCommand,
 };
 
 pub(crate) async fn maintenance(ctx: &mut client::Ctx, command: MaintenanceCommand) -> Result<()> {
@@ -294,6 +294,103 @@ pub(crate) async fn artifact_mirror(
                 "{}",
                 plan::clear_artifact_mirror(ctx, &env, &registry).await?
             );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn cluster_namespace_spec(
+    labels: &[String],
+    annotations: &[String],
+    quota: &[String],
+) -> Result<tenkai::cluster_namespace::ClusterNamespaceSpec> {
+    Ok(tenkai::cluster_namespace::ClusterNamespaceSpec {
+        labels: parse_pairs(labels, "label")?,
+        annotations: parse_pairs(annotations, "annotation")?,
+        quota: parse_pairs(quota, "quota")?,
+        ..tenkai::cluster_namespace::ClusterNamespaceSpec::default()
+    })
+}
+
+fn parse_pairs(
+    values: &[String],
+    what: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut map = std::collections::BTreeMap::new();
+    for spec in values {
+        let Some((key, value)) = spec.split_once('=') else {
+            bail!("expected {what} KEY=VALUE, got {spec:?}");
+        };
+        if key.is_empty() || value.is_empty() {
+            bail!("expected {what} KEY=VALUE, got {spec:?}");
+        }
+        map.insert(key.to_string(), value.to_string());
+    }
+    Ok(map)
+}
+
+pub(crate) async fn cluster_namespace(
+    ctx: &mut client::Ctx,
+    command: ClusterNamespaceCommand,
+) -> Result<()> {
+    match command {
+        ClusterNamespaceCommand::Set {
+            env,
+            name,
+            labels,
+            annotations,
+            quota,
+            ..
+        } => {
+            let spec = cluster_namespace_spec(&labels, &annotations, &quota)?;
+            println!(
+                "{}",
+                tenkai::cluster_namespace::set(ctx, &env, &name, spec).await?
+            );
+        }
+        ClusterNamespaceCommand::Clear { env, name, .. } => {
+            println!(
+                "{}",
+                tenkai::cluster_namespace::clear(ctx, &env, &name).await?
+            );
+        }
+        ClusterNamespaceCommand::Delete { env, name, .. } => {
+            println!(
+                "{}",
+                tenkai::cluster_namespace::request_delete(ctx, &env, &name).await?
+            );
+        }
+        ClusterNamespaceCommand::Bind {
+            env,
+            instance,
+            name,
+            ..
+        } => {
+            println!(
+                "{}",
+                tenkai::cluster_namespace::bind(ctx, &env, &instance, &name).await?
+            );
+        }
+        ClusterNamespaceCommand::Unbind { env, instance, .. } => {
+            println!(
+                "{}",
+                tenkai::cluster_namespace::unbind(ctx, &env, &instance).await?
+            );
+        }
+        ClusterNamespaceCommand::List { env } => {
+            let env_obj = plan::inspect_environment(ctx, &env).await?;
+            if env_obj.cluster_namespaces.is_empty() {
+                println!("{env} declares no cluster namespaces");
+                return Ok(());
+            }
+            for row in env_obj.cluster_namespaces {
+                let instances = if row.instances.is_empty() {
+                    "-".into()
+                } else {
+                    row.instances.join(",")
+                };
+                println!("{} {} instances={instances}", row.name, row.state);
+            }
         }
     }
     Ok(())

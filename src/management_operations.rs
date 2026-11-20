@@ -5081,6 +5081,7 @@ mod tests {
             restore_identity: None,
             target_changes: Vec::new(),
             reason: String::new(),
+            cluster_namespace: None,
         };
         use crate::apply::{Outcome, StepOutcomeStatus};
         let outcomes = [
@@ -5213,6 +5214,7 @@ mod tests {
                     sealed_recovery_warning: None,
                     identity_issuer: None,
                     identity_issuer_waiting: Vec::new(),
+                    cluster_namespaces: Vec::new(),
                 })
             })
         }

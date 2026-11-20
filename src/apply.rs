@@ -69,7 +69,7 @@ async fn admit_plan_artifact_pulls(
 ) -> Result<()> {
     let env_object = crate::environment::environment(ctx, environment).await?;
     let mut seen = std::collections::BTreeSet::new();
-    for step in steps {
+    for step in steps.iter().filter(|step| step.deploys_release()) {
         let restore_id = step.restore.as_ref().map(|pin| pin.release_id.as_str());
         for release_id in std::iter::once(step.release_id.as_str()).chain(restore_id) {
             if !seen.insert(release_id.to_string()) {

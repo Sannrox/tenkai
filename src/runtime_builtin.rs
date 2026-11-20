@@ -111,6 +111,9 @@ pub(crate) async fn execute_step(
     if let Some(rewrap) = &step.rewrap {
         return run.rewrap(step, rewrap).await;
     }
+    if let Some(ns) = &step.cluster_namespace {
+        return run.cluster_namespace(step, ns).await;
+    }
     let target = match run.prepare(step, false).await? {
         Ok(target) => target,
         Err(detail) => return Ok(receipt(Err(detail))),
@@ -576,6 +579,36 @@ impl Run<'_> {
                 )),
                 wraps: Vec::new(),
             },
+        })
+    }
+
+    /// Apply one cluster-namespace step with this runtime's cluster executor.
+    async fn cluster_namespace(
+        &self,
+        step: &Step,
+        ns: &crate::cluster_namespace::ClusterNamespaceStep,
+    ) -> Result<RuntimeStepReceipt> {
+        let request = crate::cluster_namespace::ClusterNamespaceApplyRequest {
+            environment: self.client.environment().to_string(),
+            cluster_config_path: self.config.cluster_config.clone(),
+            name: ns.name.clone(),
+            action: ns.action,
+            spec: ns.spec.clone(),
+        };
+        let result = match self.config.executors.cluster_namespace_adapter() {
+            Ok(adapter) => adapter
+                .apply_cluster_namespace(&request)
+                .map_err(|error| format!("{error:#}")),
+            Err(error) => Err(format!("{error:#}")),
+        };
+        Ok(RuntimeStepReceipt {
+            step_id: step.id.clone(),
+            succeeded: result.is_ok(),
+            detail: match &result {
+                Ok(()) => format!("{} cluster namespace {}", ns.action.as_str(), ns.name),
+                Err(detail) => detail.clone(),
+            },
+            wraps: Vec::new(),
         })
     }
 
@@ -2057,6 +2090,7 @@ mod tests {
             restore_identity: None,
             target_changes: Vec::new(),
             reason: String::new(),
+            cluster_namespace: None,
         };
         Case {
             config: BuiltinConfig {
