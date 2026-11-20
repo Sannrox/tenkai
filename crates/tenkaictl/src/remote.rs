@@ -983,6 +983,27 @@ pub(crate) async fn run(
             }
             Ok(())
         }
+        Command::Env {
+            command:
+                EnvCommand::ClusterNamespace {
+                    command: crate::env_args::ClusterNamespaceCommand::List { env },
+                },
+        } => {
+            let report = client.inspect_environment(&env).await?;
+            if report.cluster_namespaces.is_empty() {
+                println!("{env} declares no cluster namespaces");
+                return Ok(());
+            }
+            for row in report.cluster_namespaces {
+                let instances = if row.instances.is_empty() {
+                    "-".into()
+                } else {
+                    row.instances.join(",")
+                };
+                println!("{} {} instances={instances}", row.name, row.state);
+            }
+            Ok(())
+        }
         Command::Bundle { .. } => {
             bail!("bundle build is available only with --target embedded")
         }

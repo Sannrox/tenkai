@@ -68,7 +68,7 @@ impl HelmSoftwareExecutor {
                 .cluster_config_path
                 .as_deref()
                 .context("writing sealed secrets needs a cluster configuration")?;
-            let api = LiveSecrets::connect(cluster_config, &request.environment)?;
+            let api = LiveSecrets::connect(cluster_config, request.target_namespace())?;
             let sets = helm_secrets::write(&api, request)?;
             helm_secrets::write_identity(&api, request)?;
             Some((api, sets))
@@ -81,7 +81,7 @@ impl HelmSoftwareExecutor {
             .arg(request.instance_name())
             .arg(&request.workdir)
             .arg("--namespace")
-            .arg(&request.environment)
+            .arg(request.target_namespace())
             .arg("--create-namespace")
             .arg("--wait")
             .arg("--timeout")
@@ -170,7 +170,7 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
             .arg("uninstall")
             .arg(request.instance_name())
             .arg("--namespace")
-            .arg(&request.environment)
+            .arg(request.target_namespace())
             .arg("--wait")
             // A removal retried after a crash finds the release gone.
             .arg("--ignore-not-found");
@@ -204,7 +204,7 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
             .arg("status")
             .arg(request.instance_name())
             .arg("--namespace")
-            .arg(&request.environment)
+            .arg(request.target_namespace())
             .output()
             .with_context(|| format!("starting helm status via {}", self.helm_binary.display()))?;
         if !output.status.success() {
@@ -225,7 +225,7 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
             .arg("values")
             .arg(request.instance_name())
             .arg("--namespace")
-            .arg(&request.environment)
+            .arg(request.target_namespace())
             .arg("--all")
             .arg("-o")
             .arg("json")
@@ -290,6 +290,20 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
             bail!("helm list -n {environment} failed: {}", stderr.trim());
         }
         parse_helm_list_json(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    fn manages_cluster_namespaces(&self) -> bool {
+        true
+    }
+
+    fn apply_cluster_namespace(
+        &self,
+        request: &tenkai::cluster_namespace::ClusterNamespaceApplyRequest,
+    ) -> Result<()> {
+        crate::in_process_kubernetes::apply_cluster_namespace_objects(
+            &crate::in_process_kubernetes::LiveKubeApi,
+            request,
+        )
     }
 }
 

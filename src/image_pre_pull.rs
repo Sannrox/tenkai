@@ -267,6 +267,7 @@ fn step_request(
     );
     request.config_digest = selection;
     request.instance = step.instance.clone();
+    crate::cluster_namespace::stamp_request(&mut request, env_obj)?;
     request.cluster_config_path =
         crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;
     request.secret_dir_path =

@@ -884,6 +884,7 @@ mod tests {
             health_observed_at_ms: None,
             owner: None,
             unmanaged: None,
+            cluster_namespace: None,
             dependency_hold: Some(StatusDependencyHold {
                 release_id: "tenkai:release:app@2.0.0".into(),
                 contracts: vec![UnmetContract {

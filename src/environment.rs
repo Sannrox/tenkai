@@ -1728,6 +1728,11 @@ pub struct StatusRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub unmanaged: Option<crate::software_executor::LiveWorkload>,
+    /// Cluster namespace this instance deploys into (#1096). Omitted when it
+    /// is the environment name and no cluster namespaces are declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub cluster_namespace: Option<String>,
 }
 
 /// Unmet contract named by a dependency hold.
@@ -1927,6 +1932,9 @@ pub struct EnvironmentInspectReport {
     /// decode strictly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identity_issuer_waiting: Vec<String>,
+    /// Declared cluster namespaces and the instances bound to them (#1096).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cluster_namespaces: Vec<crate::cluster_namespace::ClusterNamespaceStatus>,
 }
 
 /// Inspect copy of declared/derived criticality. Lives here so this module
@@ -2339,6 +2347,7 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             health_observed_at_ms,
             owner,
             unmanaged: unmanaged_for_subscription(env_obj, &instance, deployed.as_deref()),
+            cluster_namespace: cluster_namespace_for_instance(env_obj, &instance),
         });
     }
     rows.sort_by(|a, b| {
@@ -2507,6 +2516,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             crate::owner::view_from_object(&env_obj).map(|view| view.with_reachable(&reachable));
         // Read for the fleet `unrouted` flag; unreadable webhooks route nothing.
         let webhooks = crate::deploy_webhook::parse_endpoints(&env_obj).unwrap_or_default();
+        let cluster_namespaces = crate::cluster_namespace::status(&env_obj).unwrap_or_default();
         reports.push(EnvironmentInspectReport {
             name: env_obj.name,
             id: env_obj.id,
@@ -2541,6 +2551,7 @@ pub async fn fleet_status(ctx: &mut Ctx) -> Result<FleetStatusReport> {
             sealed_recovery_warning: None,
             identity_issuer: None,
             identity_issuer_waiting: Vec::new(),
+            cluster_namespaces,
         });
     }
     let mut report = fleet_status_from_inspects(reports);
@@ -2651,6 +2662,7 @@ async fn inspect_environment_base(
         .unwrap_or_default();
     let owner =
         crate::owner::view_from_object(&env_obj).map(|view| view.with_reachable(&reachable));
+    let cluster_namespaces = crate::cluster_namespace::status(&env_obj).unwrap_or_default();
     Ok(EnvironmentInspectReport {
         name: env_obj.name,
         id: env_obj.id,
@@ -2686,6 +2698,7 @@ async fn inspect_environment_base(
         sealed_recovery_warning,
         identity_issuer,
         identity_issuer_waiting,
+        cluster_namespaces,
     })
 }
 
@@ -3907,6 +3920,14 @@ fn unmanaged_workloads_from_object(
     serde_json::from_str(raw).unwrap_or_default()
 }
 
+fn cluster_namespace_for_instance(env_obj: &Object, instance: &str) -> Option<String> {
+    let declared = crate::cluster_namespace::declared(env_obj).ok()?;
+    if declared.is_empty() {
+        return None;
+    }
+    crate::cluster_namespace::instance_namespace(env_obj, instance).ok()
+}
+
 fn unmanaged_for_subscription(
     env_obj: &Object,
     instance: &str,
@@ -3945,6 +3966,7 @@ fn append_unmanaged_rows(env_obj: &Object, rows: &mut Vec<StatusRow>) {
             health_observed_at_ms: None,
             owner: None,
             unmanaged: Some(workload),
+            cluster_namespace: None,
         });
     }
     rows.sort_by(|a, b| {
@@ -5237,6 +5259,7 @@ mod tests {
             health_observed_at_ms: None,
             owner: None,
             unmanaged: None,
+            cluster_namespace: None,
             dependency_hold: Some(StatusDependencyHold {
                 release_id: "tenkai:release:app@1.0.0".into(),
                 contracts: vec![UnmetContract {
@@ -5544,6 +5567,7 @@ mod tests {
                 restore_identity: None,
                 target_changes: Vec::new(),
                 reason: String::new(),
+                cluster_namespace: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,
@@ -5985,6 +6009,7 @@ mod tests {
                 restore_identity: None,
                 target_changes: Vec::new(),
                 reason: String::new(),
+                cluster_namespace: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,
@@ -6234,6 +6259,7 @@ mod tests {
                 restore_identity: None,
                 target_changes: Vec::new(),
                 reason: String::new(),
+                cluster_namespace: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,
@@ -6370,6 +6396,7 @@ mod tests {
                 restore_identity: None,
                 target_changes: Vec::new(),
                 reason: String::new(),
+                cluster_namespace: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,

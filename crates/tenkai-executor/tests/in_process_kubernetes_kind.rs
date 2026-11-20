@@ -71,6 +71,7 @@ fn request(root: &Path, kubeconfig: &Path, env: &str, version: &str) -> Software
         opened_secrets: Vec::new(),
         remove_owned_secrets: false,
         identity: None,
+        cluster_namespace: String::new(),
     }
 }
 
@@ -487,5 +488,76 @@ fn restricted_openshift_security_refuses_an_unconfigured_workload_and_names_the_
             || lower.contains("scc")
             || lower.contains("securitycontextconstraints"),
         "{err}"
+    );
+}
+
+#[test]
+#[ignore = "requires a kind cluster and TENKAI_CLUSTER_CONFIG"]
+fn cluster_namespace_create_applies_labels_and_quota() {
+    let kubeconfig = cluster_config();
+    let name = format!("tk1096{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let executor =
+        InProcessKubernetesExecutor::new(LiveKubeApi).with_timeout(Duration::from_secs(20));
+    let spec = tenkai::cluster_namespace::ClusterNamespaceSpec {
+        labels: std::collections::BTreeMap::from([("team".into(), "pay".into())]),
+        quota: std::collections::BTreeMap::from([("pods".into(), "10".into())]),
+        ..tenkai::cluster_namespace::ClusterNamespaceSpec::default()
+    };
+    executor
+        .apply_cluster_namespace(&tenkai::cluster_namespace::ClusterNamespaceApplyRequest {
+            environment: name.clone(),
+            cluster_config_path: Some(kubeconfig.clone()),
+            name: name.clone(),
+            action: tenkai::cluster_namespace::ClusterNamespaceAction::Create,
+            spec: spec.clone(),
+        })
+        .unwrap();
+    let labels = kubectl(
+        &kubeconfig,
+        &[
+            "get",
+            "namespace",
+            &name,
+            "-o",
+            "jsonpath={.metadata.labels.team}",
+        ],
+    );
+    assert!(
+        labels.status.success(),
+        "{}",
+        String::from_utf8_lossy(&labels.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&labels.stdout), "pay");
+    let quota = kubectl(
+        &kubeconfig,
+        &[
+            "get",
+            "resourcequota",
+            "tenkai",
+            "-n",
+            &name,
+            "-o",
+            "jsonpath={.spec.hard.pods}",
+        ],
+    );
+    assert!(
+        quota.status.success(),
+        "{}",
+        String::from_utf8_lossy(&quota.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&quota.stdout), "10");
+    executor
+        .apply_cluster_namespace(&tenkai::cluster_namespace::ClusterNamespaceApplyRequest {
+            environment: name.clone(),
+            cluster_config_path: Some(kubeconfig.clone()),
+            name: name.clone(),
+            action: tenkai::cluster_namespace::ClusterNamespaceAction::Delete,
+            spec,
+        })
+        .unwrap();
+    let gone = kubectl(&kubeconfig, &["get", "namespace", &name]);
+    assert!(
+        !gone.status.success(),
+        "namespace {name} must be gone after delete"
     );
 }

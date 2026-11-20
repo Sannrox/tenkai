@@ -856,6 +856,7 @@ fn issuer_step(
         restore_identity: None,
         target_changes: Vec::new(),
         reason: String::new(),
+        cluster_namespace: None,
     }
 }
 

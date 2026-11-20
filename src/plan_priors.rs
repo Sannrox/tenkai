@@ -372,6 +372,7 @@ mod tests {
             restore_identity: None,
             target_changes: Vec::new(),
             reason: String::new(),
+            cluster_namespace: None,
         }
     }
 
@@ -433,6 +434,7 @@ mod tests {
             sealed_recovery_warning: None,
             identity_issuer: None,
             identity_issuer_waiting: Vec::new(),
+            cluster_namespaces: Vec::new(),
         };
         annotate_plan_with_priors(
             &mut plan,
@@ -595,6 +597,7 @@ mod tests {
             sealed_recovery_warning: None,
             identity_issuer: None,
             identity_issuer_waiting: Vec::new(),
+            cluster_namespaces: Vec::new(),
         };
         let config = PriorConfig {
             enabled: true,

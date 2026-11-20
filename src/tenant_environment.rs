@@ -423,6 +423,7 @@ fn partition_local_inspect(name: &str) -> EnvironmentInspectReport {
         sealed_recovery_warning: None,
         identity_issuer: None,
         identity_issuer_waiting: Vec::new(),
+        cluster_namespaces: Vec::new(),
     }
 }
 

@@ -162,6 +162,7 @@ impl FixtureEnvironmentProjection {
                     health_observed_at_ms: None,
                     owner: None,
                     unmanaged: None,
+                    cluster_namespace: None,
                 }
             })
             .collect()
@@ -244,6 +245,7 @@ impl FixtureEnvironmentProjection {
             sealed_recovery_warning: None,
             identity_issuer: None,
             identity_issuer_waiting: Vec::new(),
+            cluster_namespaces: Vec::new(),
         }
     }
 

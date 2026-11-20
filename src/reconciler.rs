@@ -505,6 +505,7 @@ mod tests {
             restore_identity: None,
             target_changes: Vec::new(),
             reason: String::new(),
+            cluster_namespace: None,
         }];
         sealed_test_plan(env, created_at, state, inputs, steps)
     }
@@ -581,6 +582,7 @@ mod tests {
             restore_identity: None,
             target_changes: Vec::new(),
             reason: String::new(),
+            cluster_namespace: None,
         };
         sealed_test_plan(env, created_at, PlanState::Computed, Vec::new(), vec![step])
     }

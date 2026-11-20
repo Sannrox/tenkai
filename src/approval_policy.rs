@@ -1191,6 +1191,7 @@ mod tests {
                 restore_identity: None,
                 target_changes: Vec::new(),
                 reason: String::new(),
+                cluster_namespace: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,

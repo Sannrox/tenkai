@@ -72,7 +72,7 @@ impl KubernetesSoftwareExecutor {
                     "job",
                     &name,
                     "--namespace",
-                    &request.environment,
+                    request.target_namespace(),
                     "-o",
                     "json",
                 ],
@@ -131,7 +131,13 @@ fn apply_yaml(
 ) -> Result<(), String> {
     let mut child = executor
         .kubectl(request)
-        .args(["apply", "-f", "-", "--namespace", &request.environment])
+        .args([
+            "apply",
+            "-f",
+            "-",
+            "--namespace",
+            request.target_namespace(),
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -208,7 +214,7 @@ fn kubectl_pod_pull_outcome(
             "-l",
             &format!("job-name={job}"),
             "--namespace",
-            &request.environment,
+            request.target_namespace(),
             "-o",
             "json",
         ],
@@ -259,7 +265,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
                     "-f",
                     path_s.as_ref(),
                     "--namespace",
-                    &request.environment,
+                    request.target_namespace(),
                 ],
                 SoftwareDeployPhase::Apply,
                 &format!("apply -f {}", path.display()),
@@ -277,7 +283,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
             manifests_s.as_ref(),
             "--recursive",
             "--namespace",
-            &request.environment,
+            request.target_namespace(),
         ];
         let owned: Vec<String> = label_args;
         for label in &owned {
@@ -295,6 +301,17 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
         Ok(())
     }
 
+    fn manages_cluster_namespaces(&self) -> bool {
+        true
+    }
+
+    fn apply_cluster_namespace(
+        &self,
+        request: &tenkai::cluster_namespace::ClusterNamespaceApplyRequest,
+    ) -> Result<()> {
+        apply_cluster_namespace_with_kubectl(self, request)
+    }
+
     fn remove(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
         let materialized = materialize_kubernetes_manifests(request)?;
@@ -309,7 +326,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
                     "-f",
                     path_s.as_ref(),
                     "--namespace",
-                    &request.environment,
+                    request.target_namespace(),
                     "--ignore-not-found=true",
                     "--wait=true",
                 ],
@@ -342,7 +359,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
                 .arg("-f")
                 .arg(path)
                 .arg("--namespace")
-                .arg(&request.environment)
+                .arg(request.target_namespace())
                 .output()
                 .with_context(|| {
                     format!("starting kubectl get via {}", self.kubectl_binary.display())
@@ -384,7 +401,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
                 .arg(kind)
                 .arg("--replicas=0")
                 .arg("--namespace")
-                .arg(&request.environment)
+                .arg(request.target_namespace())
                 .arg("-l")
                 .arg(&selector)
                 .output()
@@ -435,7 +452,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
                 .arg("restart")
                 .arg(kind)
                 .arg("--namespace")
-                .arg(&request.environment)
+                .arg(request.target_namespace())
                 .arg("-l")
                 .arg(&selector)
                 .output()
@@ -561,7 +578,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
                 "-l",
                 &selector,
                 "--namespace",
-                &request.environment,
+                request.target_namespace(),
                 "--ignore-not-found=true",
                 "--wait=false",
             ],
@@ -580,7 +597,7 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
                         "job",
                         &name,
                         "--namespace",
-                        &request.environment,
+                        request.target_namespace(),
                         "--ignore-not-found=true",
                         "--wait=false",
                     ],
@@ -595,12 +612,141 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
     }
 }
 
+fn kubectl_kubeconfig(executor: &KubernetesSoftwareExecutor, cluster_config: &Path) -> Command {
+    let mut command = Command::new(&executor.kubectl_binary);
+    command.arg("--kubeconfig").arg(cluster_config);
+    command
+}
+
+fn apply_cluster_namespace_with_kubectl(
+    executor: &KubernetesSoftwareExecutor,
+    request: &tenkai::cluster_namespace::ClusterNamespaceApplyRequest,
+) -> Result<()> {
+    tenkai::cluster_namespace::validate_name(&request.name)?;
+    let Some(cluster_config) = request.cluster_config_path.as_deref() else {
+        bail!(
+            "environment {} has no cluster_config_path; implicit kubeconfig discovery is refused",
+            request.environment
+        );
+    };
+    if !cluster_config.is_file() {
+        bail!(
+            "environment {} cluster_config_path {} is not a readable kubeconfig file",
+            request.environment,
+            cluster_config.display()
+        );
+    }
+    match request.action {
+        tenkai::cluster_namespace::ClusterNamespaceAction::Delete => {
+            tenkai::cluster_namespace::refuse_reserved_delete(&request.name)?;
+            run_kubectl(
+                kubectl_kubeconfig(executor, cluster_config),
+                &[
+                    "delete",
+                    "namespace",
+                    &request.name,
+                    "--ignore-not-found=true",
+                    "--wait=true",
+                ],
+                SoftwareDeployPhase::Apply,
+                "delete cluster namespace",
+                "cluster-namespace",
+                &request.environment,
+            )
+        }
+        tenkai::cluster_namespace::ClusterNamespaceAction::Create
+        | tenkai::cluster_namespace::ClusterNamespaceAction::Update => {
+            let objects = tenkai::cluster_namespace::manifests(request)?;
+            let mut yaml = String::new();
+            for object in &objects {
+                if !yaml.is_empty() {
+                    yaml.push_str("\n---\n");
+                }
+                yaml.push_str(&serde_json::to_string(object)?);
+            }
+            apply_cluster_yaml(executor, cluster_config, &yaml)?;
+            if request.spec.quota.is_empty() {
+                run_kubectl(
+                    kubectl_kubeconfig(executor, cluster_config),
+                    &[
+                        "delete",
+                        "resourcequota",
+                        tenkai::cluster_namespace::quota_object_name(),
+                        "--namespace",
+                        &request.name,
+                        "--ignore-not-found=true",
+                    ],
+                    SoftwareDeployPhase::Apply,
+                    "delete cluster namespace quota",
+                    "cluster-namespace",
+                    &request.environment,
+                )?;
+            }
+            if request.spec.limit_range.is_empty() {
+                run_kubectl(
+                    kubectl_kubeconfig(executor, cluster_config),
+                    &[
+                        "delete",
+                        "limitrange",
+                        tenkai::cluster_namespace::limit_range_object_name(),
+                        "--namespace",
+                        &request.name,
+                        "--ignore-not-found=true",
+                    ],
+                    SoftwareDeployPhase::Apply,
+                    "delete cluster namespace limit range",
+                    "cluster-namespace",
+                    &request.environment,
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn apply_cluster_yaml(
+    executor: &KubernetesSoftwareExecutor,
+    cluster_config: &Path,
+    yaml: &str,
+) -> Result<()> {
+    let mut child = kubectl_kubeconfig(executor, cluster_config)
+        .args(["apply", "-f", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "starting kubectl apply via {}",
+                executor.kubectl_binary.display()
+            )
+        })?;
+    let write = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("kubectl apply has no stdin"))?
+        .write_all(yaml.as_bytes());
+    let output = child
+        .wait_with_output()
+        .with_context(|| "waiting for kubectl apply")?;
+    write.context("writing cluster namespace manifests")?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "{}",
+            tenkai::software_executor::sanitize_diagnostic_text(stderr.trim())
+        )
+    }
+}
+
 fn ensure_namespace(
     executor: &KubernetesSoftwareExecutor,
     request: &SoftwareApplyRequest,
 ) -> Result<()> {
     use std::process::Stdio;
-    let namespace = &request.environment;
+    let namespace = request.target_namespace();
     let get = executor
         .kubectl(request)
         .arg("get")
@@ -782,7 +928,13 @@ fn apply_dependency_configmap(
     let path_s = doc.path().to_string_lossy().into_owned();
     run_kubectl(
         executor.kubectl(request),
-        &["apply", "-f", &path_s, "--namespace", &request.environment],
+        &[
+            "apply",
+            "-f",
+            &path_s,
+            "--namespace",
+            request.target_namespace(),
+        ],
         phase,
         "apply dependency ConfigMap",
         &request.product,
@@ -802,7 +954,7 @@ fn delete_dependency_configmap(
             "configmap",
             &name,
             "--namespace",
-            &request.environment,
+            request.target_namespace(),
             "--ignore-not-found=true",
         ],
         SoftwareDeployPhase::Remove,
@@ -832,7 +984,7 @@ fn annotate_config_digest(
             "-l",
             &selector,
             "--namespace",
-            &request.environment,
+            request.target_namespace(),
             &annotation,
         ],
         phase,
@@ -1027,6 +1179,7 @@ data:
             opened_secrets: Vec::new(),
             remove_owned_secrets: false,
             identity: None,
+            cluster_namespace: String::new(),
         };
         let executor = KubernetesSoftwareExecutor {
             kubectl_binary: PathBuf::from(binary),

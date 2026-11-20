@@ -1476,6 +1476,73 @@
       ],
       "type": "object"
     },
+    "ClusterNamespaceSpec": {
+      "additionalProperties": false,
+      "description": "Labels, quota, and limit range of one declared cluster namespace.",
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "limit_range": {
+          "items": {
+            "$ref": "#/$defs/LimitRangeItem"
+          },
+          "type": "array"
+        },
+        "quota": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "ResourceQuota `.spec.hard` quantities, for example `cpu` or `pods`.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "ClusterNamespaceStatus": {
+      "description": "Inspect/status row: one cluster namespace and the instances in it.",
+      "properties": {
+        "instances": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "quota": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "state": {
+          "description": "`declared`, `applied`, or `pending_delete`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "state"
+      ],
+      "type": "object"
+    },
     "CollectedApproval": {
       "description": "One collected, still-detached envelope for a plan.",
       "properties": {
@@ -3579,6 +3646,104 @@
             "key"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Declare or replace a cluster namespace (#1096). Does not create it in the cluster.",
+          "properties": {
+            "kind": {
+              "const": "set_cluster_namespace",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "spec": {
+              "$ref": "#/$defs/ClusterNamespaceSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "spec"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Drop a cluster namespace declaration. The namespace stays in the cluster.",
+          "properties": {
+            "kind": {
+              "const": "clear_cluster_namespace",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Queue an approved delete of a cluster namespace.",
+          "properties": {
+            "kind": {
+              "const": "delete_cluster_namespace",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Bind an instance to a declared cluster namespace.",
+          "properties": {
+            "instance": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "bind_cluster_namespace",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "instance",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Restore the default cluster namespace (the environment name) for an instance.",
+          "properties": {
+            "instance": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "unbind_cluster_namespace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "instance"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -3798,6 +3963,13 @@
         "approval_policy": {
           "description": "The plan approval policy file this environment uses, as configured,\nwhen one is set (#820).",
           "type": "string"
+        },
+        "cluster_namespaces": {
+          "description": "Declared cluster namespaces and the instances bound to them (#1096).",
+          "items": {
+            "$ref": "#/$defs/ClusterNamespaceStatus"
+          },
+          "type": "array"
         },
         "config": {
           "description": "Effective non-secret config and declared secret names per product (#1019).",
@@ -5986,6 +6158,43 @@
       },
       "required": [
         "value"
+      ],
+      "type": "object"
+    },
+    "LimitRangeItem": {
+      "additionalProperties": false,
+      "description": "One LimitRange `.spec.limits` entry.",
+      "properties": {
+        "default": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "defaultRequest": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "max": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "min": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
       ],
       "type": "object"
     },
@@ -9093,6 +9302,10 @@
         "channel": {
           "type": "string"
         },
+        "cluster_namespace": {
+          "description": "Cluster namespace this instance deploys into (#1096). Omitted when it\nis the environment name and no cluster namespaces are declared.",
+          "type": "string"
+        },
         "delivery_hold": {
           "$ref": "#/$defs/DeliveryHold",
           "description": "Present while the subscribed channel is held."
@@ -10617,6 +10830,61 @@
       "auth": "management",
       "method": "DELETE",
       "path": "/v1/environments/{environment}/bindings",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/environments/{environment}/cluster-namespaces/{name}",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/environments/{environment}/cluster-namespaces/{name}",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/environments/{environment}/cluster-namespaces/{name}/delete",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "PUT",
+      "path": "/v1/environments/{environment}/cluster-namespace-bindings",
+      "request": {
+        "$ref": "#/$defs/EnvironmentConfigRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "DELETE",
+      "path": "/v1/environments/{environment}/cluster-namespace-bindings",
       "request": {
         "$ref": "#/$defs/EnvironmentConfigRequest"
       },

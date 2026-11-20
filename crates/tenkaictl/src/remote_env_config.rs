@@ -4,9 +4,9 @@ use anyhow::{Result, bail};
 use tenkai::environment_config::EnvironmentConfigChange as Change;
 
 use crate::env_args::{
-    ApprovalPolicyCommand, ConstraintsCommand, CriticalityCommand, EnvCommand, FactsCommand,
-    LabelsCommand, MaintenanceCommand, OwnerCommand, RemoteChange, RunnerAttestationCommand,
-    WebhooksCommand,
+    ApprovalPolicyCommand, ClusterNamespaceCommand, ConstraintsCommand, CriticalityCommand,
+    EnvCommand, FactsCommand, LabelsCommand, MaintenanceCommand, OwnerCommand, RemoteChange,
+    RunnerAttestationCommand, WebhooksCommand,
 };
 
 /// The environment, change and fence of a configuration command, or `None`
@@ -239,6 +239,61 @@ pub(crate) fn change(command: &EnvCommand) -> Option<Result<(&str, Change, Remot
                 Ok((env.as_str(), Change::ClearCriticality, remote.clone()))
             }
             CriticalityCommand::Show { .. } => return None,
+        },
+        EnvCommand::ClusterNamespace { command } => match command {
+            ClusterNamespaceCommand::Set {
+                env,
+                name,
+                labels,
+                annotations,
+                quota,
+                remote,
+            } => crate::embedded_env_config::cluster_namespace_spec(labels, annotations, quota)
+                .map(|spec| {
+                    (
+                        env.as_str(),
+                        Change::SetClusterNamespace {
+                            name: name.clone(),
+                            spec,
+                        },
+                        remote.clone(),
+                    )
+                }),
+            ClusterNamespaceCommand::Clear { env, name, remote } => Ok((
+                env.as_str(),
+                Change::ClearClusterNamespace { name: name.clone() },
+                remote.clone(),
+            )),
+            ClusterNamespaceCommand::Delete { env, name, remote } => Ok((
+                env.as_str(),
+                Change::DeleteClusterNamespace { name: name.clone() },
+                remote.clone(),
+            )),
+            ClusterNamespaceCommand::Bind {
+                env,
+                instance,
+                name,
+                remote,
+            } => Ok((
+                env.as_str(),
+                Change::BindClusterNamespace {
+                    instance: instance.clone(),
+                    name: name.clone(),
+                },
+                remote.clone(),
+            )),
+            ClusterNamespaceCommand::Unbind {
+                env,
+                instance,
+                remote,
+            } => Ok((
+                env.as_str(),
+                Change::UnbindClusterNamespace {
+                    instance: instance.clone(),
+                },
+                remote.clone(),
+            )),
+            ClusterNamespaceCommand::List { .. } => return None,
         },
         _ => return None,
     })

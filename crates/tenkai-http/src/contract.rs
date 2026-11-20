@@ -619,6 +619,41 @@ pub fn http_contract() -> Value {
             request: Some(config.clone()),
             response: lifecycle.clone(),
         },
+        Route {
+            method: "PUT",
+            path: "/v1/environments/{environment}/cluster-namespaces/{name}",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/environments/{environment}/cluster-namespaces/{name}",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/environments/{environment}/cluster-namespaces/{name}/delete",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "PUT",
+            path: "/v1/environments/{environment}/cluster-namespace-bindings",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "DELETE",
+            path: "/v1/environments/{environment}/cluster-namespace-bindings",
+            auth: Auth::Management,
+            request: Some(config.clone()),
+            response: lifecycle.clone(),
+        },
         // `?sealed=true` adds each value's ciphertext and wraps for
         // `secret recover` (ADR 0045 §7) and needs management auth.
         Route {

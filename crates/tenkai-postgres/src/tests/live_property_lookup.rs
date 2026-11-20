@@ -37,6 +37,7 @@ pub(super) fn plan_with_steps(id: &str, environment: &str, steps: u32) -> Plan {
                 restore_identity: None,
                 target_changes: Vec::new(),
                 reason: String::new(),
+                cluster_namespace: None,
             })
             .collect(),
         state: PlanState::Computed,

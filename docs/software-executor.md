@@ -205,8 +205,12 @@ even when it requires nothing, so a withdrawn peer is overwritten
 Rules:
 
 - Only `.yaml` / `.yml` files under `manifests/` are applied (sorted path order).
-- Namespace for resources is the **environment name** (`kubectl --namespace`).
-- Tenkai ensures the namespace exists (`kubectl create namespace` if missing).
+- Namespace for resources is the instance's **cluster namespace**, defaulting
+  to the environment name (`kubectl --namespace`). See
+  [cluster namespaces](manage-environments.md#cluster-namespaces).
+- Tenkai ensures that namespace exists (`kubectl create namespace` if missing)
+  unless the environment declares cluster namespaces, in which case create and
+  delete are approved plan steps.
 - After apply, resources are labeled (overwrite):
   - `tenkai.product`
   - `tenkai.instance` (the product when the instance is not named)
@@ -391,13 +395,15 @@ you run the drill.
 
 ### Required permissions
 
-The environment name is the namespace. Create that namespace first when the
-credential cannot create `Namespace` objects. Tenkai does not create an
-OpenShift `Project`.
+The instance's cluster namespace is the Kubernetes namespace, defaulting to
+the environment name. Create that namespace first when the credential cannot
+create `Namespace` objects and the environment declares none. Tenkai does not
+create an OpenShift `Project`. Declared cluster namespaces need `patch` and
+`delete` as well, because create, change, and delete are approved plan steps.
 
 | Scope | Verbs | Why |
 | --- | --- | --- |
-| `namespaces` (cluster) | `get`, `create` | First apply; skip if the namespace already exists |
+| `namespaces` (cluster) | `get`, `create`, `patch`, `delete` | First apply, and cluster-namespace plan steps |
 | namespaced built-in kinds | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` | Apply, observe, remove, restart |
 | `pods`, `replicasets` in the namespace | `list` | In-process rollout diagnosis |
 | `jobs` in the namespace | `create`, `get`, `list`, `delete` | Image pre-pull |

@@ -50,6 +50,63 @@ pub(super) async fn configure_bindings(
     .await
 }
 
+pub(super) async fn configure_cluster_namespace(
+    state: State<Arc<AppState>>,
+    method: Method,
+    Path((environment, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    configure(
+        state,
+        method,
+        environment,
+        Some(name),
+        ConfigResource::ClusterNamespaces,
+        headers,
+        body,
+    )
+    .await
+}
+
+pub(super) async fn configure_cluster_namespace_delete(
+    state: State<Arc<AppState>>,
+    method: Method,
+    Path((environment, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    configure(
+        state,
+        method,
+        environment,
+        Some(name),
+        ConfigResource::ClusterNamespaceDelete,
+        headers,
+        body,
+    )
+    .await
+}
+
+pub(super) async fn configure_cluster_namespace_bindings(
+    state: State<Arc<AppState>>,
+    method: Method,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    configure(
+        state,
+        method,
+        environment,
+        None,
+        ConfigResource::ClusterNamespaceBindings,
+        headers,
+        body,
+    )
+    .await
+}
+
 /// `GET .../sealed-secrets?sealed=true` adds each value's stored
 /// ciphertext and wraps, for `secret recover` (ADR 0045 §7).
 #[derive(Debug, Default, serde::Deserialize)]

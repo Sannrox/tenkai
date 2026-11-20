@@ -33,6 +33,9 @@ pub(super) async fn execute(
         adapters: adapters.clone(),
         started_at_ms,
     };
+    if let Some(ns) = step.cluster_namespace.as_ref() {
+        return execute_cluster_namespace(ctx, step_context, step, ns).await;
+    }
     let target = ReleasePin {
         release_id: step.release_id.clone(),
         digest: step.release_digest.clone(),
@@ -398,6 +401,53 @@ pub(super) async fn execute(
         )
         .await?;
     }
+    Ok(outcome)
+}
+
+async fn execute_cluster_namespace(
+    ctx: &mut Ctx,
+    step_context: StepContext<'_>,
+    step: &Step,
+    ns: &crate::cluster_namespace::ClusterNamespaceStep,
+) -> Result<Outcome> {
+    let StepContext {
+        lease,
+        environment,
+        plan_id,
+        adapters,
+        started_at_ms,
+    } = step_context;
+    let env_obj = crate::environment::environment(ctx, environment).await?;
+    crate::cluster_namespace::admit_apply(&env_obj, ns)?;
+    let request = crate::cluster_namespace::ClusterNamespaceApplyRequest {
+        environment: environment.to_string(),
+        cluster_config_path: crate::software_executor::cluster_config_path_from_properties(
+            &env_obj.properties,
+        )?,
+        name: ns.name.clone(),
+        action: ns.action,
+        spec: ns.spec.clone(),
+    };
+    adapters
+        .software
+        .cluster_namespace_adapter()?
+        .apply_cluster_namespace(&request)?;
+    crate::cluster_namespace::record_applied(ctx, environment, ns).await?;
+    let mut outcome = Outcome::new(
+        step.clone(),
+        StepOutcomeStatus::Succeeded,
+        format!("{} cluster namespace {}", ns.action.as_str(), ns.name),
+    );
+    record(
+        ctx,
+        started_at_ms,
+        lease,
+        environment,
+        plan_id,
+        &mut outcome,
+        crate::environment::DeploymentTransition::Unchanged,
+    )
+    .await?;
     Ok(outcome)
 }
 

@@ -148,7 +148,7 @@ fn owned_by(secret: &Secret, instance: &str, name: &str) -> bool {
 /// name the Secrets for the chart. A Secret already there is reused when
 /// Tenkai wrote it for this instance and secret, and refused otherwise.
 pub(crate) fn write(api: &dyn SecretApi, request: &SoftwareApplyRequest) -> Result<Vec<String>> {
-    let namespace = &request.environment;
+    let namespace = request.target_namespace();
     let instance = request.instance_name();
     let mut sets = Vec::new();
     for planned in planned(request)? {
@@ -238,7 +238,7 @@ pub(crate) fn write_identity(api: &dyn SecretApi, request: &SoftwareApplyRequest
     };
     write_identity_secret(
         api,
-        &request.environment,
+        request.target_namespace(),
         request.instance_name(),
         issued,
         None,
@@ -529,7 +529,7 @@ fn instance_selector(instance: &str) -> String {
 /// the newest other one, which a rollback or a pod of the previous template
 /// still reads. A secret name the instance stopped using keeps only that one.
 pub(crate) fn prune(api: &dyn SecretApi, request: &SoftwareApplyRequest) -> Result<()> {
-    let namespace = &request.environment;
+    let namespace = request.target_namespace();
     let current: Vec<String> = planned(request)?.into_iter().map(|p| p.name).collect();
     let mut by_secret: BTreeMap<String, Vec<Secret>> = BTreeMap::new();
     for secret in api.list(namespace, &instance_selector(request.instance_name()))? {
@@ -565,7 +565,7 @@ pub(crate) fn prune(api: &dyn SecretApi, request: &SoftwareApplyRequest) -> Resu
 /// the workload certificate's included: a release applied after it issues
 /// its own.
 pub(crate) fn remove_all(api: &dyn SecretApi, request: &SoftwareApplyRequest) -> Result<()> {
-    let namespace = &request.environment;
+    let namespace = request.target_namespace();
     for secret in api.list(namespace, &instance_selector(request.instance_name()))? {
         if let Some(name) = &secret.metadata.name {
             api.delete(namespace, name)?;

@@ -154,6 +154,10 @@ pub struct SoftwareApplyRequest {
     /// Helm executor and the host applier use it.
     #[serde(skip)]
     pub identity: Option<crate::workload_identity::IssuedIdentity>,
+    /// Kubernetes namespace this request writes to. Empty means `environment`
+    /// (#1096). Omitted so existing payloads stay unchanged.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cluster_namespace: String,
 }
 
 /// One sealed value opened in memory, for the slot a plan step names. Its
@@ -189,6 +193,16 @@ impl SoftwareApplyRequest {
             &self.product
         } else {
             &self.instance
+        }
+    }
+
+    /// Kubernetes namespace this request writes to. Empty `cluster_namespace`
+    /// means the Tenkai environment name.
+    pub fn target_namespace(&self) -> &str {
+        if self.cluster_namespace.is_empty() {
+            &self.environment
+        } else {
+            &self.cluster_namespace
         }
     }
 }
@@ -447,6 +461,20 @@ pub trait SoftwareExecutor: Send + Sync {
         let _ = (environment, cluster_config);
         Ok(Vec::new())
     }
+    /// Whether this adapter creates, changes, or deletes cluster namespaces.
+    fn manages_cluster_namespaces(&self) -> bool {
+        false
+    }
+    /// Apply one cluster-namespace plan step (#1096). Default refuses.
+    fn apply_cluster_namespace(
+        &self,
+        request: &crate::cluster_namespace::ClusterNamespaceApplyRequest,
+    ) -> Result<()> {
+        bail!(
+            "this executor does not manage cluster namespaces ({})",
+            request.name
+        )
+    }
     /// Apply one generation and return wall time per phase. Default times `apply`.
     fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
         let started = Instant::now();
@@ -547,6 +575,7 @@ pub struct FakeSoftwareExecutor {
     desired_objects: Mutex<BTreeMap<(String, String), serde_json::Value>>,
     live_objects: Mutex<BTreeMap<(String, String), serde_json::Value>>,
     live_workloads: Mutex<Vec<LiveWorkload>>,
+    namespaces: Mutex<Vec<crate::cluster_namespace::ClusterNamespaceApplyRequest>>,
 }
 
 impl FakeSoftwareExecutor {
@@ -608,6 +637,13 @@ impl FakeSoftwareExecutor {
     /// Live workloads this fake reports when planning or listing (#1082).
     pub fn set_live_workloads(&self, workloads: Vec<LiveWorkload>) {
         *self.live_workloads.lock().expect("fake software mutex") = workloads;
+    }
+
+    /// Cluster-namespace steps this fake applied, in order.
+    pub fn applied_cluster_namespaces(
+        &self,
+    ) -> Vec<crate::cluster_namespace::ClusterNamespaceApplyRequest> {
+        self.namespaces.lock().expect("fake software mutex").clone()
     }
 }
 
@@ -702,6 +738,22 @@ impl SoftwareExecutor for FakeSoftwareExecutor {
             .lock()
             .expect("fake software mutex")
             .clone())
+    }
+
+    fn manages_cluster_namespaces(&self) -> bool {
+        true
+    }
+
+    fn apply_cluster_namespace(
+        &self,
+        request: &crate::cluster_namespace::ClusterNamespaceApplyRequest,
+    ) -> Result<()> {
+        crate::cluster_namespace::validate_name(&request.name)?;
+        self.namespaces
+            .lock()
+            .expect("fake software mutex")
+            .push(request.clone());
+        Ok(())
     }
 }
 
@@ -1186,6 +1238,30 @@ impl SoftwareExecutors {
         )
     }
 
+    /// Adapter that creates, changes, or deletes cluster namespaces.
+    pub fn cluster_namespace_adapter(&self) -> Result<Arc<dyn SoftwareExecutor>> {
+        let prefer = [
+            SoftwareExecutorKind::KubernetesInProcess,
+            SoftwareExecutorKind::Kubernetes,
+            SoftwareExecutorKind::Helm,
+        ];
+        for wanted in prefer {
+            if let Some((_, adapter)) = self.declared.iter().find(|(kind, _)| *kind == wanted)
+                && adapter.manages_cluster_namespaces()
+            {
+                return Ok(adapter.clone());
+            }
+        }
+        if let Some(adapter) = &self.default
+            && adapter.manages_cluster_namespaces()
+        {
+            return Ok(adapter.clone());
+        }
+        bail!(
+            "no cluster executor is installed to manage cluster namespaces; install kubernetes, kubernetes-inprocess, or helm"
+        )
+    }
+
     /// Refuse to move `product` from its installed release's executor to
     /// another. Moving executors is a remove followed by an install.
     pub fn require_same_executor(
@@ -1345,6 +1421,7 @@ pub fn request_from_parts(
         opened_secrets: Vec::new(),
         remove_owned_secrets: false,
         identity: None,
+        cluster_namespace: String::new(),
     }
 }
 
@@ -1381,6 +1458,7 @@ mod tests {
             opened_secrets: Vec::new(),
             remove_owned_secrets: false,
             identity: None,
+            cluster_namespace: String::new(),
         }
     }
 
@@ -1776,5 +1854,31 @@ mod tests {
         let long = format!("{}_tail", "a".repeat(62));
         let value = super::k8s_label_value(&long);
         assert!(value.len() <= 63 && value.ends_with('a'), "{value}");
+    }
+
+    #[test]
+    fn cluster_namespace_adapter_prefers_in_process_over_kubectl() {
+        let kubectl: Arc<dyn SoftwareExecutor> = Arc::new(FakeSoftwareExecutor::new());
+        let in_process: Arc<dyn SoftwareExecutor> = Arc::new(FakeSoftwareExecutor::new());
+        let helm: Arc<dyn SoftwareExecutor> = Arc::new(FakeSoftwareExecutor::new());
+        let executors = SoftwareExecutors::default()
+            .with_adapter(SoftwareExecutorKind::Helm, helm)
+            .with_adapter(SoftwareExecutorKind::Kubernetes, kubectl.clone())
+            .with_adapter(
+                SoftwareExecutorKind::KubernetesInProcess,
+                in_process.clone(),
+            );
+        let chosen = executors.cluster_namespace_adapter().unwrap();
+        assert!(Arc::ptr_eq(&chosen, &in_process));
+        let kubectl_only = SoftwareExecutors::default()
+            .with_adapter(SoftwareExecutorKind::Kubernetes, kubectl.clone());
+        let chosen = kubectl_only.cluster_namespace_adapter().unwrap();
+        assert!(Arc::ptr_eq(&chosen, &kubectl));
+        let none = SoftwareExecutors::default();
+        let err = match none.cluster_namespace_adapter() {
+            Ok(_) => panic!("shell-only executors managed cluster namespaces"),
+            Err(error) => error.to_string(),
+        };
+        assert!(err.contains("no cluster executor"), "{err}");
     }
 }

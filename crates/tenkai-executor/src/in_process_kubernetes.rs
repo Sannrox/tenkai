@@ -43,6 +43,9 @@ const DIAGNOSIS_INTERVAL: Duration = Duration::from_secs(2);
 /// Bound on one live API call, so a stalled API server cannot hold the wait
 /// past a stop for longer than this.
 const LIVE_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// kubectl `delete namespace --wait=true` bound so a stuck finalizer cannot
+/// hold the cluster-namespace plan step forever.
+const CLUSTER_NAMESPACE_DELETE_WAIT: Duration = Duration::from_secs(60);
 /// Stop flag for a call outside an apply lease; it is never set.
 static NOT_STOPPED: AtomicBool = AtomicBool::new(false);
 
@@ -820,10 +823,12 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
     ) -> Result<(), String> {
         let mut object = pre_pull_job_object(request, image, hints);
         stamp_ownership(&mut object, request);
-        if let Err(error) =
-            self.api
-                .apply_server_side(cluster_config, &request.environment, FIELD_MANAGER, &object)
-        {
+        if let Err(error) = self.api.apply_server_side(
+            cluster_config,
+            request.target_namespace(),
+            FIELD_MANAGER,
+            &object,
+        ) {
             return Err(sanitize_diagnostic_text(&format!("{error:#}")));
         }
         let name = pre_pull_job_name(image);
@@ -834,7 +839,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
             }
             match self
                 .api
-                .observe_object(cluster_config, &request.environment, &name, "Job")
+                .observe_object(cluster_config, request.target_namespace(), &name, "Job")
             {
                 Ok(Some(live)) => {
                     if matches!(job_pull_outcome(&live), Some(Ok(()))) {
@@ -868,13 +873,13 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         job: &str,
     ) -> Option<Result<(), String>> {
         self.api
-            .list_pre_pull_resources(cluster_config, &request.environment)
+            .list_pre_pull_resources(cluster_config, request.target_namespace())
             .unwrap_or_default()
             .into_iter()
             .filter(|(kind, name)| kind == "Pod" && name.starts_with(job))
             .filter_map(|(_, name)| {
                 self.api
-                    .observe_object(cluster_config, &request.environment, &name, "Pod")
+                    .observe_object(cluster_config, request.target_namespace(), &name, "Pod")
                     .ok()
                     .flatten()
             })
@@ -909,7 +914,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
             self.mark_if_new(cluster_config, request, &mut object)?;
             let _ = self.api.apply_server_side(
                 cluster_config,
-                &request.environment,
+                request.target_namespace(),
                 FIELD_MANAGER,
                 &object,
             )?;
@@ -921,7 +926,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
             self.mark_if_new(cluster_config, request, &mut object)?;
             let observed = self.api.apply_server_side(
                 cluster_config,
-                &request.environment,
+                request.target_namespace(),
                 FIELD_MANAGER,
                 &object,
             )?;
@@ -949,7 +954,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
         let (kind, name) = object_identity(object)?;
         if self
             .api
-            .observe_object(cluster_config, &request.environment, &name, &kind)?
+            .observe_object(cluster_config, request.target_namespace(), &name, &kind)?
             .is_none()
             && let Some(metadata) = object.get_mut("metadata").and_then(Value::as_object_mut)
         {
@@ -1025,7 +1030,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
                 stop_if_lease_lost(stop, request, &last_failed, &causes)?;
                 let Some((live, rollout)) = self.api.observe_with_rollout(
                     cluster_config,
-                    &request.environment,
+                    request.target_namespace(),
                     &applied.name,
                     &applied.kind,
                 )?
@@ -1066,7 +1071,7 @@ impl<A: ClusterApplyApi> InProcessKubernetesExecutor<A> {
                     stop_if_lease_lost(stop, request, &failed, &causes)?;
                     let stall = self.diagnose(
                         cluster_config,
-                        &request.environment,
+                        request.target_namespace(),
                         &kind,
                         &name,
                         classifiers.entry((kind.clone(), name.clone())).or_default(),
@@ -1142,6 +1147,84 @@ pub fn selected_in_process_executor() -> InProcessKubernetesExecutor<LiveKubeApi
     InProcessKubernetesExecutor::from_selected()
 }
 
+/// Create, change, or delete one cluster namespace through `api` (#1096).
+pub(crate) fn apply_cluster_namespace_objects<A: ClusterApplyApi>(
+    api: &A,
+    request: &tenkai::cluster_namespace::ClusterNamespaceApplyRequest,
+) -> Result<()> {
+    tenkai::cluster_namespace::validate_name(&request.name)?;
+    let Some(cluster_config) = request.cluster_config_path.as_deref() else {
+        bail!(
+            "environment {} has no cluster_config_path; implicit kubeconfig discovery is refused",
+            request.environment
+        );
+    };
+    validate_cluster_config_path(cluster_config)?;
+    if !cluster_config.is_file() {
+        bail!(
+            "environment {} cluster_config_path {} is not a readable kubeconfig file",
+            request.environment,
+            cluster_config.display()
+        );
+    }
+    match request.action {
+        tenkai::cluster_namespace::ClusterNamespaceAction::Delete => {
+            tenkai::cluster_namespace::refuse_reserved_delete(&request.name)?;
+            api.remove(cluster_config, "", &request.name, "Namespace")?;
+            // Namespace deletion is asynchronous. Returning while the object
+            // is Terminating makes a later create of the same name fail, and
+            // kubectl already waits (`--wait=true`).
+            let deadline = Instant::now() + CLUSTER_NAMESPACE_DELETE_WAIT;
+            loop {
+                match api.observe(cluster_config, "", &request.name, "Namespace")? {
+                    None => break,
+                    Some(_) if Instant::now() >= deadline => {
+                        bail!(
+                            "cluster namespace {} still exists after delete wait of {}s",
+                            request.name,
+                            CLUSTER_NAMESPACE_DELETE_WAIT.as_secs()
+                        );
+                    }
+                    Some(_) => std::thread::sleep(MAX_HEALTH_POLL),
+                }
+            }
+            Ok(())
+        }
+        tenkai::cluster_namespace::ClusterNamespaceAction::Create
+        | tenkai::cluster_namespace::ClusterNamespaceAction::Update => {
+            for object in tenkai::cluster_namespace::manifests(request)? {
+                let kind = object
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let namespace = if kind == "Namespace" {
+                    ""
+                } else {
+                    request.name.as_str()
+                };
+                api.apply_server_side(cluster_config, namespace, FIELD_MANAGER, &object)?;
+            }
+            if request.spec.quota.is_empty() {
+                api.remove(
+                    cluster_config,
+                    &request.name,
+                    tenkai::cluster_namespace::quota_object_name(),
+                    "ResourceQuota",
+                )?;
+            }
+            if request.spec.limit_range.is_empty() {
+                api.remove(
+                    cluster_config,
+                    &request.name,
+                    tenkai::cluster_namespace::limit_range_object_name(),
+                    "LimitRange",
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
 impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
     /// The cluster is the target: without a readable cluster config file
     /// nothing can have been applied to it, whether the file is not there
@@ -1154,6 +1237,17 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
 
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
         self.apply_timed(request, &NOT_STOPPED).map(|_| ())
+    }
+
+    fn manages_cluster_namespaces(&self) -> bool {
+        true
+    }
+
+    fn apply_cluster_namespace(
+        &self,
+        request: &tenkai::cluster_namespace::ClusterNamespaceApplyRequest,
+    ) -> Result<()> {
+        apply_cluster_namespace_objects(&self.api, request)
     }
 
     fn apply_until_stopped(&self, request: &SoftwareApplyRequest, stop: &AtomicBool) -> Result<()> {
@@ -1187,7 +1281,7 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
             }
             self.api.apply_server_side(
                 cluster_config,
-                &request.environment,
+                request.target_namespace(),
                 FIELD_MANAGER,
                 &object,
             )?;
@@ -1198,7 +1292,7 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
                 "no Deployment or StatefulSet labeled tenkai.product={},tenkai.instance={} in namespace {}",
                 request.product,
                 request.instance_name(),
-                request.environment
+                request.target_namespace()
             );
         }
         Ok(())
@@ -1231,16 +1325,19 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
                     request.instance_name()
                 );
             }
-            let Some(live) =
-                self.api
-                    .observe_object(cluster_config, &request.environment, &name, &kind)?
+            let Some(live) = self.api.observe_object(
+                cluster_config,
+                request.target_namespace(),
+                &name,
+                &kind,
+            )?
             else {
                 continue;
             };
             match ownership(&live, request) {
                 Ownership::Instance => {
                     self.api
-                        .remove(cluster_config, &request.environment, &name, &kind)?
+                        .remove(cluster_config, request.target_namespace(), &name, &kind)?
                 }
                 Ownership::Other => {}
                 Ownership::Unlabeled => unproven.push(format!("{kind}/{name}")),
@@ -1272,9 +1369,12 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
             if matches!(kind.as_str(), "PersistentVolumeClaim" | "Namespace") {
                 continue;
             }
-            let Some(live) =
-                self.api
-                    .observe_object(cluster_config, &request.environment, &name, &kind)?
+            let Some(live) = self.api.observe_object(
+                cluster_config,
+                request.target_namespace(),
+                &name,
+                &kind,
+            )?
             else {
                 continue;
             };
@@ -1285,7 +1385,7 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
                 == Some(request.apply_attempt.as_str());
             if created && ownership(&live, request) == Ownership::Instance {
                 self.api
-                    .remove(cluster_config, &request.environment, &name, &kind)?;
+                    .remove(cluster_config, request.target_namespace(), &name, &kind)?;
             }
         }
         Ok(())
@@ -1311,7 +1411,7 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
                 saw_workload = true;
                 match self.api.observe_with_rollout(
                     cluster_config,
-                    &request.environment,
+                    request.target_namespace(),
                     &name,
                     &kind,
                 )? {
@@ -1356,10 +1456,12 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
                 if !is_workload(&kind) {
                     continue;
                 }
-                match self
-                    .api
-                    .observe_object(cluster_config, &request.environment, &name, &kind)?
-                {
+                match self.api.observe_object(
+                    cluster_config,
+                    request.target_namespace(),
+                    &name,
+                    &kind,
+                )? {
                     None => objects.push(tenkai::spec_drift::SpecDriftObject {
                         kind,
                         name,
@@ -1390,9 +1492,12 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
         let mut changes = Vec::new();
         for desired in objects {
             let (kind, name) = object_identity(&desired)?;
-            let live =
-                self.api
-                    .observe_object(cluster_config, &request.environment, &name, &kind)?;
+            let live = self.api.observe_object(
+                cluster_config,
+                request.target_namespace(),
+                &name,
+                &kind,
+            )?;
             changes.push(tenkai::spec_drift::compare_desired_live(
                 &kind,
                 &name,
@@ -1495,7 +1600,7 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
         };
         let mut names: BTreeSet<(String, String)> = self
             .api
-            .list_pre_pull_resources(cluster_config, &request.environment)
+            .list_pre_pull_resources(cluster_config, request.target_namespace())
             .unwrap_or_default()
             .into_iter()
             .collect();
@@ -1507,7 +1612,7 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
         for (kind, name) in names {
             let _ = self
                 .api
-                .remove(cluster_config, &request.environment, &name, &kind);
+                .remove(cluster_config, request.target_namespace(), &name, &kind);
         }
         Ok(())
     }
@@ -2214,15 +2319,19 @@ async fn live_apply(
     object: &Value,
 ) -> Result<WorkloadObservation> {
     let client = live_client(cluster_config).await?;
-    ensure_namespace(&client, namespace).await?;
     let (kind, name) = object_identity(object)?;
+    let namespaced = kind != "Namespace";
+    if namespaced {
+        ensure_namespace(&client, namespace).await?;
+    }
     let api_version = object
         .get("apiVersion")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("manifest object is missing apiVersion"))?;
     let api = dynamic_api(client, namespace, &kind, api_version)?;
     let mut payload = object.clone();
-    if let Some(metadata) = payload.get_mut("metadata").and_then(Value::as_object_mut) {
+    if namespaced && let Some(metadata) = payload.get_mut("metadata").and_then(Value::as_object_mut)
+    {
         metadata
             .entry("namespace")
             .or_insert_with(|| Value::String(namespace.into()));
@@ -2797,7 +2906,9 @@ fn builtin_api_version(kind: &str) -> Result<&'static str> {
         | "Secret"
         | "Service"
         | "ServiceAccount"
-        | "PersistentVolumeClaim" => "v1",
+        | "PersistentVolumeClaim"
+        | "ResourceQuota"
+        | "LimitRange" => "v1",
         "Deployment" | "StatefulSet" | "DaemonSet" => "apps/v1",
         "Job" | "CronJob" => "batch/v1",
         "Ingress" | "NetworkPolicy" => "networking.k8s.io/v1",
@@ -2812,6 +2923,8 @@ fn builtin_api_version(kind: &str) -> Result<&'static str> {
 fn builtin_resource(kind: &str, api_version: &str) -> Result<(kube::api::ApiResource, bool)> {
     let (group, version, plural, namespaced) = match (kind, api_version) {
         ("Namespace", "v1") => ("", "v1", "namespaces", false),
+        ("ResourceQuota", "v1") => ("", "v1", "resourcequotas", true),
+        ("LimitRange", "v1") => ("", "v1", "limitranges", true),
         ("ConfigMap", "v1") => ("", "v1", "configmaps", true),
         ("Secret", "v1") => ("", "v1", "secrets", true),
         ("Service", "v1") => ("", "v1", "services", true),
@@ -3031,7 +3144,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::Mutex;
-    use tenkai::software_executor::SoftwareApplyRequest;
+    use tenkai::software_executor::{SoftwareApplyRequest, SoftwareExecutor};
 
     fn write_deployment(root: &Path, version: &str, replicas: u64) -> PathBuf {
         write_deployment_with_containers(
@@ -3081,6 +3194,7 @@ mod tests {
             opened_secrets: Vec::new(),
             remove_owned_secrets: false,
             identity: None,
+            cluster_namespace: String::new(),
         }
     }
 
@@ -4671,5 +4785,76 @@ mod tests {
             "cleanup must drop orphaned pull pods"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn cluster_namespace_request(
+        kubeconfig: &Path,
+        action: tenkai::cluster_namespace::ClusterNamespaceAction,
+        spec: tenkai::cluster_namespace::ClusterNamespaceSpec,
+    ) -> tenkai::cluster_namespace::ClusterNamespaceApplyRequest {
+        tenkai::cluster_namespace::ClusterNamespaceApplyRequest {
+            environment: "lab".into(),
+            cluster_config_path: Some(kubeconfig.to_path_buf()),
+            name: "payments".into(),
+            action,
+            spec,
+        }
+    }
+
+    #[test]
+    fn create_writes_namespace_and_quota_and_delete_removes_them() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-cluster-ns-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let kubeconfig = write_deployment(&root, "1.0.0", 1);
+        let api = MemoryClusterApi::new();
+        let executor = InProcessKubernetesExecutor::new(&api);
+        let spec = tenkai::cluster_namespace::ClusterNamespaceSpec {
+            labels: BTreeMap::from([("team".into(), "pay".into())]),
+            quota: BTreeMap::from([("pods".into(), "10".into())]),
+            ..tenkai::cluster_namespace::ClusterNamespaceSpec::default()
+        };
+        executor
+            .apply_cluster_namespace(&cluster_namespace_request(
+                &kubeconfig,
+                tenkai::cluster_namespace::ClusterNamespaceAction::Create,
+                spec.clone(),
+            ))
+            .unwrap();
+        let live = api
+            .object("", "Namespace", "payments")
+            .expect("namespace applied");
+        assert_eq!(live["metadata"]["labels"]["team"], "pay");
+        let quota = api
+            .object("payments", "ResourceQuota", "tenkai")
+            .expect("quota applied");
+        assert_eq!(quota["spec"]["hard"]["pods"], "10");
+        executor
+            .apply_cluster_namespace(&cluster_namespace_request(
+                &kubeconfig,
+                tenkai::cluster_namespace::ClusterNamespaceAction::Delete,
+                spec,
+            ))
+            .unwrap();
+        assert!(api.object("", "Namespace", "payments").is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cluster_namespace_apply_refuses_implicit_kubeconfig() {
+        let executor = InProcessKubernetesExecutor::new(MemoryClusterApi::new());
+        let error = executor
+            .apply_cluster_namespace(&tenkai::cluster_namespace::ClusterNamespaceApplyRequest {
+                environment: "lab".into(),
+                cluster_config_path: None,
+                name: "payments".into(),
+                action: tenkai::cluster_namespace::ClusterNamespaceAction::Create,
+                spec: tenkai::cluster_namespace::ClusterNamespaceSpec::default(),
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no cluster_config_path"), "{error}");
     }
 }
