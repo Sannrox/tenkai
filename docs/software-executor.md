@@ -430,6 +430,11 @@ ignored in-process tests and the kubectl smoke. Default `make test` stays
 cluster-free. Method and the no-adapter decision:
 [OpenShift compatibility research](research/openshift-executor-compatibility.md).
 
+Cluster and node version updates are not a software-executor step. Tenkai
+requests them through CVO and observes `ClusterVersion` plus every
+`MachineConfigPool` ([ADR 0059](decisions/0059-openshift-cluster-version-updates.md)).
+The workload kubeconfig above must not include those cluster-scoped verbs.
+
 ## Security
 
 - No kubeconfig or tokens on Tenkai CLI argv for software apply.

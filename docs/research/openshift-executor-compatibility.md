@@ -28,7 +28,8 @@ admission drill. A cluster attached to this lane is recorded under
   (`an_admission_refusal_fails_the_step_naming_the_policy` in
   `crates/tenkai-executor/tests/in_process_kubernetes_kind.rs`)
 
-Non-goals: cluster provisioning, CVO/MCO (#994).
+Non-goals: cluster provisioning, CVO/MCO
+([ADR 0059](../decisions/0059-openshift-cluster-version-updates.md)).
 
 ## Shared contract
 
@@ -96,4 +97,4 @@ applies the same pause Deployment without a security context when
 
 None that change the decision. Live SCC and `Route` API presence were not
 observed on a cluster in this lane; run the drill to fill the table above.
-CVO/MCO remains #994.
+CVO/MCO is [ADR 0059](../decisions/0059-openshift-cluster-version-updates.md).

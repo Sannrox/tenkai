@@ -58,3 +58,4 @@
 - [0056 — Recall removal scope, range exclusions and an instance-count threshold](0056-recall-scope-exclusions-and-count-threshold.md)
 - [0057 — Advertise and enforce what each server and runtime can execute](0057-advertise-and-enforce-execution-capabilities.md)
 - [0058 — No OpenShift executor adapter](0058-no-openshift-executor-adapter.md)
+- [0059 — OpenShift cluster updates through CVO and MCO](0059-openshift-cluster-version-updates.md)

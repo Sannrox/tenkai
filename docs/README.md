@@ -209,3 +209,4 @@ will be split over time. Contributor and agent workflow live in
 - [Completion-gated Docker initialization jobs](research/docker-initialization-jobs.md)
 - [Software compatibility preflight](research/software-compatibility-preflight.md)
 - [OpenShift compatibility of the Kubernetes executors](research/openshift-executor-compatibility.md)
+- [OpenShift cluster updates through CVO and MCO](research/openshift-cluster-version-updates.md)
