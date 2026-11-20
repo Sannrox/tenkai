@@ -239,9 +239,10 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
         | Command::Backup { .. }) => {
             crate::embedded_apply::run(&mut ctx, command, output, &database).await
         }
-        command @ (Command::Rollback { .. } | Command::Restart { .. }) => {
-            crate::embedded_rollback::run(&mut ctx, command, output).await
-        }
+        command @ (Command::Rollback { .. }
+        | Command::Restart { .. }
+        | Command::Stop { .. }
+        | Command::Start { .. }) => crate::embedded_rollback::run(&mut ctx, command, output).await,
         Command::Product { command } => crate::embedded_product::run(&mut ctx, command).await,
         Command::Train { command } => crate::embedded_train::run(&mut ctx, command).await,
         Command::Preflight {

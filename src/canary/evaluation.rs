@@ -450,6 +450,7 @@ mod tests {
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         }];
         let content_id = plan_content_id(environment, created_at, &steps);
         let id = plan_id(environment, created_at, &content_id);

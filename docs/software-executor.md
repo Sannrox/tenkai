@@ -256,6 +256,10 @@ any current non-secret overlays; native **re-apply** of the pinned manifests,
 then `kubectl rollout restart` of Deployments/StatefulSets labeled
 `tenkai.product`. Native restart fails closed when no labeled workload exists
 after apply.
+Stop (#1067): Kubernetes scales labeled Deployments/StatefulSets to zero, Helm
+sets `replicaCount=0`/`replicas=0`, Docker `stop`s the managed containers, and
+the fake executor records a stop while `observe` stays Present. Host and shell
+executors refuse. Start re-applies the recorded pin.
 Reconcile may emit a Restart plan when Helm/Kubernetes observe is `Absent` or
 `Mismatched`, recorded apply health is `unhealthy`, or environment overlays
 changed since the last apply. `tenkaictl plan` does not execute `deploy.health`,

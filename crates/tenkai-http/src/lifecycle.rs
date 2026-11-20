@@ -297,6 +297,50 @@ pub(super) async fn apply_plan(
     }
 }
 
+pub(super) async fn stop_environment(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .stop_environment(&credential, &environment, request)
+            .await,
+    )
+}
+
+pub(super) async fn start_environment(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .start_environment(&credential, &environment, request)
+            .await,
+    )
+}
+
 pub(super) async fn rollback_environment(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,

@@ -3177,6 +3177,7 @@ mod tests {
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         };
         // What an older runtime sends: no removal field.
         let older: super::RuntimeReleaseRequest =
@@ -3288,6 +3289,7 @@ mod tests {
                 identity: None,
                 restore_identity: None,
                 target_changes: Vec::new(),
+                reason: String::new(),
                 rewrap: Some(crate::plan::RewrapStep {
                     fingerprint: new.clone(),
                     recovered: Vec::new(),
@@ -3419,6 +3421,7 @@ mod tests {
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
             rewrap: Some(crate::plan::RewrapStep {
                 fingerprint: recipient.clone(),
                 recovered,
@@ -3549,6 +3552,7 @@ mod tests {
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
             rewrap: Some(crate::plan::RewrapStep {
                 fingerprint: recipient.clone(),
                 recovered: Vec::new(),

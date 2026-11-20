@@ -479,6 +479,8 @@ pub fn max_age_ms(env: &Object) -> i64 {
 }
 
 /// Overlay apply-time health with a fresh observation, or `unknown` when stale.
+/// A recorded stop stays `stopped`: live probes of a scaled-down workload
+/// must not count as failing (#1067).
 pub fn overlay(
     apply_health: Option<String>,
     observation: Option<&HealthObservation>,
@@ -486,6 +488,13 @@ pub fn overlay(
     now_ms: i64,
     max_age_ms: i64,
 ) -> HealthStatus {
+    if apply_health.as_deref() == Some("stopped") {
+        return HealthStatus {
+            health: apply_health,
+            checks: Vec::new(),
+            observed_at_ms: None,
+        };
+    }
     match observation {
         Some(observation) if deployed_digest == Some(observation.artifact_digest.as_str()) => {
             observation.status_at(now_ms, max_age_ms)
@@ -688,6 +697,16 @@ mod tests {
             ),
             apply_time
         );
+        let failing = observation(10, HealthCheckState::Failing);
+        let stopped = overlay(
+            Some("stopped".into()),
+            Some(&failing),
+            Some(DIGEST),
+            11,
+            DEFAULT_MAX_AGE_MS,
+        );
+        assert_eq!(stopped.health.as_deref(), Some("stopped"));
+        assert!(stopped.checks.is_empty());
     }
 
     #[tokio::test]

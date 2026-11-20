@@ -338,6 +338,54 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
         }
     }
 
+    fn stop(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        validate_request(request)?;
+        let selector = instance_selector(request);
+        if !kubernetes_labeled_workloads_exist(self, request, &selector)? {
+            bail!(
+                "no Deployment or StatefulSet labeled tenkai.product={},tenkai.instance={} in namespace {}",
+                request.product,
+                request.instance_name(),
+                request.environment
+            );
+        }
+        for kind in ["deployment", "statefulset"] {
+            let output = self
+                .kubectl(request)
+                .arg("scale")
+                .arg(kind)
+                .arg("--replicas=0")
+                .arg("--namespace")
+                .arg(&request.environment)
+                .arg("-l")
+                .arg(&selector)
+                .output()
+                .with_context(|| {
+                    format!(
+                        "starting kubectl scale via {}",
+                        self.kubectl_binary.display()
+                    )
+                })?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if stderr.contains("(NotFound)") {
+                    continue;
+                }
+                bail!(
+                    "{}",
+                    tenkai::software_executor::format_software_phase_error(
+                        SoftwareDeployPhase::Stop,
+                        &request.product,
+                        &request.version,
+                        &request.environment,
+                        &stderr,
+                    )
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn restart(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
         // Re-apply first so Absent live targets are reinstalled, not bounce-only.

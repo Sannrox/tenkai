@@ -358,6 +358,62 @@ pub(super) async fn restart(
     activate(ctx, lease, content, adapters).await
 }
 
+/// Stop the current pin without unsubscribing or changing the recorded version.
+pub(super) async fn stop(
+    ctx: &mut Ctx,
+    lease: &EnvironmentLease,
+    content: &ReleaseContent,
+    adapters: TargetAdapters<'_>,
+) -> Result<Result<(), String>> {
+    if let Some(refusal) = sealed_refusal(content) {
+        return Ok(Err(refusal));
+    }
+    if content.manifest.product.kind.policy().target() != ProductTarget::Software {
+        return Ok(Err(format!(
+            "stop is only supported for software products; {} is {:?}",
+            content.instance_name(),
+            content.manifest.product.kind
+        )));
+    }
+    crate::software_compatibility::require_manifest(
+        ctx,
+        &content.environment,
+        &content.manifest,
+        &content.manifest_digest,
+        content.instance_name(),
+    )
+    .await?;
+    crate::topology::require_manifest_placement(ctx, &content.environment, &content.manifest)
+        .await?;
+    let Some(executor) = adapters
+        .software
+        .resolve(content.manifest.deploy.executor)?
+    else {
+        return Ok(Err(format!(
+            "stop is not supported by the shell executor for {}",
+            content.instance_name()
+        )));
+    };
+    let request = software_request(ctx, content, format!("lease-{}", lease.generation)).await?;
+    executor.require_target(&request)?;
+    prepare_fenced_mutation(ctx, lease, content).await?;
+    if let Err(detail) = require_artifact_pull_consumer(content, Some(executor.as_ref())) {
+        return Ok(Err(detail));
+    }
+    let stopped = run_with_lease_renewal(ctx, lease, move |halt| {
+        executor.stop_until_stopped(&request, halt)
+    })
+    .await?
+    .map_err(|error| {
+        software_phase_error(
+            crate::software_executor::SoftwareDeployPhase::Stop,
+            content,
+            &format!("{error:#}"),
+        )
+    });
+    Ok(stopped)
+}
+
 /// Why a release is being deactivated.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Removal {

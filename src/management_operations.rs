@@ -35,7 +35,7 @@ use crate::management_lifecycle::{
     DeliveryFreezeRequest, DeliveryHoldRequest, ExposureGraceRequest, ExposureWaiverClearRequest,
     ExposureWaiverRequest, ManagementLifecycleOperation, ManagementLifecycleResult, PlanRequest,
     PromoteRequest, PublishRequest, RecallRequest, ReleaseLabelRequest, RetryFailedTargetRequest,
-    RollbackRequest, SubscribeRequest,
+    RollbackRequest, StartRequest, StopRequest, SubscribeRequest,
 };
 use crate::observed_runtime::EnvironmentRuntimeReport;
 use crate::package_migration::{
@@ -4365,6 +4365,94 @@ impl ManagementOperations {
         .with_digest(digest))
     }
 
+    pub async fn stop_environment(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: StopRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.admit_agent_plan(&context, "plan.stop")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_stop(
+            &request,
+            environment,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(&context, environment, request.expected_generation)
+            .await?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "plan.stop.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let step = crate::plan::stop_step(&mut ctx, environment, &request.product, &request.reason)
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        let stored = crate::plan::create_from_steps(&mut ctx, environment, vec![step])
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        self.audit(actor, "plan.stop.completed")?;
+        let digest = format!(
+            "sha256:{}",
+            stored
+                .executable_digest()
+                .map_err(map_plan_lifecycle_error)?
+        );
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Stop,
+            format!("stop plan {} requires signed approval", stored.id),
+            Some(stored.id),
+        )
+        .with_digest(digest))
+    }
+
+    pub async fn start_environment(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: StartRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.admit_agent_plan(&context, "plan.start")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_start(
+            &request,
+            environment,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(&context, environment, request.expected_generation)
+            .await?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "plan.start.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let step = crate::plan::start_step(&mut ctx, environment, &request.product)
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        let stored = crate::plan::create_from_steps(&mut ctx, environment, vec![step])
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        self.audit(actor, "plan.start.completed")?;
+        let digest = format!(
+            "sha256:{}",
+            stored
+                .executable_digest()
+                .map_err(map_plan_lifecycle_error)?
+        );
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Start,
+            format!("start plan {} requires signed approval", stored.id),
+            Some(stored.id),
+        )
+        .with_digest(digest))
+    }
+
     /// A plan that re-wraps every sealed value of `environment` for one more
     /// recipient (ADR 0045 §5). The recipient must be an unrevoked runtime
     /// key of the environment. The plan needs signed approval, and only a
@@ -4946,6 +5034,7 @@ mod tests {
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         };
         use crate::apply::{Outcome, StepOutcomeStatus};
         let outcomes = [

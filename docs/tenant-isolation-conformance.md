@@ -128,7 +128,9 @@ Remote management lifecycle routes (`POST /v1/releases`,
 `POST /v1/environments/{environment}/subscriptions`,
 `POST /v1/environments/{environment}/plans`, `POST /v1/plans/{plan_id}/approve`,
 `POST /v1/plans/{plan_id}/apply`, `POST /v1/environments/{environment}/apply/cancel`,
-`POST /v1/environments/{environment}/rollback`) are not tenant HTTP RPCs.
+`POST /v1/environments/{environment}/rollback`,
+`POST /v1/environments/{environment}/stop`,
+`POST /v1/environments/{environment}/start`) are not tenant HTTP RPCs.
 Tenant-mode hosts refuse them rather than writing a shared catalog.
 
 **Registered but not exposed on HTTP** (harness / in-process enterprise surfaces only):

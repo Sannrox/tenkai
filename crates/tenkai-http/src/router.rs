@@ -50,7 +50,8 @@ use super::lifecycle::{
     schedule_environment_freeze, set_channel_hold, set_channel_recall_rule,
     set_environment_failure_threshold, set_environment_hold, set_exposure_waiver,
     set_product_criticality, set_product_owner, set_product_webhook, set_release_label,
-    software_compatibility_report, subscribe_environment, unsubscribe_environment,
+    software_compatibility_report, start_environment, stop_environment, subscribe_environment,
+    unsubscribe_environment,
 };
 use super::package_migration::{
     apply_package_migration, package_migration_status, preview_package_migration,
@@ -450,6 +451,14 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/rollback",
             post(rollback_environment),
+        )
+        .route(
+            "/v1/environments/{environment}/stop",
+            post(stop_environment),
+        )
+        .route(
+            "/v1/environments/{environment}/start",
+            post(start_environment),
         )
         .route(
             "/v1/environments/{environment}/hold",

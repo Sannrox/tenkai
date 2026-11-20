@@ -113,7 +113,10 @@ pub(super) async fn admit(
         }
         for step in &plan.steps.clone() {
             // A removal deploys nothing, so no eval gate applies to it.
-            if matches!(step.action, Action::Rollback | Action::Remove) {
+            if matches!(
+                step.action,
+                Action::Rollback | Action::Remove | Action::Stop
+            ) {
                 continue;
             }
             let target = ReleasePin {
@@ -450,6 +453,7 @@ mod tests {
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         }
     }
 

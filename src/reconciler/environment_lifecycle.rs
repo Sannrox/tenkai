@@ -454,6 +454,7 @@ mod tests {
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         };
         let mut running = plan::create_from_steps(&mut ctx, "local", vec![step])
             .await
@@ -535,6 +536,7 @@ mod tests {
                     identity: None,
                     restore_identity: None,
                     target_changes: Vec::new(),
+                    reason: String::new(),
                 };
                 let old = plan::create_from_steps(&mut ctx, "local", vec![step.clone()])
                     .await

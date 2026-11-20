@@ -290,6 +290,7 @@ pub(super) async fn create_pin_plan(
         identity,
         restore_identity,
         target_changes: Vec::new(),
+        reason: String::new(),
     };
     plan::create_from_steps(ctx, &record.environment, vec![step]).await
 }

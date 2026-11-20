@@ -8972,6 +8972,39 @@
       ],
       "type": "object"
     },
+    "StartRequest": {
+      "additionalProperties": false,
+      "description": "Plan a start of a stopped instance onto its recorded release (#1067).",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation",
+        "product"
+      ],
+      "type": "object"
+    },
     "StatusDependencyHold": {
       "description": "Dependency hold carried on a status row (no product; the row already names it).",
       "properties": {
@@ -9071,6 +9104,43 @@
         "product",
         "channel",
         "head"
+      ],
+      "type": "object"
+    },
+    "StopRequest": {
+      "additionalProperties": false,
+      "description": "Plan a stop of a deployed instance, keeping its subscription (#1067).",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation",
+        "product",
+        "reason"
       ],
       "type": "object"
     },
@@ -10750,6 +10820,28 @@
       "path": "/v1/environments/{environment}/rollback",
       "request": {
         "$ref": "#/$defs/RollbackRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/stop",
+      "request": {
+        "$ref": "#/$defs/StopRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/start",
+      "request": {
+        "$ref": "#/$defs/StartRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"

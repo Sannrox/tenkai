@@ -116,8 +116,10 @@ pub(crate) async fn execute_step(
         Err(detail) => return Ok(receipt(Err(detail))),
     };
     let restart = step.action == Action::Restart;
+    let stop = step.action == Action::Stop;
+    let start = step.action == Action::Start;
     // Like the server, everything is verified before anything mutates.
-    let restore = match step.from.as_deref().filter(|_| !restart) {
+    let restore = match step.from.as_deref().filter(|_| !(restart || stop || start)) {
         Some(_) if step.restore.is_some() => match run.prepare(step, true).await? {
             Ok(restore) => Some(restore),
             Err(detail) => return Ok(receipt(Err(detail))),
@@ -179,6 +181,9 @@ pub(crate) async fn execute_step(
         return Ok(receipt(Err(format!(
             "rollback blocked: outgoing release cleanup failed: {detail}"
         ))));
+    }
+    if stop {
+        return Ok(receipt(run.stop(&target).await?));
     }
     let Err(failure) = run.apply(&target, restart).await? else {
         return Ok(receipt(Ok(())));
@@ -571,6 +576,29 @@ impl Run<'_> {
             .work_root
             .join(&release.request.environment)
             .join(".mutation.lock")
+    }
+
+    /// Stop `release` without removing it.
+    async fn stop(&self, release: &Prepared) -> Result<Result<(), String>> {
+        let request = &release.request;
+        let Some(executor) = &release.executor else {
+            return Ok(Err(format!(
+                "stop is not supported by the shell executor for {}",
+                request.instance_name()
+            )));
+        };
+        if let Err(error) = executor.require_target(request) {
+            return Ok(Err(
+                release.phase_error(SoftwareDeployPhase::Stop, &error.to_string())
+            ));
+        }
+        Ok(run_claimed(self.client, self.plan_id, self.generation, {
+            let executor = executor.clone();
+            let request = request.clone();
+            move |halt| executor.stop_until_stopped(&request, halt)
+        })
+        .await?
+        .map_err(|error| release.phase_error(SoftwareDeployPhase::Stop, &format!("{error:#}"))))
     }
 
     /// Apply `release` (or restart it) and run its health check.
@@ -2020,6 +2048,7 @@ mod tests {
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         };
         Case {
             config: BuiltinConfig {

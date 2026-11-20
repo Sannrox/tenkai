@@ -227,7 +227,9 @@ pub(crate) fn command_env_mut(command: &mut Command) -> Option<&mut Option<Strin
         Command::Plan { env, .. }
         | Command::Status { env, .. }
         | Command::Rollback { env, .. }
-        | Command::Restart { env, .. } => Some(env),
+        | Command::Restart { env, .. }
+        | Command::Stop { env, .. }
+        | Command::Start { env, .. } => Some(env),
         Command::Approval {
             command: ApprovalCommand::Submit { env, .. },
         } => Some(env),

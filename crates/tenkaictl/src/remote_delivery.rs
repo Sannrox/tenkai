@@ -4,6 +4,7 @@ use tenkai::command_result::{CommandName, CommandOutcome, CommandResultV1, Retry
 
 use crate::args::{ApplyCommand, Command, OutputFormat};
 use crate::authorization::{load_remote_migration_authorization, reject_remote_migration_bypass};
+use crate::flags::DevelopmentBypassFlags;
 use crate::migrate_args::MigrateCommand;
 use crate::output::{print_machine_result, reported_machine_failure, with_remote_resources};
 use tenkai::package_migration;
@@ -185,10 +186,121 @@ pub(crate) async fn run(
             }
             Ok(())
         }
+        Command::Stop {
+            product,
+            env,
+            reason,
+            bypass,
+            emergency_reason,
+            generation,
+        } => {
+            let (env, generation) =
+                require_remote_lifecycle(env, generation, &bypass, &emergency_reason, "stop")?;
+            let result = client
+                .stop_environment(&env, &product, generation, reason)
+                .await
+                .map_err(|error| {
+                    with_remote_resources(
+                        error,
+                        output,
+                        CommandName::Stop,
+                        &[("environment", &env)],
+                    )
+                })?;
+            report_remote_plan(
+                result,
+                machine,
+                CommandName::Stop,
+                "The stop plan requires signed approval",
+                &env,
+                generation,
+            )
+        }
+        Command::Start {
+            product,
+            env,
+            bypass,
+            emergency_reason,
+            generation,
+        } => {
+            let (env, generation) =
+                require_remote_lifecycle(env, generation, &bypass, &emergency_reason, "start")?;
+            let result = client
+                .start_environment(&env, &product, generation)
+                .await
+                .map_err(|error| {
+                    with_remote_resources(
+                        error,
+                        output,
+                        CommandName::Start,
+                        &[("environment", &env)],
+                    )
+                })?;
+            report_remote_plan(
+                result,
+                machine,
+                CommandName::Start,
+                "The start plan requires signed approval",
+                &env,
+                generation,
+            )
+        }
         _ => {
             bail!("this command is not available through the v1 remote API; use --target embedded")
         }
     }
+}
+
+fn require_remote_lifecycle(
+    env: Option<String>,
+    generation: Option<u64>,
+    bypass: &DevelopmentBypassFlags,
+    emergency_reason: &Option<String>,
+    verb: &str,
+) -> Result<(String, u64)> {
+    let env = crate::client_config::require_env(env)?;
+    if emergency_reason.is_some() {
+        bail!("--emergency-reason is not sent by remote {verb}; run with --target embedded");
+    }
+    if bypass.allow_unapproved_development || bypass.development_reason.is_some() {
+        bail!("the local-development {verb} bypass is available only with --target embedded");
+    }
+    let generation = generation
+        .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;
+    Ok((env, generation))
+}
+
+fn report_remote_plan(
+    result: tenkai::management_lifecycle::ManagementLifecycleResult,
+    machine: bool,
+    command: CommandName,
+    approval_message: &'static str,
+    env: &str,
+    generation: u64,
+) -> Result<()> {
+    if machine {
+        let mut awaiting = crate::remote_catalog::remote_plan_result(
+            CommandResultV1::failed(
+                command,
+                "approval_required",
+                approval_message,
+                RetryGuidance::NotSafe,
+            ),
+            &result,
+            env,
+            generation,
+        )?;
+        awaiting.outcome = CommandOutcome::AwaitingApproval;
+        return Err(reported_machine_failure(awaiting));
+    }
+    println!("{}", result.message);
+    if let Some(plan_id) = &result.resource {
+        println!("plan id: {plan_id}");
+    }
+    if let Some(digest) = &result.digest {
+        println!("plan digest: {digest}");
+    }
+    Ok(())
 }
 
 pub(crate) async fn run_migrate(

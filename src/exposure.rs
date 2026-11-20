@@ -1985,6 +1985,7 @@ install = "true"
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         };
         let mut env = crate::environment::environment(&mut ctx, "hub")
             .await
@@ -2144,6 +2145,7 @@ install = "true"
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         }
     }
 
@@ -2478,6 +2480,7 @@ install = "true"
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         };
         assert_eq!(plan_gate(&mut ctx, "hub", &[step]).await.unwrap(), None);
         let _ = std::fs::remove_dir_all(root);
@@ -2547,6 +2550,7 @@ install = "true"
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         };
         let stale = plan_gate(&mut ctx, "spoke", std::slice::from_ref(&step))
             .await

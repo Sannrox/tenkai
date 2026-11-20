@@ -15,6 +15,8 @@ pub enum SoftwareDeployPhase {
     /// Uninstall / kubectl delete path (not the same as restore).
     Remove,
     Restart,
+    /// Scale to zero / stop without removing the release (#1067).
+    Stop,
     /// Digest-pinned image pull before a maintenance window (#1093).
     PrePull,
 }
@@ -27,6 +29,7 @@ impl SoftwareDeployPhase {
             Self::Restore => "restore",
             Self::Remove => "remove",
             Self::Restart => "restart",
+            Self::Stop => "stop",
             Self::PrePull => "pre-pull",
         }
     }
