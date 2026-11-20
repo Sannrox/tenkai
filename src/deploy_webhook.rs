@@ -798,7 +798,6 @@ mod tests {
     use super::*;
     use crate::apply::{ExecutionAuthorization, ExecutionOptions, StepOutcomeStatus};
     use crate::client::Ctx;
-    use crate::provider_event::ProviderEventStore;
     use crate::software_executor::FakeSoftwareExecutor;
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::post;
@@ -930,7 +929,7 @@ mod tests {
             "TENKAI_WEBHOOK_SECRET".into(),
             "test-secret".into(),
         )]));
-        let store = ctx.embedded_arc().unwrap();
+        let store = ctx.operational_store().unwrap();
         let (delivered, deferred) = deliver_webhook_batch(
             store.as_ref(),
             &secrets,
@@ -1022,7 +1021,7 @@ mod tests {
             "TENKAI_WEBHOOK_SECRET".into(),
             "test-secret".into(),
         )]));
-        let store = ctx.embedded_arc().unwrap();
+        let store = ctx.operational_store().unwrap();
         let (delivered, deferred) = deliver_webhook_batch(
             store.as_ref(),
             &secrets,
@@ -1104,7 +1103,7 @@ mod tests {
         event.payload_json = serde_json::to_string(&envelope).unwrap();
         let mut replay = rolled_record.clone();
         replay.payload_json = serde_json::to_string(&event).unwrap();
-        ctx.embedded_arc()
+        ctx.operational_store()
             .unwrap()
             .enqueue_provider_event(&replay)
             .expect("replay keeps the first deploy webhook");
@@ -1124,7 +1123,7 @@ mod tests {
             "TENKAI_WEBHOOK_SECRET".into(),
             "test-secret".into(),
         )]));
-        let store = ctx.embedded_arc().unwrap();
+        let store = ctx.operational_store().unwrap();
         let _ = deliver_webhook_batch(
             store.as_ref(),
             &secrets,
@@ -1408,7 +1407,7 @@ mod tests {
     }
 
     fn listed(ctx: &Ctx) -> Vec<crate::storage::ProviderEventRecord> {
-        ctx.embedded_arc()
+        ctx.operational_store()
             .unwrap()
             .list_provider_events(DEPLOY_WEBHOOK_KIND, "local", 32)
             .unwrap()

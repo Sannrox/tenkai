@@ -1,15 +1,15 @@
 //! Embedded construction, outcome inspection, and Plan retarget ticks.
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 use super::{
-    Backend, Ctx, PlanKindListSnapshot, PlanKindListTick, PlanRetargetTickGuard, block_embedded,
+    Backend, Ctx, PlanKindListSnapshot, PlanKindListTick, PlanRetargetTickGuard, block_operational,
 };
 use crate::pb::sekai::Object;
-use crate::storage::OperationalStore;
+use crate::storage::{CatalogGraph, OperationalStore};
 
 impl Ctx {
     /// Configure host-owned release roots for deployment re-verification.
@@ -97,13 +97,18 @@ impl Ctx {
         refuse_postgres_url: bool,
     ) -> Result<Self> {
         let principal = std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "tenkai".into());
-        let store = if refuse_postgres_url {
+        let store = Arc::new(if refuse_postgres_url {
             crate::storage::SqliteStore::open_embedded(path, principal)?
         } else {
             crate::storage::SqliteStore::open_control_plane(path, principal)?
-        };
+        });
+        let backup_store = Arc::clone(&store);
         Ok(Self {
-            backend: Backend::Embedded(Arc::new(store)),
+            backend: Backend::Embedded {
+                catalog: Arc::clone(&store) as Arc<dyn CatalogGraph>,
+                operational: Arc::clone(&store) as Arc<dyn OperationalStore>,
+                backup: Arc::new(move |destination: &Path| backup_store.backup(destination)),
+            },
             canary_schema_preflight: Arc::new(OnceCell::new()),
             outcome_export_enabled,
             feedback_export_enabled: false,
@@ -174,7 +179,7 @@ impl Ctx {
     }
 
     pub fn is_embedded(&self) -> bool {
-        matches!(self.backend, Backend::Embedded(_))
+        matches!(self.backend, Backend::Embedded { .. })
     }
 
     pub(crate) fn is_tenant_hub(&self) -> bool {
@@ -203,14 +208,24 @@ impl Ctx {
         )
     }
 
-    pub(crate) fn catalog_binding(
+    /// Bound catalog for this session: community embedded (tenant `None`) or a
+    /// hub tenant. Unbound and remote sessions return `None`.
+    pub(crate) fn catalog_port(
         &self,
     ) -> Option<(Arc<dyn crate::storage::CatalogGraph>, Option<String>)> {
         match &self.backend {
+            Backend::Embedded { catalog, .. } => Some((Arc::clone(catalog), None)),
             Backend::TenantHub {
                 catalog: Some(catalog),
-                tenant,
-            } => Some((Arc::clone(catalog), tenant.clone())),
+                tenant: Some(tenant),
+            } => Some((Arc::clone(catalog), Some(tenant.clone()))),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn operational_store(&self) -> Option<Arc<dyn OperationalStore>> {
+        match &self.backend {
+            Backend::Embedded { operational, .. } => Some(Arc::clone(operational)),
             _ => None,
         }
     }
@@ -288,11 +303,11 @@ impl Ctx {
         if !self.outcome_inspection_enabled {
             return Ok(Vec::new());
         }
-        let Some(store) = self.embedded_arc() else {
+        let Some(store) = self.operational_store() else {
             return Ok(Vec::new());
         };
         let environment = environment.to_string();
-        block_embedded(store, move |store| {
+        block_operational(store, move |store| {
             let records = store.list_provider_events(
                 crate::providers::OUTCOME_PROVIDER_KIND,
                 &environment,
@@ -305,10 +320,13 @@ impl Ctx {
     }
 
     pub async fn backup_embedded(&self, destination: impl AsRef<Path>) -> Result<()> {
-        let store = self
-            .embedded_arc()
-            .context("backup is available only in embedded mode")?;
+        let backup = match &self.backend {
+            Backend::Embedded { backup, .. } => Arc::clone(backup),
+            _ => anyhow::bail!("backup is available only in embedded mode"),
+        };
         let destination = destination.as_ref().to_path_buf();
-        block_embedded(store, move |store| store.backup(destination)).await
+        tokio::task::spawn_blocking(move || backup(&destination))
+            .await
+            .unwrap_or_else(|error| Err(anyhow::anyhow!("embedded backup task failed: {error}")))
     }
 }

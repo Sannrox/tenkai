@@ -7,9 +7,7 @@ use tokio::sync::OnceCell;
 
 use sekai_client::CallOptions;
 
-use super::{
-    Backend, Ctx, RemoteClient, block_embedded, block_embedded_status, remote_unary_with_options,
-};
+use super::{Backend, Ctx, RemoteClient, remote_unary_with_options};
 use crate::pb::chisei::{GetEvaluationGateEvidenceRequest, GetEvaluationGateEvidenceResponse};
 use crate::pb::graph_action::ActionTypeDef;
 use crate::pb::sekai::{
@@ -21,7 +19,7 @@ impl Ctx {
     pub(super) fn remote(&self) -> Result<&RemoteClient> {
         match &self.backend {
             Backend::Remote { client, .. } => Ok(client.as_ref()),
-            Backend::Embedded(_) | Backend::TenantHub { .. } => {
+            Backend::Embedded { .. } | Backend::TenantHub { .. } => {
                 anyhow::bail!("operation requires a configured remote provider")
             }
         }
@@ -54,20 +52,13 @@ impl Ctx {
         response.is_ok_and(|response| response.types.iter().any(|schema| schema.kind == kind))
     }
 
-    pub(crate) fn embedded_arc(&self) -> Option<Arc<crate::storage::SqliteStore>> {
-        match &self.backend {
-            Backend::Embedded(store) => Some(Arc::clone(store)),
-            Backend::Remote { .. } | Backend::TenantHub { .. } => None,
-        }
-    }
-
     pub(crate) async fn register_schema(
         &mut self,
         schema: ObjectType,
     ) -> std::result::Result<(), super::ClientError> {
-        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+        if let Some((catalog, tenant)) = self.catalog_port() {
             return super::block_catalog_status(catalog, move |catalog| {
-                catalog.register_schema(Some(&tenant), schema)
+                catalog.register_schema(tenant.as_deref(), schema)
             })
             .await;
         }
@@ -75,9 +66,6 @@ impl Ctx {
             return Err(super::ClientError::Failed(anyhow!(
                 super::TENANT_HUB_UNAVAILABLE
             )));
-        }
-        if let Some(store) = self.embedded_arc() {
-            return block_embedded_status(store, move |store| store.register_schema(schema)).await;
         }
         let kind = schema.kind.clone();
         let response: std::result::Result<CreateSchemaTypeResponse, tonic::Status> = self
@@ -102,16 +90,15 @@ impl Ctx {
     }
 
     pub(crate) async fn schemas(&mut self) -> Result<Vec<ObjectType>> {
-        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
-            return super::block_catalog(catalog, move |catalog| catalog.schemas(Some(&tenant)))
-                .await;
+        if let Some((catalog, tenant)) = self.catalog_port() {
+            return super::block_catalog(catalog, move |catalog| {
+                catalog.schemas(tenant.as_deref())
+            })
+            .await;
         }
         if self.is_tenant_hub() {
             anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
             return Ok(Vec::new());
-        }
-        if let Some(store) = self.embedded_arc() {
-            return block_embedded(store, |store| store.schemas()).await;
         }
         let response: ListSchemaTypesResponse = self
             .remote_unary(

@@ -453,7 +453,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ctx.get("note-1").await.unwrap().unwrap().name, "c");
-        let store = ctx.embedded_arc().unwrap();
+        let store = ctx.operational_store().unwrap();
         let queued = OperationalStore::list_provider_events(
             store.as_ref(),
             FEEDBACK_WEBHOOK_KIND,
@@ -465,7 +465,14 @@ mod tests {
         let inner: ProviderEvent = serde_json::from_str(&queued[0].payload_json).unwrap();
         let envelope: Envelope = serde_json::from_str(&inner.payload_json).unwrap();
         assert_eq!(envelope.body, first);
-        assert_eq!(store.feedback_observations("prod").unwrap(), vec![first]);
+        assert_eq!(
+            ctx.catalog_port()
+                .unwrap()
+                .0
+                .feedback_observations(None, "prod")
+                .unwrap(),
+            vec![first]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -522,7 +529,7 @@ mod tests {
         ctx.put_with_provider_events(updated, &[], std::slice::from_ref(&captured))
             .await
             .unwrap();
-        let store = ctx.embedded_arc().unwrap();
+        let store = ctx.operational_store().unwrap();
         let queued = OperationalStore::list_provider_events(
             store.as_ref(),
             FEEDBACK_WEBHOOK_KIND,
@@ -619,7 +626,7 @@ mod tests {
         crate::deploy_webhook::clear_environment_webhooks(&mut ctx, "prod", Some(&subscribed.url))
             .await
             .unwrap();
-        let store = ctx.embedded_arc().unwrap();
+        let store = ctx.operational_store().unwrap();
         let secrets = MapSecrets(HashMap::from([(
             "FEEDBACK_HOOK_SECRET".into(),
             "test-secret".into(),

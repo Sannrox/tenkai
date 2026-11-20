@@ -189,7 +189,7 @@ where
 }
 
 pub fn enqueue_optional_event(
-    store: &impl ProviderEventStore,
+    store: &(impl ProviderEventStore + ?Sized),
     kind: &str,
     event: &ProviderEvent,
     now: i64,

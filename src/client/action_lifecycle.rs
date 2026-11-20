@@ -35,17 +35,14 @@ pub(super) enum ActionLifecycle<'a> {
         client: &'a RemoteClient,
         action_defs: &'a RemoteActionDefs,
     },
-    Embedded(Arc<crate::storage::SqliteStore>),
     Catalog {
         catalog: Arc<dyn crate::storage::CatalogGraph>,
-        tenant: String,
+        tenant: Option<String>,
     },
     /// A tenant hub without a usable catalog binding. `tenant_unbound` is a
     /// hub that has a catalog but no tenant yet: its reads fail with
     /// [`super::TENANT_NOT_BOUND`] instead of looking like an empty catalog.
-    Unavailable {
-        tenant_unbound: bool,
-    },
+    Unavailable { tenant_unbound: bool },
 }
 
 impl ActionLifecycle<'_> {
@@ -61,14 +58,9 @@ impl ActionLifecycle<'_> {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
                 super::block_catalog_status(catalog, move |catalog| {
-                    catalog.register_action(Some(&tenant), action)
+                    catalog.register_action(tenant.as_deref(), action)
                 })
                 .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                super::block_embedded_status(store, move |store| store.register_action(action))
-                    .await
             }
             Self::Remote {
                 client,
@@ -138,15 +130,7 @@ impl ActionLifecycle<'_> {
                 let tenant = tenant.clone();
                 let action = action.to_string();
                 super::block_catalog(catalog, move |catalog| {
-                    catalog.execute_action(Some(&tenant), &action, params, dry_run)
-                })
-                .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                let action = action.to_string();
-                super::block_embedded(store, move |store| {
-                    store.execute_action(&action, params, dry_run)
+                    catalog.execute_action(tenant.as_deref(), &action, params, dry_run)
                 })
                 .await
             }
@@ -228,7 +212,7 @@ impl ActionLifecycle<'_> {
     pub(super) async fn deny(&self, approval_id: &str, _reason: &str) -> Result<()> {
         match self {
             Self::Unavailable { .. } => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
-            Self::Catalog { .. } | Self::Embedded(_) => anyhow::bail!(
+            Self::Catalog { .. } => anyhow::bail!(
                 "embedded mode has no deferred approvals; action {approval_id} cannot be denied"
             ),
             // Governed admissions are decided at submit time. There is no
@@ -257,16 +241,9 @@ impl ActionLifecycle<'_> {
                 let actor = actor.to_string();
                 let action = action.to_string();
                 super::block_catalog(catalog, move |catalog| {
-                    catalog.decisions(Some(&tenant), &actor, &action, after)
+                    catalog.decisions(tenant.as_deref(), &actor, &action, after)
                 })
                 .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                let actor = actor.to_string();
-                let action = action.to_string();
-                super::block_embedded(store, move |store| store.decisions(&actor, &action, after))
-                    .await
             }
             Self::Remote { client, .. } => {
                 let response: ListDecisionsResponse = remote_unary(

@@ -12,10 +12,9 @@ use crate::pb::sekai::{
 
 pub(super) enum RelationLifecycle<'a> {
     Remote(&'a RemoteClient),
-    Embedded(Arc<crate::storage::SqliteStore>),
     Catalog {
         catalog: Arc<dyn crate::storage::CatalogGraph>,
-        tenant: String,
+        tenant: Option<String>,
     },
     /// A tenant hub without a usable catalog binding. `tenant_unbound` is a
     /// hub that has a catalog but no tenant yet: its reads fail with
@@ -41,15 +40,8 @@ impl RelationLifecycle<'_> {
                 let tenant = tenant.clone();
                 super::block_catalog(catalog, move |catalog| {
                     catalog
-                        .create_link(Some(&tenant), link, false)
+                        .create_link(tenant.as_deref(), link, false)
                         .map_err(anyhow::Error::from)
-                })
-                .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                super::block_embedded(store, move |store| {
-                    store.create_link(link, false).map_err(anyhow::Error::from)
                 })
                 .await
             }
@@ -95,14 +87,9 @@ impl RelationLifecycle<'_> {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
                 super::block_catalog_status(catalog, move |catalog| {
-                    catalog.create_link(Some(&tenant), link, true)
+                    catalog.create_link(tenant.as_deref(), link, true)
                 })
                 .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                super::block_embedded_status(store, move |store| store.create_link(link, true))
-                    .await
             }
             Self::Remote(client) => {
                 let link_id = link.id.clone();
@@ -140,12 +127,10 @@ impl RelationLifecycle<'_> {
             Self::Catalog { catalog, tenant } => {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
-                super::block_catalog(catalog, move |catalog| catalog.unlink(Some(&tenant), &id))
-                    .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                super::block_embedded(store, move |store| store.unlink(&id)).await
+                super::block_catalog(catalog, move |catalog| {
+                    catalog.unlink(tenant.as_deref(), &id)
+                })
+                .await
             }
             Self::Remote(client) => {
                 let response: std::result::Result<DeleteLinkResponse, tonic::Status> =
@@ -182,17 +167,7 @@ impl RelationLifecycle<'_> {
                 let relation = relation.to_string();
                 let direction = direction.to_string();
                 super::block_catalog(catalog, move |catalog| {
-                    catalog.linked(Some(&tenant), &object_id, &relation, &direction)
-                })
-                .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                let object_id = object_id.to_string();
-                let relation = relation.to_string();
-                let direction = direction.to_string();
-                super::block_embedded(store, move |store| {
-                    store.linked(&object_id, &relation, &direction)
+                    catalog.linked(tenant.as_deref(), &object_id, &relation, &direction)
                 })
                 .await
             }
@@ -224,16 +199,7 @@ impl RelationLifecycle<'_> {
                 let object_id = object_id.to_string();
                 let relation = relation.to_string();
                 super::block_catalog(catalog, move |catalog| {
-                    catalog.links(Some(&tenant), &object_id, &relation, "out")
-                })
-                .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                let object_id = object_id.to_string();
-                let relation = relation.to_string();
-                super::block_embedded(store, move |store| {
-                    store.links(&object_id, &relation, "out")
+                    catalog.links(tenant.as_deref(), &object_id, &relation, "out")
                 })
                 .await
             }

@@ -59,6 +59,17 @@ pub trait CatalogGraph: Send + Sync {
         key: &str,
         value: &str,
     ) -> AnyResult<Vec<Object>>;
+    /// Property-index lookup with optional value filter, order, and page.
+    ///
+    /// The default loads by `kind`/`key`/`value`. SQLite applies the rest in
+    /// SQL, including the plan-row join so pages stay full.
+    fn find_by_property_matching(
+        &self,
+        tenant: Option<&str>,
+        query: crate::embedded::PropertyIndexQuery<'_>,
+    ) -> AnyResult<Vec<Object>> {
+        self.find_by_property(tenant, query.kind, query.key, query.value)
+    }
     fn create_link(&self, tenant: Option<&str>, link: Link, fail_if_exists: bool) -> Result<()>;
     fn unlink(&self, tenant: Option<&str>, id: &str) -> AnyResult<()>;
     fn links(
@@ -254,6 +265,36 @@ pub trait CatalogGraph: Send + Sync {
         after: i64,
     ) -> AnyResult<Vec<Decision>>;
     fn changes(&self, tenant: Option<&str>, object_id: &str) -> AnyResult<Vec<ObjectChange>>;
+    /// Write `object`, copying `key` from the stored row when it is already set.
+    fn put_keeping_property(
+        &self,
+        tenant: Option<&str>,
+        mut object: Object,
+        key: &str,
+    ) -> AnyResult<Object> {
+        if let Some(existing) = self.get(tenant, &object.id)?
+            && let Some(value) = existing.properties.get(key)
+        {
+            object.properties.insert(key.to_string(), value.clone());
+        }
+        self.put(tenant, object)
+    }
+    /// Delete `id` only while property `key` still equals `value`.
+    fn delete_if_property(
+        &self,
+        tenant: Option<&str>,
+        id: &str,
+        key: &str,
+        value: &str,
+    ) -> AnyResult<bool> {
+        match self.get(tenant, id)? {
+            Some(object) if object.properties.get(key).map(String::as_str) == Some(value) => {
+                self.delete(tenant, id)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
 }
 
 /// In-memory catalog used by unit tests and tenant-mode hosts without Postgres.
@@ -1121,6 +1162,14 @@ impl CatalogGraph for SqliteStore {
         SqliteStore::find_by_property(self, kind, key, value)
     }
 
+    fn find_by_property_matching(
+        &self,
+        _tenant: Option<&str>,
+        query: crate::embedded::PropertyIndexQuery<'_>,
+    ) -> AnyResult<Vec<Object>> {
+        SqliteStore::find_by_property_matching(self, query)
+    }
+
     fn create_link(&self, _tenant: Option<&str>, link: Link, fail_if_exists: bool) -> Result<()> {
         SqliteStore::create_link(self, link, fail_if_exists)
     }
@@ -1352,6 +1401,25 @@ impl CatalogGraph for SqliteStore {
 
     fn changes(&self, _tenant: Option<&str>, object_id: &str) -> AnyResult<Vec<ObjectChange>> {
         SqliteStore::changes(self, object_id)
+    }
+
+    fn put_keeping_property(
+        &self,
+        _tenant: Option<&str>,
+        object: Object,
+        key: &str,
+    ) -> AnyResult<Object> {
+        SqliteStore::put_keeping_property(self, object, key)
+    }
+
+    fn delete_if_property(
+        &self,
+        _tenant: Option<&str>,
+        id: &str,
+        key: &str,
+        value: &str,
+    ) -> AnyResult<bool> {
+        SqliteStore::delete_if_property(self, id, key, value)
     }
 }
 

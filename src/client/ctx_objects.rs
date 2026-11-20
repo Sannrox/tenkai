@@ -6,9 +6,7 @@ use anyhow::{Context as _, Result, ensure};
 
 use sekai_client::CallOptions;
 
-use super::{
-    Ctx, block_embedded, canonical_create_request, canonical_update_request, lease_precondition,
-};
+use super::{Ctx, canonical_create_request, canonical_update_request, lease_precondition};
 use crate::pb::sekai::{CreateObjectResponse, Lease, Object, UpdateObjectResponse};
 use crate::storage::LeaseRefresh;
 
@@ -20,7 +18,7 @@ impl Ctx {
     ) -> Vec<crate::storage::ProviderEventRecord> {
         if !self.feedback_export_enabled()
             || observations.is_empty()
-            || (self.embedded_arc().is_none() && !self.has_catalog())
+            || (!self.is_embedded() && !self.has_catalog())
         {
             return events.to_vec();
         }
@@ -47,7 +45,7 @@ impl Ctx {
         &mut self,
         observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Vec<crate::storage::ProviderEventRecord> {
-        if observations.is_empty() || (self.embedded_arc().is_none() && !self.has_catalog()) {
+        if observations.is_empty() || (!self.is_embedded() && !self.has_catalog()) {
             return Vec::new();
         }
         let mut endpoints_by_env: HashMap<String, Vec<crate::deploy_webhook::WebhookEndpoint>> =
@@ -101,11 +99,14 @@ impl Ctx {
         object: Object,
         key: &str,
     ) -> Result<Object> {
-        let Some(store) = self.embedded_arc() else {
+        let Some((catalog, None)) = self.catalog_port() else {
             anyhow::bail!("put_keeping_property requires the embedded store");
         };
         let key = key.to_string();
-        super::block_embedded(store, move |store| store.put_keeping_property(object, &key)).await
+        super::block_catalog(catalog, move |catalog| {
+            catalog.put_keeping_property(None, object, &key)
+        })
+        .await
     }
 
     /// Delete `id` only while property `key` still equals `value`.
@@ -117,14 +118,14 @@ impl Ctx {
         key: &str,
         value: &str,
     ) -> Result<bool> {
-        let Some(store) = self.embedded_arc() else {
+        let Some((catalog, None)) = self.catalog_port() else {
             anyhow::bail!("delete_if_property requires the embedded store");
         };
         let id = id.to_string();
         let key = key.to_string();
         let value = value.to_string();
-        super::block_embedded(store, move |store| {
-            store.delete_if_property(&id, &key, &value)
+        super::block_catalog(catalog, move |catalog| {
+            catalog.delete_if_property(None, &id, &key, &value)
         })
         .await
     }
@@ -147,42 +148,27 @@ impl Ctx {
         let events = self
             .with_observation_delivery_events(events, observations)
             .await;
-        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+        if let Some((catalog, tenant)) = self.catalog_port() {
             if events.is_empty() && observations.is_empty() {
                 return self.put(object).await;
             }
             let observations = observations.to_vec();
             return super::block_catalog(catalog, move |catalog| {
-                catalog.put_with_provider_events(Some(&tenant), object, &events, &observations)
+                catalog.put_with_provider_events(tenant.as_deref(), object, &events, &observations)
             })
             .await;
         }
-        let Some(store) = self.embedded_arc() else {
-            if events.is_empty() {
-                return self.put(object).await;
-            }
-            anyhow::bail!(
-                "remote application state cannot atomically enqueue Tenkai provider events"
-            );
-        };
-        if events.is_empty() && observations.is_empty() {
+        if events.is_empty() {
             return self.put(object).await;
         }
-        let observations = observations.to_vec();
-        block_embedded(store, move |store| {
-            store.put_with_provider_events(object, &events, &observations)
-        })
-        .await
+        anyhow::bail!("remote application state cannot atomically enqueue Tenkai provider events")
     }
 
     /// Whether this context commits objects and provider events in one
     /// transaction: embedded state and a tenant hub do; remote application
     /// state does not.
     pub(crate) fn commits_provider_events_atomically(&self) -> bool {
-        self.is_embedded()
-            || self
-                .catalog_binding()
-                .is_some_and(|(_, tenant)| tenant.is_some())
+        self.catalog_port().is_some()
     }
 
     /// [`Self::put_with_provider_events`] for an existing object, committed
@@ -229,28 +215,19 @@ impl Ctx {
         lease_key: &str,
         fencing_token: &str,
     ) -> Result<Object> {
-        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+        if let Some((catalog, tenant)) = self.catalog_port() {
             let lease_namespace = lease_namespace.to_string();
             let lease_key = lease_key.to_string();
             let fencing_token = fencing_token.to_string();
             return super::block_catalog(catalog, move |catalog| {
                 catalog.guarded_put(
-                    Some(&tenant),
+                    tenant.as_deref(),
                     object,
                     &lease_namespace,
                     &lease_key,
                     &fencing_token,
                     true,
                 )
-            })
-            .await;
-        }
-        if let Some(store) = self.embedded_arc() {
-            let lease_namespace = lease_namespace.to_string();
-            let lease_key = lease_key.to_string();
-            let fencing_token = fencing_token.to_string();
-            return block_embedded(store, move |store| {
-                store.guarded_put(object, &lease_namespace, &lease_key, &fencing_token, true)
             })
             .await;
         }
@@ -285,14 +262,11 @@ impl Ctx {
         &mut self,
         refreshes: Vec<LeaseRefresh>,
     ) -> Result<Vec<Lease>> {
-        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+        if let Some((catalog, tenant)) = self.catalog_port() {
             return super::block_catalog(catalog, move |catalog| {
-                catalog.refresh_leases(Some(&tenant), &refreshes)
+                catalog.refresh_leases(tenant.as_deref(), &refreshes)
             })
             .await;
-        }
-        if let Some(store) = self.embedded_arc() {
-            return block_embedded(store, move |store| store.refresh_leases(&refreshes)).await;
         }
         let mut leases = Vec::with_capacity(refreshes.len());
         for refresh in &refreshes {
@@ -353,28 +327,13 @@ impl Ctx {
         lease_key: &str,
         fencing_token: &str,
     ) -> Result<(Vec<Lease>, Object)> {
-        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+        if let Some((catalog, tenant)) = self.catalog_port() {
             let lease_namespace = lease_namespace.to_string();
             let lease_key = lease_key.to_string();
             let fencing_token = fencing_token.to_string();
             return super::block_catalog(catalog, move |catalog| {
                 catalog.refresh_leases_and_guarded_put(
-                    Some(&tenant),
-                    &refreshes,
-                    object,
-                    &lease_namespace,
-                    &lease_key,
-                    &fencing_token,
-                )
-            })
-            .await;
-        }
-        if let Some(store) = self.embedded_arc() {
-            let lease_namespace = lease_namespace.to_string();
-            let lease_key = lease_key.to_string();
-            let fencing_token = fencing_token.to_string();
-            return block_embedded(store, move |store| {
-                store.refresh_leases_and_guarded_put(
+                    tenant.as_deref(),
                     &refreshes,
                     object,
                     &lease_namespace,
@@ -400,28 +359,19 @@ impl Ctx {
         lease_key: &str,
         fencing_token: &str,
     ) -> Result<Object> {
-        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+        if let Some((catalog, tenant)) = self.catalog_port() {
             let lease_namespace = lease_namespace.to_string();
             let lease_key = lease_key.to_string();
             let fencing_token = fencing_token.to_string();
             return super::block_catalog(catalog, move |catalog| {
                 catalog.guarded_put(
-                    Some(&tenant),
+                    tenant.as_deref(),
                     object,
                     &lease_namespace,
                     &lease_key,
                     &fencing_token,
                     false,
                 )
-            })
-            .await;
-        }
-        if let Some(store) = self.embedded_arc() {
-            let lease_namespace = lease_namespace.to_string();
-            let lease_key = lease_key.to_string();
-            let fencing_token = fencing_token.to_string();
-            return block_embedded(store, move |store| {
-                store.guarded_put(object, &lease_namespace, &lease_key, &fencing_token, false)
             })
             .await;
         }
@@ -461,7 +411,7 @@ impl Ctx {
         let events = self
             .with_observation_delivery_events(events, observations)
             .await;
-        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+        if let Some((catalog, tenant)) = self.catalog_port() {
             // Observations land in the tenant partition with the objects
             // (#868); export events enqueue on its outbox when enabled (#783).
             let objects = objects.to_vec();
@@ -471,7 +421,7 @@ impl Ctx {
             let fencing_token = fencing_token.to_string();
             return super::block_catalog(catalog, move |catalog| {
                 catalog.guarded_put_objects_with_provider_events(
-                    Some(&tenant),
+                    tenant.as_deref(),
                     objects,
                     &lease_namespace,
                     &lease_key,
@@ -482,26 +432,8 @@ impl Ctx {
             })
             .await;
         }
-        let Some(store) = self.embedded_arc() else {
-            anyhow::bail!(
-                "remote application state cannot atomically update objects and enqueue Tenkai provider events"
-            );
-        };
-        let objects = objects.to_vec();
-        let lease_namespace = lease_namespace.to_string();
-        let lease_key = lease_key.to_string();
-        let fencing_token = fencing_token.to_string();
-        let observations = observations.to_vec();
-        block_embedded(store, move |store| {
-            store.guarded_put_objects_with_provider_events(
-                &objects,
-                &lease_namespace,
-                &lease_key,
-                &fencing_token,
-                &events,
-                &observations,
-            )
-        })
-        .await
+        anyhow::bail!(
+            "remote application state cannot atomically update objects and enqueue Tenkai provider events"
+        )
     }
 }

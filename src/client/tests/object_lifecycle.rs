@@ -1,4 +1,4 @@
-use crate::client::{Ctx, block_embedded};
+use crate::client::{Ctx, block_catalog};
 use crate::pb::sekai::Object;
 
 use super::mock_router::remote_ctx;
@@ -40,17 +40,14 @@ async fn assert_object_lifecycle(mut ctx: Ctx) {
 async fn embedded_blocking_join_failure_is_explicit() {
     let path = std::env::temp_dir().join(format!("tenkai-block-join-{}.db", uuid::Uuid::new_v4()));
     let ctx = Ctx::embedded(&path).unwrap();
-    let store = ctx.embedded_arc().unwrap();
-    let error = block_embedded(store, |_| -> anyhow::Result<()> {
+    let catalog = ctx.catalog_port().unwrap().0;
+    let error = block_catalog(catalog, |_| -> anyhow::Result<()> {
         panic!("forced blocking panic");
     })
     .await
     .unwrap_err()
     .to_string();
-    assert!(
-        error.contains("embedded store blocking task failed"),
-        "{error}"
-    );
+    assert!(error.contains("catalog blocking task failed"), "{error}");
     let _ = std::fs::remove_file(path);
 }
 
@@ -63,6 +60,43 @@ async fn embedded_ctx_conforms_to_object_lifecycle() {
     let ctx = Ctx::embedded(&path).unwrap();
     assert_object_lifecycle(ctx).await;
     std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn embedded_ctx_serves_catalog_and_operational_ports_and_file_backup() {
+    let suffix = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4());
+    let path = std::env::temp_dir().join(format!("tenkai-ctx-ports-{suffix}.db"));
+    let backup = std::env::temp_dir().join(format!("tenkai-ctx-ports-{suffix}.bak"));
+    let mut ctx = Ctx::embedded(&path).unwrap();
+    assert!(ctx.is_embedded());
+    assert!(ctx.catalog_port().is_some());
+    assert!(ctx.operational_store().is_some());
+
+    let object = Object {
+        id: "tenkai:conformance:object".into(),
+        kind: "tenkai.conformance".into(),
+        name: "original".into(),
+        ..Default::default()
+    };
+    ctx.put(object.clone()).await.unwrap();
+    ctx.backup_embedded(&backup).await.unwrap();
+    let restored = std::env::temp_dir().join(format!("tenkai-ctx-ports-{suffix}-restored.db"));
+    crate::storage::SqliteStore::restore(&backup, &restored).unwrap();
+    let mut restored_ctx = Ctx::embedded(&restored).unwrap();
+    assert_eq!(restored_ctx.get(&object.id).await.unwrap(), Some(object));
+
+    let hub = Ctx::tenant_hub();
+    assert!(hub.catalog_port().is_none());
+    assert!(hub.operational_store().is_none());
+    let backup_error = hub.backup_embedded(&backup).await.unwrap_err().to_string();
+    assert!(
+        backup_error.contains("backup is available only in embedded mode"),
+        "{backup_error}"
+    );
+
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(backup);
+    let _ = std::fs::remove_file(restored);
 }
 
 #[tokio::test]

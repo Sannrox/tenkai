@@ -1581,7 +1581,7 @@ async fn recalled_holders(ctx: &mut Ctx, release_id: &str) -> Result<Vec<(String
 }
 
 async fn announce_recall(ctx: &mut Ctx, release: &Object, spec: &str) {
-    let Some(store) = ctx.embedded_arc() else {
+    let Some(store) = ctx.operational_store() else {
         return;
     };
     let Some(product) = release
@@ -2075,7 +2075,7 @@ install = "true"
                 .unwrap()
                 .contains("recalled")
         );
-        let store = ctx.embedded_arc().unwrap();
+        let store = ctx.operational_store().unwrap();
         let host = crate::operational_events::deliveries(
             store.as_ref(),
             crate::operational_events::HOST_SCOPE,

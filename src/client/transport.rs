@@ -9,35 +9,17 @@ use sekai_client::{CallOptions, CoreLoopClient, GrpcTransport, SdkError, SdkErro
 
 pub(crate) type RemoteClient = CoreLoopClient<GrpcTransport>;
 
-pub(crate) async fn block_embedded<T, F>(
-    store: Arc<crate::storage::SqliteStore>,
+pub(crate) async fn block_operational<T, F>(
+    store: Arc<dyn crate::storage::OperationalStore>,
     operation: F,
 ) -> Result<T>
 where
     T: Send + 'static,
-    F: FnOnce(&crate::storage::SqliteStore) -> Result<T> + Send + 'static,
+    F: FnOnce(&dyn crate::storage::OperationalStore) -> Result<T> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || operation(&store))
+    tokio::task::spawn_blocking(move || operation(store.as_ref()))
         .await
-        .unwrap_or_else(|error| Err(anyhow!("embedded store blocking task failed: {error}")))
-}
-
-pub(crate) async fn block_embedded_status<T, F>(
-    store: Arc<crate::storage::SqliteStore>,
-    operation: F,
-) -> std::result::Result<T, super::ClientError>
-where
-    T: Send + 'static,
-    F: FnOnce(&crate::storage::SqliteStore) -> crate::storage::Result<T> + Send + 'static,
-{
-    tokio::task::spawn_blocking(move || operation(&store))
-        .await
-        .unwrap_or_else(|error| {
-            Err(crate::storage::StoreError::Database(format!(
-                "embedded store blocking task failed: {error}"
-            )))
-        })
-        .map_err(super::ClientError::from)
+        .unwrap_or_else(|error| Err(anyhow!("operational store blocking task failed: {error}")))
 }
 
 pub(crate) async fn block_catalog<T, F>(

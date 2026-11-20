@@ -38,8 +38,8 @@ pub use schema_register::{
     require_connectivity_upgrade_schema, require_package_migration_schema, require_wave_schema,
 };
 pub(crate) use transport::{
-    RemoteClient, block_catalog, block_catalog_status, block_embedded, block_embedded_status,
-    remote_unary, remote_unary_with_options, token_transport_is_safe,
+    RemoteClient, block_catalog, block_catalog_status, block_operational, remote_unary,
+    remote_unary_with_options, token_transport_is_safe,
 };
 
 /// A lease a plan execution must keep, refreshed with the environment apply
@@ -99,13 +99,19 @@ pub struct Ctx {
     plan_proposer: Option<crate::plan::PlanProposer>,
 }
 
+type EmbeddedBackup = Arc<dyn Fn(&std::path::Path) -> anyhow::Result<()> + Send + Sync>;
+
 #[derive(Clone)]
 enum Backend {
     Remote {
         client: Arc<RemoteClient>,
         action_defs: action_lifecycle::RemoteActionDefs,
     },
-    Embedded(Arc<crate::storage::SqliteStore>),
+    Embedded {
+        catalog: Arc<dyn crate::storage::CatalogGraph>,
+        operational: Arc<dyn crate::storage::OperationalStore>,
+        backup: EmbeddedBackup,
+    },
     /// Enterprise hub catalog. Writes fail closed until a catalog and tenant are bound.
     TenantHub {
         catalog: Option<Arc<dyn crate::storage::CatalogGraph>>,
@@ -125,13 +131,16 @@ impl Backend {
     fn object_lifecycle(&self) -> object_lifecycle::ObjectLifecycle<'_> {
         match self {
             Self::Remote { client, .. } => object_lifecycle::ObjectLifecycle::Remote(client),
-            Self::Embedded(store) => object_lifecycle::ObjectLifecycle::Embedded(Arc::clone(store)),
+            Self::Embedded { catalog, .. } => object_lifecycle::ObjectLifecycle::Catalog {
+                catalog: Arc::clone(catalog),
+                tenant: None,
+            },
             Self::TenantHub {
                 catalog: Some(catalog),
                 tenant: Some(tenant),
             } => object_lifecycle::ObjectLifecycle::Catalog {
                 catalog: Arc::clone(catalog),
-                tenant: tenant.clone(),
+                tenant: Some(tenant.clone()),
             },
             Self::TenantHub { catalog, .. } => object_lifecycle::ObjectLifecycle::Unavailable {
                 tenant_unbound: catalog.is_some(),
@@ -142,15 +151,16 @@ impl Backend {
     fn relation_lifecycle(&self) -> relation_lifecycle::RelationLifecycle<'_> {
         match self {
             Self::Remote { client, .. } => relation_lifecycle::RelationLifecycle::Remote(client),
-            Self::Embedded(store) => {
-                relation_lifecycle::RelationLifecycle::Embedded(Arc::clone(store))
-            }
+            Self::Embedded { catalog, .. } => relation_lifecycle::RelationLifecycle::Catalog {
+                catalog: Arc::clone(catalog),
+                tenant: None,
+            },
             Self::TenantHub {
                 catalog: Some(catalog),
                 tenant: Some(tenant),
             } => relation_lifecycle::RelationLifecycle::Catalog {
                 catalog: Arc::clone(catalog),
-                tenant: tenant.clone(),
+                tenant: Some(tenant.clone()),
             },
             Self::TenantHub { catalog, .. } => relation_lifecycle::RelationLifecycle::Unavailable {
                 tenant_unbound: catalog.is_some(),
@@ -161,13 +171,16 @@ impl Backend {
     fn lease_lifecycle(&self) -> lease_lifecycle::LeaseLifecycle<'_> {
         match self {
             Self::Remote { client, .. } => lease_lifecycle::LeaseLifecycle::Remote(client),
-            Self::Embedded(store) => lease_lifecycle::LeaseLifecycle::Embedded(Arc::clone(store)),
+            Self::Embedded { catalog, .. } => lease_lifecycle::LeaseLifecycle::Catalog {
+                catalog: Arc::clone(catalog),
+                tenant: None,
+            },
             Self::TenantHub {
                 catalog: Some(catalog),
                 tenant: Some(tenant),
             } => lease_lifecycle::LeaseLifecycle::Catalog {
                 catalog: Arc::clone(catalog),
-                tenant: tenant.clone(),
+                tenant: Some(tenant.clone()),
             },
             Self::TenantHub { catalog, .. } => lease_lifecycle::LeaseLifecycle::Unavailable {
                 tenant_unbound: catalog.is_some(),
@@ -184,13 +197,16 @@ impl Backend {
                 client,
                 action_defs,
             },
-            Self::Embedded(store) => action_lifecycle::ActionLifecycle::Embedded(Arc::clone(store)),
+            Self::Embedded { catalog, .. } => action_lifecycle::ActionLifecycle::Catalog {
+                catalog: Arc::clone(catalog),
+                tenant: None,
+            },
             Self::TenantHub {
                 catalog: Some(catalog),
                 tenant: Some(tenant),
             } => action_lifecycle::ActionLifecycle::Catalog {
                 catalog: Arc::clone(catalog),
-                tenant: tenant.clone(),
+                tenant: Some(tenant.clone()),
             },
             Self::TenantHub { catalog, .. } => action_lifecycle::ActionLifecycle::Unavailable {
                 tenant_unbound: catalog.is_some(),

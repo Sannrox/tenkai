@@ -13,10 +13,9 @@ use crate::pb::sekai::{
 
 pub(super) enum LeaseLifecycle<'a> {
     Remote(&'a RemoteClient),
-    Embedded(Arc<crate::storage::SqliteStore>),
     Catalog {
         catalog: Arc<dyn crate::storage::CatalogGraph>,
-        tenant: String,
+        tenant: Option<String>,
     },
     /// A tenant hub without a usable catalog binding. `tenant_unbound` is a
     /// hub that has a catalog but no tenant yet: its reads fail with
@@ -45,18 +44,7 @@ impl LeaseLifecycle<'_> {
                 let key = key.to_string();
                 let owner = owner.to_string();
                 super::block_catalog(catalog, move |catalog| {
-                    catalog.acquire_lease(Some(&tenant), &namespace, &key, &owner, ttl_ms)
-                })
-                .await
-                .map_err(super::LeaseError::from_anyhow)
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                let namespace = namespace.to_string();
-                let key = key.to_string();
-                let owner = owner.to_string();
-                super::block_embedded(store, move |store| {
-                    store.acquire_namespaced_lease(&namespace, &key, &owner, ttl_ms)
+                    catalog.acquire_lease(tenant.as_deref(), &namespace, &key, &owner, ttl_ms)
                 })
                 .await
                 .map_err(super::LeaseError::from_anyhow)
@@ -105,16 +93,7 @@ impl LeaseLifecycle<'_> {
                 let namespace = namespace.to_string();
                 let key = key.to_string();
                 super::block_catalog(catalog, move |catalog| {
-                    catalog.get_lease(Some(&tenant), &namespace, &key)
-                })
-                .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                let namespace = namespace.to_string();
-                let key = key.to_string();
-                super::block_embedded(store, move |store| {
-                    store.get_namespaced_lease(&namespace, &key)
+                    catalog.get_lease(tenant.as_deref(), &namespace, &key)
                 })
                 .await
             }
@@ -153,17 +132,13 @@ impl LeaseLifecycle<'_> {
                 let key = key.to_string();
                 let fencing_token = fencing_token.to_string();
                 super::block_catalog(catalog, move |catalog| {
-                    catalog.refresh_lease(Some(&tenant), &namespace, &key, &fencing_token, ttl_ms)
-                })
-                .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                let namespace = namespace.to_string();
-                let key = key.to_string();
-                let fencing_token = fencing_token.to_string();
-                super::block_embedded(store, move |store| {
-                    store.refresh_namespaced_lease(&namespace, &key, &fencing_token, ttl_ms)
+                    catalog.refresh_lease(
+                        tenant.as_deref(),
+                        &namespace,
+                        &key,
+                        &fencing_token,
+                        ttl_ms,
+                    )
                 })
                 .await
             }
@@ -204,17 +179,7 @@ impl LeaseLifecycle<'_> {
                 let key = key.to_string();
                 let fencing_token = fencing_token.to_string();
                 super::block_catalog(catalog, move |catalog| {
-                    catalog.release_lease(Some(&tenant), &namespace, &key, &fencing_token)
-                })
-                .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                let namespace = namespace.to_string();
-                let key = key.to_string();
-                let fencing_token = fencing_token.to_string();
-                super::block_embedded(store, move |store| {
-                    store.release_namespaced_lease(&namespace, &key, &fencing_token)
+                    catalog.release_lease(tenant.as_deref(), &namespace, &key, &fencing_token)
                 })
                 .await
             }
@@ -259,25 +224,7 @@ impl LeaseLifecycle<'_> {
                 let expected_fencing_token = expected_fencing_token.to_string();
                 super::block_catalog(catalog, move |catalog| {
                     catalog.takeover_lease(
-                        Some(&tenant),
-                        &namespace,
-                        &key,
-                        &owner,
-                        &expected_fencing_token,
-                        expected_expires_at_ms,
-                        ttl_ms,
-                    )
-                })
-                .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                let namespace = namespace.to_string();
-                let key = key.to_string();
-                let owner = owner.to_string();
-                let expected_fencing_token = expected_fencing_token.to_string();
-                super::block_embedded(store, move |store| {
-                    store.takeover_namespaced_lease(
+                        tenant.as_deref(),
                         &namespace,
                         &key,
                         &owner,
