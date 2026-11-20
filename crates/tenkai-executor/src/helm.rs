@@ -267,10 +267,11 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
         environment: &str,
         cluster_config: Option<&std::path::Path>,
     ) -> Result<Vec<LiveWorkload>> {
+        let Some(cluster_config) = cluster_config else {
+            return Ok(Vec::new());
+        };
         let mut command = Command::new(&self.helm_binary);
-        if let Some(path) = cluster_config {
-            command.arg("--kubeconfig").arg(path);
-        }
+        command.arg("--kubeconfig").arg(cluster_config);
         let output = command
             .arg("list")
             .arg("-n")
@@ -637,5 +638,18 @@ mod tests {
         );
         assert!(parse_helm_list_json("").unwrap().is_empty());
         assert!(parse_helm_list_json("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn helm_list_without_cluster_config_does_not_spawn() {
+        let executor = HelmSoftwareExecutor {
+            helm_binary: PathBuf::from("/no/such/tenkai-helm-list"),
+        };
+        assert!(
+            executor
+                .list_live_workloads("local", None)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

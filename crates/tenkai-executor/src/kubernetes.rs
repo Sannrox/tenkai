@@ -468,10 +468,11 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
         environment: &str,
         cluster_config: Option<&Path>,
     ) -> Result<Vec<LiveWorkload>> {
+        let Some(cluster_config) = cluster_config else {
+            return Ok(Vec::new());
+        };
         let mut command = Command::new(&self.kubectl_binary);
-        if let Some(path) = cluster_config {
-            command.arg("--kubeconfig").arg(path);
-        }
+        command.arg("--kubeconfig").arg(cluster_config);
         let output = command
             .args([
                 "get",
@@ -1037,5 +1038,18 @@ data:
         );
         executor.remove(&request).expect("remove");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kubectl_list_without_cluster_config_does_not_spawn() {
+        let executor = KubernetesSoftwareExecutor {
+            kubectl_binary: PathBuf::from("/no/such/tenkai-kubectl-list"),
+        };
+        assert!(
+            executor
+                .list_live_workloads("local", None)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

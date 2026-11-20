@@ -933,6 +933,17 @@ fn host_not_configured() -> String {
     )
 }
 
+fn lists_live_workloads(kind: Option<SoftwareExecutorKind>, cluster: bool, docker: bool) -> bool {
+    match kind {
+        None => true,
+        Some(SoftwareExecutorKind::Helm)
+        | Some(SoftwareExecutorKind::Kubernetes)
+        | Some(SoftwareExecutorKind::KubernetesInProcess) => cluster,
+        Some(SoftwareExecutorKind::Docker) => docker,
+        Some(SoftwareExecutorKind::Shell | SoftwareExecutorKind::Host) => false,
+    }
+}
+
 /// Shell default and no declared adapters.
 impl Default for SoftwareExecutors {
     fn default() -> Self {
@@ -958,6 +969,35 @@ impl SoftwareExecutors {
             if !adapters.iter().any(|seen| Arc::ptr_eq(seen, adapter)) {
                 adapters.push(Arc::clone(adapter));
             }
+        }
+        adapters
+    }
+
+    /// Adapters that can list live workloads in this environment without
+    /// contacting a cluster or Docker daemon the environment does not use.
+    /// Helm and Kubernetes need `cluster_config`. Docker needs `list_docker`
+    /// (process default `docker`, or an environment Docker secret dir). An
+    /// unnamed test default always lists.
+    pub fn listing_adapters(
+        &self,
+        cluster_config: Option<&Path>,
+        list_docker: bool,
+    ) -> Vec<Arc<dyn SoftwareExecutor>> {
+        let cluster = cluster_config.is_some();
+        let mut adapters: Vec<Arc<dyn SoftwareExecutor>> = Vec::new();
+        let mut push = |kind: Option<SoftwareExecutorKind>, adapter: &Arc<dyn SoftwareExecutor>| {
+            if !lists_live_workloads(kind, cluster, list_docker) {
+                return;
+            }
+            if !adapters.iter().any(|seen| Arc::ptr_eq(seen, adapter)) {
+                adapters.push(Arc::clone(adapter));
+            }
+        };
+        if let Some(adapter) = &self.default {
+            push(self.default_kind, adapter);
+        }
+        for (kind, adapter) in &self.declared {
+            push(Some(*kind), adapter);
         }
         adapters
     }
@@ -1430,6 +1470,31 @@ mod tests {
         );
         let err = "fake".parse::<SoftwareExecutorKind>().unwrap_err();
         assert!(err.to_string().contains("\"fake\""), "{err}");
+    }
+
+    #[test]
+    fn live_listing_skips_cluster_and_docker_without_a_handle() {
+        let fake: Arc<dyn SoftwareExecutor> = Arc::new(FakeSoftwareExecutor::new());
+        let helm: Arc<dyn SoftwareExecutor> = Arc::new(FakeSoftwareExecutor::new());
+        let docker: Arc<dyn SoftwareExecutor> = Arc::new(FakeSoftwareExecutor::new());
+        let cluster = SoftwareExecutors::default()
+            .with_adapter(SoftwareExecutorKind::Helm, helm.clone())
+            .with_adapter(SoftwareExecutorKind::Docker, docker.clone());
+        assert!(cluster.listing_adapters(None, false).is_empty());
+        let kubeconfig = Path::new("/tmp/tenkai-listing-kubeconfig");
+        let listed = cluster.listing_adapters(Some(kubeconfig), false);
+        assert_eq!(listed.len(), 1);
+        assert!(Arc::ptr_eq(&listed[0], &helm));
+        let listed = cluster.listing_adapters(None, true);
+        assert_eq!(listed.len(), 1);
+        assert!(Arc::ptr_eq(&listed[0], &docker));
+
+        let with_fake = SoftwareExecutors::with_default(fake.clone())
+            .with_adapter(SoftwareExecutorKind::Helm, helm)
+            .with_adapter(SoftwareExecutorKind::Docker, docker);
+        let listed = with_fake.listing_adapters(None, false);
+        assert_eq!(listed.len(), 1);
+        assert!(Arc::ptr_eq(&listed[0], &fake));
     }
 
     #[test]

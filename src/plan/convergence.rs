@@ -852,8 +852,12 @@ async fn compute_snapshot_with_policy(
     crate::preview::admit_plan(&env_obj, crate::now_millis())?;
     let cluster_config =
         crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;
+    let list_docker = crate::software_executor::secret_dir_from_properties(&env_obj.properties)?
+        .is_some()
+        || executors.effective_kind(None)
+            == Some(crate::software_executor::SoftwareExecutorKind::Docker);
     let (live_workloads, stamp_live) =
-        list_live_workloads(executors, env, cluster_config.as_deref());
+        list_live_workloads(executors, env, cluster_config.as_deref(), list_docker);
     if stamp_live {
         crate::environment::stamp_unmanaged_workloads(&mut env_obj, &live_workloads);
     }
@@ -1782,8 +1786,9 @@ fn list_live_workloads(
     executors: &crate::software_executor::SoftwareExecutors,
     env: &str,
     cluster_config: Option<&std::path::Path>,
+    list_docker: bool,
 ) -> (Vec<crate::software_executor::LiveWorkload>, bool) {
-    let adapters = executors.adapters();
+    let adapters = executors.listing_adapters(cluster_config, list_docker);
     if adapters.is_empty() {
         return (Vec::new(), false);
     }
