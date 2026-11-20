@@ -3197,34 +3197,41 @@ mod tests {
 
     #[test]
     fn an_unsupported_kind_is_refused_at_plan_before_apply_changes_anything() {
-        let root = unique_root("unsupported-kind");
-        let manifests = root.join("manifests");
-        std::fs::create_dir_all(&manifests).unwrap();
-        std::fs::write(
-            manifests.join("all.yaml"),
-            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n---\napiVersion: policy/v1\nkind: PodDisruptionBudget\nmetadata:\n  name: web\n---\napiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: web\n",
-        )
-        .unwrap();
-        let mut request = request(&root, &root.join("kubeconfig"), "1.0.0");
-        request.cluster_config_path = None;
-        let api = MemoryClusterApi::new();
-        let executor = InProcessKubernetesExecutor::new(&api);
+        for (tag, api_version, kind) in [
+            ("hpa", "autoscaling/v2", "HorizontalPodAutoscaler"),
+            ("route", "route.openshift.io/v1", "Route"),
+        ] {
+            let root = unique_root(&format!("unsupported-kind-{tag}"));
+            let manifests = root.join("manifests");
+            std::fs::create_dir_all(&manifests).unwrap();
+            std::fs::write(
+                manifests.join("all.yaml"),
+                format!(
+                    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n---\napiVersion: policy/v1\nkind: PodDisruptionBudget\nmetadata:\n  name: web\n---\napiVersion: {api_version}\nkind: {kind}\nmetadata:\n  name: web\n"
+                ),
+            )
+            .unwrap();
+            let mut request = request(&root, &root.join("kubeconfig"), "1.0.0");
+            request.cluster_config_path = None;
+            let api = MemoryClusterApi::new();
+            let executor = InProcessKubernetesExecutor::new(&api);
 
-        let planned = executor.render_target_changes(&request).unwrap_err();
-        std::fs::write(root.join("kubeconfig"), "apiVersion: v1\nkind: Config\n").unwrap();
-        request.cluster_config_path = Some(root.join("kubeconfig"));
-        let applied = executor.apply(&request).unwrap_err();
+            let planned = executor.render_target_changes(&request).unwrap_err();
+            std::fs::write(root.join("kubeconfig"), "apiVersion: v1\nkind: Config\n").unwrap();
+            request.cluster_config_path = Some(root.join("kubeconfig"));
+            let applied = executor.apply(&request).unwrap_err();
 
-        for error in [planned, applied] {
-            let error = error.to_string();
-            assert!(
-                error.contains("manifest all.yaml object HorizontalPodAutoscaler/web")
-                    && error.contains("refuses kind HorizontalPodAutoscaler"),
-                "{error}"
-            );
+            for error in [planned, applied] {
+                let error = error.to_string();
+                assert!(
+                    error.contains(&format!("manifest all.yaml object {kind}/web"))
+                        && error.contains(&format!("refuses kind {kind}")),
+                    "{error}"
+                );
+            }
+            assert!(api.object("lab", "Deployment", "web").is_none());
+            let _ = std::fs::remove_dir_all(&root);
         }
-        assert!(api.object("lab", "Deployment", "web").is_none());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

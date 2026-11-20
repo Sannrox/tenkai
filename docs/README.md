@@ -208,3 +208,4 @@ will be split over time. Contributor and agent workflow live in
 - [Additional model serving executors](research/additional-model-serving-executors.md)
 - [Completion-gated Docker initialization jobs](research/docker-initialization-jobs.md)
 - [Software compatibility preflight](research/software-compatibility-preflight.md)
+- [OpenShift compatibility of the Kubernetes executors](research/openshift-executor-compatibility.md)
