@@ -37,7 +37,7 @@ use tenkai::fleet::FleetStatusReport;
 use tenkai::host_identity::AuthSession;
 use tenkai::instance_explain::InstanceExplainReport;
 use tenkai::management_lifecycle::{
-    ApplyRequest, ApproveRequest, ChannelAdmitRequest, ChannelConfigureRequest,
+    AdoptRequest, ApplyRequest, ApproveRequest, ChannelAdmitRequest, ChannelConfigureRequest,
     ChannelExposureGraceRequest, ChannelHoldRequest, ChannelPolicyPauseRequest,
     ChannelRecallRuleRequest, ChannelRemoveRequest, DeliveryFailureThresholdRequest,
     DeliveryFreezeRequest, DeliveryHoldRequest, ExposureGraceRequest, ExposureWaiverClearRequest,
@@ -808,6 +808,13 @@ pub fn http_contract() -> Value {
             response: lifecycle.clone(),
         },
         Route {
+            method: "POST",
+            path: "/v1/environments/{environment}/adopt",
+            auth: Auth::Management,
+            request: Some(schema::<AdoptRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
             method: "GET",
             path: "/v1/environments/{environment}/hold",
             auth: Auth::Read,
@@ -1224,6 +1231,7 @@ mod tests {
             ("StatusRow", "spec_drift"),
             ("StatusRow", "owner"),
             ("StatusRow", "health_observed_at_ms"),
+            ("StatusRow", "unmanaged"),
             ("FleetEnvironmentRow", "owner"),
             ("DeploymentHistoryPage", "owner"),
             ("OwnerView", "endpoints"),

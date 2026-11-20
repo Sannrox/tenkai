@@ -35,23 +35,23 @@ use super::inspect::{
     ready, reconcile, take_backup,
 };
 use super::lifecycle::{
-    admit_channel_instance, apply_plan, approve_plan, canary_designations, cancel_apply,
-    cancel_environment_freeze, channel_hold, channel_pace_progress, channel_promotion_policy,
-    clear_environment_failure_threshold, clear_exposure_waiver, clear_product_criticality,
-    clear_product_owner, clear_product_webhooks, clear_release_label, close_recall_range,
-    configure_channel_exposure_grace, configure_channel_pace, configure_environment_exposure_grace,
-    designate_canaries, environment_hold, import_derived_criticality,
-    install_model_evaluation_trust, list_release_labels, pause_channel_policy, plan_environment,
-    plan_identity_issuer, prepare_identity_issuer, promote_release, publish_release,
-    recall_release, reconcile_deployment, record_model_evaluation_evidence, record_recall_range,
-    record_software_compatibility_evidence, release_channel_hold, release_environment_hold,
-    release_label_history, remove_channel_head, resume_channel_policy, retire_environment,
-    retry_failed_target, rewrap_identity_issuer, rewrap_sealed_secrets, rollback_environment,
-    schedule_environment_freeze, set_channel_hold, set_channel_recall_rule,
-    set_environment_failure_threshold, set_environment_hold, set_exposure_waiver,
-    set_product_criticality, set_product_owner, set_product_webhook, set_release_label,
-    software_compatibility_report, start_environment, stop_environment, subscribe_environment,
-    unsubscribe_environment,
+    admit_channel_instance, adopt_environment, apply_plan, approve_plan, canary_designations,
+    cancel_apply, cancel_environment_freeze, channel_hold, channel_pace_progress,
+    channel_promotion_policy, clear_environment_failure_threshold, clear_exposure_waiver,
+    clear_product_criticality, clear_product_owner, clear_product_webhooks, clear_release_label,
+    close_recall_range, configure_channel_exposure_grace, configure_channel_pace,
+    configure_environment_exposure_grace, designate_canaries, environment_hold,
+    import_derived_criticality, install_model_evaluation_trust, list_release_labels,
+    pause_channel_policy, plan_environment, plan_identity_issuer, prepare_identity_issuer,
+    promote_release, publish_release, recall_release, reconcile_deployment,
+    record_model_evaluation_evidence, record_recall_range, record_software_compatibility_evidence,
+    release_channel_hold, release_environment_hold, release_label_history, remove_channel_head,
+    resume_channel_policy, retire_environment, retry_failed_target, rewrap_identity_issuer,
+    rewrap_sealed_secrets, rollback_environment, schedule_environment_freeze, set_channel_hold,
+    set_channel_recall_rule, set_environment_failure_threshold, set_environment_hold,
+    set_exposure_waiver, set_product_criticality, set_product_owner, set_product_webhook,
+    set_release_label, software_compatibility_report, start_environment, stop_environment,
+    subscribe_environment, unsubscribe_environment,
 };
 use super::package_migration::{
     apply_package_migration, package_migration_status, preview_package_migration,
@@ -459,6 +459,10 @@ pub fn router(
         .route(
             "/v1/environments/{environment}/start",
             post(start_environment),
+        )
+        .route(
+            "/v1/environments/{environment}/adopt",
+            post(adopt_environment),
         )
         .route(
             "/v1/environments/{environment}/hold",

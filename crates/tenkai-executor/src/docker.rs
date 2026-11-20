@@ -20,8 +20,8 @@ use sha2::{Digest as _, Sha256};
 use tenkai::now_millis;
 use tenkai::observed_runtime;
 use tenkai::software_executor::{
-    PrePullImage, PrePullReport, RolloutPhaseTimes, SoftwareApplyRequest, SoftwareDeployPhase,
-    SoftwareExecutor, SoftwareObserveStatus, digest_pinned_registry_image,
+    LiveWorkload, PrePullImage, PrePullReport, RolloutPhaseTimes, SoftwareApplyRequest,
+    SoftwareDeployPhase, SoftwareExecutor, SoftwareObserveStatus, digest_pinned_registry_image,
     format_software_phase_error, run_captured_command, sanitize_diagnostic_text, validate_request,
     validate_secret_dir_path,
 };
@@ -571,6 +571,41 @@ impl SoftwareExecutor for DockerHostExecutor {
             }
         }
         Ok(())
+    }
+
+    fn list_live_workloads(
+        &self,
+        environment: &str,
+        cluster_config: Option<&Path>,
+    ) -> Result<Vec<LiveWorkload>> {
+        let _ = cluster_config;
+        let mut names = BTreeSet::new();
+        for filter in [
+            format!("label=tenkai.environment={environment}"),
+            format!("label=com.docker.compose.project={environment}"),
+        ] {
+            let output = docker_output(
+                self,
+                &["ps", "-a", "--format", "{{.Names}}", "--filter", &filter],
+            )?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("docker ps failed: {}", stderr.trim());
+            }
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let name = line.trim();
+                if !name.is_empty() {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+        Ok(names
+            .into_iter()
+            .map(|name| LiveWorkload {
+                kind: "host".into(),
+                name,
+            })
+            .collect())
     }
 
     fn pre_pull(

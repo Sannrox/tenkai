@@ -484,6 +484,19 @@ pub(crate) enum Command {
         #[arg(long)]
         generation: Option<u64>,
     },
+    /// Record a matching live workload as deployed without mutating it.
+    Adopt {
+        env: String,
+        /// Catalog pin as `product@version`.
+        release: String,
+        #[command(flatten)]
+        bypass: DevelopmentBypassFlags,
+        #[arg(long)]
+        emergency_reason: Option<String>,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
+    },
     /// Manage product-level maintenance windows (intersected with environment windows).
     Product {
         #[command(subcommand)]

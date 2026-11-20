@@ -4453,6 +4453,50 @@ impl ManagementOperations {
         .with_digest(digest))
     }
 
+    pub async fn adopt_environment(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: management_lifecycle::AdoptRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.admit_agent_plan(&context, "plan.adopt")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_adopt(
+            &request,
+            environment,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        self.require_current_generation(&context, environment, request.expected_generation)
+            .await?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "plan.adopt.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let step = crate::plan::adopt_step(&mut ctx, environment, &request.release)
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        let stored = crate::plan::create_from_steps(&mut ctx, environment, vec![step])
+            .await
+            .map_err(map_plan_lifecycle_error)?;
+        self.audit(actor, "plan.adopt.completed")?;
+        let digest = format!(
+            "sha256:{}",
+            stored
+                .executable_digest()
+                .map_err(map_plan_lifecycle_error)?
+        );
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Adopt,
+            format!("adopt plan {} requires signed approval", stored.id),
+            Some(stored.id),
+        )
+        .with_digest(digest))
+    }
+
     /// A plan that re-wraps every sealed value of `environment` for one more
     /// recipient (ADR 0045 §5). The recipient must be an unrevoked runtime
     /// key of the environment. The plan needs signed approval, and only a

@@ -1724,6 +1724,10 @@ pub struct StatusRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub owner: Option<String>,
+    /// Live workload no recorded instance owns (#1082). Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub unmanaged: Option<crate::software_executor::LiveWorkload>,
 }
 
 /// Unmet contract named by a dependency hold.
@@ -1768,6 +1772,9 @@ pub fn subscription_state(
 pub fn status_state(row: &StatusRow) -> &'static str {
     if row.dependency_hold.is_some() {
         return "waiting";
+    }
+    if row.unmanaged.is_some() {
+        return "unmanaged";
     }
     let state = subscription_state(
         row.deployed.as_deref(),
@@ -2187,7 +2194,9 @@ pub(crate) async fn list_subscriptions(
 
 pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
     let env_obj = environment(ctx, env).await?;
-    status_from_object(ctx, &env_obj).await
+    let mut rows = status_from_object(ctx, &env_obj).await?;
+    append_unmanaged_rows(&env_obj, &mut rows);
+    Ok(rows)
 }
 
 async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<StatusRow>> {
@@ -2286,12 +2295,13 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
         let certificate = certificates
             .get(&applied_key)
             .map(|report| report.status(now_secs));
+        let deployed = env_obj
+            .properties
+            .get(&format!("deployed.{instance}"))
+            .cloned();
         rows.push(StatusRow {
             instance: instance.clone(),
-            deployed: env_obj
-                .properties
-                .get(&format!("deployed.{instance}"))
-                .cloned(),
+            deployed: deployed.clone(),
             health,
             error: if instance_is_stopped(&env_obj.properties, &instance) {
                 let reason = stopped_reason(&env_obj.properties, &instance).unwrap_or("stopped");
@@ -2328,6 +2338,7 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             health_checks,
             health_observed_at_ms,
             owner,
+            unmanaged: unmanaged_for_subscription(env_obj, &instance, deployed.as_deref()),
         });
     }
     rows.sort_by(|a, b| {
@@ -3885,6 +3896,84 @@ pub fn rebase_overrides(
     Ok(rebase)
 }
 
+const UNMANAGED_WORKLOADS_PROPERTY: &str = "unmanaged_workloads";
+
+fn unmanaged_workloads_from_object(
+    env_obj: &Object,
+) -> Vec<crate::software_executor::LiveWorkload> {
+    let Some(raw) = env_obj.properties.get(UNMANAGED_WORKLOADS_PROPERTY) else {
+        return Vec::new();
+    };
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+fn unmanaged_for_subscription(
+    env_obj: &Object,
+    instance: &str,
+    deployed: Option<&str>,
+) -> Option<crate::software_executor::LiveWorkload> {
+    if deployed.is_some() {
+        return None;
+    }
+    unmanaged_workloads_from_object(env_obj)
+        .into_iter()
+        .find(|workload| workload.name == instance)
+}
+
+fn append_unmanaged_rows(env_obj: &Object, rows: &mut Vec<StatusRow>) {
+    let subscribed: BTreeSet<&str> = rows.iter().map(|row| row.instance.as_str()).collect();
+    let extra: Vec<crate::software_executor::LiveWorkload> =
+        unmanaged_workloads_from_object(env_obj)
+            .into_iter()
+            .filter(|workload| !subscribed.contains(workload.name.as_str()))
+            .collect();
+    for workload in extra {
+        rows.push(StatusRow {
+            product: workload.name.clone(),
+            instance: workload.name.clone(),
+            channel: String::new(),
+            deployed: None,
+            health: None,
+            error: None,
+            head: "-".into(),
+            overlay_stale: false,
+            delivery_hold: None,
+            dependency_hold: None,
+            spec_drift: None,
+            certificate: None,
+            health_checks: Vec::new(),
+            health_observed_at_ms: None,
+            owner: None,
+            unmanaged: Some(workload),
+        });
+    }
+    rows.sort_by(|a, b| {
+        a.instance
+            .cmp(&b.instance)
+            .then_with(|| a.product.cmp(&b.product))
+    });
+}
+
+/// Record live workloads the adapters listed. Always writes, including an
+/// empty list, so a later status does not keep a stale stamp.
+pub(crate) fn stamp_unmanaged_workloads(
+    environment: &mut Object,
+    workloads: &[crate::software_executor::LiveWorkload],
+) -> bool {
+    match serde_json::to_string(workloads) {
+        Ok(raw) => {
+            environment
+                .properties
+                .insert(UNMANAGED_WORKLOADS_PROPERTY.to_string(), raw);
+            true
+        }
+        Err(_) => {
+            environment.properties.remove(UNMANAGED_WORKLOADS_PROPERTY);
+            false
+        }
+    }
+}
+
 fn spec_drift_from_object(env_obj: &Object, key: &str) -> Option<crate::spec_drift::SpecDriftView> {
     let raw = env_obj.properties.get(&format!("spec_drift.{key}"))?;
     let view: crate::spec_drift::SpecDriftView = serde_json::from_str(raw).ok()?;
@@ -5147,6 +5236,7 @@ mod tests {
             health_checks: Vec::new(),
             health_observed_at_ms: None,
             owner: None,
+            unmanaged: None,
             dependency_hold: Some(StatusDependencyHold {
                 release_id: "tenkai:release:app@1.0.0".into(),
                 contracts: vec![UnmetContract {

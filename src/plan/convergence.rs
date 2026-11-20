@@ -439,7 +439,10 @@ async fn require_same_executor(
     let Some(installed) = step.from.as_deref() else {
         return Ok(());
     };
-    if matches!(step.action, Action::Restart | Action::Stop | Action::Start) {
+    if matches!(
+        step.action,
+        Action::Restart | Action::Stop | Action::Start | Action::Adopt
+    ) {
         return Ok(());
     }
     let installed = release_id(&step.product, installed);
@@ -616,8 +619,8 @@ async fn bind_host_steps(
                 "host release {} is never restarted; plan a new install instead",
                 step.release_id
             ),
-            None if matches!(step.action, Action::Stop | Action::Start) => bail!(
-                "host release {} cannot be stopped or started; plan a removal instead",
+            None if matches!(step.action, Action::Stop | Action::Start | Action::Adopt) => bail!(
+                "host release {} cannot be stopped, started, or adopted; plan a removal instead",
                 step.release_id
             ),
             // Uninstall acts on the release the record holds, which the
@@ -847,6 +850,18 @@ async fn compute_snapshot_with_policy(
 ) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
     let mut env_obj = crate::environment::active_environment(ctx, env).await?;
     crate::preview::admit_plan(&env_obj, crate::now_millis())?;
+    let cluster_config =
+        crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;
+    let list_docker = crate::software_executor::secret_dir_from_properties(&env_obj.properties)?
+        .is_some()
+        || executors.effective_kind(None)
+            == Some(crate::software_executor::SoftwareExecutorKind::Docker);
+    let (live_workloads, stamp_live) =
+        list_live_workloads(executors, env, cluster_config.as_deref(), list_docker);
+    if stamp_live {
+        crate::environment::stamp_unmanaged_workloads(&mut env_obj, &live_workloads);
+    }
+    let live_names: BTreeSet<String> = live_workloads.iter().map(|w| w.name.clone()).collect();
     let subscriptions = crate::environment::list_subscriptions(ctx, &env_obj).await?;
 
     let mut instances = std::collections::HashSet::new();
@@ -1206,6 +1221,7 @@ async fn compute_snapshot_with_policy(
                     kind,
                 });
             }
+            None if live_names.contains(&instance) => {}
             None => pending.push(PendingChange {
                 product,
                 instance,
@@ -1691,6 +1707,9 @@ async fn compute_snapshot_with_policy(
         .collect::<Result<Vec<_>>>()?;
     crate::environment::persist_dependency_holds(ctx, env, &hold_sets, &hold_clears).await?;
     persist_spec_drift(ctx, env, &env_obj, &spec_drift_keys).await?;
+    if stamp_live {
+        persist_unmanaged_workloads(ctx, env, &env_obj).await?;
+    }
     Ok((inputs, steps))
 }
 
@@ -1736,7 +1755,80 @@ async fn attach_target_changes(
         request.secret_dir_path =
             crate::software_executor::secret_dir_from_properties(&env_obj.properties)?;
         step.target_changes = executor.render_target_changes(&request)?;
+        if step.action == Action::Adopt {
+            refuse_adopt_diffs(&step.release_id, &step.target_changes)?;
+        }
     }
+    Ok(())
+}
+
+fn refuse_adopt_diffs(release_id: &str, changes: &[crate::spec_drift::TargetChange]) -> Result<()> {
+    let diffs: Vec<String> = changes
+        .iter()
+        .filter(|change| !change.fields.is_empty())
+        .flat_map(|change| {
+            change
+                .fields
+                .iter()
+                .map(|field| format!("{}/{} {}", change.kind, change.name, field.field))
+        })
+        .collect();
+    if diffs.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "adopt refused: live differs from {release_id} ({})",
+        diffs.join(", ")
+    )
+}
+
+fn list_live_workloads(
+    executors: &crate::software_executor::SoftwareExecutors,
+    env: &str,
+    cluster_config: Option<&std::path::Path>,
+    list_docker: bool,
+) -> (Vec<crate::software_executor::LiveWorkload>, bool) {
+    let adapters = executors.listing_adapters(cluster_config, list_docker);
+    if adapters.is_empty() {
+        return (Vec::new(), false);
+    }
+    let mut listed = Vec::new();
+    let mut any_ok = false;
+    for adapter in adapters {
+        if let Ok(workloads) = adapter.list_live_workloads(env, cluster_config) {
+            any_ok = true;
+            listed.extend(workloads);
+        }
+    }
+    if !any_ok {
+        return (Vec::new(), false);
+    }
+    listed.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    listed.dedup();
+    (listed, true)
+}
+
+async fn persist_unmanaged_workloads(
+    ctx: &mut Ctx,
+    env: &str,
+    observed: &crate::pb::sekai::Object,
+) -> Result<()> {
+    let Some(value) = observed.properties.get("unmanaged_workloads") else {
+        return Ok(());
+    };
+    let mut current = crate::environment::active_environment(ctx, env).await?;
+    if current.properties.get("unmanaged_workloads") == Some(value) {
+        return Ok(());
+    }
+    current
+        .properties
+        .insert("unmanaged_workloads".into(), value.clone());
+    current.updated = crate::now_millis();
+    ctx.put(current).await?;
     Ok(())
 }
 
@@ -1835,7 +1927,7 @@ async fn admit_reconcile_dependency(
 pub(super) fn model_routing_rollout_rank(kind: crate::manifest::ProductKind, action: Action) -> u8 {
     use crate::product_kind::RolloutDirection;
     let direction = match action {
-        Action::Install | Action::Upgrade | Action::Restart | Action::Start => {
+        Action::Install | Action::Upgrade | Action::Restart | Action::Start | Action::Adopt => {
             RolloutDirection::Forward
         }
         Action::Downgrade | Action::Rollback | Action::Remove | Action::Stop => {
@@ -3224,6 +3316,89 @@ pub(super) async fn start_step(ctx: &mut Ctx, env: &str, product: &str) -> Resul
         },
     )
     .await
+}
+
+/// Record a matching live workload as deployed without mutating the target.
+pub(super) async fn adopt_step(
+    ctx: &mut Ctx,
+    env: &str,
+    release: &str,
+    executors: &crate::software_executor::SoftwareExecutors,
+) -> Result<Step> {
+    let (product, version) = parse_adopt_release(release)?;
+    validate_identifier("product", product)?;
+    let env_obj = crate::environment::environment(ctx, env).await?;
+    let subscriptions = crate::environment::list_subscriptions(ctx, &env_obj).await?;
+    let subscribed = subscriptions
+        .iter()
+        .find(|sub| sub.product == product || sub.instance == product);
+    let Some(sub) = subscribed else {
+        bail!("{product} is not subscribed in {env}");
+    };
+    let instance = sub.instance.as_str();
+    let product = sub.product.clone();
+    if let Some(current) = env_obj.properties.get(&format!("deployed.{instance}"))
+        && !current.is_empty()
+    {
+        if current == version {
+            bail!("{instance} in {env} is already recorded as deployed at {version}");
+        }
+        bail!("{instance} in {env} is already recorded as deployed at {current}");
+    }
+    let current_id = release_id(&product, version);
+    if release_is_recalled(ctx, &current_id).await? {
+        bail!("cannot adopt recalled release {current_id}");
+    }
+    let target = pin_release(ctx, &current_id, env).await?;
+    crate::software_compatibility::require_release(ctx, env, &current_id, instance).await?;
+    let step_instance = if instance == product.as_str() {
+        String::new()
+    } else {
+        instance.to_string()
+    };
+    let peers = current_peers(ctx, env, &env_obj, instance, &target.release_id).await?;
+    let identity = step_identity(ctx, &env_obj, env, &target.release_id, instance, &peers).await?;
+    let mut step = Step {
+        id: format!("{}:adopt:{instance}", env_id(env)),
+        order: 0,
+        release_id: target.release_id,
+        release_digest: target.digest,
+        artifact_digest: target.artifact_digest,
+        workdir: target.workdir,
+        host: None,
+        sealed: crate::sealed_secret::step_bindings(&env_obj, instance)?,
+        restore: None,
+        product,
+        instance: step_instance,
+        action: Action::Adopt,
+        from: None,
+        to: version.to_string(),
+        rewrap: None,
+        issuer: None,
+        identity,
+        restore_identity: None,
+        target_changes: Vec::new(),
+        reason: String::new(),
+    };
+    attach_target_changes(
+        ctx,
+        env,
+        &env_obj,
+        executors,
+        std::slice::from_mut(&mut step),
+    )
+    .await?;
+    Ok(step)
+}
+
+fn parse_adopt_release(release: &str) -> Result<(&str, &str)> {
+    if let Some((product, version)) = split_release_id(release) {
+        return Ok((product, version));
+    }
+    release
+        .split_once('@')
+        .filter(|(product, version)| !product.is_empty() && !version.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("adopt requires product@version"))
 }
 
 /// One re-wrap step per instance of `env` with sealed values (ADR 0045 §5):
@@ -6612,6 +6787,138 @@ allowed_providers = ["local"]
         assert_eq!(start.action, Action::Start);
         assert_eq!(start.from.as_deref(), Some("1.0.0"));
         assert_eq!(start.to, "1.0.0");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn live_unmanaged_helm_is_listed_and_not_installed() {
+        use crate::software_executor::{FakeSoftwareExecutor, LiveWorkload, SoftwareExecutors};
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-unmanaged-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        published_software(&mut ctx, &root, "1.0.0").await;
+        let actor = crate::auth_context::test_management_context("unmanaged");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
+        let executor = std::sync::Arc::new(FakeSoftwareExecutor::new());
+        let executors = SoftwareExecutors::with_default(executor.clone());
+
+        let install = crate::plan::create_with(&mut ctx, "local", &executors)
+            .await
+            .unwrap();
+        assert_eq!(install.steps.len(), 1);
+        assert_eq!(install.steps[0].action, Action::Install);
+
+        executor.set_live_workloads(vec![
+            LiveWorkload {
+                kind: "helm".into(),
+                name: "api".into(),
+            },
+            LiveWorkload {
+                kind: "helm".into(),
+                name: "orphan".into(),
+            },
+        ]);
+        let held = crate::plan::create_with(&mut ctx, "local", &executors)
+            .await
+            .unwrap();
+        assert!(held.steps.is_empty(), "{held:?}");
+
+        let rows = crate::environment::status(&mut ctx, "local").await.unwrap();
+        let api = rows.iter().find(|row| row.instance == "api").unwrap();
+        assert_eq!(crate::environment::status_state(api), "unmanaged");
+        assert_eq!(
+            api.unmanaged
+                .as_ref()
+                .map(|workload| workload.kind.as_str()),
+            Some("helm")
+        );
+        let orphan = rows.iter().find(|row| row.instance == "orphan").unwrap();
+        assert_eq!(crate::environment::status_state(orphan), "unmanaged");
+        assert_eq!(orphan.channel, "");
+        assert_eq!(orphan.head, "-");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn adopt_refuses_when_desired_and_live_differ() {
+        use crate::software_executor::{
+            FakeSoftwareExecutor, SoftwareExecutorKind, SoftwareExecutors,
+        };
+        use serde_json::json;
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-adopt-diff-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let dir = root.join("1.0.0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tenkai.toml"),
+            r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+executor = "kubernetes-inprocess"
+"#,
+        )
+        .unwrap();
+        crate::catalog::publish(
+            &mut ctx,
+            &dir.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("adopt-diff");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
+        let executor = std::sync::Arc::new(FakeSoftwareExecutor::new());
+        executor.set_object(
+            "Service",
+            "web",
+            json!({
+                "kind": "Service",
+                "metadata": {"name": "web"},
+                "spec": {"ports": [{"port": 80}]}
+            }),
+            Some(json!({
+                "kind": "Service",
+                "metadata": {"name": "web"},
+                "spec": {"ports": [{"port": 8080}]}
+            })),
+        );
+        let executors = SoftwareExecutors::default()
+            .with_adapter(SoftwareExecutorKind::KubernetesInProcess, executor);
+        let error = crate::plan::adopt_step_with(&mut ctx, "local", "api@1.0.0", &executors)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("adopt refused"), "{error}");
+        assert!(error.contains("Service/web"), "{error}");
+        assert!(error.contains("ports"), "{error}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

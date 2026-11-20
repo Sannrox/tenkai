@@ -20,11 +20,11 @@ use serde_json::{Map, Value, json};
 use crate::workload_stall::{Stall, StallClassifier, WorkloadEvidence};
 
 use tenkai::software_executor::{
-    PRE_PULL_LABEL, PrePullImage, PrePullReport, RolloutPhaseTimes, SoftwareApplyRequest,
-    SoftwareExecutor, SoftwareObserveStatus, TargetUnavailable, digest_pinned_registry_image,
-    k8s_label_value, kubernetes_manifests_dir, list_manifest_files, pre_pull_job_name,
-    sanitize_diagnostic_text, substitute_instance_placeholder, validate_cluster_config_path,
-    validate_request,
+    LiveWorkload, PRE_PULL_LABEL, PrePullImage, PrePullReport, RolloutPhaseTimes,
+    SoftwareApplyRequest, SoftwareExecutor, SoftwareObserveStatus, TargetUnavailable,
+    digest_pinned_registry_image, k8s_label_value, kubernetes_manifests_dir, list_manifest_files,
+    pre_pull_job_name, sanitize_diagnostic_text, substitute_instance_placeholder,
+    validate_cluster_config_path, validate_request,
 };
 
 pub const FIELD_MANAGER: &str = "tenkai";
@@ -1416,6 +1416,24 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
         }
         self.api
             .collect_support_workloads(cluster_config, environment)
+    }
+
+    fn list_live_workloads(
+        &self,
+        environment: &str,
+        cluster_config: Option<&Path>,
+    ) -> Result<Vec<LiveWorkload>> {
+        let Some(cluster_config) = cluster_config else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .support_workloads(environment, cluster_config)?
+            .into_iter()
+            .map(|workload| LiveWorkload {
+                kind: "kubernetes".into(),
+                name: workload.name,
+            })
+            .collect())
     }
 
     fn pre_pull(

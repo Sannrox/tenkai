@@ -209,7 +209,10 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
             }));
         }
         let actual = environment.properties.get(&format!("deployed.{instance}"));
-        if actual != step.from.as_ref() {
+        // A crash after recording the pin leaves the Adopt plan Computed;
+        // retrying it is success when the recorded version is already `to`.
+        let retried_adopt = step.action == Action::Adopt && actual == Some(&step.to);
+        if actual != step.from.as_ref() && !retried_adopt {
             return Ok(Err(Rejection::DeploymentChanged {
                 product: step.product.clone(),
                 expected: step.from.clone(),

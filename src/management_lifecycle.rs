@@ -118,6 +118,7 @@ pub enum ManagementLifecycleOperation {
     Rollback,
     Stop,
     Start,
+    Adopt,
     Recall,
     Retire,
     Hold,
@@ -159,6 +160,7 @@ impl ManagementLifecycleOperation {
             Self::Rollback => "rollback",
             Self::Stop => "stop",
             Self::Start => "start",
+            Self::Adopt => "adopt",
             Self::Recall => "recall",
             Self::Retire => "retire",
             Self::Hold => "hold",
@@ -229,6 +231,7 @@ impl ManagementLifecycleOperation {
                 | Self::Rollback
                 | Self::Stop
                 | Self::Start
+                | Self::Adopt
                 | Self::Hold
                 | Self::Release
                 | Self::HoldSchedule
@@ -285,6 +288,7 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "rollback" => Ok(ManagementLifecycleOperation::Rollback),
         "stop" => Ok(ManagementLifecycleOperation::Stop),
         "start" => Ok(ManagementLifecycleOperation::Start),
+        "adopt" => Ok(ManagementLifecycleOperation::Adopt),
         "recall" => Ok(ManagementLifecycleOperation::Recall),
         "retire" => Ok(ManagementLifecycleOperation::Retire),
         "hold" => Ok(ManagementLifecycleOperation::Hold),
@@ -825,6 +829,18 @@ pub struct StartRequest {
     pub environment: String,
     pub expected_generation: u64,
     pub product: String,
+}
+
+/// Plan recording a matching live workload as deployed without mutating it (#1082).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdoptRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    /// Catalog pin as `product@version`.
+    pub release: String,
 }
 
 /// Ask for a plan that re-wraps every sealed value of the environment for
@@ -1600,6 +1616,27 @@ pub fn admit_start(
         &request.environment,
         request.expected_generation,
         ManagementLifecycleOperation::Start,
+        kind,
+        granted_environment,
+    )
+}
+
+pub fn admit_adopt(
+    request: &AdoptRequest,
+    path_environment: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_path_environment("adopt", &request.environment, path_environment)?;
+    if request.release.trim().is_empty() {
+        bail!("adopt requires release as product@version");
+    }
+    admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        ManagementLifecycleOperation::Adopt,
         kind,
         granted_environment,
     )

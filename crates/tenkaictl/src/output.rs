@@ -176,6 +176,7 @@ pub(crate) fn command_name(command: &Command, target: Target) -> Option<CommandN
         Command::Restart { .. } if target == Target::Embedded => CommandName::Restart,
         Command::Stop { .. } => CommandName::Stop,
         Command::Start { .. } => CommandName::Start,
+        Command::Adopt { .. } => CommandName::Adopt,
         Command::Release {
             command: ReleaseCommand::Recall { .. },
         } => CommandName::Recall,
@@ -196,6 +197,7 @@ fn is_mutation(command: CommandName) -> bool {
             | CommandName::Restart
             | CommandName::Stop
             | CommandName::Start
+            | CommandName::Adopt
             | CommandName::Recall
             | CommandName::Approve
             | CommandName::Subscribe
@@ -777,6 +779,7 @@ mod tests {
             (CommandName::Restart, "plan"),
             (CommandName::Stop, "plan"),
             (CommandName::Start, "plan"),
+            (CommandName::Adopt, "plan"),
             (CommandName::Recall, "release"),
             (CommandName::Approve, "plan"),
             (CommandName::Subscribe, "environment"),

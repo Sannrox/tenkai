@@ -905,3 +905,79 @@ async fn embedded_planning_refuses_an_executor_this_process_lacks() {
 
     assert!(error.contains("not installed on this process"), "{error}");
 }
+
+#[tokio::test]
+async fn identical_adopt_records_deployed_without_applying_and_retries_once() {
+    use crate::software_executor::FakeSoftwareExecutor;
+    let mut fixture = Fixture::new("adopt").await;
+    let executor = Arc::new(FakeSoftwareExecutor::new());
+    let executors = SoftwareExecutors::with_default(executor.clone());
+    fixture.release("api", "1.0.0", "install = \"true\"").await;
+
+    let step = crate::plan::adopt_step_with(&mut fixture.ctx, "local", "api@1.0.0", &executors)
+        .await
+        .unwrap();
+    assert_eq!(step.action, crate::plan::Action::Adopt);
+    let plan = crate::plan::create_from_steps(&mut fixture.ctx, "local", vec![step.clone()])
+        .await
+        .unwrap();
+    let outcomes = super::execute_with_options(
+        &mut fixture.ctx,
+        &plan.id,
+        ExecutionOptions {
+            rollback_hold: true,
+            skip_gates: true,
+            emergency_reason: None,
+            authorization: ExecutionAuthorization::LocalDevelopment {
+                reason: "adopt fixture",
+            },
+            software_executors: executors.clone(),
+            model_runtime_executor: None,
+            worker_lifecycle: None,
+            artifact_registry: None,
+            delivery_adapter: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(statuses(&outcomes), [StepOutcomeStatus::Succeeded]);
+    assert!(
+        executor.applied_keys().is_empty(),
+        "{:?}",
+        executor.applied_keys()
+    );
+    assert_eq!(fixture.deployed("api").await.as_deref(), Some("1.0.0"));
+
+    let retry = crate::plan::create_from_steps(&mut fixture.ctx, "local", vec![step])
+        .await
+        .unwrap();
+    let retried = super::execute_with_options(
+        &mut fixture.ctx,
+        &retry.id,
+        ExecutionOptions {
+            rollback_hold: true,
+            skip_gates: true,
+            emergency_reason: None,
+            authorization: ExecutionAuthorization::LocalDevelopment {
+                reason: "adopt retry fixture",
+            },
+            software_executors: executors,
+            model_runtime_executor: None,
+            worker_lifecycle: None,
+            artifact_registry: None,
+            delivery_adapter: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(statuses(&retried), [StepOutcomeStatus::Succeeded]);
+    assert!(executor.applied_keys().is_empty());
+    let history = crate::deployment_history::list_deployment_history(
+        &mut fixture.ctx,
+        "local",
+        &crate::deployment_history::DeploymentHistoryQuery::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(history.items.len(), 1, "{history:?}");
+}

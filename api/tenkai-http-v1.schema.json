@@ -1,5 +1,39 @@
 {
   "$defs": {
+    "AdoptRequest": {
+      "additionalProperties": false,
+      "description": "Plan recording a matching live workload as deployed without mutating it (#1082).",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "release": {
+          "description": "Catalog pin as `product@version`.",
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "environment",
+        "expected_generation",
+        "release"
+      ],
+      "type": "object"
+    },
     "AdvisoryFeedStatus": {
       "description": "Imported feed age and the releases it currently flags.",
       "properties": {
@@ -5955,6 +5989,23 @@
       ],
       "type": "object"
     },
+    "LiveWorkload": {
+      "description": "A live workload an adapter sees in an environment, whether or not a\nrecorded instance owns it (#1082).",
+      "properties": {
+        "kind": {
+          "description": "Adapter spelling: `helm`, `kubernetes`, or `host`.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name"
+      ],
+      "type": "object"
+    },
     "ManagementLifecycleResult": {
       "description": "Versioned result shared by catalog lifecycle routes. A client ignores\nfields it does not know, so a newer server can add one (#1172);\nrequests stay strict.",
       "properties": {
@@ -9098,6 +9149,10 @@
         "spec_drift": {
           "$ref": "#/$defs/SpecDriftView",
           "description": "Report-only live-spec comparison (#1028). Omitted when unknown."
+        },
+        "unmanaged": {
+          "$ref": "#/$defs/LiveWorkload",
+          "description": "Live workload no recorded instance owns (#1082). Omitted when none."
         }
       },
       "required": [
@@ -10842,6 +10897,17 @@
       "path": "/v1/environments/{environment}/start",
       "request": {
         "$ref": "#/$defs/StartRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/environments/{environment}/adopt",
+      "request": {
+        "$ref": "#/$defs/AdoptRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"

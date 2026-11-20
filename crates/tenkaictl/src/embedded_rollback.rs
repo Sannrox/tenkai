@@ -250,6 +250,30 @@ pub(crate) async fn run(
             )
             .await?;
         }
+        Command::Adopt {
+            env,
+            release,
+            bypass,
+            emergency_reason,
+            generation: _,
+        } => {
+            let step = plan::adopt_step(ctx, &env, &release).await?;
+            store_and_maybe_apply(
+                ctx,
+                SameVersionCommand {
+                    env: &env,
+                    step,
+                    command: CommandName::Adopt,
+                    verb: "adopt",
+                    gerund: "adopting",
+                    approval_message: "The adopt plan requires signed approval",
+                    bypass,
+                    emergency_reason,
+                    output,
+                },
+            )
+            .await?;
+        }
         _ => unreachable!("rollback dispatcher received a non-rollback command"),
     }
     Ok(())

@@ -280,6 +280,15 @@ pub struct IdentityTarget<'a> {
     pub cluster_config_path: Option<&'a Path>,
 }
 
+/// A live workload an adapter sees in an environment, whether or not a
+/// recorded instance owns it (#1082).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LiveWorkload {
+    /// Adapter spelling: `helm`, `kubernetes`, or `host`.
+    pub kind: String,
+    pub name: String,
+}
+
 /// Pluggable software apply path. Tenkai never hard-depends on a cluster.
 pub trait SoftwareExecutor: Send + Sync {
     /// Checks, before anything changes, that the target this adapter writes
@@ -427,6 +436,17 @@ pub trait SoftwareExecutor: Send + Sync {
         let _ = request;
         Ok(Vec::new())
     }
+    /// Live workloads in `environment` this adapter can see (#1082). Default
+    /// is none. A listing error is visible to the caller; it does not fail a
+    /// plan by itself.
+    fn list_live_workloads(
+        &self,
+        environment: &str,
+        cluster_config: Option<&Path>,
+    ) -> Result<Vec<LiveWorkload>> {
+        let _ = (environment, cluster_config);
+        Ok(Vec::new())
+    }
     /// Apply one generation and return wall time per phase. Default times `apply`.
     fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
         let started = Instant::now();
@@ -526,6 +546,7 @@ pub struct FakeSoftwareExecutor {
     apply_delay: std::time::Duration,
     desired_objects: Mutex<BTreeMap<(String, String), serde_json::Value>>,
     live_objects: Mutex<BTreeMap<(String, String), serde_json::Value>>,
+    live_workloads: Mutex<Vec<LiveWorkload>>,
 }
 
 impl FakeSoftwareExecutor {
@@ -582,6 +603,11 @@ impl FakeSoftwareExecutor {
             .lock()
             .expect("fake software mutex")
             .insert((kind.to_string(), name.to_string()), live);
+    }
+
+    /// Live workloads this fake reports when planning or listing (#1082).
+    pub fn set_live_workloads(&self, workloads: Vec<LiveWorkload>) {
+        *self.live_workloads.lock().expect("fake software mutex") = workloads;
     }
 }
 
@@ -663,6 +689,19 @@ impl SoftwareExecutor for FakeSoftwareExecutor {
                 crate::spec_drift::compare_desired_live(&key.0, &key.1, desired, live.get(key))
             })
             .collect())
+    }
+
+    fn list_live_workloads(
+        &self,
+        environment: &str,
+        cluster_config: Option<&Path>,
+    ) -> Result<Vec<LiveWorkload>> {
+        let _ = (environment, cluster_config);
+        Ok(self
+            .live_workloads
+            .lock()
+            .expect("fake software mutex")
+            .clone())
     }
 }
 
@@ -894,6 +933,17 @@ fn host_not_configured() -> String {
     )
 }
 
+fn lists_live_workloads(kind: Option<SoftwareExecutorKind>, cluster: bool, docker: bool) -> bool {
+    match kind {
+        None => true,
+        Some(SoftwareExecutorKind::Helm)
+        | Some(SoftwareExecutorKind::Kubernetes)
+        | Some(SoftwareExecutorKind::KubernetesInProcess) => cluster,
+        Some(SoftwareExecutorKind::Docker) => docker,
+        Some(SoftwareExecutorKind::Shell | SoftwareExecutorKind::Host) => false,
+    }
+}
+
 /// Shell default and no declared adapters.
 impl Default for SoftwareExecutors {
     fn default() -> Self {
@@ -919,6 +969,35 @@ impl SoftwareExecutors {
             if !adapters.iter().any(|seen| Arc::ptr_eq(seen, adapter)) {
                 adapters.push(Arc::clone(adapter));
             }
+        }
+        adapters
+    }
+
+    /// Adapters that can list live workloads in this environment without
+    /// contacting a cluster or Docker daemon the environment does not use.
+    /// Helm and Kubernetes need `cluster_config`. Docker needs `list_docker`
+    /// (process default `docker`, or an environment Docker secret dir). An
+    /// unnamed test default always lists.
+    pub fn listing_adapters(
+        &self,
+        cluster_config: Option<&Path>,
+        list_docker: bool,
+    ) -> Vec<Arc<dyn SoftwareExecutor>> {
+        let cluster = cluster_config.is_some();
+        let mut adapters: Vec<Arc<dyn SoftwareExecutor>> = Vec::new();
+        let mut push = |kind: Option<SoftwareExecutorKind>, adapter: &Arc<dyn SoftwareExecutor>| {
+            if !lists_live_workloads(kind, cluster, list_docker) {
+                return;
+            }
+            if !adapters.iter().any(|seen| Arc::ptr_eq(seen, adapter)) {
+                adapters.push(Arc::clone(adapter));
+            }
+        };
+        if let Some(adapter) = &self.default {
+            push(self.default_kind, adapter);
+        }
+        for (kind, adapter) in &self.declared {
+            push(Some(*kind), adapter);
         }
         adapters
     }
@@ -1391,6 +1470,31 @@ mod tests {
         );
         let err = "fake".parse::<SoftwareExecutorKind>().unwrap_err();
         assert!(err.to_string().contains("\"fake\""), "{err}");
+    }
+
+    #[test]
+    fn live_listing_skips_cluster_and_docker_without_a_handle() {
+        let fake: Arc<dyn SoftwareExecutor> = Arc::new(FakeSoftwareExecutor::new());
+        let helm: Arc<dyn SoftwareExecutor> = Arc::new(FakeSoftwareExecutor::new());
+        let docker: Arc<dyn SoftwareExecutor> = Arc::new(FakeSoftwareExecutor::new());
+        let cluster = SoftwareExecutors::default()
+            .with_adapter(SoftwareExecutorKind::Helm, helm.clone())
+            .with_adapter(SoftwareExecutorKind::Docker, docker.clone());
+        assert!(cluster.listing_adapters(None, false).is_empty());
+        let kubeconfig = Path::new("/tmp/tenkai-listing-kubeconfig");
+        let listed = cluster.listing_adapters(Some(kubeconfig), false);
+        assert_eq!(listed.len(), 1);
+        assert!(Arc::ptr_eq(&listed[0], &helm));
+        let listed = cluster.listing_adapters(None, true);
+        assert_eq!(listed.len(), 1);
+        assert!(Arc::ptr_eq(&listed[0], &docker));
+
+        let with_fake = SoftwareExecutors::with_default(fake.clone())
+            .with_adapter(SoftwareExecutorKind::Helm, helm)
+            .with_adapter(SoftwareExecutorKind::Docker, docker);
+        let listed = with_fake.listing_adapters(None, false);
+        assert_eq!(listed.len(), 1);
+        assert!(Arc::ptr_eq(&listed[0], &fake));
     }
 
     #[test]
