@@ -43,6 +43,9 @@ const DIAGNOSIS_INTERVAL: Duration = Duration::from_secs(2);
 /// Bound on one live API call, so a stalled API server cannot hold the wait
 /// past a stop for longer than this.
 const LIVE_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// kubectl `delete namespace --wait=true` bound so a stuck finalizer cannot
+/// hold the cluster-namespace plan step forever.
+const CLUSTER_NAMESPACE_DELETE_WAIT: Duration = Duration::from_secs(60);
 /// Stop flag for a call outside an apply lease; it is never set.
 static NOT_STOPPED: AtomicBool = AtomicBool::new(false);
 
@@ -1168,6 +1171,23 @@ pub(crate) fn apply_cluster_namespace_objects<A: ClusterApplyApi>(
         tenkai::cluster_namespace::ClusterNamespaceAction::Delete => {
             tenkai::cluster_namespace::refuse_reserved_delete(&request.name)?;
             api.remove(cluster_config, "", &request.name, "Namespace")?;
+            // Namespace deletion is asynchronous. Returning while the object
+            // is Terminating makes a later create of the same name fail, and
+            // kubectl already waits (`--wait=true`).
+            let deadline = Instant::now() + CLUSTER_NAMESPACE_DELETE_WAIT;
+            loop {
+                match api.observe(cluster_config, "", &request.name, "Namespace")? {
+                    None => break,
+                    Some(_) if Instant::now() >= deadline => {
+                        bail!(
+                            "cluster namespace {} still exists after delete wait of {}s",
+                            request.name,
+                            CLUSTER_NAMESPACE_DELETE_WAIT.as_secs()
+                        );
+                    }
+                    Some(_) => std::thread::sleep(MAX_HEALTH_POLL),
+                }
+            }
             Ok(())
         }
         tenkai::cluster_namespace::ClusterNamespaceAction::Create
