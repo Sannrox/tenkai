@@ -38,7 +38,7 @@ OpenShift custom resources on `kubernetes-inprocess`.
   violates restricted SCC or Pod Security is refused by admission; the
   in-process wait already names `is forbidden` / `denied the request`.
 
-CVO and MCO upgrades stay [#994](https://github.com/Sannrox/tenkai/issues/994).
+CVO and MCO upgrades are [ADR 0059](0059-openshift-cluster-version-updates.md).
 
 ## Consequences
 

@@ -215,7 +215,7 @@ Stop and record a no-go if any of these proves true while implementing:
 - Measured or attested boot as a stronger identity proof; a later decision
   can add it as another `verify` input.
 - Cluster-managed node updates, where the cluster owns the reboot
-  ([#994](https://github.com/Sannrox/tenkai/issues/994)).
+  ([ADR 0059](0059-openshift-cluster-version-updates.md)).
 
 ## Consequences
 
