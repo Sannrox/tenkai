@@ -513,9 +513,10 @@ mod tests {
         .unwrap();
 
         let observations = ctx
-            .embedded_arc()
+            .catalog_port()
             .unwrap()
-            .feedback_observations("local")
+            .0
+            .feedback_observations(None, "local")
             .unwrap();
         assert_eq!(observations.len(), 2, "{observations:?}");
         let block = &observations[0];

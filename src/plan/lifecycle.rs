@@ -868,28 +868,6 @@ where
         Some(false) => Some("false"),
         None => None,
     };
-    if let Some(store) = ctx.embedded_arc() {
-        return crate::client::block_embedded(store, move |store| {
-            let status_refs: Vec<&str> = status_labels.iter().map(String::as_str).collect();
-            let (matching_key, matching_values) = if filter_statuses {
-                (Some("status"), status_refs.as_slice())
-            } else {
-                (None, &[][..])
-            };
-            let objects = store.find_by_property_matching(environment_plan_index_query(
-                &environment,
-                matching_key,
-                matching_values,
-                equals_key,
-                equals_value,
-                descending,
-                limit,
-                offset,
-            ))?;
-            map(objects)
-        })
-        .await;
-    }
     let status_refs: Vec<&str> = status_labels.iter().map(String::as_str).collect();
     let (matching_key, matching_values) = if filter_statuses {
         (Some("status"), status_refs.as_slice())
@@ -1500,7 +1478,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(
-            error.contains("embedded store blocking task failed"),
+            error.contains("plan decode blocking task failed"),
             "{error}"
         );
         let _ = std::fs::remove_file(database);

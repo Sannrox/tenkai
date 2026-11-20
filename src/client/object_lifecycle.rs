@@ -16,10 +16,9 @@ use crate::pb::sekai::{
 
 pub(super) enum ObjectLifecycle<'a> {
     Remote(&'a RemoteClient),
-    Embedded(Arc<crate::storage::SqliteStore>),
     Catalog {
         catalog: Arc<dyn crate::storage::CatalogGraph>,
-        tenant: String,
+        tenant: Option<String>,
     },
     /// A tenant hub without a usable catalog binding. `tenant_unbound` is a
     /// hub that has a catalog but no tenant yet: its reads fail with
@@ -40,12 +39,8 @@ impl ObjectLifecycle<'_> {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
                 let id = id.to_string();
-                super::block_catalog(catalog, move |catalog| catalog.get(Some(&tenant), &id)).await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                let id = id.to_string();
-                super::block_embedded(store, move |store| store.get(&id)).await
+                super::block_catalog(catalog, move |catalog| catalog.get(tenant.as_deref(), &id))
+                    .await
             }
             Self::Remote(client) => {
                 let response: std::result::Result<GetObjectResponse, tonic::Status> = remote_unary(
@@ -75,13 +70,9 @@ impl ObjectLifecycle<'_> {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
                 super::block_catalog_status(catalog, move |catalog| {
-                    catalog.create(Some(&tenant), object)
+                    catalog.create(tenant.as_deref(), object)
                 })
                 .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                super::block_embedded_status(store, move |store| store.create(object)).await
             }
             Self::Remote(client) => {
                 let object_id = object.id.clone();
@@ -115,13 +106,10 @@ impl ObjectLifecycle<'_> {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
                 let id = id.to_string();
-                super::block_catalog(catalog, move |catalog| catalog.delete(Some(&tenant), &id))
-                    .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                let id = id.to_string();
-                super::block_embedded(store, move |store| store.delete(&id)).await
+                super::block_catalog(catalog, move |catalog| {
+                    catalog.delete(tenant.as_deref(), &id)
+                })
+                .await
             }
             Self::Remote(client) => {
                 let _: DeleteObjectResponse = remote_unary(
@@ -144,12 +132,10 @@ impl ObjectLifecycle<'_> {
             Self::Catalog { catalog, tenant } => {
                 let catalog = Arc::clone(catalog);
                 let tenant = tenant.clone();
-                super::block_catalog(catalog, move |catalog| catalog.put(Some(&tenant), object))
-                    .await
-            }
-            Self::Embedded(store) => {
-                let store = Arc::clone(store);
-                super::block_embedded(store, move |store| store.put(object)).await
+                super::block_catalog(catalog, move |catalog| {
+                    catalog.put(tenant.as_deref(), object)
+                })
+                .await
             }
             Self::Remote(client) => {
                 let existing: std::result::Result<GetObjectResponse, tonic::Status> = remote_unary(

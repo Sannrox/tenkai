@@ -469,7 +469,7 @@ fn evidence_object(plan: &Plan, evidence: &HealthGateEvidence) -> Result<Object>
 }
 
 fn enqueue_health_gate_event(ctx: &mut Ctx, plan: &Plan, evidence: &HealthGateEvidence) {
-    let Some(store) = ctx.embedded_arc() else {
+    let Some(store) = ctx.operational_store() else {
         return;
     };
     let Ok(payload) = serde_json::to_string(evidence) else {

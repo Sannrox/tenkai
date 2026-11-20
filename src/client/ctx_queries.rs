@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use sekai_client::CallOptions;
 
-use super::{Ctx, apply_remote_property_index, block_embedded};
+use super::{Ctx, apply_remote_property_index};
 use crate::pb::sekai::{
     FindByPropertyRequest, Link, ListFilter, ListObjectsRequest, ListObjectsResponse, Object,
 };
@@ -90,12 +90,50 @@ impl Ctx {
                 "find_by_property order key must be non-empty"
             );
         }
-        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+        if let Some((catalog, tenant)) = self.catalog_port() {
+            if tenant.is_none() {
+                let kind = query.kind.to_string();
+                let key = query.key.to_string();
+                let value = query.value.to_string();
+                let matching_key = query.matching_key.map(str::to_string);
+                let matching_values = query
+                    .matching_values
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect::<Vec<_>>();
+                let equals_key = query.equals_key.map(str::to_string);
+                let equals_value = query.equals_value.map(str::to_string);
+                let order_key = query.order_key.map(str::to_string);
+                let descending = query.descending;
+                let limit = query.limit;
+                let offset = query.offset;
+                return super::block_catalog(catalog, move |catalog| {
+                    let matching_refs = matching_values
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>();
+                    catalog.find_by_property_matching(
+                        None,
+                        crate::embedded::PropertyIndexQuery {
+                            matching_key: matching_key.as_deref(),
+                            matching_values: &matching_refs,
+                            equals_key: equals_key.as_deref(),
+                            equals_value: equals_value.as_deref(),
+                            order_key: order_key.as_deref(),
+                            descending,
+                            limit,
+                            offset,
+                            ..crate::embedded::PropertyIndexQuery::new(&kind, &key, &value)
+                        },
+                    )
+                })
+                .await;
+            }
             let kind = query.kind.to_string();
             let key = query.key.to_string();
             let value = query.value.to_string();
             let objects = super::block_catalog(catalog, move |catalog| {
-                catalog.find_by_property(Some(&tenant), &kind, &key, &value)
+                catalog.find_by_property(tenant.as_deref(), &kind, &key, &value)
             })
             .await?;
             return apply_remote_property_index(objects, &query);
@@ -103,41 +141,6 @@ impl Ctx {
         if self.is_tenant_hub() {
             anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
             return Ok(Vec::new());
-        }
-        if let Some(store) = self.embedded_arc() {
-            let kind = query.kind.to_string();
-            let key = query.key.to_string();
-            let value = query.value.to_string();
-            let matching_key = query.matching_key.map(str::to_string);
-            let matching_values = query
-                .matching_values
-                .iter()
-                .map(|value| (*value).to_string())
-                .collect::<Vec<_>>();
-            let equals_key = query.equals_key.map(str::to_string);
-            let equals_value = query.equals_value.map(str::to_string);
-            let order_key = query.order_key.map(str::to_string);
-            let descending = query.descending;
-            let limit = query.limit;
-            let offset = query.offset;
-            return block_embedded(store, move |store| {
-                let matching_refs = matching_values
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>();
-                store.find_by_property_matching(crate::embedded::PropertyIndexQuery {
-                    matching_key: matching_key.as_deref(),
-                    matching_values: &matching_refs,
-                    equals_key: equals_key.as_deref(),
-                    equals_value: equals_value.as_deref(),
-                    order_key: order_key.as_deref(),
-                    descending,
-                    limit,
-                    offset,
-                    ..crate::embedded::PropertyIndexQuery::new(&kind, &key, &value)
-                })
-            })
-            .await;
         }
         if query.matching_key.is_some() && query.matching_values.is_empty() {
             return Ok(Vec::new());
@@ -164,20 +167,16 @@ impl Ctx {
     }
 
     pub async fn list_kind(&mut self, kind: &str) -> Result<Vec<Object>> {
-        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+        if let Some((catalog, tenant)) = self.catalog_port() {
             let kind = kind.to_string();
             return super::block_catalog(catalog, move |catalog| {
-                catalog.list_kind(Some(&tenant), &kind)
+                catalog.list_kind(tenant.as_deref(), &kind)
             })
             .await;
         }
         if self.is_tenant_hub() {
             anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
             return Ok(Vec::new());
-        }
-        if let Some(store) = self.embedded_arc() {
-            let kind = kind.to_string();
-            return block_embedded(store, move |store| store.list_kind(&kind)).await;
         }
         const PAGE_SIZE: i32 = 100;
         let mut objects = Vec::new();
@@ -209,20 +208,16 @@ impl Ctx {
     /// Remote adapters still page `ListObjects` and keep only ids; there is no
     /// cheaper name/id RPC on the vendored protocol.
     pub(crate) async fn list_kind_ids(&mut self, kind: &str) -> Result<Vec<String>> {
-        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+        if let Some((catalog, tenant)) = self.catalog_port() {
             let kind = kind.to_string();
             return super::block_catalog(catalog, move |catalog| {
-                catalog.list_kind_ids(Some(&tenant), &kind)
+                catalog.list_kind_ids(tenant.as_deref(), &kind)
             })
             .await;
         }
         if self.is_tenant_hub() {
             anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
             return Ok(Vec::new());
-        }
-        if let Some(store) = self.embedded_arc() {
-            let kind = kind.to_string();
-            return block_embedded(store, move |store| store.list_kind_ids(&kind)).await;
         }
         Ok(self
             .list_kind(kind)

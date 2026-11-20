@@ -910,9 +910,9 @@ max_startup_seconds = 30
         .unwrap();
         apply_local_model_canary(&mut ctx, "qwen-export", "canary").await;
 
-        let store = ctx.embedded_arc().expect("embedded store");
+        let store = ctx.operational_store().expect("embedded store");
         let environment_id = crate::ontology::env_id("local");
-        let records = crate::client::block_embedded(store, move |store| {
+        let records = crate::client::block_operational(store, move |store| {
             Ok(crate::storage::OperationalStore::list_provider_events(
                 store,
                 crate::model_release_evidence::MODEL_RUNTIME_EVIDENCE_KIND,

@@ -4,7 +4,7 @@ use anyhow::{Context as _, Result};
 
 use sekai_client::CallOptions;
 
-use super::{Ctx, action_actor_from_changes, block_embedded};
+use super::{Ctx, action_actor_from_changes};
 use crate::pb::graph_action::ActionResult;
 use crate::pb::sekai::{
     Decision, ListObjectChangesRequest, ListObjectChangesResponse, ObjectChange,
@@ -65,16 +65,12 @@ impl Ctx {
     }
 
     pub async fn object_changes(&mut self, object_id: &str) -> Result<Vec<ObjectChange>> {
-        if let Some((catalog, Some(tenant))) = self.catalog_binding() {
+        if let Some((catalog, tenant)) = self.catalog_port() {
             let object_id = object_id.to_string();
             return super::block_catalog(catalog, move |catalog| {
-                catalog.changes(Some(&tenant), &object_id)
+                catalog.changes(tenant.as_deref(), &object_id)
             })
             .await;
-        }
-        if let Some(store) = self.embedded_arc() {
-            let object_id = object_id.to_string();
-            return block_embedded(store, move |store| store.changes(&object_id)).await;
         }
         let mut offset = 0;
         let mut all = Vec::new();

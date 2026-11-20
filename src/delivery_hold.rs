@@ -1070,7 +1070,7 @@ async fn try_set_automatic_hold(
 }
 
 async fn announce_automatic_hold(ctx: &mut Ctx, scope: &HoldScope, hold: &DeliveryHold) {
-    let Some(store) = ctx.embedded_arc() else {
+    let Some(store) = ctx.operational_store() else {
         return;
     };
     // Automatic holds are environment-scoped; channel holds are operator-set.

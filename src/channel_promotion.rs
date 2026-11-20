@@ -24,7 +24,6 @@ use crate::ontology::{
     KIND_INSTANCE, NS, REL_SUBSCRIBES, channel_id, env_id, validate_identifier,
 };
 use crate::pb::sekai::Object;
-use crate::storage::OperationalStore;
 
 /// Authenticator id stamped on policy-driven promotions.
 pub const POLICY_AUTHENTICATOR: &str = "channel-promotion-policy";
@@ -1530,7 +1529,7 @@ async fn mark_decision_committed_active(
 }
 
 fn emit_promoted(ctx: &mut Ctx, spec: &str, policy_id: &str) -> Result<()> {
-    let Some(store) = ctx.embedded_arc() else {
+    let Some(store) = ctx.operational_store() else {
         return Ok(());
     };
     store.append_change_event(
@@ -1543,7 +1542,7 @@ fn emit_promoted(ctx: &mut Ctx, spec: &str, policy_id: &str) -> Result<()> {
 }
 
 fn emit_reset(ctx: &mut Ctx, active: &ActiveChannelPromotionPolicy, reason: &str) -> Result<()> {
-    let Some(store) = ctx.embedded_arc() else {
+    let Some(store) = ctx.operational_store() else {
         return Ok(());
     };
     let resource = format!(
@@ -1560,7 +1559,7 @@ fn emit_reset(ctx: &mut Ctx, active: &ActiveChannelPromotionPolicy, reason: &str
 }
 
 fn emit_recall(ctx: &mut Ctx, spec: &str) -> Result<()> {
-    let Some(store) = ctx.embedded_arc() else {
+    let Some(store) = ctx.operational_store() else {
         return Ok(());
     };
     store.append_change_event(
@@ -2108,7 +2107,7 @@ mod tests {
             "{channel:?}"
         );
         let events = ctx
-            .embedded_arc()
+            .operational_store()
             .unwrap()
             .list_change_events_after(0, 20)
             .unwrap();
@@ -2149,7 +2148,7 @@ mod tests {
         assert_eq!(reset[0].state, "reset", "{reset:?}");
         assert!(head(&mut ctx, "promo", "stable").await.is_none());
         let events = ctx
-            .embedded_arc()
+            .operational_store()
             .unwrap()
             .list_change_events_after(0, 20)
             .unwrap();
@@ -2370,7 +2369,7 @@ mod tests {
             Some("1")
         );
         let events = ctx
-            .embedded_arc()
+            .operational_store()
             .unwrap()
             .list_change_events_after(0, 20)
             .unwrap();
@@ -2398,7 +2397,7 @@ mod tests {
             .unwrap();
         assert_eq!(again.len(), 1, "{again:?}");
         let events_after = ctx
-            .embedded_arc()
+            .operational_store()
             .unwrap()
             .list_change_events_after(0, 20)
             .unwrap();

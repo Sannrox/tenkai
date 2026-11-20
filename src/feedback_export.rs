@@ -1282,9 +1282,10 @@ mod tests {
         ctx.put_with_provider_events(updated, &[], std::slice::from_ref(&captured))
             .await
             .unwrap();
-        let store = ctx.embedded_arc().unwrap();
+        let catalog = ctx.catalog_port().unwrap().0;
+        let store = ctx.operational_store().unwrap();
         assert_eq!(
-            store.feedback_observations("prod").unwrap(),
+            catalog.feedback_observations(None, "prod").unwrap(),
             vec![captured.clone()]
         );
         assert_eq!(
@@ -1501,7 +1502,7 @@ mod tests {
             ctx.put_with_provider_events(object("b"), &[], std::slice::from_ref(&captured))
                 .await
                 .unwrap();
-            let store = ctx.embedded_arc().unwrap();
+            let store = ctx.operational_store().unwrap();
             assert!(
                 OperationalStore::list_provider_events(
                     store.as_ref(),
@@ -1513,7 +1514,11 @@ mod tests {
                 .is_empty()
             );
             assert_eq!(
-                store.feedback_observations("prod").unwrap(),
+                ctx.catalog_port()
+                    .unwrap()
+                    .0
+                    .feedback_observations(None, "prod")
+                    .unwrap(),
                 vec![captured.clone()]
             );
         }
@@ -1523,7 +1528,7 @@ mod tests {
                 .await
                 .unwrap();
             let events = OperationalStore::list_provider_events(
-                ctx.embedded_arc().unwrap().as_ref(),
+                ctx.operational_store().unwrap().as_ref(),
                 FEEDBACK_PROVIDER_KIND,
                 "prod",
                 8,

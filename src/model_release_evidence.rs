@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::auth_context::{AuthenticatedRequestContext, DeliveryCapability};
-use crate::client::{Ctx, block_embedded};
+use crate::client::{Ctx, block_operational};
 use crate::manifest::ProductKind;
 use crate::model_runtime::ModelRuntimeDescriptor;
 use crate::ontology::validate_identifier;
@@ -698,7 +698,7 @@ pub fn runtime_evidence_event(
 
 /// Enqueue a signed runtime evidence record into the integration outbox.
 pub fn enqueue_runtime_evidence(
-    store: &impl crate::provider_event::ProviderEventStore,
+    store: &(impl crate::provider_event::ProviderEventStore + ?Sized),
     evidence: &ModelRuntimeEvidence,
     environment_id: &str,
     plan_digest: &str,
@@ -734,7 +734,7 @@ pub(crate) async fn export_completed_runtime_evidence(
     let Some(key) = signing_key_from_env()? else {
         return Ok(());
     };
-    let Some(store) = ctx.embedded_arc() else {
+    let Some(store) = ctx.operational_store() else {
         return Ok(());
     };
     let environment_object = ctx
@@ -764,7 +764,7 @@ pub(crate) async fn export_completed_runtime_evidence(
     let environment_id = environment_object.id.clone();
     let plan_digest = export.plan_digest.to_string();
     let observed_at = export.observed_at;
-    block_embedded(store, move |store| {
+    block_operational(store, move |store| {
         enqueue_runtime_evidence(
             store,
             &evidence,

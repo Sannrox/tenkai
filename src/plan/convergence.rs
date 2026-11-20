@@ -6039,16 +6039,18 @@ install = "true"
             tokio::time::sleep(std::time::Duration::from_millis(3)).await;
         }
         let first = ctx
-            .embedded_arc()
+            .catalog_port()
             .unwrap()
-            .feedback_observations("local")
+            .0
+            .feedback_observations(None, "local")
             .unwrap();
         drop(ctx);
         let ctx = Ctx::embedded(&database).unwrap();
         let stored = ctx
-            .embedded_arc()
+            .catalog_port()
             .unwrap()
-            .feedback_observations("local")
+            .0
+            .feedback_observations(None, "local")
             .unwrap();
         assert_eq!(stored, first, "observations survive a restart unchanged");
         assert_eq!(
@@ -6198,9 +6200,10 @@ install = "true"
         // The retry's observation says it retried the held target (#803);
         // the rollback that set the hold did not.
         let observations = ctx
-            .embedded_arc()
+            .catalog_port()
             .unwrap()
-            .feedback_observations("local")
+            .0
+            .feedback_observations(None, "local")
             .unwrap();
         let retried = observations
             .iter()
