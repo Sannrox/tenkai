@@ -838,8 +838,20 @@ async fn compute_snapshot(
     ctx: &mut Ctx,
     env: &str,
     executors: &crate::software_executor::SoftwareExecutors,
-) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
-    compute_snapshot_with_policy(ctx, env, ConvergencePolicy::catalog_only(), executors).await
+    recalled_upgrade_reason: Option<&str>,
+) -> Result<(
+    Vec<DesiredStateInput>,
+    Vec<Step>,
+    Vec<crate::plan::RecalledUpgradeAdmission>,
+)> {
+    compute_snapshot_with_policy(
+        ctx,
+        env,
+        ConvergencePolicy::catalog_only(),
+        executors,
+        recalled_upgrade_reason,
+    )
+    .await
 }
 
 async fn compute_snapshot_with_policy(
@@ -847,7 +859,12 @@ async fn compute_snapshot_with_policy(
     env: &str,
     policy: ConvergencePolicy,
     executors: &crate::software_executor::SoftwareExecutors,
-) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
+    recalled_upgrade_reason: Option<&str>,
+) -> Result<(
+    Vec<DesiredStateInput>,
+    Vec<Step>,
+    Vec<crate::plan::RecalledUpgradeAdmission>,
+)> {
     let mut env_obj = crate::environment::active_environment(ctx, env).await?;
     crate::preview::admit_plan(&env_obj, crate::now_millis())?;
     let cluster_config =
@@ -888,6 +905,7 @@ async fn compute_snapshot_with_policy(
     let mut hold_clears = BTreeSet::new();
     let mut product_instances: BTreeMap<String, Vec<(String, crate::manifest::DeployInstances)>> =
         BTreeMap::new();
+    let mut recalled_upgrade = Vec::new();
     for sub in subscriptions {
         let product = sub.product;
         let instance = sub.instance;
@@ -927,12 +945,54 @@ async fn compute_snapshot_with_policy(
             .entry(product.clone())
             .or_default()
             .push((instance.clone(), instances_mode));
+        let mut admitted_recalled = false;
         if release_is_recalled(ctx, &release).await? {
-            bail!(
-                "channel head {release} is recalled; promote another release before converging {product} in {env}"
+            if policy.observe_live {
+                bail!(
+                    "channel head {release} is recalled; promote another release before converging {product} in {env}"
+                );
+            }
+            let Some(reason) = recalled_upgrade_reason else {
+                bail!(
+                    "channel head {release} is recalled; promote another release before converging {product} in {env}"
+                );
+            };
+            let current = env_obj
+                .properties
+                .get(&format!("deployed.{instance}"))
+                .cloned()
+                .filter(|value| !value.is_empty());
+            let Some(current) = current else {
+                bail!(
+                    "{}: no current pin of {instance} in {env} to compare with recalled {release}",
+                    crate::exposure::NOT_UPGRADE_GATE
+                );
+            };
+            if classify_change(&current, &desired) != Action::Upgrade {
+                bail!(
+                    "{}: converging {instance} in {env} onto recalled {release} is not an upgrade",
+                    crate::exposure::NOT_UPGRADE_GATE
+                );
+            }
+            let current_id = release_id(&product, &current);
+            recalled_upgrade.push(
+                crate::exposure::admit_recalled_upgrade(
+                    ctx,
+                    env,
+                    &product,
+                    &current_id,
+                    &release,
+                    reason,
+                )
+                .await?,
             );
+            admitted_recalled = true;
         }
-        let target = pin_release(ctx, &release, env).await?;
+        let target = if admitted_recalled {
+            pin_release_for_recovery(ctx, &release, env).await?
+        } else {
+            pin_release(ctx, &release, env).await?
+        };
         if policy.observe_live {
             match admit_reconcile_dependency(ctx, env, &release, &instance).await? {
                 DependencyAdmission::Hold {
@@ -1710,7 +1770,7 @@ async fn compute_snapshot_with_policy(
     if stamp_live {
         persist_unmanaged_workloads(ctx, env, &env_obj).await?;
     }
-    Ok((inputs, steps))
+    Ok((inputs, steps, recalled_upgrade))
 }
 
 async fn attach_target_changes(
@@ -2741,7 +2801,7 @@ fn refuse_inverted_contract_order(
 /// Compute the steps that converge the environment on its subscribed channels.
 pub(super) async fn compute(ctx: &mut Ctx, env: &str) -> Result<Vec<Step>> {
     let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
-    Ok(compute_snapshot(ctx, env, &executors).await?.1)
+    Ok(compute_snapshot(ctx, env, &executors, None).await?.1)
 }
 
 /// Compute and persist an immutable executable plan before any step is run.
@@ -2750,9 +2810,21 @@ pub(super) async fn create(
     ctx: &mut Ctx,
     env: &str,
     executors: &crate::software_executor::SoftwareExecutors,
+    recalled_upgrade_reason: Option<&str>,
 ) -> Result<Plan> {
-    let (inputs, steps) = compute_snapshot(ctx, env, executors).await?;
-    create_with_content(ctx, executors, env, inputs, steps, None, "embedded").await
+    let (inputs, steps, recalled_upgrade) =
+        compute_snapshot(ctx, env, executors, recalled_upgrade_reason).await?;
+    create_with_content(
+        ctx,
+        executors,
+        env,
+        inputs,
+        steps,
+        None,
+        "embedded",
+        recalled_upgrade,
+    )
+    .await
 }
 
 /// Persist a catalog-only plan only when it includes `product` at `release`.
@@ -2766,14 +2838,24 @@ pub(super) async fn create_for_held_target(
     release: &str,
 ) -> Result<Plan> {
     let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
-    let (inputs, steps) = compute_snapshot(ctx, env, &executors).await?;
+    let (inputs, steps, _) = compute_snapshot(ctx, env, &executors, None).await?;
     if !steps
         .iter()
         .any(|step| step.product == product && step.release_id == release)
     {
         bail!("explicit retry did not include held failed target {product} ({release})");
     }
-    create_with_content(ctx, &executors, env, inputs, steps, None, "embedded").await
+    create_with_content(
+        ctx,
+        &executors,
+        env,
+        inputs,
+        steps,
+        None,
+        "embedded",
+        Vec::new(),
+    )
+    .await
 }
 
 /// Reconcile planning may emit Restart steps from live observe/health evidence.
@@ -2783,28 +2865,60 @@ pub(super) async fn create_for_held_target(
 /// empty Computed plans so durable callers can reload the returned id.
 pub(super) async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Plan> {
     let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
-    let (inputs, mut steps) =
-        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile(), &executors).await?;
+    let (inputs, mut steps, _) =
+        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile(), &executors, None)
+            .await?;
     if steps.is_empty() {
-        return assemble_plan(env, inputs, &mut steps, None, None);
+        return assemble_plan(env, inputs, &mut steps, None, None, Vec::new());
     }
-    create_with_content(ctx, &executors, env, inputs, steps, None, "reconciler").await
+    create_with_content(
+        ctx,
+        &executors,
+        env,
+        inputs,
+        steps,
+        None,
+        "reconciler",
+        Vec::new(),
+    )
+    .await
 }
 
 /// Persist a reconcile-policy plan, even with zero steps. Held failed targets
 /// stay held, unlike operator `create`, which retries them.
 pub(super) async fn create_holding_failed_targets(ctx: &mut Ctx, env: &str) -> Result<Plan> {
     let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
-    let (inputs, steps) =
-        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile(), &executors).await?;
-    create_with_content(ctx, &executors, env, inputs, steps, None, "reconciler").await
+    let (inputs, steps, _) =
+        compute_snapshot_with_policy(ctx, env, ConvergencePolicy::reconcile(), &executors, None)
+            .await?;
+    create_with_content(
+        ctx,
+        &executors,
+        env,
+        inputs,
+        steps,
+        None,
+        "reconciler",
+        Vec::new(),
+    )
+    .await
 }
 
 /// Persist an explicitly constructed operation, such as a rollback, as a plan.
 pub(super) async fn create_from_steps(ctx: &mut Ctx, env: &str, steps: Vec<Step>) -> Result<Plan> {
     admit_preview_environment(ctx, env).await?;
     let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
-    create_with_content(ctx, &executors, env, Vec::new(), steps, None, "embedded").await
+    create_with_content(
+        ctx,
+        &executors,
+        env,
+        Vec::new(),
+        steps,
+        None,
+        "embedded",
+        Vec::new(),
+    )
+    .await
 }
 
 pub(super) async fn create_from_steps_with_recovery(
@@ -2823,6 +2937,7 @@ pub(super) async fn create_from_steps_with_recovery(
         steps,
         Some(reason),
         "embedded",
+        Vec::new(),
     )
     .await
 }
@@ -2838,6 +2953,7 @@ fn assemble_plan(
     steps: &mut [Step],
     recalled_recovery_reason: Option<String>,
     approval_brief: Option<crate::plan::ApprovalBrief>,
+    recalled_upgrade: Vec<crate::plan::RecalledUpgradeAdmission>,
 ) -> Result<Plan> {
     let created_at = crate::now_millis();
     for (order, step) in steps.iter_mut().enumerate() {
@@ -2850,6 +2966,7 @@ fn assemble_plan(
         steps,
         recalled_recovery_reason.as_deref(),
         approval_brief.as_ref(),
+        &recalled_upgrade,
     )?;
     let id = plan_id(env, created_at, &content_id);
     for (order, step) in steps.iter_mut().enumerate() {
@@ -2869,6 +2986,7 @@ fn assemble_plan(
         maintenance_blocked: false,
         prior_warnings: Vec::new(),
         recalled_recovery_reason,
+        recalled_upgrade,
         credential_runway: None,
         artifact_availability: Vec::new(),
         config_presets: Vec::new(),
@@ -2929,6 +3047,7 @@ async fn config_presets(
     Ok(views)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_with_content(
     ctx: &mut Ctx,
     executors: &crate::software_executor::SoftwareExecutors,
@@ -2937,6 +3056,7 @@ async fn create_with_content(
     steps: Vec<Step>,
     recalled_recovery_reason: Option<String>,
     default_proposer: &str,
+    recalled_upgrade: Vec<crate::plan::RecalledUpgradeAdmission>,
 ) -> Result<Plan> {
     let mut steps = bind_host_steps(ctx, executors, env, steps).await?;
     refuse_unsupported_executors(ctx, executors, env, &steps).await?;
@@ -2961,6 +3081,7 @@ async fn create_with_content(
         &mut steps,
         recalled_recovery_reason,
         approval_brief,
+        recalled_upgrade,
     )?;
     plan.artifact_availability = artifact_availability;
     plan.config_presets = config_presets(ctx, &env_obj, &steps).await?;

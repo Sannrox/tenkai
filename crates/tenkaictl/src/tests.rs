@@ -1588,9 +1588,40 @@ fn parses_plan_show() {
         Command::Plan {
             command: None,
             ref env,
+            allow_recalled_upgrade: false,
+            recalled_upgrade_reason: None,
             ..
         } if env.as_deref() == Some("prod")
     ));
+    let admitted = Cli::try_parse_from([
+        "tenkaictl",
+        "plan",
+        "--env",
+        "prod",
+        "--allow-recalled-upgrade",
+        "--recalled-upgrade-reason",
+        "lower openssl exposure",
+    ])
+    .unwrap();
+    assert!(matches!(
+        admitted.command,
+        Command::Plan {
+            command: None,
+            allow_recalled_upgrade: true,
+            recalled_upgrade_reason: Some(ref reason),
+            ..
+        } if reason == "lower openssl exposure"
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "tenkaictl",
+            "plan",
+            "--env",
+            "prod",
+            "--allow-recalled-upgrade",
+        ])
+        .is_err()
+    );
 }
 
 /// #1320: a failed certificate write used to leave `runner-ca-key.pem`

@@ -133,3 +133,5 @@ tenkaictl wave resume recall-TENKAI-2026-1 \
 
 Completed environments are not repeated. Rollback onto recalled content still
 requires `--allow-recalled-recovery --recovery-reason` inside the signed plan.
+An upgrade onto a notice-recalled head that strictly lowers blocking exposure
+uses `--allow-recalled-upgrade --recalled-upgrade-reason` instead.

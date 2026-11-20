@@ -42,11 +42,14 @@ Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
   and `GET /v1/products/{product}/recall-ranges` project those recorded facts,
   including remaining `deployed_release` instances, over `tenkai.http.v1`. Recall does not delete
   immutable descriptors or bytes. Planning will not target a recalled channel
-  head; a deployed recalled release rolls off to a non-recalled head without
-  restoring the recalled pin. Rollback onto recalled content is denied unless
-  the Plan records an audited `--allow-recalled-recovery --recovery-reason`
-  inside the signed executable digest. Ordinary lookup and channel-head
-  planning stay fail-closed. A signed `tenkai.recall-notice.v2` file carries
+  head unless the operator admits an upgrade whose blocking advisory set is a
+  proper subset of the current pin (`--allow-recalled-upgrade
+  --recalled-upgrade-reason`, recorded as `recalled_upgrade` on the signed
+  plan). A deployed recalled release otherwise rolls off to a non-recalled
+  head without restoring the recalled pin. Rollback onto recalled content is
+  denied unless the Plan records an audited `--allow-recalled-recovery
+  --recovery-reason` inside the signed executable digest. Ordinary lookup and
+  channel-head planning stay fail-closed. A signed `tenkai.recall-notice.v2` file carries
   the same recall to an isolated spoke
   ([recall notices](recall-notices.md)) under the trust rules of
   [ADR 0036](decisions/0036-offline-key-revocation.md). See

@@ -29,6 +29,7 @@ fn mock_plan_object(env: &str, created_at: i64) -> Object {
         maintenance_blocked: false,
         prior_warnings: Vec::new(),
         recalled_recovery_reason: None,
+        recalled_upgrade: Vec::new(),
         credential_runway: None,
         artifact_availability: Vec::new(),
         config_presets: Vec::new(),

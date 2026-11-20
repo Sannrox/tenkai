@@ -9,7 +9,7 @@
 //! revocations, verifies the envelope, then matches locally. Query and advisory
 //! matching read only catalog and environment state.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
@@ -58,6 +58,7 @@ pub const KIND_DEPLOYED_EXPOSURE: &str = "tenkai.deployed_exposure";
 pub const KIND_EXPOSURE_ASSESSMENT: &str = "tenkai.exposure_assessment";
 
 mod deployed;
+mod recalled_upgrade;
 mod waiver;
 
 pub(crate) use deployed::all_records as all_deployed_exposures;
@@ -68,6 +69,10 @@ use deployed::{
     reassess_under_lease,
 };
 pub use deployed::{DeployedExposure, open_environment_exposures, reassess_deployed};
+pub use recalled_upgrade::{
+    NOT_LOWER_GATE, NOT_UPGRADE_GATE, UNBOUND_GATE, admit as admit_recalled_upgrade, recheck,
+    require_reason as require_recalled_upgrade_reason,
+};
 pub use waiver::{
     EnvironmentGrace, ExposureWaiver, ExposureWaiverList, ExposureWaiverListQuery,
     GRACE_MS_PROPERTY, KIND_EXPOSURE_WAIVER, KIND_EXPOSURE_WAIVER_AUDIT, WaiverCategory,
@@ -807,6 +812,91 @@ pub fn export_exposures(
     Ok(())
 }
 
+/// Blocking advisory ids for `release_id` under the same rules as [`plan_gate`].
+///
+/// `Err(gate)` names why the set cannot be evaluated (stale feed, missing
+/// threshold, missing feed). `Ok(ids)` is the unwaived, out-of-grace hits at
+/// or above `exposure.block_severity`.
+pub(crate) async fn blocking_advisory_ids(
+    ctx: &mut Ctx,
+    environment: &str,
+    release_id: &str,
+) -> Result<std::result::Result<BTreeSet<String>, String>> {
+    let env = crate::environment::environment(ctx, environment).await?;
+    let feed = load_advisory_feed(ctx).await?;
+    if let Some(detail) = stale_feed_reason(&env, feed.as_ref()) {
+        return Ok(Err(detail));
+    }
+    let Some(threshold) = env.properties.get(BLOCK_SEVERITY_PROPERTY) else {
+        return Ok(Err(format!(
+            "recalled_upgrade_unevaluable: environment policy {BLOCK_SEVERITY_PROPERTY} is not set"
+        )));
+    };
+    let threshold = match Severity::parse(threshold) {
+        Ok(severity) => severity,
+        Err(error) => {
+            return Ok(Err(format!(
+                "exposure_unmitigated: environment policy {BLOCK_SEVERITY_PROPERTY} is invalid: {error}"
+            )));
+        }
+    };
+    let Some((feed, _)) = &feed else {
+        return Ok(Err(
+            "exposure_unmitigated: no advisory feed has been imported".into(),
+        ));
+    };
+    let Some(release) = ctx.get(release_id).await? else {
+        return Ok(Err(format!(
+            "recalled_upgrade_unevaluable: release {release_id} is missing"
+        )));
+    };
+    if release.kind != KIND_RELEASE {
+        return Ok(Err(format!(
+            "recalled_upgrade_unevaluable: {release_id} is not a release"
+        )));
+    }
+    let index = AdvisoryIndex::new(feed)?;
+    let mut matched = Vec::new();
+    index.match_release(&release, &mut matched)?;
+    sort_matches(&mut matched);
+    let now_ms = crate::now_millis();
+    let product = release
+        .properties
+        .get("product")
+        .cloned()
+        .unwrap_or_default();
+    let mut ids = BTreeSet::new();
+    for hit in matched.iter().filter(|entry| entry.severity >= threshold) {
+        if waiver::matching(
+            ctx,
+            &hit.advisory_id,
+            &hit.release_id,
+            &product,
+            &hit.component,
+            now_ms,
+        )
+        .await?
+        .is_some()
+        {
+            continue;
+        }
+        if waiver::in_grace(
+            ctx,
+            environment,
+            &product,
+            &hit.release_id,
+            &hit.advisory_id,
+            now_ms,
+        )
+        .await?
+        {
+            continue;
+        }
+        ids.insert(hit.advisory_id.clone());
+    }
+    Ok(Ok(ids))
+}
+
 /// Plan-start gate: stale advisory feed, missing/stale scan, or unmitigated
 /// severity on a target.
 ///
@@ -814,6 +904,17 @@ pub fn export_exposures(
 /// `exposure_scan_stale` / `exposure_unmitigated`) when the environment has
 /// configured the corresponding policy property.
 pub async fn plan_gate(ctx: &mut Ctx, environment: &str, steps: &[Step]) -> Result<Option<String>> {
+    plan_gate_with_admissions(ctx, environment, steps, &[]).await
+}
+
+/// [`plan_gate`], skipping unmitigated hits on a target that a live
+/// recalled-upgrade admission still covers (#1068).
+pub async fn plan_gate_with_admissions(
+    ctx: &mut Ctx,
+    environment: &str,
+    steps: &[Step],
+    admissions: &[crate::plan::RecalledUpgradeAdmission],
+) -> Result<Option<String>> {
     // Rollbacks and removals deploy nothing new; a removal is often the
     // remediation for the very advisory that would otherwise block it.
     let deploys = |step: &&Step| {
@@ -910,6 +1011,19 @@ pub async fn plan_gate(ctx: &mut Ctx, environment: &str, steps: &[Step]) -> Resu
             });
         }
         if let Some(hit) = blocking {
+            if let Some(admission) = admissions
+                .iter()
+                .find(|admission| admission.target_release == step.release_id)
+                && let Some(gate) =
+                    recalled_upgrade::recheck(ctx, environment, admission, step).await?
+            {
+                return Ok(Some(gate));
+            } else if admissions
+                .iter()
+                .any(|admission| admission.target_release == step.release_id)
+            {
+                continue;
+            }
             return Ok(Some(format!(
                 "exposure_unmitigated: {} {} on {} matches {} ({})",
                 hit.component,

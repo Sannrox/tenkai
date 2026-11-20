@@ -39,7 +39,10 @@ on that restore. See [health and SLO gate evidence](health-gate-evidence.md).
 Use `tenkaictl rollback <product>` to return to the previously deployed
 version. Same-version remediations (`tenkaictl restart`, environment overlays,
 recall, and audited `--allow-recalled-recovery`) are recorded in
-[ADR 0016](decisions/0016-same-version-remediation.md).
+[ADR 0016](decisions/0016-same-version-remediation.md). An upgrade onto a
+release recalled for an advisory is admitted only with
+`--allow-recalled-upgrade --recalled-upgrade-reason` when that release's
+blocking advisory set is a proper subset of the current pin.
 
 ## Stop and start without unsubscribing
 

@@ -341,6 +341,13 @@ pub(crate) enum Command {
         command: Option<PlanCommand>,
         #[arg(long, env = "TENKAI_ENVIRONMENT")]
         env: Option<String>,
+        /// Admit an upgrade onto an advisory-recalled channel head that
+        /// strictly lowers blocking exposure.
+        #[arg(long, requires = "recalled_upgrade_reason")]
+        allow_recalled_upgrade: bool,
+        /// Audited reason recorded on the signed plan with that admission.
+        #[arg(long, requires = "allow_recalled_upgrade")]
+        recalled_upgrade_reason: Option<String>,
         /// Current fencing generation; required with --target remote.
         #[arg(long)]
         generation: Option<u64>,

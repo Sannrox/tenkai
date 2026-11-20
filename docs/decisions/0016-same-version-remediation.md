@@ -31,7 +31,7 @@ live-state reconciler for arbitrary cluster drift.
 | Recorded deployed version | Tenkai Catalog / environment properties |
 | Live target observation | Executor `observe()` during **reconcile only**; Present/Absent/Mismatched. Unknown is never a Plan |
 | Same-version bounce | Plan `Action::Restart` from operator command or reconcile evidence |
-| Recalled release | Catalog recall mutation; planning fails closed on recalled heads; roll-off to a non-recalled channel head; rollback onto recalled content only with an audited recovery reason |
+| Recalled release | Catalog recall mutation; planning fails closed on recalled heads; roll-off to a non-recalled channel head; rollback onto recalled content only with an audited recovery reason; upgrade onto an advisory-bound recalled head only when its blocking advisory set is a proper subset of the current pin and the plan records `--allow-recalled-upgrade --recalled-upgrade-reason` |
 | Maintenance eligibility | Intersection of environment and product windows; reconciler may resume a maintenance-blocked Plan when the resolved window is open |
 | Post-apply health | Apply records `healthy` / `unhealthy`. Reconcile may Restart from recorded `unhealthy`. Tenkai does not execute `deploy.health` during unapproved planning |
 | Config or secret change | Non-secret environment overlays (`tenkaictl env overlay`) can force a same-version Restart. Secrets still require a new immutable release. No secret storage |
@@ -55,7 +55,8 @@ Rejected: hygiene restarts, kubelet/node/autoscaler ownership, treating
   emergency override is present).
 - Rollback onto recalled content is denied by default. An operator may admit it
   only with `--allow-recalled-recovery --recovery-reason`; Catalog lookup and
-  channel-head planning stay fail-closed.
+  channel-head planning stay fail-closed except for the advisory-recalled
+  upgrade admission below.
 
 ## Alternatives
 
@@ -80,6 +81,19 @@ The bounded set now also includes:
 
 Secret overlays, hygiene timers, and full live-content comparison remain
 rejected.
+
+## Amendment (2026-11-20)
+
+An operator may admit an **upgrade** onto a channel head recalled for an
+advisory when the target's blocking advisory set (same match, waiver, grace,
+and `exposure.block_severity` as `exposure::plan_gate`) is a **proper subset**
+of the current pin. The plan records both sets and `--recalled-upgrade-reason`
+in signed content (`recalled_upgrade`). A recall is advisory-bound only when
+an imported notice lists the release or a `tenkai.deployed_exposure` for that
+release has `auto_recalled_at`. Promotion-policy (`policy_id`), range-only,
+operator, and untyped claims are refused. A missing, stale, or unevaluable
+feed is refused. Unused admission flags when no head is recalled leave the
+plan unchanged. Reconcile and live observation still refuse recalled heads.
 
 ## Amendment (2026-11-07)
 

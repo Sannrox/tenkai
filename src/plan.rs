@@ -109,6 +109,19 @@ impl std::fmt::Display for Action {
 
 pub const PLAN_FORMAT_VERSION: u32 = 1;
 
+/// Signed record that an upgrade onto an advisory-recalled release was
+/// admitted because its blocking advisory set is a proper subset of the
+/// current pin (#1068).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RecalledUpgradeAdmission {
+    pub reason: String,
+    pub product: String,
+    pub current_release: String,
+    pub target_release: String,
+    pub current_advisories: Vec<String>,
+    pub target_advisories: Vec<String>,
+}
+
 /// Operator-facing detail for a zero-step Succeeded plan. Inspect uses this
 /// instead of treating empty success as applied delivery.
 pub const NO_OP_STATUS_DETAIL: &str = "no-op; environment already current";
@@ -435,6 +448,11 @@ pub struct Plan {
     /// Audited reason that admits rollback onto recalled Catalog content.
     #[serde(default)]
     pub recalled_recovery_reason: Option<String>,
+    /// Audited admission of an upgrade onto an advisory-recalled release
+    /// whose blocking advisory set is a proper subset of the current pin
+    /// (#1068). Empty on plans stored before this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recalled_upgrade: Vec<RecalledUpgradeAdmission>,
     /// A certificate that lapses before the next maintenance window opens
     /// (#778). Advisory, and outside the content address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -468,6 +486,12 @@ struct ExecutableContent<'a> {
     recalled_recovery_reason: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     approval_brief: Option<&'a ApprovalBrief>,
+    #[serde(skip_serializing_if = "admissions_empty")]
+    recalled_upgrade: &'a [RecalledUpgradeAdmission],
+}
+
+fn admissions_empty(admissions: &&[RecalledUpgradeAdmission]) -> bool {
+    admissions.is_empty()
 }
 
 fn content_address(
@@ -477,47 +501,87 @@ fn content_address(
     steps: &[Step],
     recalled_recovery_reason: Option<&str>,
     approval_brief: Option<&ApprovalBrief>,
+    recalled_upgrade: &[RecalledUpgradeAdmission],
 ) -> Result<String> {
     let mut normalized_steps = steps.to_vec();
     for step in &mut normalized_steps {
         step.id.clear();
     }
-    let bytes = match (
-        recalled_recovery_reason.filter(|value| !value.is_empty()),
-        approval_brief,
-    ) {
-        (Some(reason), Some(brief)) => serde_json::to_vec(&(
-            PLAN_FORMAT_VERSION,
-            environment,
-            created_at,
-            inputs,
-            normalized_steps,
-            reason,
-            brief,
-        ))?,
-        (Some(reason), None) => serde_json::to_vec(&(
-            PLAN_FORMAT_VERSION,
-            environment,
-            created_at,
-            inputs,
-            normalized_steps,
-            reason,
-        ))?,
-        (None, Some(brief)) => serde_json::to_vec(&(
-            PLAN_FORMAT_VERSION,
-            environment,
-            created_at,
-            inputs,
-            normalized_steps,
-            brief,
-        ))?,
-        (None, None) => serde_json::to_vec(&(
-            PLAN_FORMAT_VERSION,
-            environment,
-            created_at,
-            inputs,
-            normalized_steps,
-        ))?,
+    let recovery = recalled_recovery_reason.filter(|value| !value.is_empty());
+    let bytes = if recalled_upgrade.is_empty() {
+        match (recovery, approval_brief) {
+            (Some(reason), Some(brief)) => serde_json::to_vec(&(
+                PLAN_FORMAT_VERSION,
+                environment,
+                created_at,
+                inputs,
+                normalized_steps,
+                reason,
+                brief,
+            ))?,
+            (Some(reason), None) => serde_json::to_vec(&(
+                PLAN_FORMAT_VERSION,
+                environment,
+                created_at,
+                inputs,
+                normalized_steps,
+                reason,
+            ))?,
+            (None, Some(brief)) => serde_json::to_vec(&(
+                PLAN_FORMAT_VERSION,
+                environment,
+                created_at,
+                inputs,
+                normalized_steps,
+                brief,
+            ))?,
+            (None, None) => serde_json::to_vec(&(
+                PLAN_FORMAT_VERSION,
+                environment,
+                created_at,
+                inputs,
+                normalized_steps,
+            ))?,
+        }
+    } else {
+        match (recovery, approval_brief) {
+            (Some(reason), Some(brief)) => serde_json::to_vec(&(
+                PLAN_FORMAT_VERSION,
+                environment,
+                created_at,
+                inputs,
+                normalized_steps,
+                reason,
+                brief,
+                recalled_upgrade,
+            ))?,
+            (Some(reason), None) => serde_json::to_vec(&(
+                PLAN_FORMAT_VERSION,
+                environment,
+                created_at,
+                inputs,
+                normalized_steps,
+                reason,
+                recalled_upgrade,
+            ))?,
+            (None, Some(brief)) => serde_json::to_vec(&(
+                PLAN_FORMAT_VERSION,
+                environment,
+                created_at,
+                inputs,
+                normalized_steps,
+                brief,
+                recalled_upgrade,
+            ))?,
+            (None, None) => serde_json::to_vec(&(
+                PLAN_FORMAT_VERSION,
+                environment,
+                created_at,
+                inputs,
+                normalized_steps,
+                recalled_upgrade,
+            ))?,
+        }
     };
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
@@ -534,6 +598,7 @@ impl Plan {
             steps: &self.steps,
             recalled_recovery_reason: self.recalled_recovery_reason.as_deref(),
             approval_brief: self.approval_brief.as_ref(),
+            recalled_upgrade: &self.recalled_upgrade,
         };
         let bytes = serde_json::to_vec(&content)?;
         Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -552,6 +617,7 @@ impl Plan {
             &self.steps,
             self.recalled_recovery_reason.as_deref(),
             self.approval_brief.as_ref(),
+            &self.recalled_upgrade,
         )?;
         self.id = plan_id(&self.environment, self.created_at, &self.content_id);
         for (order, step) in self.steps.iter_mut().enumerate() {
@@ -715,6 +781,19 @@ pub async fn create(ctx: &mut Ctx, env: &str) -> Result<Plan> {
     .await
 }
 
+/// [`create`] that may pin an advisory-recalled channel head when `reason`
+/// is set and the target's blocking advisory set is a proper subset of the
+/// current pin (#1068).
+pub async fn create_with_recalled_upgrade(ctx: &mut Ctx, env: &str, reason: &str) -> Result<Plan> {
+    create_with_reason(
+        ctx,
+        env,
+        &crate::software_executor::SoftwareExecutors::try_from_process()?,
+        Some(reason),
+    )
+    .await
+}
+
 /// [`create`] with `executors` in place of this process's; host steps read
 /// the root-side applier's records through its host executor.
 pub async fn create_with(
@@ -722,12 +801,21 @@ pub async fn create_with(
     env: &str,
     executors: &crate::software_executor::SoftwareExecutors,
 ) -> Result<Plan> {
+    create_with_reason(ctx, env, executors, None).await
+}
+
+async fn create_with_reason(
+    ctx: &mut Ctx,
+    env: &str,
+    executors: &crate::software_executor::SoftwareExecutors,
+    recalled_upgrade_reason: Option<&str>,
+) -> Result<Plan> {
     let mut span = crate::telemetry::start_span(
         "tenkai.plan",
         &crate::telemetry::DeliveryAttributes::new(crate::telemetry::Operation::Plan)
             .environment(env),
     );
-    match convergence::create(ctx, env, executors).await {
+    match convergence::create(ctx, env, executors, recalled_upgrade_reason).await {
         Ok(plan) => {
             span.set_plan(&plan);
             span.succeed();
@@ -991,6 +1079,7 @@ mod tests {
             maintenance_blocked: false,
             prior_warnings: Vec::new(),
             recalled_recovery_reason: None,
+            recalled_upgrade: Vec::new(),
             credential_runway: None,
             artifact_availability: Vec::new(),
             config_presets: Vec::new(),
@@ -1003,6 +1092,7 @@ mod tests {
             &plan.steps,
             plan.recalled_recovery_reason.as_deref(),
             plan.approval_brief.as_ref(),
+            &[],
         )
         .unwrap();
         plan.id = plan_id(&plan.environment, plan.created_at, &plan.content_id);
@@ -1035,6 +1125,7 @@ mod tests {
                 &unbound.steps,
                 None,
                 None,
+                &[],
             )
             .unwrap(),
             content_address(
@@ -1044,6 +1135,7 @@ mod tests {
                 &bound.steps,
                 None,
                 None,
+                &[],
             )
             .unwrap()
         );
@@ -1070,6 +1162,7 @@ mod tests {
                 &default.steps,
                 None,
                 None,
+                &[],
             )
             .unwrap(),
             content_address(
@@ -1079,6 +1172,7 @@ mod tests {
                 &named.steps,
                 None,
                 None,
+                &[],
             )
             .unwrap()
         );
@@ -1096,6 +1190,7 @@ mod tests {
             &left.steps,
             left.recalled_recovery_reason.as_deref(),
             left.approval_brief.as_ref(),
+            &[],
         )
         .unwrap();
         right.content_id = content_address(
@@ -1105,8 +1200,75 @@ mod tests {
             &right.steps,
             right.recalled_recovery_reason.as_deref(),
             right.approval_brief.as_ref(),
+            &[],
         )
         .unwrap();
+        assert_ne!(left.content_id, right.content_id);
+        assert_ne!(
+            left.executable_digest().unwrap(),
+            right.executable_digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn empty_recalled_upgrade_keeps_the_legacy_content_address() {
+        let plan = example_plan();
+        let mut normalized = plan.steps.clone();
+        for step in &mut normalized {
+            step.id.clear();
+        }
+        let legacy = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    PLAN_FORMAT_VERSION,
+                    plan.environment.as_str(),
+                    plan.created_at,
+                    &plan.inputs,
+                    &normalized,
+                ))
+                .unwrap()
+            )
+        );
+        assert_eq!(
+            content_address(
+                &plan.environment,
+                plan.created_at,
+                &plan.inputs,
+                &plan.steps,
+                None,
+                None,
+                &[],
+            )
+            .unwrap(),
+            legacy
+        );
+        let admitted = RecalledUpgradeAdmission {
+            reason: "lower openssl exposure".into(),
+            product: "api".into(),
+            current_release: "tenkai:release:api@1.0.0".into(),
+            target_release: "tenkai:release:api@1.1.0".into(),
+            current_advisories: vec!["TENKAI-2026-1".into(), "TENKAI-2026-2".into()],
+            target_advisories: vec!["TENKAI-2026-1".into()],
+        };
+        assert_ne!(
+            content_address(
+                &plan.environment,
+                plan.created_at,
+                &plan.inputs,
+                &plan.steps,
+                None,
+                None,
+                std::slice::from_ref(&admitted),
+            )
+            .unwrap(),
+            legacy
+        );
+        let mut right = plan.clone();
+        right.recalled_upgrade = vec![admitted];
+        right.bind_content_identity().unwrap();
+        let mut left = plan;
+        left.bind_content_identity().unwrap();
         assert_ne!(left.content_id, right.content_id);
         assert_ne!(
             left.executable_digest().unwrap(),
@@ -1172,6 +1334,7 @@ mod tests {
             &plan.steps,
             plan.recalled_recovery_reason.as_deref(),
             plan.approval_brief.as_ref(),
+            &[],
         )
         .unwrap();
         plan.id = plan_id(&plan.environment, plan.created_at, &plan.content_id);
@@ -1240,6 +1403,7 @@ mod tests {
             &empty.steps,
             empty.recalled_recovery_reason.as_deref(),
             empty.approval_brief.as_ref(),
+            &[],
         )
         .unwrap();
         empty.id = plan_id(&empty.environment, empty.created_at, &empty.content_id);
@@ -1706,6 +1870,7 @@ mod tests {
             &empty.steps,
             empty.recalled_recovery_reason.as_deref(),
             empty.approval_brief.as_ref(),
+            &[],
         )
         .unwrap();
         empty.id = plan_id(&empty.environment, empty.created_at, &empty.content_id);
@@ -2274,5 +2439,298 @@ mod tests {
         assert!(dotted_version("535.104.05").unwrap() > dotted_version("535").unwrap());
         assert_eq!(dotted_version("12.x"), None);
         assert_eq!(dotted_version(""), None);
+    }
+
+    fn native_inventory(components: &[(&str, &str)]) -> String {
+        serde_json::json!({
+            "schema": crate::exposure::INVENTORY_SCHEMA,
+            "components": components
+                .iter()
+                .map(|(name, version)| serde_json::json!({"name": name, "version": version}))
+                .collect::<Vec<_>>(),
+        })
+        .to_string()
+    }
+
+    async fn signed_publish(ctx: &mut Ctx, root: &std::path::Path, version: &str, inventory: &str) {
+        let product = root.join(format!("product-{version}"));
+        std::fs::create_dir_all(&product).unwrap();
+        std::fs::write(product.join("sbom.json"), inventory).unwrap();
+        std::fs::write(
+            product.join("tenkai.toml"),
+            format!(
+                r#"
+[product]
+name = "api"
+version = "{version}"
+
+[deploy]
+install = "true"
+
+[inventory]
+document = "sbom.json"
+"#
+            ),
+        )
+        .unwrap();
+        let keys = root.join("keys");
+        let signature = root.join(format!("signature-{version}.json"));
+        let trust = root.join("trust-roots.toml");
+        crate::dev_sign::sign_release(&keys, &product.join("tenkai.toml"), &signature, &trust)
+            .unwrap();
+        crate::catalog::publish(
+            ctx,
+            &product.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                signature: Some(signature),
+                trust_roots: Some(trust),
+                state_dir: Some(root.join("state")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn recalled_upgrade_catalog(
+        label: &str,
+        current_inventory: &str,
+        target_inventory: &str,
+    ) -> (std::path::PathBuf, Ctx) {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-recalled-upgrade-{label}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        signed_publish(&mut ctx, &root, "1.0.0", current_inventory).await;
+        signed_publish(&mut ctx, &root, "1.1.0", target_inventory).await;
+        let actor = crate::auth_context::test_management_context(label);
+        crate::catalog::promote(&mut ctx, &actor, "api@1.1.0", "stable")
+            .await
+            .unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
+        (root, ctx)
+    }
+
+    async fn pin_current(ctx: &mut Ctx, version: &str) {
+        let mut env = crate::environment::environment(ctx, "local").await.unwrap();
+        env.properties
+            .insert("deployed.api".into(), version.to_string());
+        env.properties.insert(
+            "deployed_release.api".into(),
+            crate::ontology::release_id("api", version),
+        );
+        ctx.put(env).await.unwrap();
+    }
+
+    async fn set_block_severity(ctx: &mut Ctx) {
+        let mut env = crate::environment::environment(ctx, "local").await.unwrap();
+        env.properties.insert(
+            crate::exposure::BLOCK_SEVERITY_PROPERTY.into(),
+            "high".into(),
+        );
+        ctx.put(env).await.unwrap();
+    }
+
+    fn two_advisory_feed() -> crate::exposure::AdvisoryFeed {
+        crate::exposure::AdvisoryFeed {
+            schema: crate::exposure::ADVISORY_FEED_SCHEMA.into(),
+            generated_at: 2_000,
+            advisories: vec![
+                crate::exposure::Advisory {
+                    id: "TENKAI-2026-1".into(),
+                    component: "openssl".into(),
+                    range: ">=1.0.0,<1.2.0".into(),
+                    severity: crate::exposure::Severity::High,
+                    issued_at: 1,
+                },
+                crate::exposure::Advisory {
+                    id: "TENKAI-2026-2".into(),
+                    component: "libfoo".into(),
+                    range: ">=1.0.0,<1.1.0".into(),
+                    severity: crate::exposure::Severity::High,
+                    issued_at: 1,
+                },
+            ],
+        }
+    }
+
+    async fn import_feed(ctx: &mut Ctx) {
+        crate::exposure::import_advisory_feed(ctx, two_advisory_feed(), 2)
+            .await
+            .unwrap();
+    }
+
+    async fn bind_notice(ctx: &mut Ctx, spec: &str) {
+        let now = crate::now_millis();
+        let document = serde_json::json!({
+            "statement": {
+                "recalled": [{"release": spec, "digest": "unused"}]
+            }
+        })
+        .to_string();
+        let digest = format!("{:x}", Sha256::digest(document.as_bytes()));
+        ctx.create_once(crate::pb::sekai::Object {
+            id: format!("tenkai:recall-notice:{digest}"),
+            kind: crate::recall_notice::KIND_RECALL_NOTICE.into(),
+            name: format!("notice {spec}"),
+            namespace: crate::ontology::NS.into(),
+            external_id: String::new(),
+            properties: std::collections::HashMap::from([
+                ("document".into(), document),
+                ("digest".into(), digest),
+                ("imported_at".into(), now.to_string()),
+                ("advisory_id".into(), "TENKAI-2026-1".into()),
+                ("key_id".into(), "test-key".into()),
+            ]),
+            created: now,
+            updated: now,
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn recall_target(ctx: &mut Ctx, label: &str) {
+        let actor = crate::auth_context::test_management_context(label);
+        crate::catalog::recall(ctx, &actor, "api@1.1.0")
+            .await
+            .unwrap();
+    }
+
+    /// #1068: a notice-bound recalled head whose blocking set is a proper
+    /// subset of the current pin is admitted onto the signed plan.
+    #[tokio::test]
+    async fn create_admits_an_advisory_recalled_upgrade_that_lowers_exposure() {
+        let current = native_inventory(&[("openssl", "1.1.1"), ("libfoo", "1.0.0")]);
+        let target = native_inventory(&[("openssl", "1.1.1")]);
+        let (root, mut ctx) = recalled_upgrade_catalog("happy", &current, &target).await;
+        pin_current(&mut ctx, "1.0.0").await;
+        set_block_severity(&mut ctx).await;
+        import_feed(&mut ctx).await;
+        bind_notice(&mut ctx, "api@1.1.0").await;
+        recall_target(&mut ctx, "happy").await;
+
+        let denied = create(&mut ctx, "local").await.unwrap_err().to_string();
+        assert!(denied.contains("recalled"), "{denied}");
+
+        let plan = create_with_recalled_upgrade(&mut ctx, "local", "lower libfoo exposure")
+            .await
+            .unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].action, Action::Upgrade);
+        assert_eq!(plan.steps[0].to, "1.1.0");
+        assert_eq!(plan.recalled_upgrade.len(), 1);
+        let admission = &plan.recalled_upgrade[0];
+        assert_eq!(admission.reason, "lower libfoo exposure");
+        assert_eq!(admission.product, "api");
+        assert_eq!(
+            admission.current_release,
+            crate::ontology::release_id("api", "1.0.0")
+        );
+        assert_eq!(
+            admission.target_release,
+            crate::ontology::release_id("api", "1.1.0")
+        );
+        assert_eq!(
+            admission.current_advisories,
+            vec!["TENKAI-2026-1".to_string(), "TENKAI-2026-2".into()]
+        );
+        assert_eq!(
+            admission.target_advisories,
+            vec!["TENKAI-2026-1".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_recalled_upgrade_that_does_not_lower_exposure() {
+        let inventory = native_inventory(&[("openssl", "1.1.1")]);
+        let (root, mut ctx) = recalled_upgrade_catalog("not-lower", &inventory, &inventory).await;
+        pin_current(&mut ctx, "1.0.0").await;
+        set_block_severity(&mut ctx).await;
+        import_feed(&mut ctx).await;
+        bind_notice(&mut ctx, "api@1.1.0").await;
+        recall_target(&mut ctx, "not-lower").await;
+
+        let denied = create_with_recalled_upgrade(&mut ctx, "local", "still exposed")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(denied.contains(crate::exposure::NOT_LOWER_GATE), "{denied}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn create_refuses_an_untyped_recalled_upgrade() {
+        let current = native_inventory(&[("openssl", "1.1.1"), ("libfoo", "1.0.0")]);
+        let target = native_inventory(&[("openssl", "1.1.1")]);
+        let (root, mut ctx) = recalled_upgrade_catalog("unbound", &current, &target).await;
+        pin_current(&mut ctx, "1.0.0").await;
+        set_block_severity(&mut ctx).await;
+        import_feed(&mut ctx).await;
+        recall_target(&mut ctx, "unbound").await;
+
+        let denied = create_with_recalled_upgrade(&mut ctx, "local", "operator recall")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(denied.contains(crate::exposure::UNBOUND_GATE), "{denied}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_recalled_upgrade_when_the_feed_is_unevaluable() {
+        let current = native_inventory(&[("openssl", "1.1.1"), ("libfoo", "1.0.0")]);
+        let target = native_inventory(&[("openssl", "1.1.1")]);
+        let (root, mut ctx) = recalled_upgrade_catalog("unevaluable", &current, &target).await;
+        pin_current(&mut ctx, "1.0.0").await;
+        bind_notice(&mut ctx, "api@1.1.0").await;
+        recall_target(&mut ctx, "unevaluable").await;
+
+        let denied = create_with_recalled_upgrade(&mut ctx, "local", "no feed")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(denied.contains("recalled_upgrade_unevaluable"), "{denied}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn create_ignores_unused_recalled_upgrade_reason() {
+        let inventory = native_inventory(&[("openssl", "1.1.1")]);
+        let (root, mut ctx) = recalled_upgrade_catalog("unused", &inventory, &inventory).await;
+        pin_current(&mut ctx, "1.0.0").await;
+
+        let plan = create_with_recalled_upgrade(&mut ctx, "local", "unused")
+            .await
+            .unwrap();
+        assert_eq!(plan.steps[0].action, Action::Upgrade);
+        assert!(plan.recalled_upgrade.is_empty(), "{plan:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_recalled_upgrade_without_a_current_pin() {
+        let current = native_inventory(&[("openssl", "1.1.1"), ("libfoo", "1.0.0")]);
+        let target = native_inventory(&[("openssl", "1.1.1")]);
+        let (root, mut ctx) = recalled_upgrade_catalog("not-upgrade", &current, &target).await;
+        set_block_severity(&mut ctx).await;
+        import_feed(&mut ctx).await;
+        bind_notice(&mut ctx, "api@1.1.0").await;
+        recall_target(&mut ctx, "not-upgrade").await;
+
+        let denied = create_with_recalled_upgrade(&mut ctx, "local", "install onto recalled")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            denied.contains(crate::exposure::NOT_UPGRADE_GATE),
+            "{denied}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }
