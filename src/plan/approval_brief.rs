@@ -226,6 +226,7 @@ fn brief_skeleton(environment: &str, steps: &[Step]) -> Plan {
         maintenance_blocked: false,
         prior_warnings: Vec::new(),
         recalled_recovery_reason: None,
+        recalled_upgrade: Vec::new(),
         credential_runway: None,
         artifact_availability: Vec::new(),
         config_presets: Vec::new(),

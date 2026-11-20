@@ -3970,6 +3970,8 @@ impl ManagementOperations {
         // held, so the plan authorizes nothing the reconciler would not run.
         let stored = if context.acting_agent().is_some() {
             crate::plan::create_holding_failed_targets(&mut ctx, environment).await
+        } else if let Some(reason) = request.recalled_upgrade_reason.as_deref() {
+            crate::plan::create_with_recalled_upgrade(&mut ctx, environment, reason).await
         } else {
             crate::plan::create(&mut ctx, environment).await
         }
@@ -5130,6 +5132,7 @@ mod tests {
                     maintenance_blocked: false,
                     prior_warnings: Vec::new(),
                     recalled_recovery_reason: None,
+                    recalled_upgrade: Vec::new(),
                     credential_runway: None,
                     artifact_availability: Vec::new(),
                     config_presets: Vec::new(),
@@ -5691,6 +5694,7 @@ mod tests {
                     operation: "plan".into(),
                     environment: "stage".into(),
                     expected_generation: 0,
+                    recalled_upgrade_reason: None,
                 },
             )
             .await
@@ -6119,6 +6123,7 @@ mod tests {
             operation: "plan".into(),
             environment: "stage".into(),
             expected_generation: current_generation(&ops, &human, "stage").await,
+            recalled_upgrade_reason: None,
         };
         let planned = ops
             .plan_environment(&agent, "stage", plan_request.clone())

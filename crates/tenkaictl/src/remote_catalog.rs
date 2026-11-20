@@ -262,13 +262,15 @@ pub(crate) async fn run(
         Command::Plan {
             env,
             generation,
+            recalled_upgrade_reason,
             command: None,
+            ..
         } => {
             let env = crate::client_config::require_env(env)?;
             let generation = generation
                 .ok_or_else(|| anyhow::anyhow!("--generation is required with --target remote"))?;
             let result = client
-                .plan_environment(&env, generation)
+                .plan_environment_with_reason(&env, generation, recalled_upgrade_reason)
                 .await
                 .map_err(|error| {
                     with_remote_resources(

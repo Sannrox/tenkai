@@ -762,6 +762,12 @@ pub struct PlanRequest {
     pub operation: String,
     pub environment: String,
     pub expected_generation: u64,
+    /// Admit an upgrade onto an advisory-recalled channel head that strictly
+    /// lowers blocking exposure (#1068). Presence is the permission; a
+    /// non-empty reason is required when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub recalled_upgrade_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1456,6 +1462,11 @@ pub fn admit_plan(
     granted_environment: Option<&str>,
 ) -> Result<AdmittedManagementLifecycle> {
     require_path_environment("plan", &request.environment, path_environment)?;
+    if let Some(reason) = request.recalled_upgrade_reason.as_deref()
+        && reason.trim().is_empty()
+    {
+        bail!("plan recalled_upgrade_reason must not be empty when set");
+    }
     admit_environment_operation(
         request.version,
         &request.operation,
@@ -3038,12 +3049,24 @@ mod tests {
             operation: "plan".into(),
             environment: "stage".into(),
             expected_generation: 0,
+            recalled_upgrade_reason: None,
         };
         admit_plan(&plan, "stage", PrincipalKind::Management, Some("stage")).unwrap();
         let err = admit_plan(&plan, "prod", PrincipalKind::Management, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("does not match path"), "{err}");
+        let empty_reason = PlanRequest {
+            recalled_upgrade_reason: Some("   ".into()),
+            ..plan.clone()
+        };
+        let err = admit_plan(&empty_reason, "stage", PrincipalKind::Management, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("recalled_upgrade_reason must not be empty"),
+            "{err}"
+        );
 
         let err = serde_json::from_str::<ApplyRequest>(
             r#"{"version":1,"operation":"apply","environment":"stage","expected_generation":0,"approval":{"schema":"tenkai.plan-approval.v1","key_id":"k","statement":{"plan_digest":"sha256:aa","environment":"stage","purpose":"execute_plan","skip_gates":false,"issued_at":1,"expires_at":2,"policy_provider":"builtin","policy_evidence_id":"d","policy_digest":"sha256:bb"},"signature":"c2ln"},"trust_roots":{"version":1,"signers":[{"key_id":"k","identity":"dev","public_key":"cA=="}]},"allow_unapproved_development":true}"#,

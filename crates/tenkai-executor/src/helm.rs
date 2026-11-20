@@ -439,23 +439,49 @@ mod tests {
         request
     }
 
+    fn fake_helm_path(root: &Path) -> PathBuf {
+        root.join(format!(
+            "fake-helm-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    /// Install a fake `helm` at `path`. Staging is closed here; `install(1)`
+    /// writes the executable in a child so this process never holds a write
+    /// handle a concurrent fork could inherit (`execve` then fails with
+    /// "Text file busy", #767).
+    fn write_fake_helm(path: &Path, contents: &str) {
+        use std::io::Write as _;
+        let staging = path.with_extension("staging");
+        {
+            let mut file = std::fs::File::create(&staging).unwrap();
+            file.write_all(contents.as_bytes()).unwrap();
+            file.sync_all().unwrap();
+        }
+        let status = Command::new("install")
+            .args(["-m", "755"])
+            .arg(&staging)
+            .arg(path)
+            .status()
+            .expect("running install for the fake helm fixture");
+        assert!(
+            status.success(),
+            "installing fake helm at {} failed: {status}",
+            path.display()
+        );
+        let _ = std::fs::remove_file(&staging);
+    }
+
     #[test]
     fn helm_apply_captures_and_sanitizes_stderr() {
         let root = std::env::temp_dir().join(format!("tenkai-helm-diag-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let script = root.join("fake-helm");
-        std::fs::write(
+        let script = fake_helm_path(&root);
+        write_fake_helm(
             &script,
             "#!/bin/sh\necho 'helm failed; Authorization: Bearer super-secret-token' >&2\nexit 1\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mut permissions = std::fs::metadata(&script).unwrap().permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&script, permissions).unwrap();
-        }
+        );
         let request = sample_request(&root);
         let executor = HelmSoftwareExecutor {
             helm_binary: script,
@@ -471,7 +497,6 @@ mod tests {
     /// Regression for #1308: only a definite not-found is Absent.
     #[test]
     fn helm_observe_failure_is_absent_only_when_release_not_found() {
-        use std::os::unix::fs::PermissionsExt as _;
         let root = std::env::temp_dir().join(format!("tenkai-helm-obs-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let request = sample_request(&root.join("chart"));
@@ -486,9 +511,11 @@ mod tests {
             ),
             ("Error: release: not found", SoftwareObserveStatus::Absent),
         ] {
-            let script = root.join(format!("fake-helm-{}", stderr.len()));
-            std::fs::write(&script, format!("#!/bin/sh\necho '{stderr}' >&2\nexit 1\n")).unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let script = fake_helm_path(&root);
+            write_fake_helm(
+                &script,
+                &format!("#!/bin/sh\necho '{stderr}' >&2\nexit 1\n"),
+            );
             let executor = HelmSoftwareExecutor {
                 helm_binary: script,
             };
@@ -499,17 +526,14 @@ mod tests {
 
     #[test]
     fn every_helm_call_targets_the_requested_cluster_config() {
-        use std::os::unix::fs::PermissionsExt as _;
         let root = std::env::temp_dir().join(format!("tenkai-helm-kube-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let log = root.join("argv");
-        let script = root.join("fake-helm");
-        std::fs::write(
+        let script = fake_helm_path(&root);
+        write_fake_helm(
             &script,
-            format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
+        );
         let mut request = sample_request(&root.join("chart"));
         request.cluster_config_path = Some(root.join("cluster.yaml"));
         let executor = HelmSoftwareExecutor {
@@ -530,21 +554,18 @@ mod tests {
 
     #[test]
     fn overlay_values_reach_only_their_own_config_key() {
-        use std::os::unix::fs::PermissionsExt as _;
         let root = std::env::temp_dir().join(format!("tenkai-helm-vals-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let (argv, values) = (root.join("argv"), root.join("values.json"));
-        let script = root.join("fake-helm");
-        std::fs::write(
+        let script = fake_helm_path(&root);
+        write_fake_helm(
             &script,
-            format!(
+            &format!(
                 "#!/bin/sh\necho \"$@\" > {argv}\nwhile [ $# -gt 0 ]; do [ \"$1\" = -f ] && cp \"$2\" {values}; shift; done\n",
                 argv = argv.display(),
                 values = values.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut request = sample_request(&root.join("chart"));
         request.config_digest = "123".into();
         request.overlays = BTreeMap::from([

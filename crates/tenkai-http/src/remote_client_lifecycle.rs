@@ -349,6 +349,16 @@ impl RemoteClient {
         environment: &str,
         expected_generation: u64,
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.plan_environment_with_reason(environment, expected_generation, None)
+            .await
+    }
+
+    pub async fn plan_environment_with_reason(
+        &self,
+        environment: &str,
+        expected_generation: u64,
+        recalled_upgrade_reason: Option<String>,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::POST,
             &format!(
@@ -362,6 +372,7 @@ impl RemoteClient {
                     .into(),
                 environment: environment.to_string(),
                 expected_generation,
+                recalled_upgrade_reason,
             }),
         )
         .await
@@ -1301,6 +1312,7 @@ impl RemoteClient {
                     .into(),
                 environment: environment.to_string(),
                 expected_generation,
+                recalled_upgrade_reason: None,
             }),
         )
         .await

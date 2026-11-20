@@ -7137,6 +7137,10 @@
         "operation": {
           "type": "string"
         },
+        "recalled_upgrade_reason": {
+          "description": "Admit an upgrade onto an advisory-recalled channel head that strictly\nlowers blocking exposure (#1068). Presence is the permission; a\nnon-empty reason is required when set.",
+          "type": "string"
+        },
         "version": {
           "format": "uint32",
           "minimum": 0,

@@ -74,8 +74,13 @@ pub(super) async fn admit(
         .await?;
     }
     if !policy.skip_gates {
-        if let Some(detail) =
-            crate::exposure::plan_gate(ctx, &plan.environment, &plan.steps).await?
+        if let Some(detail) = crate::exposure::plan_gate_with_admissions(
+            ctx,
+            &plan.environment,
+            &plan.steps,
+            &plan.recalled_upgrade,
+        )
+        .await?
         {
             let step = plan
                 .steps

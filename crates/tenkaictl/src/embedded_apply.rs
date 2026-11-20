@@ -32,7 +32,9 @@ pub(crate) async fn run(
         Command::Plan {
             command: None,
             env,
+            recalled_upgrade_reason,
             generation: _,
+            ..
         } => {
             let env = crate::client_config::require_env(env)?;
             if output == OutputFormat::JsonV1 {
@@ -48,7 +50,11 @@ pub(crate) async fn run(
                     actor_chain: actor.actor_chain().to_vec(),
                 });
             }
-            let stored = plan::create(ctx, &env).await?;
+            let stored = if let Some(reason) = recalled_upgrade_reason.as_deref() {
+                plan::create_with_recalled_upgrade(ctx, &env, reason).await?
+            } else {
+                plan::create(ctx, &env).await?
+            };
             if output == OutputFormat::JsonV1 {
                 print_machine_result(
                     &CommandResultV1::succeeded(CommandName::Plan)
