@@ -33,7 +33,7 @@
 - [0031 — Web console as a separate, pinned client](0031-web-console.md) (sign-in amended by 0047)
 - [0032 — Versioned two-way model-release evidence](0032-model-release-evidence.md)
 - [0033 — Post-apply health and SLO gates](0033-health-slo-gates.md)
-- [0034 — Agent actors cannot make delivery changes on their own](0034-agent-actor-mutations.md)
+- [0034 — Agent actors cannot make delivery changes on their own](0034-agent-actor-mutations.md) (§3 amendment proposed in 0060)
 - [0035 — Host preflight is signed environment evidence](0035-host-preflight-evidence.md)
 - [0036 — Signed offline key revocation](0036-offline-key-revocation.md)
 - [0037 — Multi-party plan approval](0037-multi-party-plan-approval.md)
@@ -59,3 +59,4 @@
 - [0057 — Advertise and enforce what each server and runtime can execute](0057-advertise-and-enforce-execution-capabilities.md)
 - [0058 — No OpenShift executor adapter](0058-no-openshift-executor-adapter.md)
 - [0059 — OpenShift cluster updates through CVO and MCO](0059-openshift-cluster-version-updates.md)
+- [0060 — Agent budgets and release previews](0060-agent-budgets-and-release-previews.md) (proposed)
