@@ -26,7 +26,10 @@ before `SoftwareExecutors::from_process`.
 **Helm** is the chart-oriented path. **Native** is for plain multi-doc YAML via
 `kubectl` argv (no Helm release lifecycle). **In-process** applies the same
 manifest tree with server-side apply and field manager `tenkai`. Argo/Flux are
-out of scope here. Custom-resource operators are refused.
+out of scope here. In-process apply refuses unlisted kinds, including
+OpenShift `Route` ([OpenShift compatibility](#openshift-compatibility)). Helm
+and kubectl send the chart or manifests to the cluster API and do not keep a
+Tenkai kind allowlist.
 
 In-process apply supports the built-in kinds `Namespace`, `ConfigMap`,
 `Secret`, `Service`, `ServiceAccount`, `PersistentVolumeClaim` (`v1`),
@@ -363,6 +366,69 @@ TENKAI_CLUSTER_CONFIG=$HOME/tenkai-cluster/config \
 TENKAI_KUBECTL_BIN=kubectl \
   cargo test --locked kubernetes_operator_kind_path_smoke -- --ignored --nocapture
 ```
+
+## OpenShift compatibility
+
+OpenShift is a Kubernetes API distribution. Tenkai has no OpenShift executor
+and does not allowlist OpenShift custom resources on `kubernetes-inprocess`
+([ADR 0058](decisions/0058-no-openshift-executor-adapter.md)). Use the three
+existing executors.
+
+| Executor | On OpenShift |
+| --- | --- |
+| `helm` | `helm upgrade --install --namespace <environment> --create-namespace --wait --timeout 5m`. Applies whatever the chart and the cluster admit, including `Route` when `route.openshift.io` exists. Needs Helm 3.13 or later for uninstall `--ignore-not-found`. |
+| `kubernetes` | `kubectl apply` of `{workdir}/manifests/**/*.yaml` in the environment namespace. Same kind rule as Helm: the cluster admits or refuses. |
+| `kubernetes-inprocess` | Built-in namespaced kinds only. A `Route` (or any other unlisted kind) is refused at plan and again before apply, naming the file and the object, with no cluster call. Prefer `Ingress` (`networking.k8s.io/v1`) when the cluster serves it. |
+
+There is no Tenkai OpenShift version pin. Compatibility is the Kubernetes API
+those clients speak. MicroShift omits some OpenShift APIs (for example some
+operators, and sometimes `Route`); record the distribution and version when
+you run the drill.
+
+### Required permissions
+
+The environment name is the namespace. Create that namespace first when the
+credential cannot create `Namespace` objects. Tenkai does not create an
+OpenShift `Project`.
+
+| Scope | Verbs | Why |
+| --- | --- | --- |
+| `namespaces` (cluster) | `get`, `create` | First apply; skip if the namespace already exists |
+| namespaced built-in kinds | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` | Apply, observe, remove, restart |
+| `pods`, `replicasets` in the namespace | `list` | In-process rollout diagnosis |
+| `jobs` in the namespace | `create`, `get`, `list`, `delete` | Image pre-pull |
+
+Helm also writes sealed Secrets and may apply cluster-scoped objects if the
+chart contains them. `kubernetes-inprocess` never applies `ClusterRole` or
+`SecurityContextConstraints`.
+
+### Restricted SCC and Pod Security
+
+Tenkai does not inject `securityContext` or an SCC. A pause-style Deployment
+without a restricted-compatible context is refused by admission. The
+in-process wait fails at once on `ReplicaFailure=True` / `FailedCreate` when
+the message contains `is forbidden` or `denied the request`, and names the
+policy. Kind-cluster CI proves that path against
+`pod-security.kubernetes.io/enforce=restricted`. OpenShift restricted SCC is
+the same admission class; the drill records the live message.
+
+Workloads must declare a restricted-compatible context in signed release
+content. Image pulls use the workload's `imagePullSecrets` and
+`serviceAccountName`. Failures name `ImagePullBackOff` / `ErrImagePull`
+after 45 s.
+
+### Repeatable drill
+
+```bash
+TENKAI_CLUSTER_CONFIG=/var/lib/tenkai/okd.kubeconfig \
+  bash scripts/drill-openshift-executors.sh
+```
+
+The script refuses implicit `KUBECONFIG`, prints the API server version and
+whether `route.openshift.io` and `security.openshift.io` exist, then runs the
+ignored in-process tests and the kubectl smoke. Default `make test` stays
+cluster-free. Method and the no-adapter decision:
+[OpenShift compatibility research](research/openshift-executor-compatibility.md).
 
 ## Security
 

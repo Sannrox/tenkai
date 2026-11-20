@@ -447,3 +447,45 @@ spec:
     let _ = kubectl(&kubeconfig, &["delete", "namespace", &env, "--wait=false"]);
     let _ = std::fs::remove_dir_all(root);
 }
+
+fn api_group_present(kubeconfig: &Path, group: &str) -> bool {
+    let output = kubectl(
+        kubeconfig,
+        &["api-resources", "--api-group", group, "-o", "name"],
+    );
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .any(|name| !name.is_empty())
+}
+
+/// OpenShift restricted SCC is the same admission class as Pod Security on
+/// kind. Skip when the cluster has no `security.openshift.io` (plain kind).
+#[test]
+#[ignore = "requires a cluster, TENKAI_CLUSTER_CONFIG, and security.openshift.io"]
+fn restricted_openshift_security_refuses_an_unconfigured_workload_and_names_the_cause() {
+    let kubeconfig = cluster_config();
+    if !api_group_present(&kubeconfig, "security.openshift.io") {
+        eprintln!("skip: security.openshift.io is not served");
+        return;
+    }
+    let env = unique_env("scc");
+    let root = std::env::temp_dir().join(format!("{env}-scc"));
+    let _ = std::fs::remove_dir_all(&root);
+    write_workdir(&root, "edge", "registry.k8s.io/pause:3.10", 1);
+    let started = std::time::Instant::now();
+    let err = apply_fails_before_timeout(&root, &env, Duration::from_secs(120));
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "an SCC refusal must fail within seconds, took {:?}",
+        started.elapsed()
+    );
+    let lower = err.to_ascii_lowercase();
+    assert!(
+        lower.contains("is forbidden")
+            || lower.contains("denied the request")
+            || lower.contains("scc")
+            || lower.contains("securitycontextconstraints"),
+        "{err}"
+    );
+}
