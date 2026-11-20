@@ -27,6 +27,7 @@ Customer-owned, disconnected, and regulated sites apply what they verify, not wh
 ## Reference
 
 - [Command results](command-results.md): `--output json-v1`.
+- [1.0 listed surface](plans/1.0-surface.md): HTTP v1, json-v1, runtime, manifest, envelopes.
 - [Plan approval](plan-approval.md): envelope and approval brief.
 - [Offline bundles](offline-bundles.md): disconnected archive contract.
 - [Threat model](threat-model.md): assets, actors, trust boundaries, known limits.

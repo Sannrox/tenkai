@@ -5,11 +5,14 @@
 //! recovery state. A client that does not receive one complete envelope must
 //! treat the command outcome as unknown and reconcile with Tenkai.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::schema_contract::omitted_when_none;
 
 pub const COMMAND_RESULT_SCHEMA_V1: &str = "tenkai.command-result/v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandName {
     Invocation,
@@ -34,7 +37,7 @@ pub enum CommandName {
     FleetStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandOutcome {
     Succeeded,
@@ -43,7 +46,7 @@ pub enum CommandOutcome {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RetryGuidance {
     NotNeeded,
@@ -52,19 +55,21 @@ pub enum RetryGuidance {
     NotSafe,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceReference {
     pub kind: String,
     pub id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CommandCounts {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = omitted_when_none)]
     pub steps: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = omitted_when_none)]
     pub items: Option<u64>,
 }
 
@@ -77,12 +82,13 @@ pub struct CommandRefusalReason {
     pub next: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CommandFailure {
     pub code: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = omitted_when_none)]
     pub reason: Option<CommandRefusalReason>,
 }
 
@@ -210,7 +216,8 @@ pub fn validate_resource_reference(kind: &str, id: &str) -> Result<(), &'static 
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CommandResultV1 {
     pub schema: String,
     pub command: CommandName,
@@ -218,9 +225,35 @@ pub struct CommandResultV1 {
     pub retry: RetryGuidance,
     pub resources: Vec<ResourceReference>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = omitted_when_none)]
     pub counts: Option<CommandCounts>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = omitted_when_none)]
     pub error: Option<CommandFailure>,
+}
+
+/// The published JSON Schema of [`CommandResultV1`], checked in as
+/// `api/tenkai-command-result-v1.schema.json`.
+pub fn command_result_schema() -> serde_json::Value {
+    let mut schema = schemars::generate::SchemaSettings::draft2020_12()
+        .into_generator()
+        .into_root_schema_for::<CommandResultV1>();
+    schema.insert("$id".into(), COMMAND_RESULT_SCHEMA_V1.into());
+    schema.insert(
+        "description".into(),
+        "tenkaictl --output json-v1 envelope. Unknown fields and enum values must be rejected."
+            .into(),
+    );
+    if let Some(serde_json::Value::Object(properties)) = schema.get_mut("properties") {
+        properties.insert(
+            "schema".into(),
+            serde_json::json!({
+                "const": COMMAND_RESULT_SCHEMA_V1,
+                "type": "string"
+            }),
+        );
+    }
+    schema.to_value()
 }
 
 impl CommandResultV1 {

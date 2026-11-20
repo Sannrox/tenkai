@@ -133,6 +133,7 @@ will be split over time. Contributor and agent workflow live in
 | Catalog contract | [catalog-contract.md](catalog-contract.md) |
 | Delivery manifest profile | [delivery-manifest-profile.md](delivery-manifest-profile.md) |
 | Command results (`--output json-v1`) | [command-results.md](command-results.md) |
+| 1.0 listed surface | [plans/1.0-surface.md](plans/1.0-surface.md) |
 | Remote management lifecycle (HTTP) | [management-lifecycle.md](management-lifecycle.md) |
 | Runtime protocol v1 | [runtime-protocol-v1.md](runtime-protocol-v1.md) |
 | Runtime capabilities | [runtime-capabilities.md](runtime-capabilities.md) |
@@ -171,6 +172,7 @@ will be split over time. Contributor and agent workflow live in
 
 ### Releases
 
+- [1.0 listed surface](plans/1.0-surface.md)
 - [Family versioning and tagging](decisions/0040-family-versioning-and-release-policy.md)
 - [RELEASING.md](../RELEASING.md)
 - [Release 0.9.1 notes](releases/0.9.1.md)

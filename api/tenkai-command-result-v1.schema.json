@@ -1,0 +1,155 @@
+{
+  "$defs": {
+    "CommandCounts": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "steps": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "CommandFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/CommandRefusalReason"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "CommandName": {
+      "enum": [
+        "invocation",
+        "publish",
+        "promote",
+        "plan",
+        "apply",
+        "apply_cancel",
+        "status",
+        "explain",
+        "inspect_environment",
+        "history_environment",
+        "rollback",
+        "restart",
+        "stop",
+        "start",
+        "adopt",
+        "recall",
+        "approve",
+        "subscribe",
+        "list_environments",
+        "fleet_status"
+      ],
+      "type": "string"
+    },
+    "CommandOutcome": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "awaiting_approval",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "CommandRefusalReason": {
+      "additionalProperties": false,
+      "description": "Bounded gate that refused a command. `code` reuses instance-explain checks\nplus the closed refusal list; `next` names the action and its actor.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "next": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "next"
+      ],
+      "type": "object"
+    },
+    "ResourceReference": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "RetryGuidance": {
+      "enum": [
+        "not_needed",
+        "correct_request",
+        "reconcile_before_retry",
+        "not_safe"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "tenkai.command-result/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "tenkaictl --output json-v1 envelope. Unknown fields and enum values must be rejected.",
+  "properties": {
+    "command": {
+      "$ref": "#/$defs/CommandName"
+    },
+    "counts": {
+      "$ref": "#/$defs/CommandCounts"
+    },
+    "error": {
+      "$ref": "#/$defs/CommandFailure"
+    },
+    "outcome": {
+      "$ref": "#/$defs/CommandOutcome"
+    },
+    "resources": {
+      "items": {
+        "$ref": "#/$defs/ResourceReference"
+      },
+      "type": "array"
+    },
+    "retry": {
+      "$ref": "#/$defs/RetryGuidance"
+    },
+    "schema": {
+      "const": "tenkai.command-result/v1",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "command",
+    "outcome",
+    "retry",
+    "resources"
+  ],
+  "title": "CommandResultV1",
+  "type": "object"
+}

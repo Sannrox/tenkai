@@ -5,11 +5,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 # Fail when api/tenkai-http-v1.schema.json,
-# api/tenkai-terminal-outcome-v2.schema.json, or
-# api/tenkai-feedback-observation-v1.schema.json no longer matches the code.
+# api/tenkai-terminal-outcome-v2.schema.json,
+# api/tenkai-feedback-observation-v1.schema.json, or
+# api/tenkai-command-result-v1.schema.json no longer matches the code.
 # A filter that selects no tests exits 0, so a renamed test would silently
-# disable the gate: require the three checked_in_*_contract_matches_the_code tests to have run.
-EXPECTED_TESTS=3
+# disable the gate: require the four checked_in_*_contract_matches_the_code tests to have run.
+EXPECTED_TESTS=4
 output="$(cargo test --locked -p tenkai-http --lib checked_in_ --quiet 2>&1)" || {
   printf '%s\n' "$output" >&2
   exit 1

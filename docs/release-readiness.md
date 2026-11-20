@@ -24,6 +24,7 @@ Confirm compatibility for any public or host-facing contract touched by the rang
 
 | Surface | Where | Check |
 | --- | --- | --- |
+| Listed 1.0 surface | [plans/1.0-surface.md](plans/1.0-surface.md) | HTTP v1 and json-v1 schema diff against the last tag; proto `buf breaking` |
 | Crate version | `Cargo.toml` / `Cargo.lock` | Bump consistent with SemVer policy |
 | SQLite schema | `src/storage.rs` `SCHEMA_VERSION` | Migration tested; newer DBs still fail closed |
 | Runtime protocol | `docs/runtime-protocol-v1.md`, `proto/tenkai/runtime/v1/` | Wire compatibility or explicit break |

@@ -34,7 +34,10 @@ release step drafts it ([RELEASING.md](RELEASING.md)).
 When callers must act, mark the title `type!:` or add a `## Breaking` or
 `## Upgrade` section, and add the `risk:breaking` label. The CI `Semver` job
 runs `cargo-semver-checks` on the library crates against the pull request
-base; a reported major break passes only with that marker and label.
+base; a reported major break passes only with that marker and label. The
+`Schema breaking` job compares the HTTP v1 schema and the listed json-v1
+envelope to the last final `v*` tag the same way
+([1.0 listed surface](docs/plans/1.0-surface.md)).
 
 ## Review gates
 
@@ -42,6 +45,8 @@ Before review, run `make validate` and the focused tests for the change.
 `make validate` runs every `scripts/validate-*.sh`. Clippy matches
 `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`.
 The CI `Proto breaking` job runs `buf breaking` (rules in `proto/buf.yaml`)
-against the last final `v*` tag. A reported break passes only when the pull
-request title is `type!:` or its body has a `## Breaking` or `## Upgrade`
-section, and the pull request carries the `risk:breaking` label.
+against the last final `v*` tag. The `Schema breaking` job compares
+`api/tenkai-http-v1.schema.json` and `api/tenkai-command-result-v1.schema.json`
+to that tag. A reported break passes only when the pull request title is
+`type!:` or its body has a `## Breaking` or `## Upgrade` section, and the
+pull request carries the `risk:breaking` label.

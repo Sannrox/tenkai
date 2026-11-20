@@ -3,6 +3,8 @@
 `tenkaictl --output json-v1` exposes a bounded result envelope for typed
 adapters, against embedded state and a remote server alike. The default
 remains `--output human`; existing scripts and operator output are unchanged.
+The envelope schema is `api/tenkai-command-result-v1.schema.json` and is on
+the [1.0 listed surface](plans/1.0-surface.md).
 
 | Command | `--target embedded` | `--target remote` |
 | --- | --- | --- |

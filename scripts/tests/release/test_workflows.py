@@ -227,6 +227,23 @@ class Ci(unittest.TestCase):
         ci = load("ci.yml")
         self.assertIn("release-*", ci["on"]["push"]["branches"])
 
+    def test_schema_breaking_compares_listed_contracts_to_the_last_tag(self):
+        job = load("ci.yml")["jobs"]["schema-breaking"]
+        self.assertEqual(job.get("if"), "github.event_name == 'pull_request'")
+        self.assertEqual(
+            job["permissions"], {"contents": "read", "pull-requests": "read"}
+        )
+        checkout = next(
+            step
+            for step in job["steps"]
+            if uses(step).startswith("actions/checkout@")
+        )
+        self.assertEqual(checkout["with"]["fetch-depth"], 0)
+        self.assertTrue(checkout["with"]["fetch-tags"])
+        run = "\n".join(runs(step) for step in job["steps"])
+        self.assertIn("scripts/check-schema-breaking.sh --tag", run)
+        self.assertIn("risk:breaking", run)
+
     def test_a_cold_rebuild_must_match_the_dry_run_hosts(self):
         jobs = load("ci.yml")["jobs"]
         dry_run, rebuild = jobs["release-dry-run"], jobs["release-reproducible"]
