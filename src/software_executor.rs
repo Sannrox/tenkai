@@ -280,6 +280,15 @@ pub struct IdentityTarget<'a> {
     pub cluster_config_path: Option<&'a Path>,
 }
 
+/// A live workload an adapter sees in an environment, whether or not a
+/// recorded instance owns it (#1082).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LiveWorkload {
+    /// Adapter spelling: `helm`, `kubernetes`, or `host`.
+    pub kind: String,
+    pub name: String,
+}
+
 /// Pluggable software apply path. Tenkai never hard-depends on a cluster.
 pub trait SoftwareExecutor: Send + Sync {
     /// Checks, before anything changes, that the target this adapter writes
@@ -427,6 +436,17 @@ pub trait SoftwareExecutor: Send + Sync {
         let _ = request;
         Ok(Vec::new())
     }
+    /// Live workloads in `environment` this adapter can see (#1082). Default
+    /// is none. A listing error is visible to the caller; it does not fail a
+    /// plan by itself.
+    fn list_live_workloads(
+        &self,
+        environment: &str,
+        cluster_config: Option<&Path>,
+    ) -> Result<Vec<LiveWorkload>> {
+        let _ = (environment, cluster_config);
+        Ok(Vec::new())
+    }
     /// Apply one generation and return wall time per phase. Default times `apply`.
     fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
         let started = Instant::now();
@@ -526,6 +546,7 @@ pub struct FakeSoftwareExecutor {
     apply_delay: std::time::Duration,
     desired_objects: Mutex<BTreeMap<(String, String), serde_json::Value>>,
     live_objects: Mutex<BTreeMap<(String, String), serde_json::Value>>,
+    live_workloads: Mutex<Vec<LiveWorkload>>,
 }
 
 impl FakeSoftwareExecutor {
@@ -582,6 +603,11 @@ impl FakeSoftwareExecutor {
             .lock()
             .expect("fake software mutex")
             .insert((kind.to_string(), name.to_string()), live);
+    }
+
+    /// Live workloads this fake reports when planning or listing (#1082).
+    pub fn set_live_workloads(&self, workloads: Vec<LiveWorkload>) {
+        *self.live_workloads.lock().expect("fake software mutex") = workloads;
     }
 }
 
@@ -663,6 +689,19 @@ impl SoftwareExecutor for FakeSoftwareExecutor {
                 crate::spec_drift::compare_desired_live(&key.0, &key.1, desired, live.get(key))
             })
             .collect())
+    }
+
+    fn list_live_workloads(
+        &self,
+        environment: &str,
+        cluster_config: Option<&Path>,
+    ) -> Result<Vec<LiveWorkload>> {
+        let _ = (environment, cluster_config);
+        Ok(self
+            .live_workloads
+            .lock()
+            .expect("fake software mutex")
+            .clone())
     }
 }
 

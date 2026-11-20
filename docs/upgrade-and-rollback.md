@@ -51,6 +51,17 @@ channel upgrade waits until `tenkaictl start <product> --env <env>` returns it
 to the recorded release. Both commands create a plan that needs signed
 approval, embedded and remote. Host OS releases refuse stop and start.
 
+## Adopt a live workload without redeploying
+
+`tenkaictl adopt <env> <product@version>` records a subscribed instance as
+deployed when the catalog pin already matches the live target. Status lists
+live Helm, Kubernetes, and host workloads no recorded instance owns as
+`unmanaged`; planning skips an install over those names. Adopt never mutates
+the target. A live diff is refused with the changed fields; resolve it or
+approve a regular plan as the change. The adopt plan needs signed approval,
+embedded and remote. Remote adopt requires `--generation`. After adopt, drift
+and reconcile treat the instance like any other.
+
 ## Recover unknown deployment state
 
 If failed cleanup leaves deployment state unknown, reconcile the external

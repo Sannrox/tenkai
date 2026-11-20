@@ -400,8 +400,8 @@ fn evidence_release(step: &crate::plan::Step) -> Option<&str> {
         Action::Install | Action::Upgrade | Action::Downgrade | Action::Restart | Action::Start => {
             Some(&step.release_id)
         }
-        // A removal or stop deploys nothing to gather canary evidence on.
-        Action::Remove | Action::Stop => None,
+        // A removal, stop, or adopt deploys nothing to gather canary evidence on.
+        Action::Remove | Action::Stop | Action::Adopt => None,
     }
 }
 

@@ -26,6 +26,7 @@ pub enum CommandName {
     Restart,
     Stop,
     Start,
+    Adopt,
     Recall,
     Approve,
     Subscribe,

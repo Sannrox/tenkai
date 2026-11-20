@@ -319,6 +319,28 @@ pub(super) async fn stop_environment(
     )
 }
 
+pub(super) async fn adopt_environment(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .adopt_environment(&credential, &environment, request)
+            .await,
+    )
+}
+
 pub(super) async fn start_environment(
     State(state): State<Arc<AppState>>,
     Path(environment): Path<String>,

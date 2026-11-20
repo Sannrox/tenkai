@@ -4,14 +4,15 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context as _, Result, bail};
+use serde::Deserialize;
 
 use tenkai::now_millis;
 
 use crate::helm_secrets::{self, LiveSecrets};
 use crate::temp_doc::TempDoc;
 use tenkai::software_executor::{
-    SoftwareApplyRequest, SoftwareDeployPhase, SoftwareExecutor, SoftwareObserveStatus,
-    run_captured_command, validate_request,
+    LiveWorkload, SoftwareApplyRequest, SoftwareDeployPhase, SoftwareExecutor,
+    SoftwareObserveStatus, run_captured_command, validate_request,
 };
 
 /// Helm reference launcher (`helm upgrade --install` / `helm uninstall`).
@@ -260,6 +261,59 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
             &[format!("tenkai.restartNonce={nonce}")],
         )
     }
+
+    fn list_live_workloads(
+        &self,
+        environment: &str,
+        cluster_config: Option<&std::path::Path>,
+    ) -> Result<Vec<LiveWorkload>> {
+        let mut command = Command::new(&self.helm_binary);
+        if let Some(path) = cluster_config {
+            command.arg("--kubeconfig").arg(path);
+        }
+        let output = command
+            .arg("list")
+            .arg("-n")
+            .arg(environment)
+            .arg("-o")
+            .arg("json")
+            .output()
+            .with_context(|| {
+                format!(
+                    "starting helm list via {} (set TENKAI_HELM_BIN or install helm)",
+                    self.helm_binary.display()
+                )
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("helm list -n {environment} failed: {}", stderr.trim());
+        }
+        parse_helm_list_json(&String::from_utf8_lossy(&output.stdout))
+    }
+}
+
+fn parse_helm_list_json(stdout: &str) -> Result<Vec<LiveWorkload>> {
+    let raw = if stdout.trim().is_empty() {
+        "[]"
+    } else {
+        stdout
+    };
+    let releases: Vec<HelmListRelease> =
+        serde_json::from_str(raw).context("parsing helm list JSON")?;
+    Ok(releases
+        .into_iter()
+        .filter(|release| !release.name.is_empty())
+        .map(|release| LiveWorkload {
+            kind: "helm".into(),
+            name: release.name,
+        })
+        .collect())
+}
+
+#[derive(Debug, Deserialize)]
+struct HelmListRelease {
+    #[serde(default)]
+    name: String,
 }
 
 /// Writes the Tenkai-managed values to a generated values file and passes it
@@ -562,5 +616,26 @@ mod tests {
             &empty_digest
         ));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn helm_list_json_names_releases_and_treats_empty_as_none() {
+        let listed =
+            parse_helm_list_json(r#"[{"name":"api"},{"name":""},{"name":"web"}]"#).unwrap();
+        assert_eq!(
+            listed,
+            [
+                LiveWorkload {
+                    kind: "helm".into(),
+                    name: "api".into(),
+                },
+                LiveWorkload {
+                    kind: "helm".into(),
+                    name: "web".into(),
+                },
+            ]
+        );
+        assert!(parse_helm_list_json("").unwrap().is_empty());
+        assert!(parse_helm_list_json("[]").unwrap().is_empty());
     }
 }

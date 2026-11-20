@@ -115,7 +115,7 @@ pub(super) async fn admit(
             // A removal deploys nothing, so no eval gate applies to it.
             if matches!(
                 step.action,
-                Action::Rollback | Action::Remove | Action::Stop
+                Action::Rollback | Action::Remove | Action::Stop | Action::Adopt
             ) {
                 continue;
             }

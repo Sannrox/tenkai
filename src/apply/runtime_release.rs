@@ -158,7 +158,10 @@ pub(crate) async fn runtime_release(
         Some(installed)
             if !restore
                 && step.restore.is_none()
-                && !matches!(step.action, Action::Restart | Action::Stop | Action::Start) =>
+                && !matches!(
+                    step.action,
+                    Action::Restart | Action::Stop | Action::Start | Action::Adopt
+                ) =>
         {
             let installed = crate::ontology::release_id(&step.product, installed);
             let executor = crate::plan::stored_release_executor(ctx, &installed).await?;

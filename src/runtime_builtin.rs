@@ -118,8 +118,13 @@ pub(crate) async fn execute_step(
     let restart = step.action == Action::Restart;
     let stop = step.action == Action::Stop;
     let start = step.action == Action::Start;
+    let adopt = step.action == Action::Adopt;
     // Like the server, everything is verified before anything mutates.
-    let restore = match step.from.as_deref().filter(|_| !(restart || stop || start)) {
+    let restore = match step
+        .from
+        .as_deref()
+        .filter(|_| !(restart || stop || start || adopt))
+    {
         Some(_) if step.restore.is_some() => match run.prepare(step, true).await? {
             Ok(restore) => Some(restore),
             Err(detail) => return Ok(receipt(Err(detail))),
@@ -184,6 +189,9 @@ pub(crate) async fn execute_step(
     }
     if stop {
         return Ok(receipt(run.stop(&target).await?));
+    }
+    if adopt {
+        return Ok(receipt(Ok(())));
     }
     let Err(failure) = run.apply(&target, restart).await? else {
         return Ok(receipt(Ok(())));

@@ -86,6 +86,8 @@ pub enum Action {
     Stop,
     /// Return a stopped instance to serving its recorded release (#1067).
     Start,
+    /// Record a live workload as deployed without mutating the target (#1082).
+    Adopt,
 }
 
 impl std::fmt::Display for Action {
@@ -99,6 +101,7 @@ impl std::fmt::Display for Action {
             Action::Remove => "remove",
             Action::Stop => "stop",
             Action::Start => "start",
+            Action::Adopt => "adopt",
         };
         f.write_str(s)
     }
@@ -873,6 +876,22 @@ pub async fn stop_step(ctx: &mut Ctx, env: &str, product: &str, reason: &str) ->
 /// Plan a start of a stopped instance onto its recorded release.
 pub async fn start_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
     convergence::start_step(ctx, env, product).await
+}
+
+/// Plan recording a matching live workload as deployed without mutating it.
+pub async fn adopt_step(ctx: &mut Ctx, env: &str, release: &str) -> Result<Step> {
+    let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
+    convergence::adopt_step(ctx, env, release, &executors).await
+}
+
+/// [`adopt_step`] with `executors` in place of this process's.
+pub async fn adopt_step_with(
+    ctx: &mut Ctx,
+    env: &str,
+    release: &str,
+    executors: &crate::software_executor::SoftwareExecutors,
+) -> Result<Step> {
+    convergence::adopt_step(ctx, env, release, executors).await
 }
 
 pub async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Plan> {

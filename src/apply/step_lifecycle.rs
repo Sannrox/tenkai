@@ -76,8 +76,10 @@ pub(super) async fn execute(
             .software
             .require_available(restore.manifest.deploy.executor)?;
     }
-    if !matches!(step.action, Action::Restart | Action::Stop | Action::Start)
-        && let Some(installed) = step.from.as_deref()
+    if !matches!(
+        step.action,
+        Action::Restart | Action::Stop | Action::Start | Action::Adopt
+    ) && let Some(installed) = step.from.as_deref()
     {
         // The restore pin, when there is one, is the installed release.
         let installed = match restore_content.as_ref() {
@@ -178,6 +180,10 @@ pub(super) async fn execute(
             .await?;
             return Ok(outcome);
         }
+    }
+
+    if step.action == Action::Adopt {
+        return execute_adopt(ctx, step_context, step).await;
     }
 
     let mut outgoing_removed = false;
@@ -353,7 +359,12 @@ pub(super) async fn execute(
             Outcome::new(step.clone(), StepOutcomeStatus::Blocked, detail),
             Some(crate::environment::DeploymentTransition::Unknown),
         ),
-        Err(detail) if matches!(step.action, Action::Restart | Action::Stop | Action::Start) => {
+        Err(detail)
+            if matches!(
+                step.action,
+                Action::Restart | Action::Stop | Action::Start | Action::Adopt
+            ) =>
+        {
             recover_restart(ctx, step_context, step, &content, detail).await?
         }
         Err(detail) => {
@@ -396,6 +407,54 @@ fn recorded_transition(step: &Step) -> crate::environment::DeploymentTransition 
             previous: step.from.clone(),
         },
     }
+}
+
+/// Record a matching live workload as deployed without mutating the target.
+/// A retry after a crash that already wrote the pin succeeds without a
+/// second history record.
+async fn execute_adopt(
+    ctx: &mut Ctx,
+    step_context: StepContext<'_>,
+    step: &Step,
+) -> Result<Outcome> {
+    let StepContext {
+        lease,
+        environment,
+        plan_id,
+        started_at_ms,
+        ..
+    } = step_context;
+    let instance = step.instance_name();
+    let env_object = crate::environment::environment(ctx, environment).await?;
+    if let Some(current) = env_object
+        .properties
+        .get(&format!("deployed.{instance}"))
+        .filter(|current| !current.is_empty())
+    {
+        if current == &step.to {
+            return Ok(Outcome::new(
+                step.clone(),
+                StepOutcomeStatus::Succeeded,
+                String::new(),
+            ));
+        }
+        bail!("{instance} in {environment} is already recorded as deployed at {current}");
+    }
+    let mut outcome = Outcome::new(step.clone(), StepOutcomeStatus::Succeeded, String::new());
+    record(
+        ctx,
+        started_at_ms,
+        lease,
+        environment,
+        plan_id,
+        &mut outcome,
+        crate::environment::DeploymentTransition::Deployed {
+            version: step.to.clone(),
+            previous: None,
+        },
+    )
+    .await?;
+    Ok(outcome)
 }
 
 /// Remove the release of a non-host step with its own executor (ADR 0049)
@@ -923,7 +982,10 @@ async fn compensate_activation(
     failure: &anyhow::Error,
     adapters: TargetAdapters<'_>,
 ) -> Result<()> {
-    if matches!(step.action, Action::Restart | Action::Stop | Action::Start) {
+    if matches!(
+        step.action,
+        Action::Restart | Action::Stop | Action::Start | Action::Adopt
+    ) {
         return Ok(());
     }
     let failure = format!("deployment bookkeeping failed after activation: {failure}");

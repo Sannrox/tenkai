@@ -44,7 +44,7 @@ and the object.
 
 | Type | Role |
 | --- | --- |
-| `SoftwareExecutor` | apply / remove / observe / restart, plus `cleanup_failed_apply` (defaults to remove), report-only `observe_spec_drift` (#1028), `render_target_changes` for plan-time desired-versus-live diffs (#1077), and `pre_pull` / `cleanup_pre_pull` for digest-pinned images while a plan waits on a maintenance window (#1093) |
+| `SoftwareExecutor` | apply / remove / observe / restart, plus `cleanup_failed_apply` (defaults to remove), report-only `observe_spec_drift` (#1028), `render_target_changes` for plan-time desired-versus-live diffs (#1077), `list_live_workloads` for unmanaged Helm, Kubernetes, and host listings (#1082), and `pre_pull` / `cleanup_pre_pull` for digest-pinned images while a plan waits on a maintenance window (#1093) |
 | `SoftwareExecutors` | the process default plus adapters for declared kinds; resolves one per release |
 | `FakeSoftwareExecutor` | CI without cluster |
 | `HelmSoftwareExecutor` | Helm chart path (`tenkai-executor`) |

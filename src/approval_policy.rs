@@ -1077,7 +1077,10 @@ pub(crate) async fn delivery_signals_for_plan(
     let mut signals = DeliverySignals::default();
     let mut releases = None;
     for step in &plan.steps {
-        if matches!(step.action, Action::Restart | Action::Stop | Action::Start) {
+        if matches!(
+            step.action,
+            Action::Restart | Action::Stop | Action::Start | Action::Adopt
+        ) {
             continue;
         }
         if let Some(release) = ctx.get(&step.release_id).await? {

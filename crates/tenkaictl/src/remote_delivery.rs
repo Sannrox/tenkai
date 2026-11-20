@@ -245,6 +245,40 @@ pub(crate) async fn run(
                 generation,
             )
         }
+        Command::Adopt {
+            env,
+            release,
+            bypass,
+            emergency_reason,
+            generation,
+        } => {
+            let (env, generation) = require_remote_lifecycle(
+                Some(env),
+                generation,
+                &bypass,
+                &emergency_reason,
+                "adopt",
+            )?;
+            let result = client
+                .adopt_environment(&env, &release, generation)
+                .await
+                .map_err(|error| {
+                    with_remote_resources(
+                        error,
+                        output,
+                        CommandName::Adopt,
+                        &[("environment", &env)],
+                    )
+                })?;
+            report_remote_plan(
+                result,
+                machine,
+                CommandName::Adopt,
+                "The adopt plan requires signed approval",
+                &env,
+                generation,
+            )
+        }
         _ => {
             bail!("this command is not available through the v1 remote API; use --target embedded")
         }

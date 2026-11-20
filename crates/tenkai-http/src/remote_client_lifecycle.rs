@@ -1069,6 +1069,31 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn adopt_environment(
+        &self,
+        environment: &str,
+        release: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!(
+                "/v1/environments/{}/adopt",
+                encode_path_segment(environment)
+            ),
+            Some(&tenkai::management_lifecycle::AdoptRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Adopt
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                release: release.to_string(),
+            }),
+        )
+        .await
+    }
+
     pub async fn start_environment(
         &self,
         environment: &str,

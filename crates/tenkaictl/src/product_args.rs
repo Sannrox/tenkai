@@ -143,6 +143,15 @@ mod tests {
                 ..
             } if product == "api" && env.as_deref() == Some("prod")
         ));
+        let adopt = Cli::try_parse_from(["tenkaictl", "adopt", "prod", "api@1.0.0"]).unwrap();
+        assert!(matches!(
+            adopt.command,
+            Command::Adopt {
+                ref env,
+                ref release,
+                ..
+            } if env == "prod" && release == "api@1.0.0"
+        ));
         let product = Cli::try_parse_from([
             "tenkaictl",
             "product",

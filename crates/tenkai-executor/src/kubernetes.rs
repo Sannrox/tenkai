@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -11,9 +11,9 @@ use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
 use tenkai::software_executor::{
-    PRE_PULL_LABEL, PrePullImage, PrePullReport, SoftwareApplyRequest, SoftwareDeployPhase,
-    SoftwareExecutor, SoftwareObserveStatus, digest_pinned_registry_image, instance_selector,
-    k8s_label_value, kubernetes_manifests_dir, list_manifest_files,
+    LiveWorkload, PRE_PULL_LABEL, PrePullImage, PrePullReport, SoftwareApplyRequest,
+    SoftwareDeployPhase, SoftwareExecutor, SoftwareObserveStatus, digest_pinned_registry_image,
+    instance_selector, k8s_label_value, kubernetes_manifests_dir, list_manifest_files,
     materialize_kubernetes_manifests, pre_pull_job_name, run_captured_command,
     sanitize_diagnostic_text, substitute_instance_placeholder, validate_request,
 };
@@ -152,6 +152,34 @@ fn apply_yaml(
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(sanitize_diagnostic_text(stderr.trim()))
     }
+}
+
+fn parse_kubectl_workload_list(stdout: &[u8]) -> Result<Vec<LiveWorkload>> {
+    #[derive(Deserialize)]
+    struct List {
+        #[serde(default)]
+        items: Vec<Item>,
+    }
+    #[derive(Deserialize)]
+    struct Item {
+        metadata: Meta,
+    }
+    #[derive(Deserialize)]
+    struct Meta {
+        #[serde(default)]
+        name: String,
+    }
+    let list: List = serde_json::from_slice(if stdout.is_empty() { b"{}" } else { stdout })
+        .context("parsing kubectl workload list JSON")?;
+    Ok(list
+        .items
+        .into_iter()
+        .filter(|item| !item.metadata.name.is_empty())
+        .map(|item| LiveWorkload {
+            kind: "kubernetes".into(),
+            name: item.metadata.name,
+        })
+        .collect())
 }
 
 fn kubectl_json(
@@ -433,6 +461,41 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
             );
         }
         Ok(())
+    }
+
+    fn list_live_workloads(
+        &self,
+        environment: &str,
+        cluster_config: Option<&Path>,
+    ) -> Result<Vec<LiveWorkload>> {
+        let mut command = Command::new(&self.kubectl_binary);
+        if let Some(path) = cluster_config {
+            command.arg("--kubeconfig").arg(path);
+        }
+        let output = command
+            .args([
+                "get",
+                "deploy,sts,ds",
+                "--namespace",
+                environment,
+                "-o",
+                "json",
+            ])
+            .output()
+            .with_context(|| {
+                format!(
+                    "starting kubectl get via {} (set TENKAI_KUBECTL_BIN or install kubectl)",
+                    self.kubectl_binary.display()
+                )
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "kubectl get deploy,sts,ds -n {environment} failed: {}",
+                stderr.trim()
+            );
+        }
+        parse_kubectl_workload_list(&output.stdout)
     }
 
     fn pre_pull(
