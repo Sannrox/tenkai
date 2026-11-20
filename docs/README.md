@@ -33,6 +33,7 @@ will be split over time. Contributor and agent workflow live in
 | [Governed deploy in 15 minutes](../README.md#governed-deploy-in-15-minutes) | Sign, approve, apply, and roll back hello-local on a laptop |
 | [Sign in to the web console with Keycloak](console-sign-in-with-keycloak.md) | Connect a local Keycloak, sign in to `/ui/` with OIDC, and see your grants |
 | [Local minikube dogfood](local-dogfood-minikube.md) | Deliver to a laptop Kubernetes cluster, then repeat with signed multi-environment releases and a software canary |
+| [Local Apple `container` cluster](local-dogfood-container-cluster.md) | Create a `container` cluster on Apple silicon, point `local` at its kubeconfig, and apply hello-minikube |
 | [Hello minikube example](../examples/hello-minikube/) | The scripts and manual steps behind the minikube path |
 
 ## How-to guides

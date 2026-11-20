@@ -13,7 +13,9 @@ host, Postgres, or cloud spend.
 
 Related contracts: [software executor](software-executor.md),
 [release signing](release-signing.md), [plan approval](plan-approval.md),
-[rollout waves](rollout-waves.md).
+[rollout waves](rollout-waves.md). On Apple silicon, the same example
+applies to an [Apple `container` cluster](local-dogfood-container-cluster.md)
+without minikube.
 
 ## Quick path
 

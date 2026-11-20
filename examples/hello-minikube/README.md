@@ -41,6 +41,8 @@ Unsigned releases **only** apply to the built-in `local` environment. That is
 intentional trust policy, not a minikube limitation.
 
 Full ops notes: [`docs/local-dogfood-minikube.md`](../../docs/local-dogfood-minikube.md).
+On Apple silicon, the same example applies to an Apple `container` cluster:
+[`docs/local-dogfood-container-cluster.md`](../../docs/local-dogfood-container-cluster.md).
 
 ## Full dogfood paths exercised on a Mac
 

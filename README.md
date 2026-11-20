@@ -161,7 +161,7 @@ environments the server cannot reach.
 
 | I want to… | Read |
 | --- | --- |
-| Run Tenkai against a laptop Kubernetes cluster | [Local minikube dogfood](docs/local-dogfood-minikube.md) |
+| Run Tenkai against a laptop Kubernetes cluster | [Local minikube dogfood](docs/local-dogfood-minikube.md), [Apple `container` cluster](docs/local-dogfood-container-cluster.md) |
 | Write a manifest for my product | [The manifest](docs/manifest.md) |
 | Add environments, constraints, and maintenance windows | [Manage environments](docs/manage-environments.md) |
 | Upgrade, roll back, or recover a product | [Upgrade and rollback](docs/upgrade-and-rollback.md) |
