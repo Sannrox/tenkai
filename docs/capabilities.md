@@ -96,6 +96,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Multi-replica hub compose steps | [Multi-replica hub runbook](multi-replica-hub-runbook.md); #130 |
 | Inventory heartbeat + OpenMetrics + outcome priors | #136–#138; [plan priors](plan-priors.md) |
 | Local minikube dogfood (embedded, no remote server) | [ops note](local-dogfood-minikube.md); #145–#146, #152 |
+| Local Apple `container` cluster dogfood (embedded, no remote server) | [ops note](local-dogfood-container-cluster.md); #1373 |
 | Dogfood `tenkaictl dev` release/plan signing (not production KMS) | [ops note](local-dogfood-minikube.md#first-class-dogfood-signing-149); #149 |
 | Production content signer (PKCS#11 or lab; production refuses file seeds) | [release signing](release-signing.md#production-signer); #642 |
 | Per-release software executor (`[deploy] executor`) | [per-release selection](software-executor.md#per-release-selection); [ADR 0041](decisions/0041-per-release-executor-and-privileged-host-releases.md); #909, #910 |
@@ -130,7 +131,7 @@ Postgres hub + multi-replica fencing) are landed on main. Remaining work is
 | Intelligence loop depth | Fail-closed prior policy; live remote OutcomeProvider history |
 | Executor / model depth | Peer/regional weight caches; additional engines (vLLM, TGI and NIM on Kubernetes and MLX shipped: [research](research/additional-model-serving-executors.md)) |
 | Enterprise host | Live IdP drills, tenant-isolated prior stores (OIDC JWKS discovery and key rotation shipped in #468) |
-| Local dogfood | [minikube path](local-dogfood-minikube.md): unsigned + signed multi-env (#152) + **software canary drill** (#154) landed; inventory → `env facts` drill still optional |
+| Local dogfood | [minikube path](local-dogfood-minikube.md): unsigned + signed multi-env (#152) + **software canary drill** (#154) landed; [Apple `container` cluster](local-dogfood-container-cluster.md) (#1373); inventory → `env facts` drill still optional |
 
 Explicit non-priorities until measured need: Catalog service extraction
 (ADR 0001), multi-primary SQLite HA (ADR 0009), identity-plane DB co-location.

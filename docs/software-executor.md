@@ -552,8 +552,9 @@ pattern as Helm and Kubernetes examples. Default tests drive a fake Docker CLI.
 
 ## Local dogfood
 
-Laptop path (embedded `tenkaictl`, minikube, no remote server):
-[local-dogfood-minikube.md](local-dogfood-minikube.md) and
+Laptop path (embedded `tenkaictl`, no remote server):
+[minikube](local-dogfood-minikube.md) or an
+[Apple `container` cluster](local-dogfood-container-cluster.md), both using
 [examples/hello-minikube/](../examples/hello-minikube/).
 
 ## Failure diagnostics (#150)
