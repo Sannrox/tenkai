@@ -44,7 +44,8 @@ use tenkai::management_lifecycle::{
     ExposureWaiverRequest, ManagementLifecycleResult, PlanRequest, PromoteHttpRequest,
     PublishRequest, RecallRangeCloseRequest, RecallRangeRequest, RecallRequest,
     ReconcileDeploymentRequest, ReleaseLabelRequest, RetireEnvironmentRequest,
-    RetryFailedTargetRequest, RollbackRequest, SubscribeRequest, UnsubscribeRequest,
+    RetryFailedTargetRequest, RollbackRequest, StartRequest, StopRequest, SubscribeRequest,
+    UnsubscribeRequest,
 };
 use tenkai::observed_runtime::EnvironmentRuntimeReport;
 use tenkai::offline_import::{ImportJob, ImportJobList, ImportRequest, StagedBundle};
@@ -790,6 +791,20 @@ pub fn http_contract() -> Value {
             path: "/v1/environments/{environment}/rollback",
             auth: Auth::Management,
             request: Some(schema::<RollbackRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/environments/{environment}/stop",
+            auth: Auth::Management,
+            request: Some(schema::<StopRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/environments/{environment}/start",
+            auth: Auth::Management,
+            request: Some(schema::<StartRequest>(&mut g)),
             response: lifecycle.clone(),
         },
         Route {

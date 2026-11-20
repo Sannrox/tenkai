@@ -455,6 +455,35 @@ pub(crate) enum Command {
         #[arg(long)]
         emergency_reason: Option<String>,
     },
+    /// Stop a deployed instance without unsubscribing, recording the reason.
+    Stop {
+        product: String,
+        #[arg(long, env = "TENKAI_ENVIRONMENT")]
+        env: Option<String>,
+        /// Audited reason the instance is taken out of service.
+        #[arg(long)]
+        reason: String,
+        #[command(flatten)]
+        bypass: DevelopmentBypassFlags,
+        #[arg(long)]
+        emergency_reason: Option<String>,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
+    },
+    /// Start a stopped instance onto its recorded release.
+    Start {
+        product: String,
+        #[arg(long, env = "TENKAI_ENVIRONMENT")]
+        env: Option<String>,
+        #[command(flatten)]
+        bypass: DevelopmentBypassFlags,
+        #[arg(long)]
+        emergency_reason: Option<String>,
+        /// Current fencing generation; required with --target remote.
+        #[arg(long)]
+        generation: Option<u64>,
+    },
     /// Manage product-level maintenance windows (intersected with environment windows).
     Product {
         #[command(subcommand)]

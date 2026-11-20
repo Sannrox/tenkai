@@ -82,6 +82,10 @@ pub enum Action {
     /// release as a host `uninstall` step, any other software release with
     /// its own executor (ADR 0049).
     Remove,
+    /// Take a deployed instance out of service without unsubscribing (#1067).
+    Stop,
+    /// Return a stopped instance to serving its recorded release (#1067).
+    Start,
 }
 
 impl std::fmt::Display for Action {
@@ -93,6 +97,8 @@ impl std::fmt::Display for Action {
             Action::Rollback => "rollback",
             Action::Restart => "restart",
             Action::Remove => "remove",
+            Action::Stop => "stop",
+            Action::Start => "start",
         };
         f.write_str(s)
     }
@@ -167,6 +173,12 @@ pub struct Step {
     /// fails approval closed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_changes: Vec<crate::spec_drift::TargetChange>,
+    /// Operator reason for a stop step (#1067). Empty and omitted on every
+    /// other step so their digests stay unchanged. A binary that predates
+    /// the field drops it, computes a different digest, and fails approval
+    /// closed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 /// The issuer key an identity issuer step activates or re-wraps.
@@ -853,6 +865,16 @@ pub async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Ste
     convergence::restart_step(ctx, env, product).await
 }
 
+/// Plan a stop of the currently deployed instance, keeping its subscription.
+pub async fn stop_step(ctx: &mut Ctx, env: &str, product: &str, reason: &str) -> Result<Step> {
+    convergence::stop_step(ctx, env, product, reason).await
+}
+
+/// Plan a start of a stopped instance onto its recorded release.
+pub async fn start_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
+    convergence::start_step(ctx, env, product).await
+}
+
 pub async fn create_for_reconcile(ctx: &mut Ctx, env: &str) -> Result<Plan> {
     let mut span = crate::telemetry::start_span(
         "tenkai.plan",
@@ -942,6 +964,7 @@ mod tests {
                 identity: None,
                 restore_identity: None,
                 target_changes: Vec::new(),
+                reason: String::new(),
             }],
             state: PlanState::Computed,
             gates_skipped: None,

@@ -522,7 +522,7 @@ pub(crate) async fn step_requires_slo_evaluation(
     step: &Step,
 ) -> Result<bool> {
     match step.action {
-        Action::Rollback | Action::Remove => Ok(false),
+        Action::Rollback | Action::Remove | Action::Stop => Ok(false),
         Action::Restart => restart_retries_failed_health_gate(ctx, environment, step).await,
         _ => Ok(true),
     }
@@ -763,6 +763,7 @@ mod tests {
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         }
     }
 

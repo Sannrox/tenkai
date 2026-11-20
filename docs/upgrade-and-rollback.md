@@ -41,6 +41,16 @@ version. Same-version remediations (`tenkaictl restart`, environment overlays,
 recall, and audited `--allow-recalled-recovery`) are recorded in
 [ADR 0016](decisions/0016-same-version-remediation.md).
 
+## Stop and start without unsubscribing
+
+`tenkaictl stop <product> --env <env> --reason <text>` plans a stop of the
+deployed instance: Kubernetes scales to zero, Docker stops the container, and
+the subscription and deployed pin stay. Status reports `stopped`; health,
+pacing, and recall skip the instance instead of counting it as failing. A
+channel upgrade waits until `tenkaictl start <product> --env <env>` returns it
+to the recorded release. Both commands create a plan that needs signed
+approval, embedded and remote. Host OS releases refuse stop and start.
+
 ## Recover unknown deployment state
 
 If failed cleanup leaves deployment state unknown, reconcile the external

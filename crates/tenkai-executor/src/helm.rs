@@ -242,6 +242,15 @@ impl SoftwareExecutor for HelmSoftwareExecutor {
         }
     }
 
+    fn stop(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        self.helm_upgrade(
+            request,
+            SoftwareDeployPhase::Stop,
+            "upgrade --install --stop",
+            &["replicaCount=0".into(), "replicas=0".into()],
+        )
+    }
+
     fn restart(&self, request: &SoftwareApplyRequest) -> Result<()> {
         let nonce = now_millis();
         self.helm_upgrade(

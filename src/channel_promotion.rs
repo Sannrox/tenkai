@@ -1763,6 +1763,7 @@ async fn classify_health(
             continue;
         }
         match health.as_deref() {
+            Some(crate::environment::STOPPED_HEALTH) => continue,
             Some("unhealthy") => {
                 saw_failing = true;
                 let messages: Vec<String> = checks

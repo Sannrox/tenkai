@@ -116,6 +116,8 @@ pub enum ManagementLifecycleOperation {
     Approve,
     Apply,
     Rollback,
+    Stop,
+    Start,
     Recall,
     Retire,
     Hold,
@@ -155,6 +157,8 @@ impl ManagementLifecycleOperation {
             Self::Approve => "approve",
             Self::Apply => "apply",
             Self::Rollback => "rollback",
+            Self::Stop => "stop",
+            Self::Start => "start",
             Self::Recall => "recall",
             Self::Retire => "retire",
             Self::Hold => "hold",
@@ -223,6 +227,8 @@ impl ManagementLifecycleOperation {
                 | Self::Approve
                 | Self::Apply
                 | Self::Rollback
+                | Self::Stop
+                | Self::Start
                 | Self::Hold
                 | Self::Release
                 | Self::HoldSchedule
@@ -277,6 +283,8 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "approve" => Ok(ManagementLifecycleOperation::Approve),
         "apply" => Ok(ManagementLifecycleOperation::Apply),
         "rollback" => Ok(ManagementLifecycleOperation::Rollback),
+        "stop" => Ok(ManagementLifecycleOperation::Stop),
+        "start" => Ok(ManagementLifecycleOperation::Start),
         "recall" => Ok(ManagementLifecycleOperation::Recall),
         "retire" => Ok(ManagementLifecycleOperation::Retire),
         "hold" => Ok(ManagementLifecycleOperation::Hold),
@@ -794,6 +802,29 @@ pub struct RollbackRequest {
     pub product: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_reason: Option<String>,
+}
+
+/// Plan a stop of a deployed instance, keeping its subscription (#1067).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StopRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    pub product: String,
+    pub reason: String,
+}
+
+/// Plan a start of a stopped instance onto its recorded release (#1067).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StartRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub expected_generation: u64,
+    pub product: String,
 }
 
 /// Ask for a plan that re-wraps every sealed value of the environment for
@@ -1517,6 +1548,58 @@ pub fn admit_rollback(
         &request.environment,
         request.expected_generation,
         ManagementLifecycleOperation::Rollback,
+        kind,
+        granted_environment,
+    )
+}
+
+pub fn admit_stop(
+    request: &StopRequest,
+    path_environment: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_path_environment("stop", &request.environment, path_environment)?;
+    if request.product.trim().is_empty() {
+        bail!("stop requires product");
+    }
+    let reason = request.reason.trim();
+    if reason.is_empty() {
+        bail!("stop reason must not be empty");
+    }
+    if reason.len() > crate::criticality::MAX_REASON_BYTES {
+        bail!(
+            "stop reason exceeds {} bytes",
+            crate::criticality::MAX_REASON_BYTES
+        );
+    }
+    admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        ManagementLifecycleOperation::Stop,
+        kind,
+        granted_environment,
+    )
+}
+
+pub fn admit_start(
+    request: &StartRequest,
+    path_environment: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    require_path_environment("start", &request.environment, path_environment)?;
+    if request.product.trim().is_empty() {
+        bail!("start requires product");
+    }
+    admit_environment_operation(
+        request.version,
+        &request.operation,
+        &request.environment,
+        request.expected_generation,
+        ManagementLifecycleOperation::Start,
         kind,
         granted_environment,
     )
@@ -2409,6 +2492,7 @@ mod tests {
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         }
     }
 

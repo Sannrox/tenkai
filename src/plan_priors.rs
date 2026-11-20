@@ -371,6 +371,7 @@ mod tests {
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         }
     }
 

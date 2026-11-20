@@ -429,8 +429,8 @@ pub(crate) async fn stored_release_executor(
 /// Refuse a step whose target release resolves to a different executor than
 /// the installed release of the same product (ADR 0041), when the plan is
 /// made. Apply admission checks again and refuses releases that are missing,
-/// so a step naming one is left to it. Install and restart steps have
-/// nothing to compare.
+/// so a step naming one is left to it. Install, restart, stop, and start
+/// steps have nothing to compare.
 async fn require_same_executor(
     ctx: &mut Ctx,
     executors: &crate::software_executor::SoftwareExecutors,
@@ -439,7 +439,7 @@ async fn require_same_executor(
     let Some(installed) = step.from.as_deref() else {
         return Ok(());
     };
-    if step.action == Action::Restart {
+    if matches!(step.action, Action::Restart | Action::Stop | Action::Start) {
         return Ok(());
     }
     let installed = release_id(&step.product, installed);
@@ -614,6 +614,10 @@ async fn bind_host_steps(
             Some(_) => bail!("step for host release {} is already bound", step.release_id),
             None if step.action == Action::Restart => bail!(
                 "host release {} is never restarted; plan a new install instead",
+                step.release_id
+            ),
+            None if matches!(step.action, Action::Stop | Action::Start) => bail!(
+                "host release {} cannot be stopped or started; plan a removal instead",
                 step.release_id
             ),
             // Uninstall acts on the release the record holds, which the
@@ -964,6 +968,11 @@ async fn compute_snapshot_with_policy(
             }
             _ => None,
         };
+        if crate::environment::instance_is_stopped(&env_obj.properties, &instance) {
+            // Keep the subscription and deployed pin; channel upgrades wait
+            // until the instance is started (#1067).
+            continue;
+        }
         if host_record.is_none()
             && env_obj
                 .properties
@@ -1676,6 +1685,7 @@ async fn compute_snapshot_with_policy(
                 identity,
                 restore_identity,
                 target_changes: Vec::new(),
+                reason: String::new(),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1825,8 +1835,12 @@ async fn admit_reconcile_dependency(
 pub(super) fn model_routing_rollout_rank(kind: crate::manifest::ProductKind, action: Action) -> u8 {
     use crate::product_kind::RolloutDirection;
     let direction = match action {
-        Action::Install | Action::Upgrade | Action::Restart => RolloutDirection::Forward,
-        Action::Downgrade | Action::Rollback | Action::Remove => RolloutDirection::Reverse,
+        Action::Install | Action::Upgrade | Action::Restart | Action::Start => {
+            RolloutDirection::Forward
+        }
+        Action::Downgrade | Action::Rollback | Action::Remove | Action::Stop => {
+            RolloutDirection::Reverse
+        }
     };
     kind.policy().rollout_rank(direction)
 }
@@ -3025,26 +3039,36 @@ pub(super) async fn rollback_step_with_recovery(
         identity,
         restore_identity,
         target_changes: Vec::new(),
+        reason: String::new(),
     })
 }
 
-/// A same-version restart of the currently deployed release.
-pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
-    validate_identifier("product", product)?;
-    let env_obj = crate::environment::environment(ctx, env).await?;
-    let instance = product;
-    let product = product_for_instance(&env_obj.properties, instance);
-    let Some(current) = env_obj
-        .properties
-        .get(&format!("deployed.{instance}"))
-        .cloned()
-        .filter(|value| !value.is_empty())
-    else {
-        bail!("no deployed version of {instance} recorded in {env} — nothing to restart");
-    };
+struct SameVersionPin<'a> {
+    env: &'a str,
+    env_obj: &'a crate::pb::sekai::Object,
+    instance: &'a str,
+    product: String,
+    current: String,
+    action: Action,
+    reason: String,
+    refuse_recalled: bool,
+}
+
+/// Pin the currently deployed release as a same-version step.
+async fn pin_same_version_step(ctx: &mut Ctx, pin: SameVersionPin<'_>) -> Result<Step> {
+    let SameVersionPin {
+        env,
+        env_obj,
+        instance,
+        product,
+        current,
+        action,
+        reason,
+        refuse_recalled,
+    } = pin;
     let current_id = release_id(&product, &current);
-    if release_is_recalled(ctx, &current_id).await? {
-        bail!("cannot restart recalled release {current_id}");
+    if refuse_recalled && release_is_recalled(ctx, &current_id).await? {
+        bail!("cannot {action} recalled release {current_id}");
     }
     let target = pin_release(ctx, &current_id, env).await?;
     crate::software_compatibility::require_release(ctx, env, &current_id, instance).await?;
@@ -3053,21 +3077,21 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
     } else {
         instance.to_string()
     };
-    let peers = current_peers(ctx, env, &env_obj, instance, &target.release_id).await?;
-    let identity = step_identity(ctx, &env_obj, env, &target.release_id, instance, &peers).await?;
+    let peers = current_peers(ctx, env, env_obj, instance, &target.release_id).await?;
+    let identity = step_identity(ctx, env_obj, env, &target.release_id, instance, &peers).await?;
     Ok(Step {
-        id: format!("{}:restart:{instance}", env_id(env)),
+        id: format!("{}:{action}:{instance}", env_id(env)),
         order: 0,
         release_id: target.release_id,
         release_digest: target.digest,
         artifact_digest: target.artifact_digest,
         workdir: target.workdir,
         host: None,
-        sealed: crate::sealed_secret::step_bindings(&env_obj, instance)?,
+        sealed: crate::sealed_secret::step_bindings(env_obj, instance)?,
         restore: None,
         product,
         instance: step_instance,
-        action: Action::Restart,
+        action,
         from: Some(current.clone()),
         to: current,
         rewrap: None,
@@ -3075,7 +3099,131 @@ pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Res
         identity,
         restore_identity: None,
         target_changes: Vec::new(),
+        reason,
     })
+}
+
+fn deployed_version(
+    properties: &std::collections::HashMap<String, String>,
+    env: &str,
+    instance: &str,
+    action: Action,
+) -> Result<String> {
+    properties
+        .get(&format!("deployed.{instance}"))
+        .cloned()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no deployed version of {instance} recorded in {env} — nothing to {action}"
+            )
+        })
+}
+
+/// A same-version restart of the currently deployed release.
+pub(super) async fn restart_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
+    validate_identifier("product", product)?;
+    let env_obj = crate::environment::environment(ctx, env).await?;
+    let instance = product;
+    let product = product_for_instance(&env_obj.properties, instance);
+    let current = deployed_version(&env_obj.properties, env, instance, Action::Restart)?;
+    pin_same_version_step(
+        ctx,
+        SameVersionPin {
+            env,
+            env_obj: &env_obj,
+            instance,
+            product,
+            current,
+            action: Action::Restart,
+            reason: String::new(),
+            refuse_recalled: true,
+        },
+    )
+    .await
+}
+
+fn validate_stop_reason(reason: &str) -> Result<()> {
+    let reason = reason.trim();
+    anyhow::ensure!(!reason.is_empty(), "stop reason must not be empty");
+    anyhow::ensure!(
+        reason.len() <= crate::criticality::MAX_REASON_BYTES,
+        "stop reason exceeds {} bytes",
+        crate::criticality::MAX_REASON_BYTES
+    );
+    Ok(())
+}
+
+/// A stop of the currently deployed release that keeps the subscription.
+pub(super) async fn stop_step(
+    ctx: &mut Ctx,
+    env: &str,
+    product: &str,
+    reason: &str,
+) -> Result<Step> {
+    validate_identifier("product", product)?;
+    validate_stop_reason(reason)?;
+    let env_obj = crate::environment::environment(ctx, env).await?;
+    let instance = product;
+    let product = product_for_instance(&env_obj.properties, instance);
+    if crate::environment::instance_is_stopped(&env_obj.properties, instance) {
+        bail!("{instance} in {env} is already stopped");
+    }
+    let current = deployed_version(&env_obj.properties, env, instance, Action::Stop)?;
+    if env_obj
+        .properties
+        .get(&format!("deployment_health.{instance}"))
+        .is_some_and(|health| health == "unknown")
+    {
+        let detail = env_obj
+            .properties
+            .get(&format!("deployment_error.{instance}"))
+            .map(String::as_str)
+            .unwrap_or("deployment state requires manual reconciliation");
+        bail!(
+            "deployment state for {instance} in {env} is unknown: {detail}; reconcile it or use rollback before creating a new plan"
+        );
+    }
+    pin_same_version_step(
+        ctx,
+        SameVersionPin {
+            env,
+            env_obj: &env_obj,
+            instance,
+            product,
+            current,
+            action: Action::Stop,
+            reason: reason.trim().to_string(),
+            refuse_recalled: false,
+        },
+    )
+    .await
+}
+
+/// A start of a stopped instance onto its recorded release.
+pub(super) async fn start_step(ctx: &mut Ctx, env: &str, product: &str) -> Result<Step> {
+    validate_identifier("product", product)?;
+    let env_obj = crate::environment::environment(ctx, env).await?;
+    let instance = product;
+    let product = product_for_instance(&env_obj.properties, instance);
+    if !crate::environment::instance_is_stopped(&env_obj.properties, instance) {
+        bail!("{instance} in {env} is not stopped");
+    }
+    let current = deployed_version(&env_obj.properties, env, instance, Action::Start)?;
+    pin_same_version_step(
+        ctx,
+        SameVersionPin {
+            env,
+            env_obj: &env_obj,
+            instance,
+            product,
+            current,
+            action: Action::Start,
+            reason: String::new(),
+            refuse_recalled: true,
+        },
+    )
+    .await
 }
 
 /// One re-wrap step per instance of `env` with sealed values (ADR 0045 §5):
@@ -3162,6 +3310,7 @@ pub(super) async fn rewrap_steps(
                 recovered,
             }),
             target_changes: Vec::new(),
+            reason: String::new(),
         });
     }
     Ok((steps, undeployed))
@@ -6400,6 +6549,69 @@ allowed_providers = ["local"]
         assert_eq!(plan.steps[0].action, Action::Restart);
         assert_eq!(plan.steps[0].from.as_deref(), Some("1.0.0"));
         assert_eq!(plan.steps[0].to, "1.0.0");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn stopped_instance_holds_channel_upgrade() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-stop-hold-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        published_software(&mut ctx, &root, "1.0.0").await;
+        published_software(&mut ctx, &root, "2.0.0").await;
+        let actor = crate::auth_context::test_management_context("stop-hold");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        env_add(&mut ctx, "local", "fixture").await.unwrap();
+        subscribe(&mut ctx, "local", "api", "stable").await.unwrap();
+        let mut env = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        env.properties.insert("deployed.api".into(), "1.0.0".into());
+        env.properties
+            .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
+        env.properties.insert(
+            "deployment_health.api".into(),
+            crate::environment::STOPPED_HEALTH.into(),
+        );
+        env.properties
+            .insert("stopped_reason.api".into(), "drain for maintenance".into());
+        ctx.put(env).await.unwrap();
+
+        crate::catalog::promote(&mut ctx, &actor, "api@2.0.0", "stable")
+            .await
+            .unwrap();
+        let held = create_for_reconcile(&mut ctx, "local").await.unwrap();
+        assert!(held.steps.is_empty(), "{held:?}");
+
+        let stop = crate::plan::stop_step(&mut ctx, "local", "api", "")
+            .await
+            .unwrap_err();
+        assert!(
+            stop.to_string().contains("stop reason must not be empty"),
+            "{stop:#}"
+        );
+        let already = crate::plan::stop_step(&mut ctx, "local", "api", "again")
+            .await
+            .unwrap_err();
+        assert!(
+            already.to_string().contains("already stopped"),
+            "{already:#}"
+        );
+
+        let start = crate::plan::start_step(&mut ctx, "local", "api")
+            .await
+            .unwrap();
+        assert_eq!(start.action, Action::Start);
+        assert_eq!(start.from.as_deref(), Some("1.0.0"));
+        assert_eq!(start.to, "1.0.0");
 
         let _ = std::fs::remove_dir_all(&root);
     }

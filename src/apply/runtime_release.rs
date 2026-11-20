@@ -155,7 +155,11 @@ pub(crate) async fn runtime_release(
     let signature = crate::catalog::signature_envelope(ctx, &pin.release_id).await?;
     let entries = release_entries(&content.workdir, &content.manifest.immutable_inputs())?;
     let replaces = match step.from.as_deref() {
-        Some(installed) if !restore && step.restore.is_none() && step.action != Action::Restart => {
+        Some(installed)
+            if !restore
+                && step.restore.is_none()
+                && !matches!(step.action, Action::Restart | Action::Stop | Action::Start) =>
+        {
             let installed = crate::ontology::release_id(&step.product, installed);
             let executor = crate::plan::stored_release_executor(ctx, &installed).await?;
             Some(crate::runtime_delivery::RuntimeReplacedRelease {

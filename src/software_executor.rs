@@ -317,6 +317,21 @@ pub trait SoftwareExecutor: Send + Sync {
         let _ = stop;
         self.restart(request)
     }
+    /// Take the workload out of service without removing it. Default refuses;
+    /// adapters that can scale to zero or stop a container override it.
+    fn stop(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        bail!(
+            "stop is not supported for {}@{} in {}",
+            request.product,
+            request.version,
+            request.environment
+        )
+    }
+    /// `stop` under an apply lease, stopping like [`Self::apply_until_stopped`].
+    fn stop_until_stopped(&self, request: &SoftwareApplyRequest, stop: &AtomicBool) -> Result<()> {
+        let _ = stop;
+        self.stop(request)
+    }
     /// `remove` under an apply lease, stopping like
     /// [`Self::apply_until_stopped`]. A removal stopped part-way is retried by
     /// the next approved plan. Default ignores `stop`.
@@ -614,6 +629,21 @@ impl SoftwareExecutor for FakeSoftwareExecutor {
         } else {
             Ok(SoftwareObserveStatus::Absent)
         }
+    }
+
+    fn stop(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        validate_request(request)?;
+        let key = request_key(request);
+        let applied = self.applied.lock().expect("fake software mutex");
+        anyhow::ensure!(
+            applied.iter().any(|entry| entry == &key),
+            "fake software executor has no applied release to stop for {}@{} in {}",
+            request.product,
+            request.version,
+            request.environment
+        );
+        drop(applied);
+        Ok(())
     }
 
     fn render_target_changes(

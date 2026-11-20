@@ -112,6 +112,37 @@ mod tests {
                 ..
             } if product == "api" && env.as_deref() == Some("prod")
         ));
+        let stop = Cli::try_parse_from([
+            "tenkaictl",
+            "stop",
+            "api",
+            "--env",
+            "prod",
+            "--reason",
+            "drain for maintenance",
+        ])
+        .unwrap();
+        assert!(matches!(
+            stop.command,
+            Command::Stop {
+                ref product,
+                ref env,
+                ref reason,
+                ..
+            } if product == "api"
+                && env.as_deref() == Some("prod")
+                && reason == "drain for maintenance"
+        ));
+        assert!(Cli::try_parse_from(["tenkaictl", "stop", "api", "--env", "prod"]).is_err());
+        let start = Cli::try_parse_from(["tenkaictl", "start", "api", "--env", "prod"]).unwrap();
+        assert!(matches!(
+            start.command,
+            Command::Start {
+                ref product,
+                ref env,
+                ..
+            } if product == "api" && env.as_deref() == Some("prod")
+        ));
         let product = Cli::try_parse_from([
             "tenkaictl",
             "product",

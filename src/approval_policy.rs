@@ -1077,7 +1077,7 @@ pub(crate) async fn delivery_signals_for_plan(
     let mut signals = DeliverySignals::default();
     let mut releases = None;
     for step in &plan.steps {
-        if step.action == Action::Restart {
+        if matches!(step.action, Action::Restart | Action::Stop | Action::Start) {
             continue;
         }
         if let Some(release) = ctx.get(&step.release_id).await? {
@@ -1187,6 +1187,7 @@ mod tests {
                 identity: None,
                 restore_identity: None,
                 target_changes: Vec::new(),
+                reason: String::new(),
             }],
             state: PlanState::Computed,
             gates_skipped: None,

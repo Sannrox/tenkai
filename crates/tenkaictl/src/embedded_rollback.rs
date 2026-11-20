@@ -199,7 +199,147 @@ pub(crate) async fn run(
                 );
             }
         }
+        Command::Stop {
+            product,
+            env,
+            reason,
+            bypass,
+            emergency_reason,
+            generation: _,
+        } => {
+            let env = crate::client_config::require_env(env)?;
+            let step = plan::stop_step(ctx, &env, &product, &reason).await?;
+            store_and_maybe_apply(
+                ctx,
+                SameVersionCommand {
+                    env: &env,
+                    step,
+                    command: CommandName::Stop,
+                    verb: "stop",
+                    gerund: "stopping",
+                    approval_message: "The stop plan requires signed approval",
+                    bypass,
+                    emergency_reason,
+                    output,
+                },
+            )
+            .await?;
+        }
+        Command::Start {
+            product,
+            env,
+            bypass,
+            emergency_reason,
+            generation: _,
+        } => {
+            let env = crate::client_config::require_env(env)?;
+            let step = plan::start_step(ctx, &env, &product).await?;
+            store_and_maybe_apply(
+                ctx,
+                SameVersionCommand {
+                    env: &env,
+                    step,
+                    command: CommandName::Start,
+                    verb: "start",
+                    gerund: "starting",
+                    approval_message: "The start plan requires signed approval",
+                    bypass,
+                    emergency_reason,
+                    output,
+                },
+            )
+            .await?;
+        }
         _ => unreachable!("rollback dispatcher received a non-rollback command"),
     }
     Ok(())
+}
+
+struct SameVersionCommand<'a> {
+    env: &'a str,
+    step: tenkai::plan::Step,
+    command: CommandName,
+    verb: &'a str,
+    gerund: &'a str,
+    approval_message: &'static str,
+    bypass: crate::flags::DevelopmentBypassFlags,
+    emergency_reason: Option<String>,
+    output: OutputFormat,
+}
+
+async fn store_and_maybe_apply(
+    ctx: &mut client::Ctx,
+    command: SameVersionCommand<'_>,
+) -> Result<()> {
+    let SameVersionCommand {
+        env,
+        step,
+        command,
+        verb,
+        gerund,
+        approval_message,
+        bypass,
+        emergency_reason,
+        output,
+    } = command;
+    let stored = plan::create_from_steps(ctx, env, vec![step]).await?;
+    if output == OutputFormat::Human {
+        println!("{gerund} in {env}:");
+        print_steps(&stored.steps);
+    }
+    if bypass.allow_unapproved_development {
+        run_plan(
+            ctx,
+            &stored.id,
+            apply::ExecutionOptions {
+                rollback_hold: false,
+                skip_gates: true,
+                emergency_reason: emergency_reason.as_deref(),
+                authorization: apply::ExecutionAuthorization::LocalDevelopment {
+                    reason: bypass
+                        .development_reason
+                        .as_deref()
+                        .expect("clap requires a development reason"),
+                },
+                software_executors: tenkai::software_executor::SoftwareExecutors::try_from_process(
+                )?,
+                model_runtime_executor:
+                    tenkai::model_runtime::selected_model_runtime_executor_factory(),
+                worker_lifecycle: None,
+                artifact_registry: None,
+                delivery_adapter: None,
+            },
+            PlanResultContext {
+                command,
+                environment: &stored.environment,
+                step_count: stored.steps.len(),
+                output,
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+    if output == OutputFormat::JsonV1 {
+        let mut result = CommandResultV1::failed(
+            command,
+            "approval_required",
+            approval_message,
+            RetryGuidance::NotSafe,
+        )
+        .resource("plan", stored.id)
+        .resource("environment", stored.environment)
+        .counts(Some(stored.steps.len()), None);
+        result.outcome = CommandOutcome::AwaitingApproval;
+        return Err(reported_machine_failure(result));
+    }
+    bail!(
+        "{verb} was not executed; plan {} requires signed approval. Run `tenkaictl apply {}` with --approval and --approval-trust-roots{}",
+        stored.id,
+        stored.id,
+        if emergency_reason.is_some() {
+            " and repeat --emergency-reason"
+        } else {
+            ""
+        }
+    );
 }

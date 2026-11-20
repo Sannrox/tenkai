@@ -1169,6 +1169,41 @@ impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
         self.apply_until_stopped(request, stop)
     }
 
+    fn stop(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        validate_request(request)?;
+        let cluster_config = Self::require_cluster_config(request)?;
+        let manifests = kubernetes_manifests_dir(&request.workdir)?;
+        let files = list_manifest_files(&manifests)?;
+        let objects = supported_manifest_objects(&manifests, &files, request.instance_name())?;
+        let mut scaled = false;
+        for mut object in objects {
+            let (kind, _) = object_identity(&object)?;
+            if !matches!(kind.as_str(), "Deployment" | "StatefulSet") {
+                continue;
+            }
+            stamp_ownership(&mut object, request);
+            if let Some(spec) = object.get_mut("spec").and_then(Value::as_object_mut) {
+                spec.insert("replicas".into(), Value::from(0));
+            }
+            self.api.apply_server_side(
+                cluster_config,
+                &request.environment,
+                FIELD_MANAGER,
+                &object,
+            )?;
+            scaled = true;
+        }
+        if !scaled {
+            bail!(
+                "no Deployment or StatefulSet labeled tenkai.product={},tenkai.instance={} in namespace {}",
+                request.product,
+                request.instance_name(),
+                request.environment
+            );
+        }
+        Ok(())
+    }
+
     fn apply_with_phases(&self, request: &SoftwareApplyRequest) -> Result<RolloutPhaseTimes> {
         self.apply_timed(request, &NOT_STOPPED)
     }

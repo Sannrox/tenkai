@@ -524,6 +524,26 @@ impl SoftwareExecutor for DockerHostExecutor {
         Ok(Some(snapshot_observed_runtime(self, request, &topology)?))
     }
 
+    fn stop(&self, request: &SoftwareApplyRequest) -> Result<()> {
+        validate_request(request)?;
+        let topology = self.topology(request)?;
+        validate_topology(&topology, request.secret_dir_path.as_deref())?;
+        for container in order_containers(&topology)? {
+            let name = managed_container_name(request, container)?;
+            refuse_foreign_container(self, request, &name)?;
+            if inspect_container(self, &name)?.is_some() {
+                docker_ok(
+                    self,
+                    request,
+                    SoftwareDeployPhase::Stop,
+                    "stop",
+                    &["stop", &name],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn restart(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
         let topology = self.topology(request)?;

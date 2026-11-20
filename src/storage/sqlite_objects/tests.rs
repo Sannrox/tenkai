@@ -446,6 +446,7 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
             identity: None,
             restore_identity: None,
             target_changes: Vec::new(),
+            reason: String::new(),
         }],
         state: PlanState::Computed,
         gates_skipped: None,

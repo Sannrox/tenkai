@@ -174,6 +174,8 @@ pub(crate) fn command_name(command: &Command, target: Target) -> Option<CommandN
         } => CommandName::Approve,
         Command::Rollback { .. } => CommandName::Rollback,
         Command::Restart { .. } if target == Target::Embedded => CommandName::Restart,
+        Command::Stop { .. } => CommandName::Stop,
+        Command::Start { .. } => CommandName::Start,
         Command::Release {
             command: ReleaseCommand::Recall { .. },
         } => CommandName::Recall,
@@ -192,6 +194,8 @@ fn is_mutation(command: CommandName) -> bool {
             | CommandName::ApplyCancel
             | CommandName::Rollback
             | CommandName::Restart
+            | CommandName::Stop
+            | CommandName::Start
             | CommandName::Recall
             | CommandName::Approve
             | CommandName::Subscribe
@@ -771,6 +775,8 @@ mod tests {
             (CommandName::HistoryEnvironment, "environment"),
             (CommandName::Rollback, "plan"),
             (CommandName::Restart, "plan"),
+            (CommandName::Stop, "plan"),
+            (CommandName::Start, "plan"),
             (CommandName::Recall, "release"),
             (CommandName::Approve, "plan"),
             (CommandName::Subscribe, "environment"),

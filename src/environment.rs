@@ -29,6 +29,10 @@ pub(crate) enum DeploymentTransition {
     Removed {
         version: String,
     },
+    /// The instance is out of service while its subscription and pin remain.
+    Stopped {
+        reason: String,
+    },
     Unknown,
 }
 
@@ -58,6 +62,31 @@ const RETIREMENT_REASON: &str = "tenkai.retirement.reason";
 const RETIREMENT_ACTOR: &str = "tenkai.retirement.actor";
 const RETIREMENT_AT: &str = "tenkai.retirement.at";
 pub(crate) const TENANT_RETIREMENT_KEY: &str = "_tenkai_retirement";
+/// Recorded apply-time health of a stopped instance (#1067).
+pub const STOPPED_HEALTH: &str = "stopped";
+pub(crate) const STOPPED_REASON_PREFIX: &str = "stopped_reason.";
+
+/// Whether `instance` is recorded as stopped while still subscribed.
+pub fn instance_is_stopped(
+    properties: &std::collections::HashMap<String, String>,
+    instance: &str,
+) -> bool {
+    properties
+        .get(&format!("deployment_health.{instance}"))
+        .map(String::as_str)
+        == Some(STOPPED_HEALTH)
+}
+
+/// Operator reason recorded with a stop, when present.
+pub fn stopped_reason<'a>(
+    properties: &'a std::collections::HashMap<String, String>,
+    instance: &str,
+) -> Option<&'a str> {
+    properties
+        .get(&format!("{STOPPED_REASON_PREFIX}{instance}"))
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+}
 
 fn retirement_from_properties(
     properties: &HashMap<String, String>,
@@ -486,6 +515,9 @@ async fn update_reconciled_deployment_object(
         .properties
         .insert(format!("deployment_health.{key}"), "healthy".into());
     object.properties.remove(&format!("deployment_error.{key}"));
+    object
+        .properties
+        .remove(&format!("{STOPPED_REASON_PREFIX}{key}"));
     let schema = deployed_digest_schema(ctx, object, key).await?;
     stamp_applied_overlays(object, product, instance, sealed, schema.as_ref());
     object.properties.remove(&format!("deployed_prev.{key}"));
@@ -612,6 +644,9 @@ pub(crate) async fn record_deployed(
         .properties
         .insert(format!("deployment_health.{key}"), "healthy".into());
     object.properties.remove(&format!("deployment_error.{key}"));
+    object
+        .properties
+        .remove(&format!("{STOPPED_REASON_PREFIX}{key}"));
     let schema = deployed_digest_schema(ctx, &object, key).await?;
     stamp_applied_overlays(
         &mut object,
@@ -1074,6 +1109,9 @@ fn transition_deployment(
             environment
                 .properties
                 .remove(&format!("deployment_error.{key}"));
+            environment
+                .properties
+                .remove(&format!("{STOPPED_REASON_PREFIX}{key}"));
             stamp_applied_overlays(environment, product, instance, sealed, schema);
             environment.properties.remove(&format!("spec_drift.{key}"));
             clear_unknown_origin(environment, key);
@@ -1098,8 +1136,23 @@ fn transition_deployment(
             environment
                 .properties
                 .remove(&format!("deployment_error.{key}"));
+            environment
+                .properties
+                .remove(&format!("{STOPPED_REASON_PREFIX}{key}"));
             stamp_applied_overlays(environment, product, instance, sealed, schema);
             environment.properties.remove(&format!("spec_drift.{key}"));
+            clear_unknown_origin(environment, key);
+        }
+        DeploymentTransition::Stopped { reason } => {
+            environment
+                .properties
+                .insert(format!("deployment_health.{key}"), STOPPED_HEALTH.into());
+            environment
+                .properties
+                .insert(format!("{STOPPED_REASON_PREFIX}{key}"), reason.clone());
+            environment
+                .properties
+                .remove(&format!("deployment_error.{key}"));
             clear_unknown_origin(environment, key);
         }
         DeploymentTransition::Removed { version } => {
@@ -1119,6 +1172,9 @@ fn transition_deployment(
             environment
                 .properties
                 .insert(format!("deployed_prev.{key}"), version.clone());
+            environment
+                .properties
+                .remove(&format!("{STOPPED_REASON_PREFIX}{key}"));
             clear_unknown_origin(environment, key);
         }
         DeploymentTransition::Unknown => {
@@ -1135,6 +1191,9 @@ fn transition_deployment(
             environment
                 .properties
                 .insert(format!("deployment_error.{key}"), detail.into());
+            environment
+                .properties
+                .remove(&format!("{STOPPED_REASON_PREFIX}{key}"));
         }
     }
     environment.updated = observed_at;
@@ -1695,6 +1754,7 @@ pub fn subscription_state(
     match (deployed, health) {
         (_, Some("unknown")) => "unknown",
         (_, Some("unhealthy")) => "unhealthy",
+        (_, Some(STOPPED_HEALTH)) => STOPPED_HEALTH,
         (Some(version), _) if version == head && overlay_stale => "config_stale",
         (Some(version), _) if version == head => "current",
         (Some(_), _) => "behind",
@@ -2233,7 +2293,10 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
                 .get(&format!("deployed.{instance}"))
                 .cloned(),
             health,
-            error: if held
+            error: if instance_is_stopped(&env_obj.properties, &instance) {
+                let reason = stopped_reason(&env_obj.properties, &instance).unwrap_or("stopped");
+                Some(format!("upgrade held: {reason}"))
+            } else if held
                 && env_obj
                     .properties
                     .get(&format!("deployment_health.{instance}"))
@@ -4876,6 +4939,61 @@ mod tests {
     }
 
     #[test]
+    fn stopped_observation_keeps_the_deployed_pin() {
+        let mut environment = environment_object();
+        environment
+            .properties
+            .insert("deployed.api".into(), "1.0.0".into());
+        environment
+            .properties
+            .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
+        environment
+            .properties
+            .insert("deployment_health.api".into(), "healthy".into());
+
+        transition_deployment(
+            &mut environment,
+            "api",
+            "api",
+            None,
+            None,
+            &DeploymentTransition::Stopped {
+                reason: "drain for maintenance".into(),
+            },
+            "",
+            42,
+        );
+
+        assert_eq!(environment.properties.get("deployed.api").unwrap(), "1.0.0");
+        assert_eq!(
+            environment.properties.get("deployment_health.api").unwrap(),
+            STOPPED_HEALTH
+        );
+        assert_eq!(
+            environment.properties.get("stopped_reason.api").unwrap(),
+            "drain for maintenance"
+        );
+        assert!(instance_is_stopped(&environment.properties, "api"));
+
+        transition_deployment(
+            &mut environment,
+            "api",
+            "api",
+            None,
+            None,
+            &DeploymentTransition::Refreshed,
+            "",
+            43,
+        );
+        assert_eq!(environment.properties.get("deployed.api").unwrap(), "1.0.0");
+        assert_eq!(
+            environment.properties.get("deployment_health.api").unwrap(),
+            "healthy"
+        );
+        assert!(!environment.properties.contains_key("stopped_reason.api"));
+    }
+
+    #[test]
     fn dependency_hold_is_idempotent_for_the_same_contracts() {
         let mut properties = HashMap::new();
         let contracts = vec![("database".into(), "1.2.0".into())];
@@ -5003,6 +5121,10 @@ mod tests {
         assert_eq!(
             subscription_state(Some("1.0.0"), "1.0.0", Some("unknown"), true),
             "unknown"
+        );
+        assert_eq!(
+            subscription_state(Some("1.0.0"), "2.0.0", Some(STOPPED_HEALTH), false),
+            STOPPED_HEALTH
         );
         assert_eq!(
             subscription_state(Some("1.0.0"), "2.0.0", Some("healthy"), false),
@@ -5331,6 +5453,7 @@ mod tests {
                 identity: None,
                 restore_identity: None,
                 target_changes: Vec::new(),
+                reason: String::new(),
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,
@@ -5770,6 +5893,7 @@ mod tests {
                 identity: None,
                 restore_identity: None,
                 target_changes: Vec::new(),
+                reason: String::new(),
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,
@@ -6017,6 +6141,7 @@ mod tests {
                 identity: None,
                 restore_identity: None,
                 target_changes: Vec::new(),
+                reason: String::new(),
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,
@@ -6151,6 +6276,7 @@ mod tests {
                 identity: None,
                 restore_identity: None,
                 target_changes: Vec::new(),
+                reason: String::new(),
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,

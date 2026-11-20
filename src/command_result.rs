@@ -24,6 +24,8 @@ pub enum CommandName {
     HistoryEnvironment,
     Rollback,
     Restart,
+    Stop,
+    Start,
     Recall,
     Approve,
     Subscribe,

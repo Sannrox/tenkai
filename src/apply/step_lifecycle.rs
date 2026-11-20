@@ -76,7 +76,7 @@ pub(super) async fn execute(
             .software
             .require_available(restore.manifest.deploy.executor)?;
     }
-    if step.action != Action::Restart
+    if !matches!(step.action, Action::Restart | Action::Stop | Action::Start)
         && let Some(installed) = step.from.as_deref()
     {
         // The restore pin, when there is one, is the installed release.
@@ -218,7 +218,9 @@ pub(super) async fn execute(
         outgoing_removed = true;
     }
 
-    let activation = match if step.action == Action::Restart {
+    let activation = match if step.action == Action::Stop {
+        product_execution::stop(ctx, lease, &content, adapters.clone()).await
+    } else if step.action == Action::Restart {
         product_execution::restart(ctx, lease, &content, adapters.clone()).await
     } else {
         product_execution::activate(ctx, lease, &content, adapters.clone()).await
@@ -282,14 +284,7 @@ pub(super) async fn execute(
                 }
                 Ok(Some(decision)) => {
                     let mut outcome = decision.halted_outcome(step);
-                    let transition = if step.action == Action::Restart {
-                        crate::environment::DeploymentTransition::Refreshed
-                    } else {
-                        crate::environment::DeploymentTransition::Deployed {
-                            version: step.to.clone(),
-                            previous: step.from.clone(),
-                        }
-                    };
+                    let transition = recorded_transition(step);
                     if let Err(error) = record(
                         ctx,
                         started_at_ms,
@@ -329,14 +324,7 @@ pub(super) async fn execute(
             }
             let mut outcome =
                 Outcome::new(step.clone(), StepOutcomeStatus::Succeeded, String::new());
-            let transition = if step.action == Action::Restart {
-                crate::environment::DeploymentTransition::Refreshed
-            } else {
-                crate::environment::DeploymentTransition::Deployed {
-                    version: step.to.clone(),
-                    previous: step.from.clone(),
-                }
-            };
+            let transition = recorded_transition(step);
             if let Err(error) = record(
                 ctx,
                 started_at_ms,
@@ -365,7 +353,7 @@ pub(super) async fn execute(
             Outcome::new(step.clone(), StepOutcomeStatus::Blocked, detail),
             Some(crate::environment::DeploymentTransition::Unknown),
         ),
-        Err(detail) if step.action == Action::Restart => {
+        Err(detail) if matches!(step.action, Action::Restart | Action::Stop | Action::Start) => {
             recover_restart(ctx, step_context, step, &content, detail).await?
         }
         Err(detail) => {
@@ -395,6 +383,19 @@ pub(super) async fn execute(
         .await?;
     }
     Ok(outcome)
+}
+
+fn recorded_transition(step: &Step) -> crate::environment::DeploymentTransition {
+    match step.action {
+        Action::Restart | Action::Start => crate::environment::DeploymentTransition::Refreshed,
+        Action::Stop => crate::environment::DeploymentTransition::Stopped {
+            reason: step.reason.clone(),
+        },
+        _ => crate::environment::DeploymentTransition::Deployed {
+            version: step.to.clone(),
+            previous: step.from.clone(),
+        },
+    }
 }
 
 /// Remove the release of a non-host step with its own executor (ADR 0049)
@@ -922,7 +923,7 @@ async fn compensate_activation(
     failure: &anyhow::Error,
     adapters: TargetAdapters<'_>,
 ) -> Result<()> {
-    if step.action == Action::Restart {
+    if matches!(step.action, Action::Restart | Action::Stop | Action::Start) {
         return Ok(());
     }
     let failure = format!("deployment bookkeeping failed after activation: {failure}");

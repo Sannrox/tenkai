@@ -1045,6 +1045,55 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn stop_environment(
+        &self,
+        environment: &str,
+        product: &str,
+        expected_generation: u64,
+        reason: String,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/environments/{}/stop", encode_path_segment(environment)),
+            Some(&tenkai::management_lifecycle::StopRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Stop
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                product: product.to_string(),
+                reason,
+            }),
+        )
+        .await
+    }
+
+    pub async fn start_environment(
+        &self,
+        environment: &str,
+        product: &str,
+        expected_generation: u64,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!(
+                "/v1/environments/{}/start",
+                encode_path_segment(environment)
+            ),
+            Some(&tenkai::management_lifecycle::StartRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Start
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                expected_generation,
+                product: product.to_string(),
+            }),
+        )
+        .await
+    }
+
     pub async fn rollback_environment(
         &self,
         environment: &str,

@@ -449,6 +449,7 @@ mod tests {
             identity: None,
             restore_identity: None,
             target_changes,
+            reason: String::new(),
         }
     }
 
