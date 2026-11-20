@@ -1601,4 +1601,29 @@ mod tests {
             "api/tenkai-feedback-observation-v1.schema.json is stale; run `make update`"
         );
     }
+
+    const CHECKED_IN_COMMAND_RESULT: &str =
+        include_str!("../../../api/tenkai-command-result-v1.schema.json");
+
+    /// The json-v1 envelope schema (#1086) lives beside the HTTP contract so
+    /// `make update` and the API-contract validator cover it.
+    #[test]
+    fn checked_in_command_result_contract_matches_the_code() {
+        let rendered = format!("{:#}\n", tenkai::command_result::command_result_schema());
+        if std::env::var_os("TENKAI_UPDATE_API_CONTRACT").is_some() {
+            std::fs::write(
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../api/tenkai-command-result-v1.schema.json"
+                ),
+                &rendered,
+            )
+            .unwrap();
+            return;
+        }
+        assert!(
+            rendered == CHECKED_IN_COMMAND_RESULT,
+            "api/tenkai-command-result-v1.schema.json is stale; run `make update`"
+        );
+    }
 }

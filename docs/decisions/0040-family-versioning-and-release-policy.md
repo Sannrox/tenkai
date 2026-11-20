@@ -10,6 +10,8 @@
 - Amended: 2026-11-18 ([#1257](https://github.com/Sannrox/tenkai/issues/1257)),
   §10.5 and §10.9: the newest release is always cut from main; a line only
   patches a minor older than the newest final release
+- Amended: 2026-11-20 ([#1086](https://github.com/Sannrox/tenkai/issues/1086)),
+  §9 JSON Schema field-removal diff for HTTP v1 and listed json-v1 outputs
 - Issue: [#883](https://github.com/Sannrox/tenkai/issues/883)
 - Owner: Tenkai maintainers
 - Related: [software compatibility](../software-compatibility.md),
@@ -116,7 +118,7 @@ and Breaking note fails CI.
 | --- | --- |
 | `cargo-semver-checks` against the pull request base | Library crates |
 | `buf breaking` against the last tag | Proto |
-| OpenAPI diff | HTTP contracts |
+| JSON Schema field-removal diff against the last tag | HTTP v1 and listed json-v1 outputs |
 
 ### 10. Tagging
 
