@@ -179,7 +179,9 @@ fn connect_client(config: &Config, tls: MakeRustlsConnect) -> Result<Client> {
                     executors TEXT NOT NULL,
                     version TEXT NOT NULL,
                     checked_in_at BIGINT NOT NULL
-                 );",
+                 );
+             ALTER TABLE tenkai_hub_replicas
+                    ADD COLUMN IF NOT EXISTS engines TEXT;",
         )
         .map_err(pg)?;
     // Stored OIDC grant rules (#836): hub-wide, one row per claim value, and

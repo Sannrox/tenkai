@@ -131,6 +131,90 @@ impl Fixture {
             .unwrap();
     }
 
+    /// Publish and promote a model_runtime release and subscribe to it.
+    async fn model_release(&mut self, product: &str, version: &str, engine: &str) {
+        let dir = self.root.join(format!("{product}-{version}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        std::fs::write(
+            dir.join("tenkai.toml"),
+            format!(
+                r#"[product]
+name = "{product}"
+version = "{version}"
+kind = "model_runtime"
+description = "engine fixture"
+
+[model]
+source = "file:///tmp/weights.bin"
+revision = "fixture"
+format = "gguf"
+quantization = "Q4_K_M"
+artifact_digest = "{digest}"
+license = "apache-2.0"
+
+[runtime]
+engine = "{engine}"
+port = 8080
+context_length = 8192
+
+[requirements]
+architecture = ["arm64"]
+memory_gib = 16
+accelerator = ["apple-metal"]
+
+[health]
+endpoint = "http://127.0.0.1:8080/v1/models"
+smoke_prompt = "OK"
+max_startup_seconds = 60
+"#
+            ),
+        )
+        .unwrap();
+        crate::catalog::publish(
+            &mut self.ctx,
+            &dir.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        crate::model_release_evidence::record_passing_evaluation_for_release(
+            &mut self.ctx,
+            &format!("{product}@{version}"),
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("release-executor");
+        crate::catalog::promote(
+            &mut self.ctx,
+            &actor,
+            &format!("{product}@{version}"),
+            "stable",
+        )
+        .await
+        .unwrap();
+        crate::plan::subscribe(&mut self.ctx, "local", product, "stable")
+            .await
+            .unwrap();
+        crate::environment::set_environment_fact(&mut self.ctx, "local", "architecture", "arm64")
+            .await
+            .unwrap();
+        crate::environment::set_environment_fact(
+            &mut self.ctx,
+            "local",
+            "accelerator",
+            "apple-metal",
+        )
+        .await
+        .unwrap();
+        crate::environment::set_environment_fact(&mut self.ctx, "local", "memory_gib", "32")
+            .await
+            .unwrap();
+    }
+
     async fn apply(&mut self, executors: &SoftwareExecutors) -> anyhow::Result<Vec<Outcome>> {
         let plan = crate::plan::create_with(&mut self.ctx, "local", executors).await?;
         super::execute_with_options(
@@ -792,6 +876,24 @@ fn checked_in(
         id: id.into(),
         version: None,
         executors: executors.map(crate::execution_capabilities::parse_names),
+        engines: None,
+        checked_in_at,
+    }
+}
+
+fn checked_in_engines(
+    kind: crate::execution_capabilities::ProcessKind,
+    id: &str,
+    executors: Option<&str>,
+    engines: Option<&str>,
+    checked_in_at: i64,
+) -> crate::execution_capabilities::ProcessExecutors {
+    crate::execution_capabilities::ProcessExecutors {
+        kind,
+        id: id.into(),
+        version: None,
+        executors: executors.map(crate::execution_capabilities::parse_names),
+        engines: engines.map(crate::execution_capabilities::parse_engine_names),
         checked_in_at,
     }
 }
@@ -840,6 +942,73 @@ async fn a_plan_is_refused_until_every_replica_has_the_declared_executor() {
 
     check_ins.replicas.lock().unwrap().replicas[1] =
         checked_in(Replica, "standby", Some("docker,shell"), 0);
+    crate::plan::create_with(&mut fixture.ctx, "local", &executors)
+        .await
+        .unwrap();
+}
+
+/// A plan for a model release whose engine one replica lacks is refused
+/// and names that replica; it is accepted once the replica checks in with
+/// the engine.
+#[tokio::test]
+async fn a_plan_is_refused_until_every_replica_has_the_declared_engine() {
+    use crate::execution_capabilities::{ProcessKind::Replica, ReplicaView};
+    let check_ins = Arc::new(CheckIns::default());
+    *check_ins.replicas.lock().unwrap() = ReplicaView {
+        this: Some("leader".into()),
+        leader: Some("leader".into()),
+        replicas: vec![
+            checked_in_engines(Replica, "leader", Some("shell"), Some("llama.cpp"), 0),
+            checked_in_engines(Replica, "standby", Some("shell"), Some("mlx"), 0),
+        ],
+    };
+    let mut fixture = Fixture::new("engines").await;
+    fixture.ctx = fixture
+        .ctx
+        .clone()
+        .with_execution_capabilities(check_ins.clone());
+    fixture.model_release("qwen", "1.0.0", "llama.cpp").await;
+    let executors = SoftwareExecutors::with_default(Arc::new(Recorder::default()));
+
+    let error = crate::plan::create_with(&mut fixture.ctx, "local", &executors)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("tenkai:release:qwen@1.0.0")
+            && error.contains("\"llama.cpp\"")
+            && error.contains("not configured on standby that"),
+        "{error}"
+    );
+
+    check_ins.replicas.lock().unwrap().replicas[1] =
+        checked_in_engines(Replica, "standby", Some("shell"), Some("llama.cpp,mlx"), 0);
+    crate::plan::create_with(&mut fixture.ctx, "local", &executors)
+        .await
+        .unwrap();
+}
+
+/// A process that recorded no engines leaves the engine check to apply.
+#[tokio::test]
+async fn an_unrecorded_engine_set_leaves_the_check_to_apply() {
+    use crate::execution_capabilities::{ProcessKind::Replica, ReplicaView};
+    let check_ins = Arc::new(CheckIns::default());
+    *check_ins.replicas.lock().unwrap() = ReplicaView {
+        this: Some("new".into()),
+        leader: Some("new".into()),
+        replicas: vec![
+            checked_in_engines(Replica, "new", Some("shell"), Some("llama.cpp"), 0),
+            checked_in(Replica, "old", Some("shell"), 0),
+        ],
+    };
+    let mut fixture = Fixture::new("old-engines").await;
+    fixture.ctx = fixture
+        .ctx
+        .clone()
+        .with_execution_capabilities(check_ins.clone());
+    fixture.model_release("qwen", "1.0.0", "llama.cpp").await;
+    let executors = SoftwareExecutors::with_default(Arc::new(Recorder::default()));
+
     crate::plan::create_with(&mut fixture.ctx, "local", &executors)
         .await
         .unwrap();

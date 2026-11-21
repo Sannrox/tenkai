@@ -6,7 +6,7 @@ There is no served gRPC `RuntimeService`.
 
 | HTTP | Request | Result |
 | --- | --- | --- |
-| `GET /v1/runtime/environments/{environment}/work` | Bearer token and `x-tenkai-runtime-instance`; optional `x-tenkai-runtime-capabilities` and `x-tenkai-runtime-executors`. No body. | JSON `RuntimeWork` (`environment`, optional `plan`, optional `claim`, optional `approvals`, optional `issuer_candidate`, optional `health_observations`) |
+| `GET /v1/runtime/environments/{environment}/work` | Bearer token and `x-tenkai-runtime-instance`; optional `x-tenkai-runtime-capabilities`, `x-tenkai-runtime-executors`, and `x-tenkai-runtime-engines`. No body. | JSON `RuntimeWork` (`environment`, optional `plan`, optional `claim`, optional `approvals`, optional `issuer_candidate`, optional `health_observations`) |
 | `POST /v1/runtime/environments/{environment}/identity-issuer/candidate` | JSON `IssuerKey` (`generation`, `fingerprint`, `certificate`, `sealed_key`) | JSON `IssuerKey`: the candidate the server keeps ([below](#identity-issuer)); `409` when none was asked for |
 | `POST /v1/runtime/environments/{environment}/complete` | JSON `RuntimeCompletion` (`plan_id`, `generation`, `succeeded`, `detail`, `receipts`) | `204` |
 | `POST /v1/runtime/environments/{environment}/progress` | `x-tenkai-runtime-capabilities` naming `os_image`. JSON `RuntimeProgressReport` (`plan_id`, `generation`, `awaiting_boot`, `receipts`) | `204` ([below](#os-image-reboots)); `409` when the claim is not live or another runner recorded it |
@@ -122,7 +122,11 @@ kinds, comma-separated canonical names, in `x-tenkai-runtime-executors` on
 work pull (ADR 0057). The server records them on the runtime's activity
 and refuses a plan whose release declares an executor the runtime lacks.
 A pull without the header keeps the recorded set; a server that predates
-it ignores the header.
+it ignores the header. The same runtime names its configured model engines
+in `x-tenkai-runtime-engines`; planning refuses a model release whose
+engine the runtime lacks. A pull without that header keeps the recorded
+engines; an older process that never sent it leaves the engine check to
+apply.
 
 Work pull does not accept supported versions and does not negotiate. The
 capabilities are `workload_identity`, `peer_grants`, `issuer_rotation`,

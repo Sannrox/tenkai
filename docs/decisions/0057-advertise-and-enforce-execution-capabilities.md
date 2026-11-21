@@ -106,8 +106,10 @@ only refuses earlier and makes the sets visible.
   outcome is unchanged, only earlier.
 - The record is an operator view and a planning aid. A failed write is
   reported, and the apply-time check still decides.
-- Model engines and accelerator facts are not part of the set yet. A model
-  release's engine is checked by the model runtime at apply.
+- Model engines are recorded beside executors (#1520): in-tree launchers
+  always count, injected engines when their host factory is configured.
+  A process that recorded no engines leaves that check to apply. Accelerator
+  facts are not part of the set.
 
 ## Rejected
 

@@ -281,6 +281,7 @@ async fn readyz_names_peers_whose_executors_differ_without_failing() {
         id: id.into(),
         version: None,
         executors: Some(parse_names(executors)),
+        engines: None,
         checked_in_at: 1,
     };
     let mut config = ServerConfig::community("management-secret", HashMap::new());

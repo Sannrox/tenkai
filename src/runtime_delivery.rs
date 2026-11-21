@@ -1214,10 +1214,16 @@ pub struct RuntimeCaller<'a> {
     /// (ADR 0057), comma-separated. Recorded on work pull; planning refuses
     /// a release whose executor the runtime lacks.
     pub executors: Option<&'a str>,
+    /// The agent's configured model engines from `x-tenkai-runtime-engines`,
+    /// comma-separated. Recorded on work pull; planning refuses a model
+    /// release whose engine the runtime lacks.
+    pub engines: Option<&'a str>,
 }
 
 /// The header a runtime names its installed executor kinds in (ADR 0057).
 pub const EXECUTORS_HEADER: &str = "x-tenkai-runtime-executors";
+/// The header a runtime names its configured model engines in.
+pub const ENGINES_HEADER: &str = "x-tenkai-runtime-engines";
 
 /// The capability a runtime names to be offered identity issuer work.
 pub const WORKLOAD_IDENTITY_CAPABILITY: &str = "workload_identity";
@@ -1268,8 +1274,9 @@ const ACTIVITY_INTERVAL_MS: i64 = 30_000;
 
 /// Last written activity per `(runner, instance, kind)`, with its version.
 /// Per runner instance and kind: when it was last written, with the
-/// version and executors it carried.
-type ActivityWrites = HashMap<(String, String, Activity), (i64, Option<String>, Option<String>)>;
+/// version, executors, and engines it carried.
+type ActivityWrites =
+    HashMap<(String, String, Activity), (i64, Option<String>, Option<String>, Option<String>)>;
 
 /// Deep runtime delivery module used after transport extraction.
 pub struct RuntimeDeliveryOperations {
@@ -1314,6 +1321,7 @@ impl RuntimeDeliveryOperations {
         environment: &str,
         version: Option<&str>,
         executors: Option<&str>,
+        engines: Option<&str>,
         kind: Activity,
     ) {
         let version = version
@@ -1325,6 +1333,12 @@ impl RuntimeDeliveryOperations {
                 .collect();
             names.join(",")
         });
+        let engines = engines.filter(|names| names.len() <= 256).map(|names| {
+            let names: Vec<_> = crate::execution_capabilities::parse_engine_names(names)
+                .into_iter()
+                .collect();
+            names.join(",")
+        });
         let now = crate::now_millis();
         let key = (identity.runner_id.clone(), identity.instance.clone(), kind);
         {
@@ -1332,14 +1346,18 @@ impl RuntimeDeliveryOperations {
                 .activity
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            if let Some((at, recorded, recorded_executors)) = written.get(&key)
+            if let Some((at, recorded, recorded_executors, recorded_engines)) = written.get(&key)
                 && now - at < ACTIVITY_INTERVAL_MS
                 && (version.is_none() || version == *recorded)
                 && (executors.is_none() || executors == *recorded_executors)
+                && (engines.is_none() || engines == *recorded_engines)
             {
                 return;
             }
-            written.insert(key, (now, version.clone(), executors.clone()));
+            written.insert(
+                key,
+                (now, version.clone(), executors.clone(), engines.clone()),
+            );
         }
         let at = Some(now);
         let record = crate::storage::RuntimeActivityRecord {
@@ -1352,6 +1370,7 @@ impl RuntimeDeliveryOperations {
             last_heartbeat_at: at.filter(|_| kind == Activity::Heartbeat),
             last_inventory_at: at.filter(|_| kind == Activity::Inventory),
             executors,
+            engines,
         };
         if let Err(error) = self.store.record_runtime_activity(&record) {
             eprintln!("recording runtime activity failed (continuing): {error}");
@@ -1522,6 +1541,7 @@ impl RuntimeDeliveryOperations {
             environment,
             caller.version,
             caller.executors,
+            caller.engines,
             Activity::Work,
         );
         // While the server may still run a plan it began before a runtime
@@ -2118,6 +2138,7 @@ impl RuntimeDeliveryOperations {
             environment,
             caller.version,
             None,
+            None,
             Activity::Heartbeat,
         );
         let Some(mut ctx) = self.reconciler.application_ctx() else {
@@ -2329,6 +2350,7 @@ impl RuntimeDeliveryOperations {
             environment,
             caller.version,
             None,
+            None,
             Activity::Inventory,
         );
         let Some(mut ctx) = self.reconciler.application_ctx() else {
@@ -2357,6 +2379,7 @@ impl RuntimeDeliveryOperations {
             &identity,
             environment,
             caller.version,
+            None,
             None,
             Activity::Inventory,
         );
@@ -2387,6 +2410,7 @@ impl RuntimeDeliveryOperations {
             environment,
             caller.version,
             None,
+            None,
             Activity::Inventory,
         );
         let Some(mut ctx) = self.reconciler.application_ctx() else {
@@ -2413,6 +2437,7 @@ impl RuntimeDeliveryOperations {
             &identity,
             environment,
             caller.version,
+            None,
             None,
             Activity::Inventory,
         );
@@ -3981,6 +4006,7 @@ health = "curl -f http://127.0.0.1:9/health"
                 instance_health: false,
                 os_image: false,
                 executors: None,
+                engines: None,
             };
             operations.admit(None, &caller, environment)
         };
@@ -4034,6 +4060,7 @@ health = "curl -f http://127.0.0.1:9/health"
                         instance_health: false,
                         os_image: false,
                         executors: None,
+                        engines: None,
                     },
                     "prod",
                     &request,
@@ -4220,6 +4247,7 @@ health = "curl -f http://127.0.0.1:9/health"
                             instance_health: false,
                             os_image: false,
                             executors: None,
+                            engines: None,
                         },
                         "prod",
                         &request,
@@ -4309,6 +4337,7 @@ health = "curl -f http://127.0.0.1:9/health"
                         instance_health: false,
                         os_image: false,
                         executors: None,
+                        engines: None,
                     },
                     "prod",
                     RuntimeInventoryReport {
@@ -5285,6 +5314,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     instance_health: false,
                     os_image: false,
                     executors: None,
+                    engines: None,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -5406,6 +5436,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     instance_health: false,
                     os_image: false,
                     executors: None,
+                    engines: None,
                 },
                 "prod",
                 &RuntimeCertificateRequest {
@@ -5448,6 +5479,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     instance_health: false,
                     os_image: false,
                     executors: None,
+                    engines: None,
                 },
                 "prod",
                 &RuntimeCertificateRequest {

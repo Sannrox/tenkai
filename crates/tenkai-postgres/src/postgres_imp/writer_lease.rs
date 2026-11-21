@@ -159,21 +159,27 @@ impl Inner {
         &self,
         holder: &str,
         executors: &str,
+        engines: Option<&str>,
         version: &str,
         forget_ms: i64,
     ) -> Result<()> {
-        let (holder, executors, version) =
-            (holder.to_owned(), executors.to_owned(), version.to_owned());
+        let (holder, executors, engines, version) = (
+            holder.to_owned(),
+            executors.to_owned(),
+            engines.map(str::to_owned),
+            version.to_owned(),
+        );
         self.with_schema("public", move |tx| {
             bound_lease_transaction(tx, 5_000)?;
             tx.execute(
                 &format!(
-                    "INSERT INTO tenkai_hub_replicas (holder, executors, version, checked_in_at)
-                     VALUES ($1, $2, $3, {DB_NOW})
+                    "INSERT INTO tenkai_hub_replicas (holder, executors, engines, version, checked_in_at)
+                     VALUES ($1, $2, $3, $4, {DB_NOW})
                      ON CONFLICT (holder) DO UPDATE SET executors = excluded.executors,
-                         version = excluded.version, checked_in_at = excluded.checked_in_at"
+                         engines = excluded.engines, version = excluded.version,
+                         checked_in_at = excluded.checked_in_at"
                 ),
-                &[&holder, &executors, &version],
+                &[&holder, &executors, &engines, &version],
             )
             .map_err(pg)?;
             tx.execute(
@@ -192,19 +198,23 @@ impl Inner {
             let replicas = tx
                 .query(
                     &format!(
-                        "SELECT holder, executors, version, checked_in_at FROM tenkai_hub_replicas
+                        "SELECT holder, executors, engines, version, checked_in_at FROM tenkai_hub_replicas
                          WHERE checked_in_at >= {DB_NOW} - $1 ORDER BY holder"
                     ),
                     &[&window_ms],
                 )
                 .map_err(pg)?
                 .into_iter()
-                .map(|row| ProcessExecutors {
-                    kind: ProcessKind::Replica,
-                    id: row.get(0),
-                    executors: Some(parse_names(row.get(1))),
-                    version: Some(row.get(2)),
-                    checked_in_at: row.get(3),
+                .map(|row| {
+                    let engines: Option<String> = row.get(2);
+                    ProcessExecutors {
+                        kind: ProcessKind::Replica,
+                        id: row.get(0),
+                        executors: Some(parse_names(row.get(1))),
+                        engines: engines.as_deref().map(tenkai::execution_capabilities::parse_engine_names),
+                        version: Some(row.get(3)),
+                        checked_in_at: row.get(4),
+                    }
                 })
                 .collect();
             let leader = tx

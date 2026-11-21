@@ -49,7 +49,7 @@ pub struct FleetEnvironmentRow {
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub certificates: Option<FleetCertificateSummary>,
     /// The environment's runtime instances and their recorded executors
-    /// (ADR 0057). Empty when no runtime runs it.
+    /// and engines (ADR 0057). Empty when no runtime runs it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtimes: Vec<crate::execution_capabilities::ProcessExecutors>,
     /// Aggregate posture: `empty` | `unhealthy` | `behind` | `current`.
@@ -150,7 +150,7 @@ pub struct FleetStatusReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub promotion_policies: Vec<crate::channel_promotion::ChannelPromotionPolicyStatus>,
     /// Server replicas that checked in recently and their installed
-    /// executors (ADR 0057). Empty on a single-replica server.
+    /// executors and engines (ADR 0057). Empty on a single-replica server.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replicas: Vec<crate::execution_capabilities::ProcessExecutors>,
 }

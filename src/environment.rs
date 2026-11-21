@@ -5447,6 +5447,7 @@ mod tests {
             id: id.into(),
             version: None,
             executors: Some(parse_names(executors)),
+            engines: None,
             checked_in_at: 1,
         };
         let database = std::env::temp_dir().join(format!(

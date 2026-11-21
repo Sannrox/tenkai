@@ -12,7 +12,7 @@
 //! cache verifies its digest, the executor unpacks it once under the cache root,
 //! which pods mount read-only from the claim that holds it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -170,6 +170,14 @@ fn entitlement_for(
     })
 }
 
+/// True when `var` supplies the host configuration this engine needs.
+fn host_has_serving_config(engine: ServingEngine, var: impl Fn(&str) -> Option<String>) -> bool {
+    matches!(var("IMAGE"), Some(image) if image.contains("@sha256:"))
+        && var("WEIGHTS_CLAIM").is_some()
+        && var("WEIGHTS_ROOT").is_some()
+        && entitlement_for(engine, var).is_ok()
+}
+
 /// Host-held NGC entitlement for NIM images: Kubernetes Secret names only,
 /// never the key itself, and never manifest data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +279,23 @@ impl tenkai::model_runtime::ModelRuntimeExecutorFactory for KubernetesModelRunti
             },
             state_path.to_path_buf(),
         )))
+    }
+
+    fn configured_engines(&self) -> BTreeSet<String> {
+        [ServingEngine::Vllm, ServingEngine::Tgi, ServingEngine::Nim]
+            .into_iter()
+            .filter(|engine| {
+                let prefix = engine.env_prefix();
+                let var = |suffix: &str| {
+                    std::env::var(format!("{prefix}_{suffix}"))
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                };
+                host_has_serving_config(*engine, var)
+            })
+            .map(ServingEngine::name)
+            .map(str::to_string)
+            .collect()
     }
 }
 
@@ -1759,6 +1784,46 @@ mod tests {
         assert!(executor.apply(&no_gpu).is_err());
         assert_eq!(executor.observe().unwrap(), None);
         let _ = std::fs::remove_dir_all(fixture.root);
+    }
+
+    #[test]
+    fn configured_engines_need_a_digest_pinned_image_and_nim_entitlement() {
+        let vars = |pairs: &[(&str, &str)]| {
+            let map: BTreeMap<String, String> = pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect();
+            move |suffix: &str| map.get(suffix).cloned()
+        };
+        let complete = [
+            ("IMAGE", "vllm@sha256:ab"),
+            ("WEIGHTS_CLAIM", "weights"),
+            ("WEIGHTS_ROOT", "/weights"),
+        ];
+        assert!(host_has_serving_config(
+            ServingEngine::Vllm,
+            vars(&complete)
+        ));
+        assert!(!host_has_serving_config(
+            ServingEngine::Vllm,
+            vars(&[
+                ("IMAGE", "vllm:latest"),
+                ("WEIGHTS_CLAIM", "weights"),
+                ("WEIGHTS_ROOT", "/weights"),
+            ])
+        ));
+        assert!(!host_has_serving_config(
+            ServingEngine::Nim,
+            vars(&complete)
+        ));
+        let nim = [
+            ("IMAGE", "nim@sha256:ab"),
+            ("WEIGHTS_CLAIM", "weights"),
+            ("WEIGHTS_ROOT", "/weights"),
+            ("PULL_SECRET", "ngc-pull"),
+            ("NGC_API_KEY_SECRET", "ngc-key"),
+        ];
+        assert!(host_has_serving_config(ServingEngine::Nim, vars(&nim)));
     }
 
     /// A one-entry archive whose stored name is `name`, bypassing the builder's checks.

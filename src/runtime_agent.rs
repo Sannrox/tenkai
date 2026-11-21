@@ -1066,6 +1066,10 @@ impl RuntimeClient {
                 crate::runtime_delivery::EXECUTORS_HEADER,
                 config.executors.installed_names(),
             );
+            request = request.header(
+                crate::runtime_delivery::ENGINES_HEADER,
+                crate::model_runtime::installed_engine_names(),
+            );
         }
         let response = request.send().await?;
         // What the server admits is read on every pull, so a server rolled

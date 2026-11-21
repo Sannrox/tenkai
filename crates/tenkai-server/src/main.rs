@@ -811,7 +811,18 @@ async fn main() -> Result<()> {
                 let fence = fence.clone();
                 move || {
                     tenkai_postgres::open_hub_writer_lease(holder, WRITER_LEASE_TTL_MS, fence)
-                        .map(|lease| lease.with_executors(executors))
+                        .map(|lease| {
+                            #[cfg(feature = "postgres")]
+                            {
+                                lease
+                                    .with_executors(executors)
+                                    .with_engines(tenkai::model_runtime::installed_engine_names())
+                            }
+                            #[cfg(not(feature = "postgres"))]
+                            {
+                                lease.with_executors(executors)
+                            }
+                        })
                         .map_err(anyhow::Error::from)
                 }
             })
