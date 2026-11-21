@@ -2,12 +2,15 @@
 //! no such process can run (ADR 0057).
 //!
 //! A server replica and an environment runtime each record the executor
-//! kinds they have installed when they check in. An environment's supported
-//! set is derived from those records, never configured: its runtime's set
-//! when a runtime runs it, otherwise the intersection over the server
-//! replicas that checked in recently. A process that recorded no set (an
-//! older version) makes the set `unknown`, and planning then leaves the
-//! check to apply, which stays the fence on the process that runs the step.
+//! kinds they have installed, and the model engines whose launcher is
+//! configured, when they check in. An environment's supported set is
+//! derived from those records, never configured: its runtime's set when a
+//! runtime runs it, otherwise the intersection over the server replicas
+//! that checked in recently. A process that recorded no set (an older
+//! version) makes that set `unknown`, and planning then leaves the check
+//! to apply, which stays the fence on the process that runs the step.
+//! Executors and engines are independent: a process that recorded
+//! executors but no engines leaves only the engine check to apply.
 //!
 //! Hosts install an [`ExecutionCapabilitySource`] on the [`Ctx`]. Without
 //! one (embedded `tenkaictl`, tests), the planning process's own executors
@@ -38,7 +41,7 @@ pub enum ProcessKind {
     Local,
 }
 
-/// One process's recorded executor set.
+/// One process's recorded executor and engine sets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProcessExecutors {
     pub kind: ProcessKind,
@@ -52,6 +55,11 @@ pub struct ProcessExecutors {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub executors: Option<BTreeSet<String>>,
+    /// Configured model engines. Absent when the process recorded none, as
+    /// a version before engines were part of the set does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub engines: Option<BTreeSet<String>>,
     /// Last check-in, Unix milliseconds.
     pub checked_in_at: i64,
 }
@@ -154,6 +162,7 @@ impl ExecutionCapabilitySource for StoreExecutionCapabilities {
                     id: format!("{}/{}", activity.runner_id, activity.instance_id),
                     version: activity.runtime_version,
                     executors: activity.executors.as_deref().map(parse_names),
+                    engines: activity.engines.as_deref().map(parse_engine_names),
                     checked_in_at: [
                         activity.last_work_at,
                         activity.last_heartbeat_at,
@@ -177,6 +186,23 @@ pub enum SupportedExecutors {
     /// Every process that may run a step has these kinds installed.
     Known {
         executors: BTreeSet<String>,
+        processes: Vec<ProcessExecutors>,
+    },
+    /// Planning cannot tell; apply checks on the process that runs it.
+    Unknown {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        processes: Vec<ProcessExecutors>,
+    },
+}
+
+/// What an environment's executing processes can run for model engines.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SupportedEngines {
+    /// Every process that may run a step has these engines configured.
+    Known {
+        engines: BTreeSet<String>,
         processes: Vec<ProcessExecutors>,
     },
     /// Planning cannot tell; apply checks on the process that runs it.
@@ -221,6 +247,11 @@ pub fn parse_names(names: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// Parse a comma-separated engine list. Unknown names are dropped.
+pub fn parse_engine_names(names: &str) -> BTreeSet<String> {
+    crate::model_runtime::parse_engine_names(names)
+}
+
 /// Derive the supported set from the fresh records of every process that
 /// may run a step.
 fn derive(processes: Vec<ProcessExecutors>, none_reason: &str) -> SupportedExecutors {
@@ -253,6 +284,32 @@ fn derive(processes: Vec<ProcessExecutors>, none_reason: &str) -> SupportedExecu
     }
 }
 
+fn derive_engines(processes: Vec<ProcessExecutors>, none_reason: &str) -> SupportedEngines {
+    if processes.is_empty() {
+        return SupportedEngines::Unknown {
+            reason: none_reason.into(),
+            processes,
+        };
+    }
+    let mut supported: Option<BTreeSet<String>> = None;
+    for process in &processes {
+        let Some(engines) = process.engines.as_ref() else {
+            return SupportedEngines::Unknown {
+                reason: format!("{} recorded no engines (an older version)", process.id),
+                processes,
+            };
+        };
+        supported = Some(match supported {
+            Some(supported) => supported.intersection(engines).cloned().collect(),
+            None => engines.clone(),
+        });
+    }
+    SupportedEngines::Known {
+        engines: supported.unwrap_or_default(),
+        processes,
+    }
+}
+
 fn local(own: &SoftwareExecutors) -> ProcessExecutors {
     ProcessExecutors {
         kind: ProcessKind::Local,
@@ -264,6 +321,7 @@ fn local(own: &SoftwareExecutors) -> ProcessExecutors {
                 .map(|kind| kind.as_str().to_string())
                 .collect(),
         ),
+        engines: Some(crate::model_runtime::configured_engines()),
         checked_in_at: crate::now_millis(),
     }
 }
@@ -274,15 +332,24 @@ pub fn this_process(own: &SoftwareExecutors) -> SupportedExecutors {
     derive(vec![local(own)], "")
 }
 
-/// The supported set of `environment`. `own` is the planning process's
-/// executors, used when no other process runs its steps.
-pub async fn supported_for(
-    ctx: &mut Ctx,
-    environment: &str,
-    own: &SoftwareExecutors,
-) -> Result<SupportedExecutors> {
+/// This process's configured engines, used when no other process runs the
+/// environment's steps.
+pub fn this_process_engines(own: &SoftwareExecutors) -> SupportedEngines {
+    derive_engines(vec![local(own)], "")
+}
+
+enum ProcessSet {
+    Local,
+    Known(Vec<ProcessExecutors>),
+    UnknownLeader {
+        leader: String,
+        processes: Vec<ProcessExecutors>,
+    },
+}
+
+async fn processes_for(ctx: &mut Ctx, environment: &str) -> Result<ProcessSet> {
     let Some(source) = ctx.execution_capabilities() else {
-        return Ok(this_process(own));
+        return Ok(ProcessSet::Local);
     };
     let runtimes: Vec<_> = source
         .runtimes()?
@@ -300,26 +367,64 @@ pub async fn supported_for(
             .into_iter()
             .filter(|runtime| now - runtime.checked_in_at <= RUNTIME_CHECK_IN_WINDOW_MS)
             .collect();
-        return Ok(derive(
-            fresh,
-            "no runtime of this environment checked in recently",
-        ));
+        return Ok(ProcessSet::Known(fresh));
     }
     let view = source.replicas();
     if let Some(leader) = &view.leader
         && !view.replicas.iter().any(|replica| &replica.id == leader)
     {
-        return Ok(SupportedExecutors::Unknown {
-            reason: format!(
-                "writer-lease holder {leader} recorded no executors (an older version)"
-            ),
+        return Ok(ProcessSet::UnknownLeader {
+            leader: leader.clone(),
             processes: view.replicas,
         });
     }
     if view.replicas.is_empty() {
-        return Ok(this_process(own));
+        return Ok(ProcessSet::Local);
     }
-    Ok(derive(view.replicas, ""))
+    Ok(ProcessSet::Known(view.replicas))
+}
+
+/// The supported set of `environment`. `own` is the planning process's
+/// executors, used when no other process runs its steps.
+pub async fn supported_for(
+    ctx: &mut Ctx,
+    environment: &str,
+    own: &SoftwareExecutors,
+) -> Result<SupportedExecutors> {
+    Ok(match processes_for(ctx, environment).await? {
+        ProcessSet::Local => this_process(own),
+        ProcessSet::Known(processes) => derive(
+            processes,
+            "no runtime of this environment checked in recently",
+        ),
+        ProcessSet::UnknownLeader { leader, processes } => SupportedExecutors::Unknown {
+            reason: format!(
+                "writer-lease holder {leader} recorded no executors (an older version)"
+            ),
+            processes,
+        },
+    })
+}
+
+/// The supported engines of `environment`. Independent of
+/// [`supported_for`]: a process that recorded executors but no engines
+/// makes only this set unknown.
+pub async fn supported_engines_for(
+    ctx: &mut Ctx,
+    environment: &str,
+    own: &SoftwareExecutors,
+) -> Result<SupportedEngines> {
+    Ok(match processes_for(ctx, environment).await? {
+        ProcessSet::Local => this_process_engines(own),
+        ProcessSet::Known(processes) => derive_engines(
+            processes,
+            "no runtime of this environment checked in recently",
+        ),
+        ProcessSet::UnknownLeader { leader, processes } => SupportedEngines::Unknown {
+            reason: format!("writer-lease holder {leader} recorded no engines (an older version)"),
+            processes,
+        },
+    })
 }
 
 /// Refuse a plan whose steps declare an executor outside `environment`'s
@@ -354,16 +459,59 @@ pub async fn refuse_unsupported(
     Ok(())
 }
 
+/// Refuse a plan whose model release needs an engine outside
+/// `environment`'s supported set, naming the release, the engine, and each
+/// process that lacks it. An unknown set refuses nothing.
+pub async fn refuse_unsupported_engines(
+    ctx: &mut Ctx,
+    environment: &str,
+    own: &SoftwareExecutors,
+    declared: &[(String, String)],
+) -> Result<()> {
+    if declared.is_empty() {
+        return Ok(());
+    }
+    let SupportedEngines::Known { processes, .. } =
+        supported_engines_for(ctx, environment, own).await?
+    else {
+        return Ok(());
+    };
+    for (release, engine) in declared {
+        let lacking: Vec<_> = processes
+            .iter()
+            .filter(|process| {
+                process
+                    .engines
+                    .as_ref()
+                    .is_some_and(|engines| !engines.contains(engine.as_str()))
+            })
+            .map(|process| process.id.as_str())
+            .collect();
+        if !lacking.is_empty() {
+            bail!(
+                "release {release} declares runtime.engine = \"{engine}\", and that engine is not configured on {} that may run {environment}'s steps",
+                lacking.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn replica(id: &str, executors: Option<&str>) -> ProcessExecutors {
+        process(id, executors, None)
+    }
+
+    fn process(id: &str, executors: Option<&str>, engines: Option<&str>) -> ProcessExecutors {
         ProcessExecutors {
             kind: ProcessKind::Replica,
             id: id.into(),
             version: None,
             executors: executors.map(parse_names),
+            engines: engines.map(parse_engine_names),
             checked_in_at: 0,
         }
     }
@@ -417,5 +565,46 @@ mod tests {
         };
         assert_eq!(view.differing_peers(), ["b"]);
         assert!(ReplicaView::default().differing_peers().is_empty());
+    }
+
+    #[test]
+    fn the_supported_engines_are_the_intersection_of_every_replica() {
+        let supported = derive_engines(
+            vec![
+                process("a", Some("shell"), Some("llama.cpp,vllm")),
+                process("b", Some("shell"), Some("llama.cpp,mlx")),
+            ],
+            "",
+        );
+        let SupportedEngines::Known { engines, .. } = supported else {
+            panic!("{supported:?}");
+        };
+        assert_eq!(engines, parse_engine_names("llama.cpp"));
+    }
+
+    #[test]
+    fn a_replica_without_engines_makes_only_engines_unknown() {
+        let supported = derive_engines(
+            vec![
+                process("a", Some("shell"), Some("llama.cpp")),
+                process("old", Some("shell"), None),
+            ],
+            "",
+        );
+        assert!(
+            matches!(&supported, SupportedEngines::Unknown { reason, .. } if reason.contains("old")),
+            "{supported:?}"
+        );
+        let executors = derive(
+            vec![
+                process("a", Some("shell"), Some("llama.cpp")),
+                process("old", Some("shell"), None),
+            ],
+            "",
+        );
+        assert!(
+            matches!(&executors, SupportedExecutors::Known { .. }),
+            "{executors:?}"
+        );
     }
 }

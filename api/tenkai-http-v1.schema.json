@@ -4564,6 +4564,10 @@
         "environment": {
           "type": "string"
         },
+        "supported_engines": {
+          "$ref": "#/$defs/SupportedEngines",
+          "description": "What the processes that run this environment's steps can serve\n(model engines). Independent of `supported_executors`."
+        },
         "supported_executors": {
           "$ref": "#/$defs/SupportedExecutors",
           "description": "What the processes that run this environment's steps can execute\n(ADR 0057): its runtime's set, or the server replicas' common set."
@@ -5437,7 +5441,7 @@
           "type": "integer"
         },
         "runtimes": {
-          "description": "The environment's runtime instances and their recorded executors\n(ADR 0057). Empty when no runtime runs it.",
+          "description": "The environment's runtime instances and their recorded executors\nand engines (ADR 0057). Empty when no runtime runs it.",
           "items": {
             "$ref": "#/$defs/ProcessExecutors"
           },
@@ -5514,7 +5518,7 @@
           "type": "array"
         },
         "replicas": {
-          "description": "Server replicas that checked in recently and their installed\nexecutors (ADR 0057). Empty on a single-replica server.",
+          "description": "Server replicas that checked in recently and their installed\nexecutors and engines (ADR 0057). Empty on a single-replica server.",
           "items": {
             "$ref": "#/$defs/ProcessExecutors"
           },
@@ -7447,12 +7451,20 @@
       "type": "object"
     },
     "ProcessExecutors": {
-      "description": "One process's recorded executor set.",
+      "description": "One process's recorded executor and engine sets.",
       "properties": {
         "checked_in_at": {
           "description": "Last check-in, Unix milliseconds.",
           "format": "int64",
           "type": "integer"
+        },
+        "engines": {
+          "description": "Configured model engines. Absent when the process recorded none, as\na version before engines were part of the set does.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
         },
         "executors": {
           "description": "Installed executor kinds. Absent when the process recorded none, as\na version before ADR 0057 does.",
@@ -9451,6 +9463,62 @@
         "spec"
       ],
       "type": "object"
+    },
+    "SupportedEngines": {
+      "description": "What an environment's executing processes can run for model engines.",
+      "oneOf": [
+        {
+          "description": "Every process that may run a step has these engines configured.",
+          "properties": {
+            "engines": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "processes": {
+              "items": {
+                "$ref": "#/$defs/ProcessExecutors"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "known",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "engines",
+            "processes"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Planning cannot tell; apply checks on the process that runs it.",
+          "properties": {
+            "processes": {
+              "items": {
+                "$ref": "#/$defs/ProcessExecutors"
+              },
+              "type": "array"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "SupportedExecutors": {
       "description": "What an environment's executing processes can run.",

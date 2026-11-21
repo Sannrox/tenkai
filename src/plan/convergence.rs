@@ -271,6 +271,40 @@ async fn refuse_unsupported_executors(
     crate::execution_capabilities::refuse_unsupported(ctx, env, executors, &declared).await
 }
 
+/// Refuse a plan with a step whose model release needs an engine that a
+/// process which may run it lacks. A process that recorded no engines
+/// leaves the check to apply.
+async fn refuse_unsupported_engines(
+    ctx: &mut Ctx,
+    executors: &crate::software_executor::SoftwareExecutors,
+    env: &str,
+    steps: &[Step],
+) -> Result<()> {
+    let mut declared = Vec::new();
+    for step in steps.iter().filter(|step| step.deploys_release()) {
+        let Some(manifest) = readable_manifest(ctx, &step.release_id).await? else {
+            continue;
+        };
+        if manifest.product.kind != crate::manifest::ProductKind::ModelRuntime {
+            continue;
+        }
+        let Some(engine) = manifest
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.engine.clone())
+        else {
+            continue;
+        };
+        if !declared
+            .iter()
+            .any(|(release, _)| release == &step.release_id)
+        {
+            declared.push((step.release_id.clone(), engine));
+        }
+    }
+    crate::execution_capabilities::refuse_unsupported_engines(ctx, env, executors, &declared).await
+}
+
 /// The workload certificate grant (ADR 0046 §3) a step deploying `release`
 /// to `instance` carries, if the release declares `[deploy.identity]`. Every
 /// step that runs the release carries it, so each run re-issues and keeps
@@ -3195,6 +3229,7 @@ async fn create_with_content(
 ) -> Result<Plan> {
     let mut steps = bind_host_steps(ctx, executors, env, steps).await?;
     refuse_unsupported_executors(ctx, executors, env, &steps).await?;
+    refuse_unsupported_engines(ctx, executors, env, &steps).await?;
     // Identity issuer, re-wrap, and cluster-namespace steps name no release.
     for step in steps.iter().filter(|step| step.deploys_release()) {
         require_same_executor(ctx, executors, step).await?;

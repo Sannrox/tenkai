@@ -141,6 +141,8 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
         );
         ALTER TABLE runtime_activity
             ADD COLUMN IF NOT EXISTS executors TEXT;
+        ALTER TABLE runtime_activity
+            ADD COLUMN IF NOT EXISTS engines TEXT;
         CREATE TABLE IF NOT EXISTS runtime_attestations (
             runner_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL,
             evidence_digest TEXT, key_fingerprint TEXT, checked_at BIGINT,

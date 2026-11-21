@@ -287,6 +287,11 @@ pub struct RuntimeActivityRecord {
     /// runtime that reports them pulls; a report without them keeps these.
     #[serde(default)]
     pub executors: Option<String>,
+    /// Configured model engines, comma-separated canonical names, from the
+    /// runtime's last work pull that sent them. `None` until a runtime that
+    /// reports them pulls; a report without them keeps these.
+    #[serde(default)]
+    pub engines: Option<String>,
 }
 
 /// A runner's HPKE sealing public key (ADR 0045). Bound to one enrolled

@@ -6,7 +6,7 @@
 //! payloads are never stored in Tenkai operational state—only content-addressed
 //! digests and descriptors.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -31,6 +31,45 @@ pub use onnx::{
 
 /// Version of the model-runtime descriptor contract.
 pub const MODEL_RUNTIME_CONTRACT_VERSION: u32 = 1;
+
+/// Canonical `runtime.engine` names this version admits. A check-in that
+/// names anything else drops those names: no release this version stores
+/// can declare them.
+pub const KNOWN_ENGINES: &[&str] = &["llama.cpp", "mlx", "onnx", "vllm", "tgi", "nim"];
+
+/// Parse a comma-separated engine list. Unknown names are dropped.
+pub fn parse_engine_names(names: &str) -> BTreeSet<String> {
+    names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| KNOWN_ENGINES.contains(name))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Engines this process can select at apply. In-tree launchers always
+/// count (fake in CI, real binary when configured). Injected engines come
+/// from the host factory when its required variables are set.
+pub fn configured_engines() -> BTreeSet<String> {
+    let mut engines = BTreeSet::from([
+        "llama.cpp".to_string(),
+        MLX_ENGINE.to_string(),
+        "onnx".to_string(),
+    ]);
+    if let Some(factory) = selected_model_runtime_executor_factory() {
+        engines.extend(factory.configured_engines());
+    }
+    engines
+}
+
+/// [`configured_engines`] as comma-separated canonical names: what a
+/// replica records and a runtime sends in `x-tenkai-runtime-engines`.
+pub fn installed_engine_names() -> String {
+    configured_engines()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 /// Validated model-runtime release descriptor (manifest sections, normalized).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -832,6 +871,12 @@ pub trait ModelRuntimeExecutorFactory: Send + Sync {
         state_path: &Path,
         artifacts: Option<ModelRuntimeArtifacts>,
     ) -> Result<Arc<dyn ModelRuntimeExecutor>>;
+
+    /// Engines this host's injected factory can actually construct. Empty
+    /// when none of its engines have their required host configuration.
+    fn configured_engines(&self) -> BTreeSet<String> {
+        BTreeSet::new()
+    }
 }
 
 /// One environment's weight-origin policy, applied with [`WeightCache::with_environment`]:
@@ -1511,6 +1556,18 @@ mod tests {
                 .push((engine.to_string(), cluster_config.to_path_buf()));
             Ok(self.executor.clone())
         }
+    }
+
+    #[test]
+    fn configured_engines_always_include_in_tree_launchers() {
+        let engines = configured_engines();
+        assert!(engines.contains("llama.cpp"), "{engines:?}");
+        assert!(engines.contains("mlx"), "{engines:?}");
+        assert!(engines.contains("onnx"), "{engines:?}");
+        assert_eq!(
+            parse_engine_names("llama.cpp, warp-drive, mlx,"),
+            BTreeSet::from(["llama.cpp".into(), "mlx".into()])
+        );
     }
 
     #[test]

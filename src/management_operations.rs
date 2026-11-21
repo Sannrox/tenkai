@@ -1329,32 +1329,58 @@ impl ManagementOperations {
             // Tenant inspect already isolated the name. Snapshots live on the
             // community apply store and must not be joined across partitions.
             // Missing catalog still returns this view; apply stays the fence.
-            let supported_executors =
+            let (supported_executors, supported_engines) =
                 match crate::software_executor::SoftwareExecutors::try_from_process() {
-                    Err(error) => crate::execution_capabilities::SupportedExecutors::Unknown {
-                        reason: error.to_string(),
-                        processes: Vec::new(),
-                    },
+                    Err(error) => (
+                        crate::execution_capabilities::SupportedExecutors::Unknown {
+                            reason: error.to_string(),
+                            processes: Vec::new(),
+                        },
+                        crate::execution_capabilities::SupportedEngines::Unknown {
+                            reason: error.to_string(),
+                            processes: Vec::new(),
+                        },
+                    ),
                     Ok(executors) => match self.application_ctx() {
-                        Ok(mut ctx) => crate::execution_capabilities::supported_for(
-                            &mut ctx,
-                            environment,
-                            &executors,
-                        )
-                        .await
-                        .unwrap_or_else(|error| {
-                            crate::execution_capabilities::SupportedExecutors::Unknown {
-                                reason: error.to_string(),
-                                processes: Vec::new(),
-                            }
-                        }),
-                        Err(_) => crate::execution_capabilities::this_process(&executors),
+                        Ok(mut ctx) => {
+                            let supported_executors = crate::execution_capabilities::supported_for(
+                                &mut ctx,
+                                environment,
+                                &executors,
+                            )
+                            .await
+                            .unwrap_or_else(|error| {
+                                crate::execution_capabilities::SupportedExecutors::Unknown {
+                                    reason: error.to_string(),
+                                    processes: Vec::new(),
+                                }
+                            });
+                            let supported_engines =
+                                crate::execution_capabilities::supported_engines_for(
+                                    &mut ctx,
+                                    environment,
+                                    &executors,
+                                )
+                                .await
+                                .unwrap_or_else(|error| {
+                                    crate::execution_capabilities::SupportedEngines::Unknown {
+                                        reason: error.to_string(),
+                                        processes: Vec::new(),
+                                    }
+                                });
+                            (supported_executors, supported_engines)
+                        }
+                        Err(_) => (
+                            crate::execution_capabilities::this_process(&executors),
+                            crate::execution_capabilities::this_process_engines(&executors),
+                        ),
                     },
                 };
             return Ok(EnvironmentRuntimeReport {
                 environment: environment.to_string(),
                 components: Vec::new(),
                 supported_executors: Some(supported_executors),
+                supported_engines: Some(supported_engines),
             });
         }
         let mut ctx = self.application_ctx()?;

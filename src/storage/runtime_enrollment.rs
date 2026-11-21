@@ -47,6 +47,12 @@ pub(super) fn ensure_runtime_enrollment_tables(connection: &Connection) -> Resul
     if !has_executors {
         connection.execute("ALTER TABLE runtime_activity ADD COLUMN executors TEXT", [])?;
     }
+    let has_engines = connection
+        .prepare("SELECT 1 FROM pragma_table_info('runtime_activity') WHERE name='engines'")?
+        .exists([])?;
+    if !has_engines {
+        connection.execute("ALTER TABLE runtime_activity ADD COLUMN engines TEXT", [])?;
+    }
     Ok(())
 }
 
@@ -299,12 +305,13 @@ impl SqliteStore {
     ) -> Result<()> {
         self.connection()?.execute(
             "INSERT INTO runtime_activity(runner_id,instance_id,environment_id,owner,
-                 runtime_version,last_work_at,last_heartbeat_at,last_inventory_at,executors)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                 runtime_version,last_work_at,last_heartbeat_at,last_inventory_at,executors,engines)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(runner_id,instance_id) DO UPDATE SET
                  environment_id=excluded.environment_id, owner=excluded.owner,
                  runtime_version=COALESCE(excluded.runtime_version, runtime_version),
                  executors=COALESCE(excluded.executors, executors),
+                 engines=COALESCE(excluded.engines, engines),
                  last_work_at=COALESCE(MAX(excluded.last_work_at, last_work_at),
                      excluded.last_work_at, last_work_at),
                  last_heartbeat_at=COALESCE(MAX(excluded.last_heartbeat_at, last_heartbeat_at),
@@ -320,7 +327,8 @@ impl SqliteStore {
                 activity.last_work_at,
                 activity.last_heartbeat_at,
                 activity.last_inventory_at,
-                activity.executors
+                activity.executors,
+                activity.engines
             ],
         )?;
         Ok(())
@@ -330,7 +338,7 @@ impl SqliteStore {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT runner_id,instance_id,environment_id,owner,runtime_version,
-                    last_work_at,last_heartbeat_at,last_inventory_at,executors
+                    last_work_at,last_heartbeat_at,last_inventory_at,executors,engines
              FROM runtime_activity ORDER BY runner_id, instance_id",
         )?;
         let rows = statement.query_map([], |row| {
@@ -344,6 +352,7 @@ impl SqliteStore {
                 last_heartbeat_at: row.get(6)?,
                 last_inventory_at: row.get(7)?,
                 executors: row.get(8)?,
+                engines: row.get(9)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -553,6 +562,34 @@ mod tests {
         assert_eq!(executors, None);
     }
 
+    /// A store whose `runtime_activity` predates engine records gains the
+    /// `engines` column, and its rows read as reporting none.
+    #[test]
+    fn an_older_activity_table_gains_the_engines_column() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE runtime_activity (
+                     runner_id TEXT NOT NULL, instance_id TEXT NOT NULL,
+                     environment_id TEXT NOT NULL, owner TEXT NOT NULL,
+                     runtime_version TEXT, last_work_at INTEGER,
+                     last_heartbeat_at INTEGER, last_inventory_at INTEGER,
+                     executors TEXT,
+                     PRIMARY KEY (runner_id, instance_id)
+                 );
+                 INSERT INTO runtime_activity VALUES('r','i','prod','runtime:i','0.5.0',1,NULL,NULL,'shell');",
+            )
+            .unwrap();
+
+        ensure_runtime_enrollment_tables(&connection).unwrap();
+        ensure_runtime_enrollment_tables(&connection).unwrap();
+
+        let engines: Option<String> = connection
+            .query_row("SELECT engines FROM runtime_activity", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(engines, None);
+    }
+
     /// Activity merges per runner instance: timestamps only advance, a
     /// report without a version keeps the recorded one, and live claims
     /// name their owners (#673).
@@ -571,6 +608,7 @@ mod tests {
                     last_heartbeat_at: beat,
                     last_inventory_at: None,
                     executors: version.map(|_| "shell,docker".into()),
+                    engines: version.map(|_| "llama.cpp".into()),
                 }
             };
         store
@@ -589,8 +627,9 @@ mod tests {
         assert_eq!(recorded[0].last_heartbeat_at, Some(120));
         assert_eq!(recorded[0].runtime_version.as_deref(), Some("0.5.0"));
         assert_eq!(recorded[1].runtime_version.as_deref(), Some("0.6.0"));
-        // A report without executors keeps the recorded set.
+        // A report without executors or engines keeps the recorded sets.
         assert_eq!(recorded[0].executors.as_deref(), Some("shell,docker"));
+        assert_eq!(recorded[0].engines.as_deref(), Some("llama.cpp"));
 
         let expires = crate::now_millis() + 60_000;
         assert!(

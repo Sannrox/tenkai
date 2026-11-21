@@ -179,6 +179,7 @@ fn live_postgres_runtime_enrollment_is_single_use_across_replicas() {
             last_heartbeat_at: beat,
             last_inventory_at: None,
             executors: None,
+            engines: None,
         };
     a.record_runtime_activity(&activity(Some(100), None, Some("0.5.0")))
         .unwrap();

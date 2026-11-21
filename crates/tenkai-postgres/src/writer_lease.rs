@@ -32,6 +32,9 @@ pub struct PostgresHubWriterLease {
     /// This replica's installed executors, recorded before each renewal
     /// (ADR 0057). `None` records nothing.
     executors: Option<String>,
+    /// This replica's configured engines. `None` writes NULL, as a version
+    /// that recorded executors but not engines does.
+    engines: Option<String>,
     /// The replicas seen at the last renewal.
     view: std::sync::RwLock<ReplicaView>,
 }
@@ -58,6 +61,7 @@ impl PostgresHubWriterLease {
             ttl_ms,
             fence,
             executors: None,
+            engines: None,
             view: std::sync::RwLock::new(ReplicaView::default()),
         })
     }
@@ -66,6 +70,13 @@ impl PostgresHubWriterLease {
     /// replica's set on every renewal, before it competes for the lease.
     pub fn with_executors(mut self, executors: impl Into<String>) -> Self {
         self.executors = Some(executors.into());
+        self
+    }
+
+    /// Record `engines` (comma-separated canonical names) with the executor
+    /// set on every renewal.
+    pub fn with_engines(mut self, engines: impl Into<String>) -> Self {
+        self.engines = Some(engines.into());
         self
     }
 
@@ -105,6 +116,7 @@ impl PostgresHubWriterLease {
             inner.record_hub_replica(
                 &self.holder,
                 executors,
+                self.engines.as_deref(),
                 tenkai::version_skew::SERVER_VERSION,
                 self.ttl_ms * REPLICA_FORGET_TTLS,
             )
@@ -207,6 +219,10 @@ impl HubWriterLease {
     }
 
     pub fn with_executors(self, _executors: impl Into<String>) -> Self {
+        match self {}
+    }
+
+    pub fn with_engines(self, _engines: impl Into<String>) -> Self {
         match self {}
     }
 

@@ -344,6 +344,9 @@ fn runtime_caller<'a>(
         executors: headers
             .get(tenkai::runtime_delivery::EXECUTORS_HEADER)
             .and_then(|value| value.to_str().ok()),
+        engines: headers
+            .get(tenkai::runtime_delivery::ENGINES_HEADER)
+            .and_then(|value| value.to_str().ok()),
     }
 }
 

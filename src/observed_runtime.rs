@@ -24,6 +24,11 @@ pub struct EnvironmentRuntimeReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub supported_executors: Option<crate::execution_capabilities::SupportedExecutors>,
+    /// What the processes that run this environment's steps can serve
+    /// (model engines). Independent of `supported_executors`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub supported_engines: Option<crate::execution_capabilities::SupportedEngines>,
 }
 
 /// Observed state of one deployed product on an environment.
@@ -205,10 +210,14 @@ pub async fn report(ctx: &mut Ctx, environment: &str) -> Result<EnvironmentRunti
     let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
     let supported_executors =
         Some(crate::execution_capabilities::supported_for(ctx, environment, &executors).await?);
+    let supported_engines = Some(
+        crate::execution_capabilities::supported_engines_for(ctx, environment, &executors).await?,
+    );
     Ok(EnvironmentRuntimeReport {
         environment: env_obj.name,
         components,
         supported_executors,
+        supported_engines,
     })
 }
 
