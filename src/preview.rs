@@ -71,8 +71,12 @@ pub struct TeardownEvidence {
     pub pin_digest: String,
     pub plan_digest: String,
     pub reason: String,
-    pub status: String,
     pub torn_down_at: i64,
+}
+
+struct TeardownProgress {
+    evidence: TeardownEvidence,
+    status: String,
 }
 
 impl BranchPin {
@@ -294,8 +298,8 @@ pub async fn is_terminal_residue(ctx: &mut Ctx, env: &str, now: i64) -> Result<b
     } else {
         TEARDOWN_EXPIRED
     };
-    let evidence = begin_teardown(ctx, object, reason, now).await?;
-    Ok(evidence.status == STATUS_TORN_DOWN)
+    let progress = begin_teardown(ctx, object, reason, now).await?;
+    Ok(progress.status == STATUS_TORN_DOWN)
 }
 
 pub async fn close_branch(ctx: &mut Ctx, env: &str, now: i64) -> Result<TeardownEvidence> {
@@ -313,7 +317,6 @@ pub async fn close_branch(ctx: &mut Ctx, env: &str, now: i64) -> Result<Teardown
             reason: preview
                 .teardown_reason
                 .unwrap_or_else(|| TEARDOWN_BRANCH_CLOSED.into()),
-            status: STATUS_TORN_DOWN.into(),
             torn_down_at: preview.teardown_at.unwrap_or(now),
         });
     }
@@ -324,7 +327,7 @@ pub async fn close_branch(ctx: &mut Ctx, env: &str, now: i64) -> Result<Teardown
     } else {
         TEARDOWN_BRANCH_CLOSED.into()
     };
-    begin_teardown(ctx, object, &reason, now).await
+    Ok(begin_teardown(ctx, object, &reason, now).await?.evidence)
 }
 
 fn replay_or_conflict(
@@ -438,14 +441,16 @@ fn evidence_from(
     reason: &str,
     status: &str,
     at: i64,
-) -> TeardownEvidence {
-    TeardownEvidence {
-        environment: object.name.clone(),
-        pin_digest: preview.pin_digest.clone(),
-        plan_digest: preview.plan_digest.clone(),
-        reason: reason.into(),
+) -> TeardownProgress {
+    TeardownProgress {
+        evidence: TeardownEvidence {
+            environment: object.name.clone(),
+            pin_digest: preview.pin_digest.clone(),
+            plan_digest: preview.plan_digest.clone(),
+            reason: reason.into(),
+            torn_down_at: at,
+        },
         status: status.into(),
-        torn_down_at: at,
     }
 }
 
@@ -454,7 +459,7 @@ async fn begin_teardown(
     object: Object,
     reason: &str,
     now: i64,
-) -> Result<TeardownEvidence> {
+) -> Result<TeardownProgress> {
     if !is_preview(&object) {
         bail!(
             "refusing to tear down environment {}; expiry must never delete a non-preview environment",
@@ -494,7 +499,7 @@ async fn persist_status(
     status: &str,
     reason: &str,
     now: i64,
-) -> Result<TeardownEvidence> {
+) -> Result<TeardownProgress> {
     object.properties.insert(PROP_STATUS.into(), status.into());
     object
         .properties
@@ -503,9 +508,9 @@ async fn persist_status(
         .properties
         .insert(PROP_TEARDOWN_AT.into(), now.to_string());
     object.updated = now;
-    let evidence = evidence_from(&object, &preview, reason, status, now);
+    let progress = evidence_from(&object, &preview, reason, status, now);
     ctx.put(object).await?;
-    Ok(evidence)
+    Ok(progress)
 }
 
 async fn persist_teardown(
@@ -514,7 +519,7 @@ async fn persist_teardown(
     preview: PreviewInspect,
     reason: &str,
     now: i64,
-) -> Result<TeardownEvidence> {
+) -> Result<TeardownProgress> {
     let keys: Vec<String> = object
         .properties
         .keys()
@@ -791,7 +796,6 @@ mod tests {
             .unwrap();
         let evidence = close_branch(&mut ctx, "review", 2_000).await.unwrap();
         assert_eq!(evidence.reason, TEARDOWN_BRANCH_CLOSED);
-        assert_eq!(evidence.status, STATUS_TORN_DOWN);
         assert_eq!(evidence.torn_down_at, 2_000);
         let inspect = inspect_from_object(
             &crate::environment::environment(&mut ctx, "review")
@@ -837,7 +841,6 @@ mod tests {
             .unwrap();
         stamp_deployed(&mut ctx, "review", "api", "1.0.0").await;
         let evidence = close_branch(&mut ctx, "review", 2_000).await.unwrap();
-        assert_eq!(evidence.status, STATUS_CLOSING);
         assert_eq!(evidence.reason, TEARDOWN_BRANCH_CLOSED);
         let stored = crate::environment::environment(&mut ctx, "review")
             .await
@@ -978,10 +981,17 @@ mod tests {
         stamp_deployed(&mut ctx, "local", "api", "1.0.0").await;
         let executors = SoftwareExecutors::with_default(Arc::new(FakeSoftwareExecutor::new()));
 
-        let evidence = close_branch(&mut ctx, "local", crate::now_millis())
+        close_branch(&mut ctx, "local", crate::now_millis())
             .await
             .unwrap();
-        assert_eq!(evidence.status, STATUS_CLOSING);
+        let closing = inspect_from_object(
+            &crate::environment::environment(&mut ctx, "local")
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(closing.status, STATUS_CLOSING);
         assert!(
             !is_terminal_residue(&mut ctx, "local", crate::now_millis())
                 .await

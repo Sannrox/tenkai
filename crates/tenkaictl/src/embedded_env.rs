@@ -53,7 +53,11 @@ pub(crate) async fn run(
         }
         EnvCommand::ClosePreview { env } => {
             let evidence = preview::close_branch(ctx, &env, tenkai::now_millis()).await?;
-            if evidence.status == preview::STATUS_CLOSING {
+            let closing = plan::inspect_environment(ctx, &env)
+                .await?
+                .preview
+                .is_some_and(|inspect| inspect.status == preview::STATUS_CLOSING);
+            if closing {
                 println!(
                     "preview environment {} closing ({}); deployed instances are removed on reconcile; pin {}; plan digest {}",
                     evidence.environment,
