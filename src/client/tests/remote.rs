@@ -242,10 +242,11 @@ async fn remote_graph_action_registration_uses_governed_rpc() {
     assert!(registered[0].parameter_schema_json.contains("\"id\""));
     assert_eq!(
         state.metadata.lock().unwrap().as_slice(),
-        [(
-            Some("tenkai.test".into()),
-            Some("Bearer provider-token".into())
-        )]
+        [super::mock_state::CapturedMetadata {
+            principal: Some("tenkai.test".into()),
+            authorization: Some("Bearer provider-token".into()),
+            traceparent: None,
+        }]
     );
 
     // Re-registering the same definition is idempotent; a changed one fails
@@ -259,5 +260,68 @@ async fn remote_graph_action_registration_uses_governed_rpc() {
         "{error}"
     );
     assert_eq!(state.governed_actions.lock().unwrap().len(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn remote_grpc_forwards_its_trace_context_only_when_it_has_one() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let state = MockSekaiState::default();
+    let server_state = state.clone();
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(server_state)
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    let client = RemoteClient::connect(ClientConfig::new(
+        format!("http://{address}"),
+        "tenkai.test",
+    ))
+    .await
+    .unwrap();
+    let mut ctx = Ctx {
+        backend: Backend::Remote {
+            client: Arc::new(client),
+            action_defs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        },
+        canary_schema_preflight: Arc::new(OnceCell::new()),
+        outcome_export_enabled: false,
+        feedback_export_enabled: false,
+        outcome_inspection_enabled: false,
+        release_trust_roots: None,
+        require_host_release_trust: false,
+        plan_kind_list: Arc::new(PlanKindListTick::default()),
+        health_metrics: None,
+        trust_sources: None,
+        execution_capabilities: None,
+        held_execution_leases: Vec::new(),
+        plan_proposer: None,
+    };
+    const PARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    let parent = crate::telemetry::TraceContext::from_traceparent(PARENT).unwrap();
+    crate::telemetry::in_trace(
+        parent,
+        ctx.create_once(Object {
+            id: "tenkai:object:traced".into(),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    ctx.create_once(Object {
+        id: "tenkai:object:untraced".into(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let captured = state.metadata.lock().unwrap().clone();
+    assert_eq!(captured.len(), 2, "{captured:?}");
+    assert_eq!(captured[0].traceparent.as_deref(), Some(PARENT));
+    assert_eq!(captured[1].traceparent, None);
+
     server.abort();
 }

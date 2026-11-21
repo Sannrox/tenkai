@@ -6,7 +6,27 @@ use crate::pb::sekai::{
     CreateObjectRequest, Decision, GovernedActionType, Lease, Link, Object, UpdateObjectRequest,
 };
 
-pub(super) type CapturedMetadata = (Option<String>, Option<String>);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CapturedMetadata {
+    pub(super) principal: Option<String>,
+    pub(super) authorization: Option<String>,
+    pub(super) traceparent: Option<String>,
+}
+
+pub(super) fn captured_metadata<T>(request: &tonic::Request<T>) -> CapturedMetadata {
+    let metadata = request.metadata();
+    let value = |key| {
+        metadata
+            .get(key)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    CapturedMetadata {
+        principal: value("x-principal"),
+        authorization: value("authorization"),
+        traceparent: value("traceparent"),
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct MockSekaiState {

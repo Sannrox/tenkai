@@ -69,12 +69,18 @@ pub(crate) async fn remote_unary_with_options<Req, Resp>(
     client: &RemoteClient,
     path: &str,
     request: Req,
-    options: CallOptions,
+    mut options: CallOptions,
 ) -> std::result::Result<Resp, tonic::Status>
 where
     Req: Message + Default + Clone + Send + 'static,
     Resp: Message + Default + Send + 'static,
 {
+    // New RPCs inherit this: one injection on the shared unary path.
+    if let Some(trace) = crate::telemetry::current_trace() {
+        options.context = options
+            .context
+            .with_metadata("traceparent", trace.traceparent());
+    }
     client
         .raw()
         .unary(path, request, options)

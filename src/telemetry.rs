@@ -9,7 +9,9 @@
 //! Spans link into one trace. A span opened inside [`in_trace`] is a child of
 //! that context; the reconcile tick and an apply run their work inside their
 //! own span's context, and the hub runs a request inside the caller's
-//! `traceparent` when it carries a valid one (#1443).
+//! `traceparent` when it carries a valid one (#1443). Outbound gRPC calls to
+//! Sekai and Chisei send that context as `traceparent` metadata so those
+//! servers' spans join the same trace (#1538).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
