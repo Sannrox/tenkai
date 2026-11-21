@@ -136,7 +136,7 @@ async fn change_events_resume_from_cursor_without_gaps_or_duplicates() {
 
 #[tokio::test]
 async fn environment_scoped_events_resume_past_other_environments() {
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let mut config = ServerConfig::community(
         "management-secret",
         HashMap::from([("runtime-secret".into(), "prod".into())]),

@@ -20,6 +20,7 @@ tenkai = { path = "../..", version = "0.9.1" }
 tenkai-executor = { path = "../tenkai-executor", version = "0.9.1" }
 tenkai-postgres = { path = "../tenkai-postgres", version = "0.9.1" }
 tenkai-http = { path = "../tenkai-http", version = "0.9.1" }
+tenkai-sqlite = { path = "../tenkai-sqlite", version = "0.9.1" }
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 base64 = "0.22"

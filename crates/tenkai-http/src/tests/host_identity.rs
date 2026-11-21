@@ -42,7 +42,7 @@ fn host_app(account: HostAccount, rules: Vec<OidcGrantRule>) -> Router {
         Arc::new(FixedLookup(account)),
         HostGrantMapping::from_rules(rules).unwrap(),
     )));
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     store
         .put_environment(&tenkai::storage::EnvironmentRecord {
             id: "prod".into(),
@@ -169,7 +169,7 @@ async fn unix_peer_nss_failure_is_refused() {
         Arc::new(Fail),
         HostGrantMapping::from_rules(vec![grant("tenkai-operator", "management")]).unwrap(),
     )));
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let app = router(
         config,
         Arc::new(super::support::FixedReconciler::default()),

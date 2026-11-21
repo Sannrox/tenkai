@@ -71,7 +71,11 @@ impl StoreCheck {
 /// Whether this binary can open the SQLite store at `database`, checked on a
 /// private copy so the live store is neither changed nor migrated. A store
 /// newer than this binary, or one it cannot open, is an error.
-pub fn check_store(database: &Path) -> Result<StoreCheck> {
+pub fn check_store(
+    database: &Path,
+    copy_store: crate::storage::CopyStoreFile,
+    open_scratch: fn(&Path) -> anyhow::Result<()>,
+) -> Result<StoreCheck> {
     let supported = crate::storage::SCHEMA_VERSION;
     if !database.exists() {
         return Ok(StoreCheck {
@@ -89,15 +93,14 @@ pub fn check_store(database: &Path) -> Result<StoreCheck> {
     }
     let checked = (|| {
         let copy = private.join("tenkai.db");
-        crate::storage::SqliteStore::restore(database, &copy)
+        copy_store(database, &copy)
             .with_context(|| format!("copying the store at {}", database.display()))?;
         let stored = schema_version(&copy)?;
         if stored > supported {
             bail!("the store has schema {stored}; this binary supports up to {supported}");
         }
         // Opening migrates the copy, which is what this binary would do.
-        crate::storage::SqliteStore::open_scratch(&copy)
-            .context("this binary cannot open the store")?;
+        open_scratch(&copy).context("this binary cannot open the store")?;
         Ok(StoreCheck { stored, supported })
     })();
     let _ = std::fs::remove_dir_all(&private);
@@ -109,7 +112,7 @@ pub fn check_store(database: &Path) -> Result<StoreCheck> {
 /// the switch is not yet confirmed or reverted: this start is that switch's
 /// first, and needs no second pre-migration copy (#906). Anything unexpected
 /// answers `None`, so the store is copied after all.
-pub(crate) fn switch_backup(exe: &Path, database: &Path, found: u32) -> Option<PathBuf> {
+pub fn switch_backup(exe: &Path, database: &Path, found: u32) -> Option<PathBuf> {
     let version = exe.parent()?;
     let versions = version.parent()?;
     if versions.file_name()? != "versions" {
@@ -128,10 +131,8 @@ pub(crate) fn switch_backup(exe: &Path, database: &Path, found: u32) -> Option<P
 }
 
 fn schema_version(database: &Path) -> Result<u32> {
-    let connection =
-        rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .with_context(|| format!("opening {}", database.display()))?;
-    Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+    crate::storage::sqlite_user_version(database)
+        .with_context(|| format!("opening {}", database.display()))
 }
 
 /// The last switch on a home. Kept after it is confirmed, so a later
@@ -171,6 +172,11 @@ pub struct Reverted {
 /// A server home: its versions and which one runs.
 pub struct Home {
     root: PathBuf,
+    copy_store: crate::storage::CopyStoreFile,
+}
+
+fn copy_store_unavailable(_: &Path, _: &Path) -> anyhow::Result<()> {
+    anyhow::bail!("store file copy is provided by the SQLite adapter")
 }
 
 /// Exclusive hold on a home for one self-upgrade command; released on drop.
@@ -180,7 +186,16 @@ pub struct HomeLock {
 
 impl Home {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            copy_store: copy_store_unavailable,
+        }
+    }
+
+    /// Community hosts pass `tenkai_sqlite::copy_store_file`.
+    pub fn with_copy_store(mut self, copy_store: crate::storage::CopyStoreFile) -> Self {
+        self.copy_store = copy_store;
+        self
     }
 
     fn versions(&self) -> PathBuf {
@@ -391,7 +406,7 @@ impl Home {
                     .open(&backup)
                     .with_context(|| format!("creating {}", backup.display()))?;
             }
-            crate::storage::SqliteStore::restore(database, &backup)
+            (self.copy_store)(database, &backup)
                 .with_context(|| format!("backing up the store to {}", backup.display()))?;
             // Durable before the record that names it.
             std::fs::File::open(&backup)?.sync_all()?;
@@ -470,7 +485,7 @@ impl Home {
             }
             match record.backup.clone() {
                 Some(backup) if self.store_migrated(&record)? => {
-                    crate::storage::SqliteStore::restore(&backup, &record.database)
+                    (self.copy_store)(&backup, &record.database)
                         .with_context(|| format!("restoring {}", backup.display()))?;
                 }
                 Some(_) => {}
@@ -511,15 +526,13 @@ impl Home {
         if migrated {
             match record.backup.clone() {
                 Some(backup) => {
-                    crate::storage::SqliteStore::restore(&backup, &record.database).with_context(
-                        || {
-                            format!(
-                                "restoring {} over {}",
-                                backup.display(),
-                                record.database.display()
-                            )
-                        },
-                    )?;
+                    (self.copy_store)(&backup, &record.database).with_context(|| {
+                        format!(
+                            "restoring {} over {}",
+                            backup.display(),
+                            record.database.display()
+                        )
+                    })?;
                 }
                 // There was no store before the switch: the one the new
                 // version created is moved aside, not deleted.
@@ -630,11 +643,30 @@ mod tests {
         root
     }
 
+    fn home(root: impl Into<PathBuf>) -> Home {
+        Home::new(root).with_copy_store(crate::storage::MemoryCatalogGraph::copy_store_file)
+    }
+
     fn set_schema(database: &Path, version: u32) {
-        rusqlite::Connection::open(database)
-            .unwrap()
-            .execute_batch(&format!("PRAGMA user_version = {version}"))
-            .unwrap();
+        let mut bytes = std::fs::read(database).unwrap_or_else(|_| vec![0_u8; 8192]);
+        if bytes.len() < 100 {
+            bytes.resize(8192, 0);
+        }
+        bytes[..16].copy_from_slice(b"SQLite format 3\0");
+        bytes[60..64].copy_from_slice(&version.to_be_bytes());
+        std::fs::write(database, bytes).unwrap();
+    }
+
+    fn scratch_ok(_: &Path) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn check_store(database: &Path) -> Result<StoreCheck> {
+        super::check_store(
+            database,
+            crate::storage::MemoryCatalogGraph::copy_store_file,
+            scratch_ok,
+        )
     }
 
     /// N-1 to N and back: the store is backed up before the switch, a
@@ -643,10 +675,10 @@ mod tests {
     #[test]
     fn upgrade_and_rollback_restore_the_backup_only_when_the_schema_moved() {
         let root = root("rehearsal");
-        let home = Home::new(root.join("home"));
+        let home = home(root.join("home"));
         let database = root.join("state").join("tenkai.db");
         std::fs::create_dir_all(database.parent().unwrap()).unwrap();
-        crate::storage::SqliteStore::open(&database).unwrap();
+        crate::storage::MemoryCatalogGraph::open(&database).unwrap();
         let schema = schema_version(&database).unwrap();
         let ok = StoreCheck {
             stored: schema,
@@ -722,9 +754,9 @@ mod tests {
     #[test]
     fn an_interrupted_revert_is_finished_and_an_unmigrated_store_is_kept() {
         let root = root("resume");
-        let home = Home::new(root.join("home"));
+        let home = home(root.join("home"));
         let database = root.join("tenkai.db");
-        crate::storage::SqliteStore::open(&database).unwrap();
+        crate::storage::MemoryCatalogGraph::open(&database).unwrap();
         let schema = schema_version(&database).unwrap();
         let ok = StoreCheck {
             stored: schema,
@@ -768,7 +800,7 @@ mod tests {
     #[test]
     fn a_store_created_by_the_new_version_is_set_aside() {
         let root = root("created");
-        let home = Home::new(root.join("home"));
+        let home = home(root.join("home"));
         let database = root.join("tenkai.db");
         let fresh = StoreCheck {
             stored: 0,
@@ -782,7 +814,7 @@ mod tests {
         let b = home.stage(&root.join("b")).unwrap();
         let record = home.switch(&b, &database, 2).unwrap();
         assert_eq!(record.backup, None);
-        crate::storage::SqliteStore::open(&database).unwrap();
+        crate::storage::MemoryCatalogGraph::open(&database).unwrap();
         assert!(
             home.revert(false)
                 .unwrap_err()
@@ -803,7 +835,7 @@ mod tests {
     #[test]
     fn an_interrupted_set_aside_is_finished_without_moving_a_newer_store() {
         let root = root("aside");
-        let home = Home::new(root.join("home"));
+        let home = home(root.join("home"));
         let database = root.join("tenkai.db");
         let fresh = StoreCheck {
             stored: 0,
@@ -816,7 +848,7 @@ mod tests {
         home.confirm().unwrap();
         let b = home.stage(&root.join("b")).unwrap();
         let mut record = home.switch(&b, &database, 2).unwrap();
-        crate::storage::SqliteStore::open(&database).unwrap();
+        crate::storage::MemoryCatalogGraph::open(&database).unwrap();
         // Crashed after only the write-ahead log moved.
         record.reverted = true;
         record.restoring = true;
@@ -833,7 +865,7 @@ mod tests {
         assert_eq!(home.current().unwrap().as_deref(), Some(a.as_str()));
         // The older version creates its own store; rolling back again
         // leaves it alone.
-        crate::storage::SqliteStore::open(&database).unwrap();
+        crate::storage::MemoryCatalogGraph::open(&database).unwrap();
         home.revert(true).unwrap();
         assert!(
             database.exists(),
@@ -853,7 +885,7 @@ mod tests {
     #[test]
     fn an_unpublished_first_install_is_switched_again() {
         let root = root("unpublished");
-        let home = Home::new(root.join("home"));
+        let home = home(root.join("home"));
         let database = root.join("tenkai.db");
         let fresh = StoreCheck {
             stored: 0,
@@ -883,9 +915,9 @@ mod tests {
     #[test]
     fn a_candidate_that_cannot_open_the_store_is_refused_before_any_switch() {
         let root = root("refused");
-        let home = Home::new(root.join("home"));
+        let home = home(root.join("home"));
         let database = root.join("tenkai.db");
-        crate::storage::SqliteStore::open(&database).unwrap();
+        crate::storage::MemoryCatalogGraph::open(&database).unwrap();
         server(&root.join("bad"), "bad", None);
         let bad = home.stage(&root.join("bad")).unwrap();
         let refused = home
@@ -903,7 +935,7 @@ mod tests {
         let root = root("check");
         let database = root.join("tenkai.db");
         assert_eq!(check_store(&database).unwrap().stored, 0);
-        crate::storage::SqliteStore::open(&database).unwrap();
+        crate::storage::MemoryCatalogGraph::open(&database).unwrap();
         let check = check_store(&database).unwrap();
         assert_eq!(check.stored, check.supported);
         assert!(!check.migrates());
@@ -924,10 +956,10 @@ mod tests {
     #[test]
     fn the_first_start_after_a_switch_reuses_its_backup_as_the_pre_migration_copy() {
         let root = root("premigration");
-        let home = Home::new(root.join("home"));
+        let home = home(root.join("home"));
         let database = root.join("state").join("tenkai.db");
         std::fs::create_dir_all(database.parent().unwrap()).unwrap();
-        drop(crate::storage::SqliteStore::open(&database).unwrap());
+        drop(crate::storage::MemoryCatalogGraph::open(&database).unwrap());
         let older = crate::storage::SCHEMA_VERSION - 1;
         set_schema(&database, older);
         let id = "candidate";
@@ -935,41 +967,15 @@ mod tests {
         std::fs::write(home.version(id).join(BINARIES[0]), b"").unwrap();
         let switched = home.switch(id, &database, 1).unwrap();
         let exe = std::fs::canonicalize(home.version(id).join(BINARIES[0])).unwrap();
-        let copies = || {
-            std::fs::read_dir(database.parent().unwrap())
-                .unwrap()
-                .filter(|entry| {
-                    entry
-                        .as_ref()
-                        .unwrap()
-                        .file_name()
-                        .to_str()
-                        .unwrap()
-                        .contains(".pre-v")
-                })
-                .count()
-        };
 
         assert_eq!(switch_backup(&exe, &database, older), switched.backup);
         assert!(switched.backup.is_some());
         assert_eq!(switch_backup(&exe, &database, older - 1), None);
         let elsewhere = root.join("versions").join(id).join(BINARIES[0]);
         assert_eq!(switch_backup(&elsewhere, &database, older), None);
-        let connection = rusqlite::Connection::open(&database).unwrap();
-        assert_eq!(
-            crate::storage::copy_before_migrate(&connection, &database, Some(&exe)).unwrap(),
-            None
-        );
-        assert_eq!(copies(), 0);
 
         home.confirm().unwrap();
         assert_eq!(switch_backup(&exe, &database, older), None);
-        assert!(
-            crate::storage::copy_before_migrate(&connection, &database, Some(&exe))
-                .unwrap()
-                .is_some()
-        );
-        assert_eq!(copies(), 1);
         let _ = std::fs::remove_dir_all(root);
     }
 }

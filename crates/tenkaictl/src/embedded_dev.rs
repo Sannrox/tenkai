@@ -9,7 +9,7 @@ pub(crate) async fn restore(cli: &Cli) -> Result<()> {
         unreachable!("restore dispatcher received a non-restore command");
     };
     tenkai::storage::refuse_postgres_on_embedded()?;
-    tenkai::storage::SqliteStore::restore(source, &cli.database)?;
+    tenkai_sqlite::SqliteStore::restore(source, &cli.database)?;
     println!(
         "restored embedded state from {} to {}",
         source.display(),
@@ -71,7 +71,7 @@ pub(crate) async fn run_dev(cli: &Cli) -> Result<()> {
                 })?;
                 dev_sign::sign_plan_approval(
                     keys,
-                    &cli.database,
+                    tenkai_sqlite::embedded_ctx(&cli.database, false)?,
                     plan_id,
                     approval,
                     trust_roots,

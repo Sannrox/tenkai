@@ -28,7 +28,7 @@ async fn development_fixture_surface_is_explicit_authorized_and_tenant_scoped() 
     config.development_fixtures = Some(DevelopmentFixtureConfig {
         allowed_principals: std::collections::BTreeSet::from(["seed-service".into()]),
     });
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let fixture_app = router(config, Arc::new(FixedReconciler::default()), store).unwrap();
     let fixture = serde_json::json!({
         "contract_version": 1,

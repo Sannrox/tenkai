@@ -352,7 +352,7 @@ async fn run(mut cli: Cli, effective_command: &mut Option<CommandName>) -> Resul
                 trust_roots,
             } => {
                 tenkai::storage::refuse_postgres_on_embedded()?;
-                let store = tenkai::storage::SqliteStore::open(&cli.database)?;
+                let store = tenkai_sqlite::SqliteStore::open(&cli.database)?;
                 let rotated = trust_roots
                     .as_deref()
                     .map(|path| {
@@ -446,8 +446,14 @@ async fn run(mut cli: Cli, effective_command: &mut Option<CommandName>) -> Resul
                 )
             })
             .transpose()?;
-        let evidence =
-            tenkai::backup::drill(backup, &scratch, tenkai::now_millis(), roots.as_ref())?;
+        let evidence = tenkai::backup::drill(
+            backup,
+            &scratch,
+            tenkai::now_millis(),
+            roots.as_ref(),
+            tenkai_sqlite::copy_store_file,
+            tenkai_sqlite::inspect_restored,
+        )?;
         println!("{}", serde_json::to_string_pretty(&evidence)?);
         return Ok(());
     }

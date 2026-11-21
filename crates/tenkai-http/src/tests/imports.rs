@@ -13,14 +13,14 @@ async fn import_routes_take_staged_names_and_record_refusals() {
     // Any valid trust roots: this test never gets as far as a signature.
     super::lifecycle_support::signed_catalog_fixture(&root, "1.0.0");
     let database = root.join("tenkai.db");
-    let mut ctx = tenkai::client::Ctx::embedded(&database).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
     tenkai::plan::env_add(&mut ctx, "site-c", "isolated")
         .await
         .unwrap();
     let reconciler =
         tenkai::reconciler::Reconciler::new(ctx, tenkai::reconciler::Config::default()).unwrap();
-    let store = Arc::new(tenkai::storage::SqliteStore::open(&database).unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open(&database).unwrap());
     let mut config = ServerConfig::community("management-secret", HashMap::new());
     config
         .environment_management_assignments

@@ -16,7 +16,7 @@ async fn tenant_store_work_can_run_a_synchronous_runtime() {
 
 #[tokio::test]
 async fn openmetrics_enabled_exposes_series_without_secrets() {
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let mut config = ServerConfig::community(
         "management-secret",
         HashMap::from([("runtime-secret".into(), "prod".into())]),
@@ -468,7 +468,7 @@ async fn recipient_keys_omit_revoked_runtimes() {
 /// token report `bearer`.
 #[tokio::test]
 async fn the_registry_reports_how_each_runner_authenticates() {
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     store
         .put_environment(&tenkai::storage::EnvironmentRecord {
             id: "prod".into(),

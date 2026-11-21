@@ -34,7 +34,7 @@ environment = "prod"
 
 struct Hub {
     app: Router,
-    store: Arc<tenkai::storage::SqliteStore>,
+    store: Arc<tenkai_sqlite::SqliteStore>,
     dir: std::path::PathBuf,
 }
 
@@ -51,7 +51,7 @@ fn hub(signer: &Signer) -> Hub {
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(tenkai::storage::SqliteStore::open(dir.join("tenkai.db")).unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open(dir.join("tenkai.db")).unwrap());
     let raw = jwks(&[signer]);
     let source: Arc<dyn KeySource> = Arc::new(move || Ok(raw.clone()));
     let config = oidc_config();

@@ -652,7 +652,7 @@ impl Plan {
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }
 
-    pub(crate) fn to_object(&self) -> Result<Object> {
+    pub fn to_object(&self) -> Result<Object> {
         lifecycle::to_object(self)
     }
 

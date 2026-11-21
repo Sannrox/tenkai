@@ -64,7 +64,7 @@ impl Server {
 }
 
 fn trust_events(database: &Path) -> Vec<String> {
-    tenkai::storage::SqliteStore::open(database)
+    tenkai_sqlite::SqliteStore::open(database)
         .unwrap()
         .list_change_events_after(0, 100)
         .unwrap()

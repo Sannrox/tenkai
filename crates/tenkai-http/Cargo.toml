@@ -28,6 +28,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tenkai = { path = "../..", version = "0.9.1", features = ["test-support"] }
+tenkai-sqlite = { path = "../tenkai-sqlite", version = "0.9.1" }
 libc = "0.2"
 base64 = "0.22"
 ed25519-dalek = "2"

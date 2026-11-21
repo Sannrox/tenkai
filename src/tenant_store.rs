@@ -1,6 +1,6 @@
 //! Tenant-isolating operational store port and in-memory adapter.
 //!
-//! Community hosts keep using [`crate::storage::SqliteStore`] (tenant-free).
+//! Community hosts keep using `tenkai-sqlite::SqliteStore` (tenant-free).
 //! Enterprise hosts that enable tenant mode use a store that advertises
 //! `tenant_isolation` and enforces tenant-scoped reads/writes.
 //!
@@ -18,11 +18,12 @@ use crate::runtime_capabilities::{
     Capability, CapabilityName, ComponentCapabilities, RUNTIME_CAPABILITY_CONTRACT_VERSION,
 };
 use crate::storage::{
-    AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
-    OfflineStepImportRecord, OperationalStore, PlanRecord, PlanStatus, ProviderEventRecord,
-    ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus, RuntimeActivityRecord,
-    RuntimeAttestationRecord, RuntimeClaim, RuntimeCredentialRecord, RuntimeEnrollmentRecord,
-    RuntimeRevocation, RuntimeRunnerRecord, RuntimeSealingKeyRecord, SCHEMA_VERSION, SqliteStore,
+    AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, MemoryCatalogGraph,
+    OfflineImportRecord, OfflineStepImportRecord, OperationalStore, PlanRecord, PlanStatus,
+    ProviderEventRecord, ReceiptRecord, ReleaseRecord, Result, RollbackRecord, RollbackStatus,
+    RuntimeActivityRecord, RuntimeAttestationRecord, RuntimeClaim, RuntimeCredentialRecord,
+    RuntimeEnrollmentRecord, RuntimeRevocation, RuntimeRunnerRecord, RuntimeSealingKeyRecord,
+    SCHEMA_VERSION,
 };
 use crate::tenant_isolation::{
     IsolationError, TenantIsolationHarness, TenantResources, TwoTenantFixture,
@@ -146,12 +147,13 @@ pub fn tenant_memory_store_capabilities() -> ComponentCapabilities {
 
 /// Enterprise multi-tenant operational store factory (in-memory partitions).
 ///
-/// Each authenticated tenant receives an isolated [`SqliteStore`] partition.
+/// Each authenticated tenant receives an isolated operational partition.
 /// Cross-tenant access is denied with a non-disclosing error. This is a
 /// conformance and wiring adapter, not a commercial multi-tenant database.
 #[derive(Clone)]
 pub struct InMemoryTenantOperationalStore {
-    partitions: Arc<Mutex<BTreeMap<String, Arc<SqliteStore>>>>,
+    partitions: Arc<Mutex<BTreeMap<String, Arc<dyn OperationalStore>>>>,
+    open: Arc<dyn Fn() -> Result<Arc<dyn OperationalStore>> + Send + Sync>,
     /// Shared producer sequences for every tenant partition. Export uses one
     /// outcome producer identity, so counters cannot restart per tenant.
     producer_sequences: Arc<Mutex<BTreeMap<String, i64>>>,
@@ -161,18 +163,28 @@ pub struct InMemoryTenantOperationalStore {
 
 impl Default for InMemoryTenantOperationalStore {
     fn default() -> Self {
-        Self {
-            partitions: Arc::new(Mutex::new(BTreeMap::new())),
-            producer_sequences: Arc::new(Mutex::new(BTreeMap::new())),
-            #[cfg(any(test, feature = "test-support"))]
-            healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        }
+        Self::new()
     }
 }
 
 impl InMemoryTenantOperationalStore {
+    /// Isolated in-memory partitions (no SQLite).
     pub fn new() -> Self {
-        Self::default()
+        Self::with_open(|| Ok(Arc::new(MemoryCatalogGraph::new()) as Arc<dyn OperationalStore>))
+    }
+
+    /// Open a partition with `open` (community hosts that still want SQLite
+    /// pass `tenkai_sqlite::SqliteStore::open_in_memory`).
+    pub fn with_open(
+        open: impl Fn() -> Result<Arc<dyn OperationalStore>> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            partitions: Arc::new(Mutex::new(BTreeMap::new())),
+            open: Arc::new(open),
+            producer_sequences: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(any(test, feature = "test-support"))]
+            healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }
     }
 
     pub fn runtime_capabilities(&self) -> ComponentCapabilities {
@@ -218,9 +230,9 @@ impl InMemoryTenantOperationalStore {
                 &self.producer_sequences,
             ));
         }
-        let store = Arc::new(SqliteStore::open_in_memory().map_err(|error| {
+        let store = (self.open)().map_err(|error| {
             IsolationError::Unavailable(format!("opening tenant partition: {error}"))
-        })?);
+        })?;
         partitions.insert(tenant_id.to_string(), store.clone());
         Ok(tenant_partition(
             tenant_id.to_string(),
@@ -575,7 +587,7 @@ impl TenantOperationalStore for InMemoryTenantOperationalStore {
 
 fn tenant_partition(
     tenant_id: String,
-    store: Arc<SqliteStore>,
+    store: Arc<dyn OperationalStore>,
     producer_sequences: &Arc<Mutex<BTreeMap<String, i64>>>,
 ) -> TenantPartition {
     TenantPartition {
@@ -598,7 +610,7 @@ fn context_for(
 #[derive(Clone)]
 pub struct TenantPartition {
     tenant_id: String,
-    store: Arc<SqliteStore>,
+    store: Arc<dyn OperationalStore>,
     producer_sequences: Arc<Mutex<BTreeMap<String, i64>>>,
 }
 
@@ -1028,7 +1040,7 @@ mod tests {
                 .iter()
                 .any(|name| name.contains("tenant_isolation"))
         );
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::new();
         let names = store.runtime_capabilities().names();
         assert!(!names.iter().any(|name| name.contains("tenant_isolation")));
     }

@@ -863,7 +863,7 @@ mod tests {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let day = 86_400;
         let tick = |at: i64| {
-            let store = crate::storage::SqliteStore::open(&database).unwrap();
+            let store = crate::storage::MemoryCatalogGraph::open(&database).unwrap();
             announce_crossing(&store, posture(&sources, at).snapshot(), at * 1_000)
                 .unwrap()
                 .map(|event| event.resource)
@@ -881,7 +881,7 @@ mod tests {
         assert_eq!(tick(now + 180 * day).as_deref(), Some("trust/warning"));
         assert_eq!(tick(now + 181 * day), None);
 
-        let store = crate::storage::SqliteStore::open(&database).unwrap();
+        let store = crate::storage::MemoryCatalogGraph::open(&database).unwrap();
         let events = store.list_change_events_after(0, 100).unwrap();
         assert!(events.iter().all(|event| event.kind
             == crate::change_stream::ChangeEventKind::TrustThresholdCrossed
@@ -917,7 +917,7 @@ mod tests {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         // Each tick opens the store afresh, as a restarted server would.
         let tick = |at: i64| {
-            let store = crate::storage::SqliteStore::open(&database).unwrap();
+            let store = crate::storage::MemoryCatalogGraph::open(&database).unwrap();
             announce_crossing(&store, posture(&sources, at).snapshot(), at * 1_000)
                 .unwrap()
                 .map(|event| event.resource)
@@ -943,7 +943,7 @@ mod tests {
         use crate::storage::OperationalStore as _;
         let dir = scratch("trust-race");
         let database = dir.join("tenkai.db");
-        drop(crate::storage::SqliteStore::open(&database).unwrap());
+        drop(crate::storage::MemoryCatalogGraph::open(&database).unwrap());
         let snapshot = TrustSnapshot {
             status: TrustStatus::Critical,
             since_ms: 1_000,
@@ -954,7 +954,7 @@ mod tests {
                 let database = database.clone();
                 let start = start.clone();
                 std::thread::spawn(move || {
-                    let store = crate::storage::SqliteStore::open(&database).unwrap();
+                    let store = crate::storage::MemoryCatalogGraph::open(&database).unwrap();
                     start.wait();
                     announce_crossing(&store, snapshot, 2_000 + writer)
                         .unwrap()
@@ -966,7 +966,7 @@ mod tests {
             .map(|writer| usize::from(writer.join().unwrap()))
             .sum();
         assert_eq!(appended, 1);
-        let store = crate::storage::SqliteStore::open(&database).unwrap();
+        let store = crate::storage::MemoryCatalogGraph::open(&database).unwrap();
         assert_eq!(store.list_change_events_after(0, 10).unwrap().len(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1247,8 +1247,9 @@ IQDZq+YO1/tDxcu5xN5Lo9z7V6C39Ey9tLwLOK4Lqlybog==
         };
         std::fs::write(&roots, toml::to_string(&trust).unwrap()).unwrap();
 
-        let store =
-            std::sync::Arc::new(crate::storage::SqliteStore::open(dir.join("tenkai.db")).unwrap());
+        let store = std::sync::Arc::new(
+            crate::storage::MemoryCatalogGraph::open(dir.join("tenkai.db")).unwrap(),
+        );
         let backup_dir = dir.join("backups");
         crate::backup::Backups::new(
             store.clone(),

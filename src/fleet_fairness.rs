@@ -81,6 +81,8 @@ pub async fn observe(
     spec: &WorkloadSpec,
     backup: &Path,
     database: &Path,
+    copy_store: crate::storage::CopyStoreFile,
+    reopen: impl Fn(&Path) -> anyhow::Result<Ctx>,
 ) -> Result<(WorkloadPlan, FairnessReport)> {
     let plan = fleet_workload::materialize(ctx, spec).await?;
     let postures = stored_postures(ctx).await?;
@@ -189,7 +191,7 @@ pub async fn observe(
     }
 
     ctx.backup_embedded(backup).await?;
-    let failed_restore_explicit = failed_restore_is_explicit(backup)?;
+    let failed_restore_explicit = failed_restore_is_explicit(backup, copy_store)?;
     let live = fleet_workload::stored_posture_counts(ctx, &plan.seed_digest)
         .await?
         .values()
@@ -198,13 +200,13 @@ pub async fn observe(
     if live != WORKLOAD_SIZE as usize {
         bail!("live fleet lost synthetic environments after a failed restore attempt");
     }
-    Ctx::embedded(database).map_err(|error| {
+    reopen(database).map_err(|error| {
         anyhow::anyhow!("live fleet store was damaged by the failed restore: {error}")
     })?;
 
     let recovered = backup.with_extension("recovered.db");
-    crate::storage::SqliteStore::restore(backup, &recovered)?;
-    let mut restored = Ctx::embedded(&recovered)?;
+    copy_store(backup, &recovered)?;
+    let mut restored = reopen(&recovered)?;
     crate::ontology::register(&mut restored).await?;
     let backup_environments =
         fleet_workload::stored_posture_counts(&mut restored, &plan.seed_digest)
@@ -485,11 +487,14 @@ async fn reject_conflicting_completion(
     }
 }
 
-fn failed_restore_is_explicit(backup: &Path) -> Result<bool> {
+fn failed_restore_is_explicit(
+    backup: &Path,
+    copy_store: crate::storage::CopyStoreFile,
+) -> Result<bool> {
     let damaged = backup.with_extension("damaged.db");
     std::fs::write(&damaged, b"not-a-sqlite-database")?;
     let dest = backup.with_extension("failed-restore.db");
-    let failed = crate::storage::SqliteStore::restore(&damaged, &dest).is_err();
+    let failed = copy_store(&damaged, &dest).is_err();
     let _ = std::fs::remove_file(&damaged);
     let _ = std::fs::remove_file(&dest);
     if !failed {
@@ -565,9 +570,16 @@ mod tests {
             .await
             .unwrap();
         let backup = root.join("backup.db");
-        let (plan, report) = observe(&mut ctx, &spec(), &backup, &database)
-            .await
-            .unwrap();
+        let (plan, report) = observe(
+            &mut ctx,
+            &spec(),
+            &backup,
+            &database,
+            crate::storage::MemoryCatalogGraph::copy_store_file,
+            |path| crate::client::Ctx::embedded(path),
+        )
+        .await
+        .unwrap();
         assert_eq!(plan.members.len(), WORKLOAD_SIZE as usize);
         assert_eq!(report.failing_applied, 0);
         assert!(report.behind_progressed > 0, "{report:?}");

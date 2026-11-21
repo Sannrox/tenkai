@@ -247,7 +247,7 @@ async fn migration_list_pages_current_state() {
         tenkai::reconciler::Config::default(),
     )
     .unwrap();
-    let store = Arc::new(tenkai::storage::SqliteStore::open(&fixture.database).unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open(&fixture.database).unwrap());
     let app = router(
         ServerConfig::community("management-secret", HashMap::new()),
         Arc::new(reconciler),
@@ -305,7 +305,7 @@ async fn catalog_lists_refuse_tenant_mode() {
     };
     config.enterprise_auth = Some(Arc::new(TenantAssertionExtension));
     config.tenant_store = Some(tenant_store);
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let app = router(config, Arc::new(FixedReconciler::default()), store).unwrap();
     let assertion =
         r#"{"tenant":"tenant-a","principal":"user-a","capabilities":["read","management"]}"#;
@@ -402,7 +402,7 @@ async fn catalog_lists_serve_bound_tenant_catalog() {
     };
     config.enterprise_auth = Some(Arc::new(TenantAssertionExtension));
     config.tenant_store = Some(tenant_store);
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let app = router(
         config,
         Arc::new(FixedReconciler::with_ctx(

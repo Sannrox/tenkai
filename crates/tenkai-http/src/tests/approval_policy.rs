@@ -139,7 +139,7 @@ async fn remote_approval_policy_round_trip_reports_configured_auto_view() {
         ),
     )
     .unwrap();
-    let mut ctx = tenkai::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(root.join("tenkai.db"), false).unwrap();
     tenkai::plan::set_plan_approval_policy(&mut ctx, "stage", &policy)
         .await
         .unwrap();

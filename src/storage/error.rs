@@ -94,10 +94,4 @@ impl StoreError {
     }
 }
 
-impl From<rusqlite::Error> for StoreError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Database(error.to_string())
-    }
-}
-
 pub type Result<T> = std::result::Result<T, StoreError>;

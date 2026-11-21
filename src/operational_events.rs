@@ -884,7 +884,7 @@ pub fn delivery_page(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::SqliteStore;
+    use crate::storage::MemoryCatalogGraph;
 
     fn endpoint(operational: Vec<OperationalEvent>) -> WebhookEndpoint {
         WebhookEndpoint {
@@ -901,7 +901,7 @@ mod tests {
     /// of the recent list, but not out of the failing list.
     #[test]
     fn a_long_failing_delivery_stays_visible_behind_newer_traffic() {
-        let sqlite = SqliteStore::open_in_memory().unwrap();
+        let sqlite = MemoryCatalogGraph::open_in_memory().unwrap();
         let store: &dyn OperationalStore = &sqlite;
         let failing = WebhookEndpoint {
             url: "https://hooks.example/failing".into(),
@@ -956,7 +956,7 @@ mod tests {
     /// first, through equal timestamps, with and without a filter.
     #[test]
     fn delivery_pages_follow_the_cursor_without_repeats_or_gaps() {
-        let sqlite = SqliteStore::open_in_memory().unwrap();
+        let sqlite = MemoryCatalogGraph::open_in_memory().unwrap();
         let store: &dyn OperationalStore = &sqlite;
         let wanted = endpoint(vec![OperationalEvent::PlanHeld]);
         let other = WebhookEndpoint {
@@ -1016,7 +1016,7 @@ mod tests {
 
     #[test]
     fn a_transition_is_enqueued_once_and_only_for_listing_endpoints() {
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         let held = Transition {
             event: OperationalEvent::PlanHeld,
             scope: HOST_SCOPE,
@@ -1080,7 +1080,7 @@ mod tests {
 
     #[test]
     fn host_watch_announces_each_turn_once() {
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         let hosts = [endpoint(vec![
             OperationalEvent::BackupStale,
             OperationalEvent::ClockDrift,
@@ -1149,7 +1149,7 @@ mod tests {
     #[test]
     fn trust_expiry_is_announced_once_per_crossing() {
         use crate::trust_posture::TrustStatus;
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         let hosts = vec![endpoint(vec![OperationalEvent::TrustExpiring])];
         let mut watch = HostWatch::default();
         for (now, status) in [
@@ -1244,7 +1244,7 @@ mod tests {
             .unwrap();
         assert_ne!(retried.started_at_ms, job.started_at_ms);
 
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         for now in [1, 2] {
             announce_failed_imports(&mut ctx, &store, &staging, now).await;
         }
@@ -1266,7 +1266,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_down_sink_defers_and_records_its_failure() {
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         // A closed port: the delivery fails and stays queued for retry.
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/hook", closed.local_addr().unwrap());

@@ -139,7 +139,7 @@ impl Drill {
     /// Change one member digest in the stored release's pin evidence, as a
     /// drifted or tampered record would, and return the original object.
     fn drift_stored_pin_evidence(&self, version: &str) -> tenkai::pb::sekai::Object {
-        let store = tenkai::storage::SqliteStore::open(&self.cli.db).unwrap();
+        let store = tenkai_sqlite::SqliteStore::open(&self.cli.db).unwrap();
         let id = tenkai::ontology::release_id(PRODUCT, version);
         let original = store.get(&id).unwrap().expect("stored release");
         let mut evidence: serde_json::Value =
@@ -154,7 +154,7 @@ impl Drill {
     }
 
     fn restore_release(&self, original: tenkai::pb::sekai::Object) {
-        let store = tenkai::storage::SqliteStore::open(&self.cli.db).unwrap();
+        let store = tenkai_sqlite::SqliteStore::open(&self.cli.db).unwrap();
         store.put(original).unwrap();
     }
 

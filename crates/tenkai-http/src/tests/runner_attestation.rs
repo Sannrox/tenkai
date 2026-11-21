@@ -56,7 +56,7 @@ async fn an_environment_requiring_attestation_enrolls_only_attested_runners() {
             config.clone(),
             Arc::new(
                 tenkai::reconciler::Reconciler::new(
-                    tenkai::client::Ctx::embedded(root.join("tenkai.db")).unwrap(),
+                    tenkai_sqlite::embedded_ctx(root.join("tenkai.db"), false).unwrap(),
                     tenkai::reconciler::Config::default(),
                 )
                 .unwrap(),
@@ -86,7 +86,7 @@ async fn an_environment_requiring_attestation_enrolls_only_attested_runners() {
         );
     }
     config.runner_certificates_admitted = true;
-    let mut ctx = tenkai::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(root.join("tenkai.db"), false).unwrap();
     let reconciler =
         tenkai::reconciler::Reconciler::new(ctx.clone(), tenkai::reconciler::Config::default())
             .unwrap();
@@ -268,7 +268,7 @@ async fn hardware_key_policy_refuses_a_file_runner_key() {
         tenkai::runner_ca::RunnerCa::from_pem(&cert, &key).unwrap(),
     ));
     config.runner_certificates_admitted = true;
-    let ctx = tenkai::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
+    let ctx = tenkai_sqlite::embedded_ctx(root.join("tenkai.db"), false).unwrap();
     let reconciler =
         tenkai::reconciler::Reconciler::new(ctx, tenkai::reconciler::Config::default()).unwrap();
     let app = router(config, Arc::new(reconciler), store).unwrap();

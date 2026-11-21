@@ -44,7 +44,7 @@ async fn plan_step_target_changes_are_readable_over_http() {
     );
     let hashed_from = secret_change.fields[0].from.clone().expect("live digest");
     let hashed_to = secret_change.fields[0].to.clone().expect("desired digest");
-    let mut ctx = tenkai::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(root.join("tenkai.db"), false).unwrap();
     let mut stored = tenkai::plan::load(&mut ctx, &plan_id).await.unwrap();
     stored.created_at = stored.created_at.saturating_add(1);
     stored.steps[0].target_changes = vec![

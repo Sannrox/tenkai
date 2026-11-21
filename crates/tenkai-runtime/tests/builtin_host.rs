@@ -247,7 +247,8 @@ async fn rig(label: &str) -> Rig {
     std::fs::create_dir_all(&spool).unwrap();
     let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
-    let store = Arc::new(tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap());
+    let store =
+        Arc::new(tenkai::storage::MemoryCatalogGraph::open(root.join("tenkai.db")).unwrap());
     ctx = ctx.with_execution_capabilities(Arc::new(
         tenkai::execution_capabilities::StoreExecutionCapabilities::new(
             store.clone(),

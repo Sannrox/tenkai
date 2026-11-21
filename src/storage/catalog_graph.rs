@@ -4,16 +4,22 @@
 //! fails closed (ADR 0038).
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result as AnyResult, bail};
 
 use crate::feedback_observation::FeedbackObservation;
-use crate::ontology::KIND_ENVIRONMENT_EXECUTION;
+use crate::ontology::{
+    CHANNEL_REVISION_FLOOR, KIND_CHANNEL, KIND_ENVIRONMENT, KIND_ENVIRONMENT_EXECUTION, KIND_PLAN,
+    KIND_RELEASE, NS, env_id, release_id,
+};
 use crate::pb::graph_action::{ActionResult, ActionTypeDef};
 use crate::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
+use crate::plan::Plan;
 use crate::storage::{
-    CATALOG_HISTORY_RETENTION_MS, ProviderEventRecord, Result, SqliteStore, StoreError,
+    CATALOG_HISTORY_RETENTION_MS, ChannelRecord, EnvironmentRecord, PlanRecord, PlanStatus,
+    ProviderEventRecord, ReleaseRecord, Result, StoreError, channel_record_to_object,
+    encode_object, environment_record_to_object, plan_record_to_object, release_record_to_object,
 };
 
 /// One namespaced lease to refresh inside [`CatalogGraph::refresh_leases_and_guarded_put`].
@@ -297,10 +303,13 @@ pub trait CatalogGraph: Send + Sync {
     }
 }
 
-/// In-memory catalog used by unit tests and tenant-mode hosts without Postgres.
-#[derive(Default)]
+/// In-memory catalog and operational store for unit tests and tenant-mode
+/// hosts without Postgres. One value implements both [`CatalogGraph`] and
+/// [`super::OperationalStore`] so community tests share catalog outbox and
+/// operational events the way `tenkai-sqlite::SqliteStore` does.
+#[derive(Clone, Default)]
 pub struct MemoryCatalogGraph {
-    partitions: Mutex<BTreeMap<String, Partition>>,
+    partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
     principal: String,
 }
 
@@ -315,12 +324,37 @@ struct Partition {
     changes: BTreeMap<String, Vec<ObjectChange>>,
     events: BTreeMap<(String, String), ProviderEventRecord>,
     observations: BTreeMap<String, FeedbackObservation>,
+    releases: BTreeMap<String, super::ReleaseRecord>,
+    channels: BTreeMap<String, super::ChannelRecord>,
+    environments: BTreeMap<String, super::EnvironmentRecord>,
+    plans: BTreeMap<String, super::PlanRecord>,
+    apply_leases: BTreeMap<String, super::LeaseRecord>,
+    lease_takeovers: BTreeMap<(String, u64), (String, String)>,
+    receipts: BTreeMap<String, super::ReceiptRecord>,
+    offline_imports: BTreeMap<String, super::OfflineImportRecord>,
+    offline_steps: Vec<super::OfflineStepImportRecord>,
+    rollbacks: BTreeMap<String, super::RollbackRecord>,
+    audit: Vec<super::AuditRecord>,
+    change_events: Vec<crate::change_stream::ChangeEvent>,
+    change_seq: i64,
+    producer_sequences: BTreeMap<String, i64>,
+    runtime_claims: BTreeMap<String, super::RuntimeClaim>,
+    enrollments: BTreeMap<String, super::RuntimeEnrollmentRecord>,
+    credentials: BTreeMap<String, super::RuntimeCredentialRecord>,
+    credential_revocations: BTreeMap<String, super::RuntimeRevocation>,
+    activity: BTreeMap<(String, String), super::RuntimeActivityRecord>,
+    certificates: BTreeMap<String, (String, i64)>,
+    attestations: BTreeMap<String, super::RuntimeAttestationRecord>,
+    sealing_keys: BTreeMap<String, super::RuntimeSealingKeyRecord>,
+    fixture_objects: BTreeMap<(String, String), (String, String, i64)>,
+    grant_rules: BTreeMap<String, String>,
+    grant_rule_generation: i64,
 }
 
 impl MemoryCatalogGraph {
     pub fn new() -> Self {
         Self {
-            partitions: Mutex::new(BTreeMap::new()),
+            partitions: Arc::new(Mutex::new(BTreeMap::new())),
             principal: "tenkai".into(),
         }
     }
@@ -353,8 +387,12 @@ impl CatalogGraph for MemoryCatalogGraph {
         if partition.objects.contains_key(&object.id) {
             return Err(StoreError::already_exists("object", object.id));
         }
-        partition.objects.insert(object.id.clone(), object.clone());
-        Ok(object)
+        persist_memory_object(partition, object, &self.principal, None).map_err(|error| {
+            match error.downcast::<StoreError>() {
+                Ok(store) => store,
+                Err(error) => StoreError::Database(error.to_string()),
+            }
+        })
     }
 
     fn put(&self, tenant: Option<&str>, object: Object) -> AnyResult<Object> {
@@ -362,11 +400,8 @@ impl CatalogGraph for MemoryCatalogGraph {
         // change and writes, so concurrent puts diff against what they replace.
         let mut partitions = self.lock()?;
         let partition = partitions.entry(Self::key(tenant)).or_default();
-        if let Some(previous) = partition.objects.get(&object.id).cloned() {
-            record_memory_changes(partition, &previous, &object, &self.principal);
-        }
-        partition.objects.insert(object.id.clone(), object.clone());
-        Ok(object)
+        let previous = partition.objects.get(&object.id).cloned();
+        persist_memory_object(partition, object, &self.principal, previous.as_ref())
     }
 
     fn delete(&self, tenant: Option<&str>, id: &str) -> AnyResult<()> {
@@ -375,6 +410,10 @@ impl CatalogGraph for MemoryCatalogGraph {
             return Ok(());
         };
         partition.objects.remove(id);
+        partition.environments.remove(id);
+        partition.releases.remove(id);
+        partition.channels.remove(id);
+        partition.plans.remove(id);
         partition
             .links
             .retain(|_, link| link.from_id != id && link.to_id != id);
@@ -384,22 +423,35 @@ impl CatalogGraph for MemoryCatalogGraph {
 
     fn list_kind(&self, tenant: Option<&str>, kind: &str) -> AnyResult<Vec<Object>> {
         let partitions = self.lock()?;
-        let mut objects = partitions
-            .get(&Self::key(tenant))
-            .map(|partition| {
-                partition
+        let Some(partition) = partitions.get(&Self::key(tenant)) else {
+            return Ok(Vec::new());
+        };
+        match kind {
+            KIND_ENVIRONMENT => list_memory_environments(partition),
+            KIND_PLAN => list_memory_plans(partition),
+            KIND_RELEASE => list_memory_releases(partition),
+            KIND_CHANNEL => list_memory_channels(partition),
+            _ => {
+                let mut objects: Vec<Object> = partition
                     .objects
                     .values()
                     .filter(|object| object.kind == kind)
                     .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        objects.sort_by(|left, right| left.id.cmp(&right.id));
-        Ok(objects)
+                    .collect();
+                objects.sort_by(|left, right| left.id.cmp(&right.id));
+                Ok(objects)
+            }
+        }
     }
 
     fn list_kind_ids(&self, tenant: Option<&str>, kind: &str) -> AnyResult<Vec<String>> {
+        if kind == KIND_ENVIRONMENT {
+            let partitions = self.lock()?;
+            return Ok(partitions
+                .get(&Self::key(tenant))
+                .map(list_active_catalog_environment_ids)
+                .unwrap_or_default());
+        }
         Ok(self
             .list_kind(tenant, kind)?
             .into_iter()
@@ -428,6 +480,109 @@ impl CatalogGraph for MemoryCatalogGraph {
                     .is_some_and(|stored| stored == value)
             })
             .collect())
+    }
+
+    fn find_by_property_matching(
+        &self,
+        tenant: Option<&str>,
+        query: crate::embedded::PropertyIndexQuery<'_>,
+    ) -> AnyResult<Vec<Object>> {
+        anyhow::ensure!(
+            !query.kind.trim().is_empty() && !query.key.trim().is_empty(),
+            "find_by_property requires non-empty kind and key"
+        );
+        if let Some(filter_key) = query.matching_key {
+            anyhow::ensure!(
+                !filter_key.trim().is_empty(),
+                "find_by_property matching key must be non-empty"
+            );
+            if query.matching_values.is_empty() {
+                return Ok(Vec::new());
+            }
+        }
+        if let Some(equals_key) = query.equals_key {
+            anyhow::ensure!(
+                !equals_key.trim().is_empty(),
+                "find_by_property equals key must be non-empty"
+            );
+            anyhow::ensure!(
+                query
+                    .equals_value
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "find_by_property equals value must be non-empty"
+            );
+        }
+        if let Some(order_key) = query.order_key {
+            anyhow::ensure!(
+                !order_key.trim().is_empty(),
+                "find_by_property order key must be non-empty"
+            );
+        }
+        let partitions = self.lock()?;
+        let Some(partition) = partitions.get(&Self::key(tenant)) else {
+            return Ok(Vec::new());
+        };
+        let mut objects: Vec<Object> = partition
+            .objects
+            .values()
+            .filter(|object| {
+                object.kind == query.kind
+                    && object
+                        .properties
+                        .get(query.key)
+                        .is_some_and(|stored| stored == query.value)
+            })
+            .cloned()
+            .collect();
+        if query.kind == KIND_PLAN {
+            objects.retain(|object| partition.plans.contains_key(&object.id));
+        }
+        if let Some(filter_key) = query.matching_key {
+            objects.retain(|object| {
+                object
+                    .properties
+                    .get(filter_key)
+                    .is_some_and(|stored| query.matching_values.contains(&stored.as_str()))
+            });
+        }
+        if let (Some(equals_key), Some(equals_value)) = (query.equals_key, query.equals_value) {
+            objects.retain(|object| {
+                object
+                    .properties
+                    .get(equals_key)
+                    .is_some_and(|stored| stored == equals_value)
+            });
+        }
+        if let Some(order_key) = query.order_key {
+            objects.sort_by(|left, right| {
+                let order =
+                    integer_property(left, order_key).cmp(&integer_property(right, order_key));
+                let order = order.then_with(|| left.id.cmp(&right.id));
+                if query.descending {
+                    order.reverse()
+                } else {
+                    order
+                }
+            });
+        } else {
+            objects.sort_by(|left, right| left.id.cmp(&right.id));
+        }
+        if let Some(offset) = query.offset {
+            anyhow::ensure!(
+                query.limit.is_some(),
+                "find_by_property offset requires a limit"
+            );
+            let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+            if offset >= objects.len() {
+                objects.clear();
+            } else {
+                objects.drain(..offset);
+            }
+        }
+        if let Some(limit) = query.limit {
+            objects.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        }
+        Ok(objects)
     }
 
     fn create_link(&self, tenant: Option<&str>, link: Link, fail_if_exists: bool) -> Result<()> {
@@ -672,11 +827,7 @@ impl CatalogGraph for MemoryCatalogGraph {
                 object.id
             );
         }
-        if let Some(previous) = previous {
-            record_memory_changes(partition, &previous, &object, &self.principal);
-        }
-        partition.objects.insert(object.id.clone(), object.clone());
-        Ok(object)
+        persist_memory_object(partition, object, &self.principal, previous.as_ref())
     }
 
     fn guarded_put_many(
@@ -945,8 +1096,12 @@ impl MemoryCatalogGraph {
                 })
                 .collect::<AnyResult<_>>()?;
         for (object, previous) in objects.iter().zip(previous) {
-            record_memory_changes(&mut partition, &previous, object, &self.principal);
-            partition.objects.insert(object.id.clone(), object.clone());
+            persist_memory_object(
+                &mut partition,
+                object.clone(),
+                &self.principal,
+                Some(&previous),
+            )?;
         }
         for event in &events {
             enqueue_memory_provider_event(&mut partition, event)?;
@@ -1016,17 +1171,373 @@ impl MemoryCatalogGraph {
     }
 }
 
+fn environment_is_retired(environment: &EnvironmentRecord) -> bool {
+    crate::environment::retirement_from_configuration_json(&environment.configuration_json)
+        .is_some()
+}
+
+fn list_active_catalog_environment_ids(partition: &Partition) -> Vec<String> {
+    let mut ids: Vec<String> = partition
+        .environments
+        .values()
+        .filter(|environment| !environment_is_retired(environment))
+        .filter(|environment| {
+            environment.id.starts_with("tenkai:env:") || {
+                let catalog_id = env_id(&environment.id);
+                !partition
+                    .environments
+                    .get(&catalog_id)
+                    .is_some_and(environment_is_retired)
+            }
+        })
+        .map(|environment| environment.id.clone())
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn list_memory_environments(partition: &Partition) -> AnyResult<Vec<Object>> {
+    list_active_catalog_environment_ids(partition)
+        .into_iter()
+        .filter_map(|id| partition.environments.get(&id).cloned())
+        .map(|record| environment_record_to_object(&record))
+        .collect()
+}
+
+fn list_memory_plans(partition: &Partition) -> AnyResult<Vec<Object>> {
+    let mut objects = Vec::new();
+    for record in partition.plans.values() {
+        if let Some(stored) = partition.objects.get(&record.id) {
+            objects.push(stored.clone());
+        } else {
+            objects.push(plan_record_to_object(record)?);
+        }
+    }
+    objects.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(objects)
+}
+
+fn list_memory_releases(partition: &Partition) -> AnyResult<Vec<Object>> {
+    partition
+        .releases
+        .values()
+        .map(release_record_to_object)
+        .collect::<AnyResult<Vec<_>>>()
+        .map(|mut objects| {
+            objects.sort_by(|left, right| left.id.cmp(&right.id));
+            objects
+        })
+}
+
+fn list_memory_channels(partition: &Partition) -> AnyResult<Vec<Object>> {
+    let mut objects: Vec<Object> = partition
+        .channels
+        .values()
+        .map(|record| {
+            partition
+                .objects
+                .get(&record.id)
+                .cloned()
+                .unwrap_or_else(|| channel_record_to_object(record))
+        })
+        .collect();
+    let mut seen: std::collections::BTreeSet<String> =
+        objects.iter().map(|object| object.id.clone()).collect();
+    for object in partition.objects.values() {
+        if object.kind == KIND_CHANNEL && seen.insert(object.id.clone()) {
+            objects.push(object.clone());
+        }
+    }
+    objects.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(objects)
+}
+
+fn integer_property(object: &Object, key: &str) -> i64 {
+    object
+        .properties
+        .get(key)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+fn persist_memory_object(
+    partition: &mut Partition,
+    object: Object,
+    principal: &str,
+    previous: Option<&Object>,
+) -> AnyResult<Object> {
+    let object = upsert_memory_typed(partition, object)?;
+    if let Some(previous) = previous {
+        record_memory_changes(partition, previous, &object, principal);
+    }
+    partition.objects.insert(object.id.clone(), object.clone());
+    Ok(object)
+}
+
+fn upsert_memory_typed(partition: &mut Partition, object: Object) -> AnyResult<Object> {
+    match object.kind.as_str() {
+        KIND_ENVIRONMENT => {
+            upsert_memory_environment(partition, &object)?;
+            Ok(object)
+        }
+        KIND_RELEASE => {
+            upsert_memory_release(partition, &object)?;
+            Ok(object)
+        }
+        KIND_CHANNEL => upsert_memory_channel(partition, object),
+        KIND_PLAN => {
+            upsert_memory_plan(partition, &object)?;
+            Ok(object)
+        }
+        _ => Ok(object),
+    }
+}
+
+fn upsert_memory_environment(partition: &mut Partition, object: &Object) -> AnyResult<()> {
+    let existing = partition.environments.get(&object.id);
+    let was_retired = existing
+        .and_then(|environment| {
+            crate::environment::retirement_from_configuration_json(&environment.configuration_json)
+        })
+        .is_some();
+    if was_retired {
+        return Err(StoreError::InvalidData {
+            kind: "environment",
+            detail: format!(
+                "environment {} is retired and cannot be updated",
+                object.name
+            ),
+        }
+        .into());
+    }
+    if crate::environment::is_retired_object(object) {
+        let now = crate::now_millis();
+        let active_claim = partition.runtime_claims.values().any(|claim| {
+            (claim.environment_id == object.name || claim.environment_id == object.id)
+                && claim.expires_at > now
+                && claim.completion_json.is_none()
+        });
+        let catalog_lease = partition
+            .leases
+            .get(&(
+                crate::apply::ENVIRONMENT_LEASE_NAMESPACE.to_string(),
+                object.name.clone(),
+            ))
+            .is_some_and(|lease| lease.status == "active" && lease.expires_at_ms > now);
+        let typed_lease = partition
+            .apply_leases
+            .get(&object.id)
+            .or_else(|| partition.apply_leases.get(&object.name))
+            .is_some_and(|lease| lease.expires_at > now);
+        if active_claim || catalog_lease || typed_lease {
+            return Err(StoreError::InvalidData {
+                kind: "environment",
+                detail: format!("environment {} has active delivery work", object.name),
+            }
+            .into());
+        }
+    }
+    let next = existing
+        .map(|environment| environment.revision + 1)
+        .unwrap_or(1);
+    partition.environments.insert(
+        object.id.clone(),
+        EnvironmentRecord {
+            id: object.id.clone(),
+            revision: next,
+            configuration_json: encode_object(object),
+        },
+    );
+    Ok(())
+}
+
+fn upsert_memory_release(partition: &mut Partition, object: &Object) -> AnyResult<()> {
+    let product = object
+        .properties
+        .get("product")
+        .cloned()
+        .unwrap_or_default();
+    let version = object
+        .properties
+        .get("version")
+        .cloned()
+        .unwrap_or_default();
+    let digest = object
+        .properties
+        .get("digest")
+        .cloned()
+        .or_else(|| object.properties.get("content_digest").cloned())
+        .unwrap_or_default();
+    let id = if object.id.is_empty() {
+        release_id(&product, &version)
+    } else {
+        object.id.clone()
+    };
+    if let Some(existing) = partition.releases.get_mut(&id) {
+        if existing.content_digest != digest {
+            return Err(StoreError::ImmutableConflict {
+                kind: "release",
+                id,
+            }
+            .into());
+        }
+        existing.descriptor_json = encode_object(object);
+        return Ok(());
+    }
+    partition.releases.insert(
+        id.clone(),
+        ReleaseRecord {
+            id,
+            product,
+            version,
+            content_digest: digest,
+            descriptor_json: encode_object(object),
+        },
+    );
+    Ok(())
+}
+
+fn upsert_memory_channel(partition: &mut Partition, mut object: Object) -> AnyResult<Object> {
+    let product = object
+        .properties
+        .get("product")
+        .cloned()
+        .unwrap_or_default();
+    let name = object
+        .properties
+        .get("name")
+        .cloned()
+        .or_else(|| object.properties.get("channel").cloned())
+        .unwrap_or_else(|| object.name.clone());
+    let release = object
+        .properties
+        .get("current_release")
+        .cloned()
+        .unwrap_or_default();
+    let floor = partition
+        .channels
+        .get(&object.id)
+        .map(|channel| channel.revision)
+        .or_else(|| {
+            object
+                .properties
+                .get(CHANNEL_REVISION_FLOOR)
+                .and_then(|value| value.parse().ok())
+        });
+    let release_exists = !release.is_empty() && partition.releases.contains_key(&release);
+    if !release_exists {
+        partition.channels.remove(&object.id);
+        if let Some(floor) = floor {
+            object
+                .properties
+                .insert(CHANNEL_REVISION_FLOOR.into(), floor.to_string());
+        }
+        return Ok(object);
+    }
+    let next = floor.map(|value| value + 1).unwrap_or(1);
+    partition.channels.insert(
+        object.id.clone(),
+        ChannelRecord {
+            id: object.id.clone(),
+            product,
+            name,
+            release_id: release,
+            revision: next,
+        },
+    );
+    Ok(object)
+}
+
+fn upsert_memory_plan(partition: &mut Partition, object: &Object) -> AnyResult<()> {
+    let Some(raw) = object.properties.get("plan") else {
+        return Ok(());
+    };
+    let Ok(plan) = serde_json::from_str::<Plan>(raw) else {
+        return Ok(());
+    };
+    let environment_id = env_id(&plan.environment);
+    if !partition.plans.contains_key(&object.id)
+        && partition
+            .environments
+            .get(&environment_id)
+            .or_else(|| partition.environments.get(&plan.environment))
+            .and_then(|environment| {
+                crate::environment::retirement_from_configuration_json(
+                    &environment.configuration_json,
+                )
+            })
+            .is_some()
+    {
+        return Err(StoreError::InvalidData {
+            kind: "environment",
+            detail: format!(
+                "retired environment {} cannot accept new plans",
+                plan.environment
+            ),
+        }
+        .into());
+    }
+    if !partition.environments.contains_key(&environment_id) {
+        partition.environments.insert(
+            environment_id.clone(),
+            EnvironmentRecord {
+                id: environment_id.clone(),
+                revision: 1,
+                configuration_json: encode_object(&Object {
+                    id: environment_id.clone(),
+                    kind: KIND_ENVIRONMENT.into(),
+                    name: plan.environment.clone(),
+                    namespace: NS.into(),
+                    created: plan.created_at,
+                    updated: plan.created_at,
+                    ..Object::default()
+                }),
+            },
+        );
+    }
+    let digest = object
+        .properties
+        .get("content_digest")
+        .cloned()
+        .unwrap_or_default();
+    let status = object
+        .properties
+        .get("status")
+        .and_then(|value| PlanStatus::parse(value).ok())
+        .unwrap_or(PlanStatus::Computed);
+    partition.plans.insert(
+        object.id.clone(),
+        PlanRecord {
+            id: object.id.clone(),
+            environment_id,
+            format_version: plan.format_version,
+            content_digest: digest,
+            plan_json: raw.clone(),
+            status,
+            status_detail: plan.status_detail,
+        },
+    );
+    Ok(())
+}
+
+fn keep_first_optional_webhook(event: &ProviderEventRecord) -> bool {
+    event.provider_kind == "feedback_webhook" || event.provider_kind == "deploy_webhook"
+}
+
 fn enqueue_memory_provider_event(
     partition: &mut Partition,
     event: &ProviderEventRecord,
 ) -> AnyResult<()> {
-    super::provider_claims::validate_new_provider_event(event).map_err(anyhow::Error::from)?;
+    super::validate_new_provider_event(event).map_err(anyhow::Error::from)?;
     let key = (event.provider_kind.clone(), event.id.clone());
     if let Some(existing) = partition.events.get(&key) {
         if existing.provider_kind != event.provider_kind
             || existing.binding_digest != event.binding_digest
             || !super::provider_event_payloads_match(&existing.payload_json, &event.payload_json)
         {
+            if keep_first_optional_webhook(event) {
+                return Ok(());
+            }
             return Err(StoreError::ImmutableConflict {
                 kind: "provider event",
                 id: event.id.clone(),
@@ -1127,301 +1638,7 @@ fn record_memory_changes(
     }
 }
 
-impl CatalogGraph for SqliteStore {
-    fn get(&self, _tenant: Option<&str>, id: &str) -> AnyResult<Option<Object>> {
-        SqliteStore::get(self, id)
-    }
-
-    fn create(&self, _tenant: Option<&str>, object: Object) -> Result<Object> {
-        SqliteStore::create(self, object)
-    }
-
-    fn put(&self, _tenant: Option<&str>, object: Object) -> AnyResult<Object> {
-        SqliteStore::put(self, object)
-    }
-
-    fn delete(&self, _tenant: Option<&str>, id: &str) -> AnyResult<()> {
-        SqliteStore::delete(self, id)
-    }
-
-    fn list_kind(&self, _tenant: Option<&str>, kind: &str) -> AnyResult<Vec<Object>> {
-        SqliteStore::list_kind(self, kind)
-    }
-
-    fn list_kind_ids(&self, _tenant: Option<&str>, kind: &str) -> AnyResult<Vec<String>> {
-        SqliteStore::list_kind_ids(self, kind)
-    }
-
-    fn find_by_property(
-        &self,
-        _tenant: Option<&str>,
-        kind: &str,
-        key: &str,
-        value: &str,
-    ) -> AnyResult<Vec<Object>> {
-        SqliteStore::find_by_property(self, kind, key, value)
-    }
-
-    fn find_by_property_matching(
-        &self,
-        _tenant: Option<&str>,
-        query: crate::embedded::PropertyIndexQuery<'_>,
-    ) -> AnyResult<Vec<Object>> {
-        SqliteStore::find_by_property_matching(self, query)
-    }
-
-    fn create_link(&self, _tenant: Option<&str>, link: Link, fail_if_exists: bool) -> Result<()> {
-        SqliteStore::create_link(self, link, fail_if_exists)
-    }
-
-    fn unlink(&self, _tenant: Option<&str>, id: &str) -> AnyResult<()> {
-        SqliteStore::unlink(self, id)
-    }
-
-    fn links(
-        &self,
-        _tenant: Option<&str>,
-        object_id: &str,
-        relation: &str,
-        direction: &str,
-    ) -> AnyResult<Vec<Link>> {
-        SqliteStore::links(self, object_id, relation, direction)
-    }
-
-    fn linked(
-        &self,
-        _tenant: Option<&str>,
-        object_id: &str,
-        relation: &str,
-        direction: &str,
-    ) -> AnyResult<Vec<Object>> {
-        SqliteStore::linked(self, object_id, relation, direction)
-    }
-
-    fn acquire_lease(
-        &self,
-        _tenant: Option<&str>,
-        namespace: &str,
-        key: &str,
-        owner: &str,
-        ttl_ms: i64,
-    ) -> AnyResult<Lease> {
-        self.acquire_namespaced_lease(namespace, key, owner, ttl_ms)
-    }
-
-    fn get_lease(
-        &self,
-        _tenant: Option<&str>,
-        namespace: &str,
-        key: &str,
-    ) -> AnyResult<Option<Lease>> {
-        self.get_namespaced_lease(namespace, key)
-    }
-
-    fn refresh_lease(
-        &self,
-        _tenant: Option<&str>,
-        namespace: &str,
-        key: &str,
-        fencing_token: &str,
-        ttl_ms: i64,
-    ) -> AnyResult<Lease> {
-        self.refresh_namespaced_lease(namespace, key, fencing_token, ttl_ms)
-    }
-
-    fn refresh_leases(
-        &self,
-        _tenant: Option<&str>,
-        refreshes: &[LeaseRefresh],
-    ) -> AnyResult<Vec<Lease>> {
-        SqliteStore::refresh_leases(self, refreshes)
-    }
-
-    fn refresh_leases_and_guarded_put(
-        &self,
-        _tenant: Option<&str>,
-        refreshes: &[LeaseRefresh],
-        object: Object,
-        object_namespace: &str,
-        object_key: &str,
-        object_fencing_token: &str,
-    ) -> AnyResult<(Vec<Lease>, Object)> {
-        SqliteStore::refresh_leases_and_guarded_put(
-            self,
-            refreshes,
-            object,
-            object_namespace,
-            object_key,
-            object_fencing_token,
-        )
-    }
-
-    fn release_lease(
-        &self,
-        _tenant: Option<&str>,
-        namespace: &str,
-        key: &str,
-        fencing_token: &str,
-    ) -> AnyResult<Lease> {
-        self.release_namespaced_lease(namespace, key, fencing_token)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn takeover_lease(
-        &self,
-        _tenant: Option<&str>,
-        namespace: &str,
-        key: &str,
-        owner: &str,
-        expected_token: &str,
-        expected_expires_at: i64,
-        ttl_ms: i64,
-    ) -> AnyResult<Lease> {
-        self.takeover_namespaced_lease(
-            namespace,
-            key,
-            owner,
-            expected_token,
-            expected_expires_at,
-            ttl_ms,
-        )
-    }
-
-    fn guarded_put(
-        &self,
-        _tenant: Option<&str>,
-        object: Object,
-        namespace: &str,
-        key: &str,
-        fencing_token: &str,
-        create: bool,
-    ) -> AnyResult<Object> {
-        SqliteStore::guarded_put(self, object, namespace, key, fencing_token, create)
-    }
-
-    fn guarded_put_many(
-        &self,
-        _tenant: Option<&str>,
-        objects: Vec<Object>,
-        namespace: &str,
-        key: &str,
-        fencing_token: &str,
-    ) -> AnyResult<()> {
-        SqliteStore::guarded_put_objects_with_provider_events(
-            self,
-            &objects,
-            namespace,
-            key,
-            fencing_token,
-            &[],
-            &[],
-        )
-    }
-
-    fn put_with_provider_events(
-        &self,
-        _tenant: Option<&str>,
-        object: Object,
-        events: &[ProviderEventRecord],
-        observations: &[FeedbackObservation],
-    ) -> AnyResult<Object> {
-        SqliteStore::put_with_provider_events(self, object, events, observations)
-    }
-
-    fn put_objects_with_provider_events(
-        &self,
-        _tenant: Option<&str>,
-        objects: &[Object],
-        events: &[ProviderEventRecord],
-        observations: &[FeedbackObservation],
-    ) -> AnyResult<()> {
-        SqliteStore::put_objects_with_provider_events(self, objects, events, observations)
-    }
-
-    fn guarded_put_objects_with_provider_events(
-        &self,
-        _tenant: Option<&str>,
-        objects: Vec<Object>,
-        namespace: &str,
-        key: &str,
-        fencing_token: &str,
-        events: &[ProviderEventRecord],
-        observations: &[FeedbackObservation],
-    ) -> AnyResult<()> {
-        SqliteStore::guarded_put_objects_with_provider_events(
-            self,
-            &objects,
-            namespace,
-            key,
-            fencing_token,
-            events,
-            observations,
-        )
-    }
-
-    fn feedback_observations(
-        &self,
-        _tenant: Option<&str>,
-        environment: &str,
-    ) -> AnyResult<Vec<FeedbackObservation>> {
-        SqliteStore::feedback_observations(self, environment)
-    }
-
-    fn register_schema(&self, _tenant: Option<&str>, schema: ObjectType) -> Result<()> {
-        SqliteStore::register_schema(self, schema)
-    }
-
-    fn schemas(&self, _tenant: Option<&str>) -> AnyResult<Vec<ObjectType>> {
-        SqliteStore::schemas(self)
-    }
-
-    fn register_action(&self, _tenant: Option<&str>, action: ActionTypeDef) -> Result<()> {
-        SqliteStore::register_action(self, action)
-    }
-
-    fn execute_action(
-        &self,
-        _tenant: Option<&str>,
-        action: &str,
-        params: HashMap<String, String>,
-        dry_run: bool,
-    ) -> AnyResult<ActionResult> {
-        SqliteStore::execute_action(self, action, params, dry_run)
-    }
-
-    fn decisions(
-        &self,
-        _tenant: Option<&str>,
-        actor: &str,
-        action: &str,
-        after: i64,
-    ) -> AnyResult<Vec<Decision>> {
-        SqliteStore::decisions(self, actor, action, after)
-    }
-
-    fn changes(&self, _tenant: Option<&str>, object_id: &str) -> AnyResult<Vec<ObjectChange>> {
-        SqliteStore::changes(self, object_id)
-    }
-
-    fn put_keeping_property(
-        &self,
-        _tenant: Option<&str>,
-        object: Object,
-        key: &str,
-    ) -> AnyResult<Object> {
-        SqliteStore::put_keeping_property(self, object, key)
-    }
-
-    fn delete_if_property(
-        &self,
-        _tenant: Option<&str>,
-        id: &str,
-        key: &str,
-        value: &str,
-    ) -> AnyResult<bool> {
-        SqliteStore::delete_if_property(self, id, key, value)
-    }
-}
+mod memory_operational;
 
 #[cfg(test)]
 mod tests {
@@ -1513,15 +1730,6 @@ mod tests {
     #[test]
     fn memory_catalog_matches_sqlite_contract() {
         assert_graph(&MemoryCatalogGraph::new(), Some("tenant-a"));
-        let path = std::env::temp_dir().join(format!(
-            "tenkai-764-sqlite-catalog-{}-{}.db",
-            std::process::id(),
-            crate::now_millis()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let store = SqliteStore::open(&path).unwrap();
-        assert_graph(&store, None);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1656,30 +1864,16 @@ mod tests {
     }
 
     #[test]
-    fn memory_and_sqlite_execute_action_records_decision() {
+    fn memory_catalog_execute_action_records_decision() {
         assert_execute_action_records_decision(&MemoryCatalogGraph::new(), Some("tenant-a"));
-        let path = std::env::temp_dir().join(format!(
-            "tenkai-764-sqlite-action-{}-{}.db",
-            std::process::id(),
-            crate::now_millis()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let store = SqliteStore::open(&path).unwrap();
-        assert_execute_action_records_decision(&store, None);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn sqlite_environment_retire_refuses_active_apply_lease() {
-        let path = std::env::temp_dir().join(format!(
-            "tenkai-764-sqlite-retire-{}-{}.db",
-            std::process::id(),
-            crate::now_millis()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let store = SqliteStore::open(&path).unwrap();
-        assert_environment_retire_refuses_active_apply_lease(&store, None);
-        let _ = std::fs::remove_file(path);
+    fn memory_catalog_retire_refuses_active_apply_lease() {
+        assert_environment_retire_refuses_active_apply_lease(
+            &MemoryCatalogGraph::new(),
+            Some("tenant-a"),
+        );
     }
 
     fn sample_event(id: &str, environment: &str) -> ProviderEventRecord {
@@ -1875,14 +2069,40 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_catalog_enqueues_provider_events_atomically() {
+    fn runtime_progress_outlives_a_later_claim() {
+        use crate::storage::OperationalStore as _;
+        let store = MemoryCatalogGraph::new();
+        let expiry = crate::now_millis() + 10_000;
+        let claim = store
+            .claim_runtime_plan("prod", "plan-1", "runtime-a", expiry)
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .record_runtime_progress("plan-1", "runtime-a", claim.generation, "{\"a\":1}")
+                .unwrap()
+        );
+        store.lapse_runtime_claims(1).unwrap();
+        let next = store
+            .claim_runtime_plan("prod", "plan-1", "runtime-a", expiry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.generation, claim.generation + 1);
+        assert_eq!(
+            store.runtime_progress("plan-1").unwrap().as_deref(),
+            Some("{\"a\":1}")
+        );
+    }
+
+    #[test]
+    fn memory_catalog_path_keyed_enqueues_provider_events_atomically() {
         let path = std::env::temp_dir().join(format!(
-            "tenkai-765-sqlite-outbox-{}-{}.db",
+            "tenkai-765-memory-outbox-{}-{}.db",
             std::process::id(),
             crate::now_millis()
         ));
         let _ = std::fs::remove_file(&path);
-        let store = SqliteStore::open(&path).unwrap();
+        let store = MemoryCatalogGraph::open(&path).unwrap();
         assert_atomic_outbox(&store, None, || {
             crate::storage::OperationalStore::list_provider_events(&store, "outcome", "prod", 8)
                 .unwrap()

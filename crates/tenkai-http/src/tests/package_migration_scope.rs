@@ -60,7 +60,7 @@ async fn environment_scoped_management_cannot_reconcile_or_migrate_other_environ
     let reconciler =
         tenkai::reconciler::Reconciler::new(ctx.clone(), tenkai::reconciler::Config::default())
             .unwrap();
-    let store = Arc::new(tenkai::storage::SqliteStore::open(&database).unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open(&database).unwrap());
     let mut config = ServerConfig::community("management-secret", HashMap::new());
     config.environment_management_assignments = HashMap::from([
         ("prod-secret".to_string(), "prod".to_string()),

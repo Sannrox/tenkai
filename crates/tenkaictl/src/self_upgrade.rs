@@ -9,6 +9,10 @@ use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 use tenkai::server_self_upgrade::{Home, StoreCheck};
 
+fn community_home(root: impl Into<PathBuf>) -> Home {
+    Home::new(root).with_copy_store(tenkai_sqlite::copy_store_file)
+}
+
 #[derive(Subcommand)]
 pub(crate) enum SelfUpgradeCommand {
     /// Verify the bundle's host binaries and run the candidate's store
@@ -91,7 +95,7 @@ pub(crate) struct Settle {
 pub(crate) async fn run(command: SelfUpgradeCommand) -> Result<()> {
     match command {
         SelfUpgradeCommand::Plan { source } => {
-            let home = Home::new(&source.home);
+            let home = community_home(&source.home);
             let _held = home.lock()?;
             let (id, check) = candidate(&home, &source)?;
             println!("candidate {id} {}", describe(&check));
@@ -99,7 +103,7 @@ pub(crate) async fn run(command: SelfUpgradeCommand) -> Result<()> {
             Ok(())
         }
         SelfUpgradeCommand::Apply { source, settle } => {
-            let home = Home::new(&source.home);
+            let home = community_home(&source.home);
             let _held = home.lock()?;
             let (id, check) = candidate(&home, &source)?;
             println!("candidate {id} {}", describe(&check));
@@ -118,7 +122,7 @@ pub(crate) async fn run(command: SelfUpgradeCommand) -> Result<()> {
             settle_switch(&home, &settle).await
         }
         SelfUpgradeCommand::Confirm { home, settle } => {
-            let home = Home::new(home);
+            let home = community_home(home);
             let _held = home.lock()?;
             settle_switch(&home, &settle).await
         }
@@ -127,7 +131,7 @@ pub(crate) async fn run(command: SelfUpgradeCommand) -> Result<()> {
             restore_backup,
             restart,
         } => {
-            let home = Home::new(home);
+            let home = community_home(home);
             let _held = home.lock()?;
             let reverted = home.revert(restore_backup)?;
             println!("{}", serde_json::to_string_pretty(&reverted)?);
@@ -372,9 +376,9 @@ mod tests {
     }
 
     fn home_with_switch(root: &std::path::Path) -> (Home, String, String) {
-        tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap();
+        tenkai_sqlite::SqliteStore::open(root.join("tenkai.db")).unwrap();
         let schema = tenkai::storage::SCHEMA_VERSION;
-        let home = Home::new(root.join("home"));
+        let home = community_home(root.join("home"));
         let mut ids = Vec::new();
         for marker in ["a", "b"] {
             let dir = root.join(marker);
@@ -445,7 +449,7 @@ mod tests {
         std::fs::write(&trust_path, &trust_toml).unwrap();
         let archive = root.join("hosts.bundle.json");
         let registry = MemoryArtifactRegistry::new();
-        let mut ctx = tenkai::client::Ctx::embedded(root.join("catalog.db")).unwrap();
+        let mut ctx = tenkai_sqlite::embedded_ctx(root.join("catalog.db"), false).unwrap();
         let issued_at = tenkai::now_millis();
         offline_bundle_build::build(
             &mut ctx,
@@ -471,8 +475,8 @@ mod tests {
         .await
         .unwrap();
 
-        tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap();
-        let home = Home::new(root.join("home"));
+        tenkai_sqlite::SqliteStore::open(root.join("tenkai.db")).unwrap();
+        let home = community_home(root.join("home"));
         let (_id, check) = candidate(
             &home,
             &Source {

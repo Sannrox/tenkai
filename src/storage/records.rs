@@ -177,6 +177,82 @@ pub struct RollbackRecord {
     pub status_detail: String,
 }
 
+pub fn rollback_intent_digest(rollback: &RollbackRecord) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    let mut digest = Sha256::new();
+    for value in [
+        rollback.environment_id.as_bytes(),
+        rollback.plan_id.as_bytes(),
+        &rollback.lease_generation.to_le_bytes(),
+        rollback.checkpoint_json.as_bytes(),
+        rollback.status_detail.as_bytes(),
+    ] {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value);
+    }
+    format!("{:x}", digest.finalize())
+}
+
+/// A first-delivery collection timestamp is the only field allowed to be
+/// added to a durable provider envelope after enqueue. Preserve enqueue
+/// idempotency when the same event is submitted again after that binding.
+pub fn provider_event_payloads_match(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let Ok(mut left) = serde_json::from_str::<serde_json::Value>(left) else {
+        return false;
+    };
+    let Ok(mut right) = serde_json::from_str::<serde_json::Value>(right) else {
+        return false;
+    };
+    let (Some(left), Some(right)) = (left.as_object_mut(), right.as_object_mut()) else {
+        return false;
+    };
+    let metadata = |object: &serde_json::Map<String, serde_json::Value>| {
+        ["collected_at_ms", "source_sequence"]
+            .map(|key| object.get(key).filter(|value| !value.is_null()).cloned())
+    };
+    let left_metadata = metadata(left);
+    let right_metadata = metadata(right);
+    if left_metadata == right_metadata
+        || !((left_metadata.iter().all(Option::is_none)
+            && right_metadata.iter().all(Option::is_some))
+            || (right_metadata.iter().all(Option::is_none)
+                && left_metadata.iter().all(Option::is_some)))
+    {
+        return false;
+    }
+    left.remove("collected_at_ms");
+    left.remove("source_sequence");
+    right.remove("collected_at_ms");
+    right.remove("source_sequence");
+    left == right
+}
+
+pub fn provider_event_environment_id(payload_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    value
+        .get("binding")?
+        .get("environment_id")?
+        .as_str()
+        .filter(|environment| !environment.trim().is_empty())
+        .map(str::to_owned)
+}
+
+pub fn provider_event_observed_at(payload_json: &str, fallback: i64) -> i64 {
+    let observed_at = serde_json::from_str::<serde_json::Value>(payload_json)
+        .ok()
+        .and_then(|value| {
+            let payload = value.get("payload_json")?.as_str()?;
+            let payload = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+            payload.get("observed_at")?.as_i64()
+        })
+        .filter(|observed_at| *observed_at > 0);
+    observed_at.unwrap_or(fallback)
+}
+
 /// Position of a provider event in newest-first inspection order:
 /// `observed_at`, then `provider_kind`, then `id` (text bytewise), all
 /// descending. Stores must compare in this order. Unique
@@ -201,6 +277,25 @@ pub struct ProviderEventRecord {
     pub last_error: String,
     pub claim_token: Option<String>,
     pub claim_until: Option<i64>,
+}
+
+pub fn validate_new_provider_event(event: &ProviderEventRecord) -> Result<()> {
+    if event.id.trim().is_empty()
+        || event.provider_kind.trim().is_empty()
+        || event.binding_digest.trim().is_empty()
+        || event.payload_json.is_empty()
+        || event.attempts != 0
+        || event.delivered_at.is_some()
+        || !event.last_error.is_empty()
+        || event.claim_token.is_some()
+        || event.claim_until.is_some()
+    {
+        return Err(StoreError::InvalidData {
+            kind: "provider event",
+            detail: "new events require identities, content, and pristine delivery state".into(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

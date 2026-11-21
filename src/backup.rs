@@ -41,7 +41,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::release_signing::TrustRoots;
-use crate::storage::SqliteStore;
+use crate::storage::{CopyStoreFile, StoreBackup};
 
 pub const MANIFEST_SCHEMA: &str = "tenkai.backup.v1";
 pub const STATUS_SCHEMA: &str = "tenkai.backup-status.v1";
@@ -131,6 +131,15 @@ pub struct DrillEvidence {
     pub plans: u64,
 }
 
+/// Engine-owned inspect of a restored scratch store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrillInspect {
+    pub integrity: String,
+    pub environments: u64,
+    pub releases: u64,
+    pub plans: u64,
+}
+
 /// `GET /v1/backups`: `status.json` plus the newest drill and the drill
 /// history.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -169,12 +178,12 @@ pub struct BackupHealth {
 /// overlap during a restart, never race on the directory or the status file.
 pub struct Backups {
     /// `None` for an evidence-only set, whose store Tenkai does not copy.
-    store: Option<Arc<SqliteStore>>,
+    store: Option<Arc<dyn StoreBackup>>,
     policy: BackupPolicy,
 }
 
 impl Backups {
-    pub fn new(store: Arc<SqliteStore>, policy: BackupPolicy) -> Result<Self> {
+    pub fn new(store: Arc<dyn StoreBackup>, policy: BackupPolicy) -> Result<Self> {
         if policy.retain == 0 {
             bail!("backup retention must keep at least one backup");
         }
@@ -194,7 +203,7 @@ impl Backups {
         Self::open(None, policy)
     }
 
-    fn open(store: Option<Arc<SqliteStore>>, policy: BackupPolicy) -> Result<Self> {
+    fn open(store: Option<Arc<dyn StoreBackup>>, policy: BackupPolicy) -> Result<Self> {
         std::fs::create_dir_all(&policy.dir)
             .with_context(|| format!("creating backup directory {}", policy.dir.display()))?;
         Ok(Self { store, policy })
@@ -213,7 +222,7 @@ impl Backups {
         };
         let _lock = lock_dir(&self.policy.dir)?;
         remove_incomplete(&self.policy.dir)?;
-        let result = self.write_backup(store, now_ms);
+        let result = self.write_backup(store.as_ref(), now_ms);
         // A damaged status file must not stop backups for good: start over.
         let mut status = read_status(&self.policy.dir).unwrap_or_else(|error| {
             eprintln!("backup status unreadable, starting a new one: {error:#}");
@@ -285,7 +294,7 @@ impl Backups {
         }
     }
 
-    fn write_backup(&self, store: &SqliteStore, now_ms: i64) -> Result<BackupManifest> {
+    fn write_backup(&self, store: &dyn StoreBackup, now_ms: i64) -> Result<BackupManifest> {
         let dir = &self.policy.dir;
         let file = format!("{PREFIX}{now_ms}.db");
         let target = dir.join(&file);
@@ -512,6 +521,8 @@ pub fn drill(
     scratch_dir: &Path,
     now_ms: i64,
     roots: Option<&TrustRoots>,
+    restore: CopyStoreFile,
+    inspect: fn(&Path) -> anyhow::Result<DrillInspect>,
 ) -> Result<DrillEvidence> {
     // A shared hold on the backup lock keeps retention from removing the
     // source until it is verified and copied; it ends when the drill returns.
@@ -554,29 +565,18 @@ pub fn drill(
     }
     let _cleanup = ScratchStore(private.clone());
     let scratch = private.join("restored.db");
-    SqliteStore::restore(backup, &scratch)?;
-    // Opening runs this version's migrations: the backup must still open.
-    drop(SqliteStore::open_scratch(&scratch).context("opening the restored store")?);
-    let connection = rusqlite::Connection::open(&scratch)?;
-    let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
-    let count = |table: &str| -> Result<u64> {
-        Ok(
-            connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                row.get::<_, i64>(0)
-            })? as u64,
-        )
-    };
+    restore(backup, &scratch)?;
+    let inspected = inspect(&scratch).context("opening the restored store")?;
     let evidence = DrillEvidence {
         schema: DRILL_SCHEMA.into(),
         file: manifest.file,
         sha256,
         restored_at_ms: now_ms,
-        integrity,
-        environments: count("environments")?,
-        releases: count("releases")?,
-        plans: count("plans")?,
+        integrity: inspected.integrity,
+        environments: inspected.environments,
+        releases: inspected.releases,
+        plans: inspected.plans,
     };
-    drop(connection);
     if evidence.integrity != "ok" {
         bail!(
             "restored store failed its integrity check: {}",
@@ -814,8 +814,38 @@ fn sha256_file(path: &Path) -> Result<(String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::OperationalStore as _;
+    use crate::storage::{MemoryCatalogGraph, OperationalStore as _};
     use ed25519_dalek::SigningKey;
+
+    fn restore_store(source: &Path, destination: &Path) -> anyhow::Result<()> {
+        MemoryCatalogGraph::copy_store_file(source, destination)
+    }
+
+    fn inspect_store(path: &Path) -> anyhow::Result<DrillInspect> {
+        use std::io::Read as _;
+        let mut header = [0_u8; 16];
+        std::fs::File::open(path)?.read_exact(&mut header)?;
+        if header != *b"SQLite format 3\0" {
+            anyhow::bail!("not a store file");
+        }
+        let store = MemoryCatalogGraph::open(path)?;
+        let (environments, releases, plans) = store.inspect_counts()?;
+        Ok(DrillInspect {
+            integrity: "ok".into(),
+            environments,
+            releases,
+            plans,
+        })
+    }
+
+    fn run_drill(
+        backup: &Path,
+        scratch: &Path,
+        now_ms: i64,
+        roots: Option<&TrustRoots>,
+    ) -> Result<DrillEvidence> {
+        drill(backup, scratch, now_ms, roots, restore_store, inspect_store)
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -827,8 +857,8 @@ mod tests {
         dir
     }
 
-    fn backups(root: &Path, retain: usize) -> (Arc<SqliteStore>, Backups) {
-        let store = Arc::new(SqliteStore::open(root.join("tenkai.db")).unwrap());
+    fn backups(root: &Path, retain: usize) -> (Arc<MemoryCatalogGraph>, Backups) {
+        let store = Arc::new(MemoryCatalogGraph::open(root.join("tenkai.db")).unwrap());
         let backups = Backups::new(
             store.clone(),
             BackupPolicy {
@@ -842,7 +872,7 @@ mod tests {
         (store, backups)
     }
 
-    fn put_environment(store: &SqliteStore, id: &str) {
+    fn put_environment(store: &MemoryCatalogGraph, id: &str) {
         store
             .put_environment(&crate::storage::EnvironmentRecord {
                 id: id.into(),
@@ -878,7 +908,7 @@ mod tests {
         let written = writer.join().unwrap();
         let mut previous = 0;
         for manifest in &taken {
-            let evidence = drill(
+            let evidence = run_drill(
                 &backups.policy().dir.join(&manifest.file),
                 &root.join("scratch"),
                 manifest.taken_at_ms,
@@ -987,7 +1017,7 @@ mod tests {
         let mut bytes = std::fs::read(&path).unwrap();
         bytes[100] ^= 0xff;
         std::fs::write(&path, bytes).unwrap();
-        let error = drill(&path, &root.join("scratch"), 2_000, None).unwrap_err();
+        let error = run_drill(&path, &root.join("scratch"), 2_000, None).unwrap_err();
         assert!(format!("{error:#}").contains("does not match its manifest"));
 
         // A second backup in the same millisecond is refused and recorded.
@@ -1062,7 +1092,7 @@ mod tests {
         )
         .unwrap();
         let scratch = root.join("scratch");
-        assert!(drill(&path, &scratch, 2_000, None).is_err());
+        assert!(run_drill(&path, &scratch, 2_000, None).is_err());
         assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1096,7 +1126,7 @@ mod tests {
         let root = temp_dir("signed");
         let (seed, roots) = signing_seed(&root, 42);
         let (_, other_roots) = signing_seed(&root, 7);
-        let store = Arc::new(SqliteStore::open(root.join("tenkai.db")).unwrap());
+        let store = Arc::new(MemoryCatalogGraph::open(root.join("tenkai.db")).unwrap());
         let policy = BackupPolicy {
             dir: root.join("backups"),
             retain: 1,
@@ -1107,8 +1137,8 @@ mod tests {
         let manifest = signed.take(1_000).unwrap();
         let path = policy.dir.join(&manifest.file);
         let scratch = root.join("scratch");
-        drill(&path, &scratch, 2_000, Some(&roots)).unwrap();
-        let error = drill(&path, &scratch, 2_000, Some(&other_roots)).unwrap_err();
+        run_drill(&path, &scratch, 2_000, Some(&roots)).unwrap();
+        let error = run_drill(&path, &scratch, 2_000, Some(&other_roots)).unwrap_err();
         assert!(format!("{error:#}").contains("not trusted"), "{error:#}");
 
         // A changed manifest no longer verifies, even with a matching sha256.
@@ -1117,7 +1147,7 @@ mod tests {
             .unwrap()
             .replace("\"taken_at_ms\": 1000", "\"taken_at_ms\": 1001");
         std::fs::write(manifest_path(&path), changed).unwrap();
-        let error = drill(&path, &scratch, 2_000, Some(&roots)).unwrap_err();
+        let error = run_drill(&path, &scratch, 2_000, Some(&roots)).unwrap_err();
         assert!(
             format!("{error:#}").contains("does not verify"),
             "{error:#}"
@@ -1137,12 +1167,12 @@ mod tests {
         let next = unsigned.take(3_000).unwrap();
         assert!(!signature_path(&path).exists());
         let next = policy.dir.join(&next.file);
-        let error = drill(&next, &scratch, 4_000, Some(&roots)).unwrap_err();
+        let error = run_drill(&next, &scratch, 4_000, Some(&roots)).unwrap_err();
         assert!(
             format!("{error:#}").contains("no manifest signature"),
             "{error:#}"
         );
-        drill(&next, &scratch, 4_000, None).unwrap();
+        run_drill(&next, &scratch, 4_000, None).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -11,9 +11,10 @@
   [Operational storage](../operational-storage.md)
 
 > Later record: Context below is the pre-decision world as of 2026-09-13.
-> Live hosts now open [`SqliteStore`](../../src/storage.rs) (typed schema 11).
-> [`EmbeddedStore`](../../src/embedded.rs) remains a schema-5 import fixture.
-> See [operational storage](../operational-storage.md).
+> Live hosts now open [`SqliteStore`](../../crates/tenkai-sqlite/src/sqlite_store.rs)
+> (typed schema 14) in `tenkai-sqlite`.
+> [`EmbeddedStore`](../../crates/tenkai-sqlite/src/legacy.rs) remains a schema-5
+> import fixture. See [operational storage](../operational-storage.md).
 
 ## Context
 

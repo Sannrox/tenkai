@@ -12,7 +12,6 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signer as _, SigningKey};
 
-use crate::client::Ctx;
 use crate::manifest::{self, digest as manifest_digest};
 use crate::plan;
 use crate::plan_approval::{
@@ -325,7 +324,7 @@ pub(crate) fn sign_digests(
 /// Sign a plan approval for `plan_id` loaded from embedded `database`.
 pub async fn sign_plan_approval(
     keys_dir: &Path,
-    database: &Path,
+    mut ctx: crate::client::Ctx,
     plan_id: &str,
     approval_out: &Path,
     trust_roots_out: &Path,
@@ -344,7 +343,6 @@ pub async fn sign_plan_approval(
     let public = signing_key.verifying_key().to_bytes();
     let kid = key_id(&public);
 
-    let mut ctx = Ctx::embedded(database)?;
     let plan = plan::load(&mut ctx, plan_id).await?;
     let plan_digest = format!("sha256:{}", plan.executable_digest()?);
 
@@ -779,7 +777,7 @@ inputs = ["manifests"]
         let keys = root.join("keys");
         init_dev_keys(&keys).unwrap();
         let db = root.join("tenkai.db");
-        let mut ctx = Ctx::embedded(&db).unwrap();
+        let mut ctx = crate::client::Ctx::embedded(&db).unwrap();
         crate::ontology::register(&mut ctx).await.unwrap();
         plan::env_add(&mut ctx, "stage", "dogfood stage")
             .await
@@ -817,9 +815,16 @@ inputs = ["manifests"]
 
         let approval = root.join("approval.json");
         let trust = root.join("approval-trust.toml");
-        let written = sign_plan_approval(&keys, &db, &plan.id, &approval, &trust, 3600)
-            .await
-            .unwrap();
+        let written = sign_plan_approval(
+            &keys,
+            crate::client::Ctx::embedded(&db).unwrap(),
+            &plan.id,
+            &approval,
+            &trust,
+            3600,
+        )
+        .await
+        .unwrap();
         assert!(written.envelope.exists());
         let body = fs::read_to_string(&approval).unwrap();
         assert!(body.contains(APPROVAL_SCHEMA));

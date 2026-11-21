@@ -368,7 +368,7 @@ fn tenant_hub() -> Router {
     };
     config.enterprise_auth = Some(Arc::new(TenantAssertionExtension));
     config.tenant_store = Some(tenant_store);
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     router(
         config,
         Arc::new(FixedReconciler::with_ctx(

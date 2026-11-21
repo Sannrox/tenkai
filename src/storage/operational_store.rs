@@ -6,6 +6,21 @@ pub trait OperationalStore: Send + Sync {
     fn get_release(&self, id: &str) -> Result<Option<ReleaseRecord>>;
     fn promote_channel(&self, channel: &ChannelRecord) -> Result<ChannelRecord>;
     fn put_environment(&self, environment: &EnvironmentRecord) -> Result<EnvironmentRecord>;
+    fn get_environment(&self, _id: &str) -> Result<Option<EnvironmentRecord>> {
+        Err(StoreError::AdapterUnavailable(
+            "environment lookup is not implemented by this store".into(),
+        ))
+    }
+    fn list_environment_ids(&self) -> Result<Vec<String>> {
+        Err(StoreError::AdapterUnavailable(
+            "environment listing is not implemented by this store".into(),
+        ))
+    }
+    fn list_active_environment_ids(&self) -> Result<Vec<String>> {
+        Err(StoreError::AdapterUnavailable(
+            "environment listing is not implemented by this store".into(),
+        ))
+    }
     fn create_plan(&self, plan: &PlanRecord) -> Result<()>;
     fn get_plan(&self, id: &str) -> Result<Option<PlanRecord>>;
     fn transition_plan(
@@ -19,6 +34,29 @@ pub trait OperationalStore: Send + Sync {
     fn acquire_lease(&self, environment: &str, owner: &str, expires_at: i64)
     -> Result<LeaseRecord>;
     fn current_lease(&self, environment: &str) -> Result<Option<LeaseRecord>>;
+    /// Take over a lapsed lease at exactly `generation`, recording `evidence_json`.
+    fn takeover_expired_lease(
+        &self,
+        _environment: &str,
+        _owner: &str,
+        _generation: u64,
+        _expires_at: i64,
+        _evidence_json: &str,
+    ) -> Result<LeaseRecord> {
+        Err(StoreError::AdapterUnavailable(
+            "expired-lease takeover is not implemented by this store".into(),
+        ))
+    }
+    fn require_claimed_undelivered_provider_event(
+        &self,
+        _provider_kind: &str,
+        _id: &str,
+        _claim_token: &str,
+    ) -> Result<()> {
+        Err(StoreError::AdapterUnavailable(
+            "claimed provider-event lookup is not implemented by this store".into(),
+        ))
+    }
     fn record_receipt(&self, owner: &str, receipt: &ReceiptRecord) -> Result<()>;
     fn get_receipt(&self, id: &str) -> Result<Option<ReceiptRecord>>;
     fn record_offline_import(

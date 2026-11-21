@@ -14,6 +14,7 @@ path = "src/main.rs"
 tenkai = { path = "../..", version = "0.9.1" }
 tenkai-executor = { path = "../tenkai-executor", version = "0.9.1" }
 tenkai-http = { path = "../tenkai-http", version = "0.9.1" }
+tenkai-sqlite = { path = "../tenkai-sqlite", version = "0.9.1" }
 anyhow = "1"
 base64 = "0.22"
 chrono = "0.4"

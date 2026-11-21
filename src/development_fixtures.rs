@@ -570,7 +570,7 @@ fn invalid<T>(detail: String) -> Result<T, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{OperationalStore, SqliteStore};
+    use crate::storage::{MemoryCatalogGraph, OperationalStore};
 
     fn fixture() -> DevelopmentFixture {
         DevelopmentFixture {
@@ -625,7 +625,7 @@ mod tests {
 
     #[test]
     fn sqlite_import_is_atomic_idempotent_conflict_safe_and_resettable() {
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         let prepared = fixture().prepare().unwrap();
         let first = store
             .import_development_fixture(&prepared, "seed-service", "request-1")
@@ -660,7 +660,7 @@ mod tests {
 
     #[test]
     fn sqlite_fixture_plans_cannot_transition_or_be_claimed() {
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         let map = store
             .import_development_fixture(&fixture().prepare().unwrap(), "seed-service", "request-1")
             .unwrap();
@@ -716,7 +716,7 @@ mod tests {
 
     #[test]
     fn sqlite_projection_selects_last_channel_per_product() {
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         let mut fixture = fixture();
         fixture.channels.push(FixtureChannel {
             name: "canary".into(),
@@ -747,7 +747,7 @@ mod tests {
 
     #[test]
     fn sqlite_reset_does_not_cross_prefix_or_wildcard_fixture_ids() {
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         let mut buyer = fixture();
         buyer.fixture_id = "buyer".into();
         let buyer = buyer.prepare().unwrap();

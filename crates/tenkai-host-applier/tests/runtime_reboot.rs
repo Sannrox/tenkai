@@ -89,7 +89,8 @@ impl Rig {
         std::fs::create_dir_all(&root).unwrap();
         let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
         tenkai::ontology::register(&mut ctx).await.unwrap();
-        let store = Arc::new(tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap());
+        let store =
+            Arc::new(tenkai::storage::MemoryCatalogGraph::open(root.join("tenkai.db")).unwrap());
         // Prod is served by a runtime, so planning uses that runtime's
         // recorded executors, not this process's (ADR 0057).
         ctx = ctx.with_execution_capabilities(Arc::new(
@@ -356,21 +357,18 @@ impl Rig {
 
     /// Move the recorded reboot back past any boot deadline.
     fn age_reboot(&self) {
-        let aged = rusqlite::Connection::open(self.root.join("tenkai.db"))
+        let aged = tenkai::storage::MemoryCatalogGraph::open(self.root.join("tenkai.db"))
             .unwrap()
-            .execute(
-                "UPDATE runtime_claims SET progress_json = json_set(progress_json, '$.recorded_at', 1) WHERE progress_json IS NOT NULL",
-                [],
-            )
+            .set_runtime_progress_recorded_at(1)
             .unwrap();
         assert_eq!(aged, 1);
     }
 
     /// Lapse every runtime claim, as the reboot outlasting the lease does.
     fn lapse_claims(&self) {
-        rusqlite::Connection::open(self.root.join("tenkai.db"))
+        tenkai::storage::MemoryCatalogGraph::open(self.root.join("tenkai.db"))
             .unwrap()
-            .execute("UPDATE runtime_claims SET expires_at = 1", [])
+            .lapse_runtime_claims(1)
             .unwrap();
     }
 }
@@ -474,7 +472,7 @@ async fn a_host_that_never_returns_fails_at_its_deadline_after_a_server_restart(
     let database = rig.root.join("tenkai.db");
     let mut ctx = Ctx::embedded(&database).unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
-    let store = tenkai::storage::SqliteStore::open(&database).unwrap();
+    let store = tenkai::storage::MemoryCatalogGraph::open(&database).unwrap();
     let report = Reconciler::new(ctx.clone(), ReconcilerConfig::default())
         .unwrap()
         .with_runtime_environments(["prod".into()].into())

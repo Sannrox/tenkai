@@ -164,11 +164,12 @@
 //! - [`management_lifecycle`] admits the versioned remote operator contract
 //!   (`tenkai.management-lifecycle.v1`) before HTTP adapters call Catalog,
 //!   planner, or apply. Spoke runtime HTTP stays a separate surface.
-//! - [`storage::SqliteStore`] and the `tenkaictl` / `tenkai-server` /
-//!   `tenkai-runtime` hosts share the same application core; transport is not a
-//!   domain seam. [`embedded`] is
-//!   the pre-0029 schema-5 graph-fixture factory used to import leftover
-//!   `embedded_*` rows; it is not a live host.
+//! - [`storage::OperationalStore`] / [`storage::CatalogGraph`] and the
+//!   `tenkaictl` / `tenkai-server` / `tenkai-runtime` hosts share the same
+//!   application core; transport is not a domain seam. Community hosts open
+//!   SQLite through the `tenkai-sqlite` crate. [`embedded`] keeps the catalog
+//!   property-index query type; the pre-0029 schema-5 graph-fixture factory
+//!   lives with the SQLite adapter.
 //!
 //! See ADR 0001 for the ownership and service-evolution rules.
 
@@ -244,6 +245,7 @@ pub mod issuer_auth;
 pub mod key_provider;
 pub mod key_revocation;
 pub mod labels;
+pub mod property_index;
 /// KMIP adapter, now in `tenkai-keys`; this path stays for existing importers.
 pub use tenkai_keys::kmip as kmip_provider;
 pub mod maintenance;

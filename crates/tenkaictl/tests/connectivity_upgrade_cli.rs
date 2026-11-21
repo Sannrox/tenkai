@@ -6,7 +6,6 @@ use std::process::Command;
 
 use base64::Engine as _;
 use ed25519_dalek::SigningKey;
-use tenkai::client::Ctx;
 use tenkai::connectivity;
 use tenkai::release_signing::{TRUST_ROOT_VERSION, TrustRoots, key_id};
 
@@ -155,7 +154,7 @@ install = "true"
     assert!(started.contains("status admitted"), "{started}");
 
     let record = {
-        let mut ctx = Ctx::embedded(&db).unwrap();
+        let mut ctx = tenkai_sqlite::embedded_ctx(&db, false).unwrap();
         connectivity::load_upgrade(&mut ctx, "fleet-1")
             .await
             .unwrap()
@@ -245,7 +244,7 @@ install = "true"
     );
 
     let record = {
-        let mut ctx = Ctx::embedded(&db).unwrap();
+        let mut ctx = tenkai_sqlite::embedded_ctx(&db, false).unwrap();
         connectivity::load_upgrade(&mut ctx, "fleet-1")
             .await
             .unwrap()

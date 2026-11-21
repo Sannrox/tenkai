@@ -2711,9 +2711,16 @@ install = "true"
             if envelope.exists() {
                 continue;
             }
-            crate::dev_sign::sign_plan_approval(keys, db, plan_id, &envelope, trust, 3600)
-                .await
-                .unwrap();
+            crate::dev_sign::sign_plan_approval(
+                keys,
+                crate::client::Ctx::embedded(db).unwrap(),
+                plan_id,
+                &envelope,
+                trust,
+                3600,
+            )
+            .await
+            .unwrap();
         }
     }
 

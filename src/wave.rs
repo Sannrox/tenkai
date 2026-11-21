@@ -536,9 +536,16 @@ document = "suite.json"
             if envelope.exists() {
                 continue;
             }
-            crate::dev_sign::sign_plan_approval(keys, db, plan_id, &envelope, trust, 3600)
-                .await
-                .unwrap();
+            crate::dev_sign::sign_plan_approval(
+                keys,
+                crate::client::Ctx::embedded(db).unwrap(),
+                plan_id,
+                &envelope,
+                trust,
+                3600,
+            )
+            .await
+            .unwrap();
         }
     }
 
@@ -961,7 +968,7 @@ document = "suite.json"
 
     impl crate::software_executor::SoftwareExecutor for LosesLeaseDuringApply {
         fn apply(&self, _: &crate::software_executor::SoftwareApplyRequest) -> anyhow::Result<()> {
-            crate::storage::SqliteStore::open(&self.database)?.release_namespaced_lease(
+            crate::storage::MemoryCatalogGraph::open(&self.database)?.release_namespaced_lease(
                 "tenkai/topology-availability",
                 "ledger-ha",
                 &self.fencing_token,

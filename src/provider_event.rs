@@ -467,11 +467,11 @@ fn defer(
 /// workers settle the rest of a claimed batch.
 #[cfg(test)]
 pub(crate) mod failing_mark {
-    use crate::storage::{OperationalStore, ProviderEventRecord, SqliteStore};
+    use crate::storage::{MemoryCatalogGraph, OperationalStore, ProviderEventRecord};
 
     /// Delegates to SQLite but fails to mark one event delivered.
     pub(crate) struct FailingMark {
-        pub(crate) inner: SqliteStore,
+        pub(crate) inner: MemoryCatalogGraph,
         pub(crate) failing_id: String,
     }
 

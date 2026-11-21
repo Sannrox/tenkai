@@ -134,7 +134,8 @@ async fn a_runtime_upgrades_tenkai_server_and_restores_a_bad_build() {
     std::fs::create_dir_all(&marks).unwrap();
     let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
-    let store = Arc::new(tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap());
+    let store =
+        Arc::new(tenkai::storage::MemoryCatalogGraph::open(root.join("tenkai.db")).unwrap());
     let reconciler = Arc::new(
         Reconciler::new(ctx.clone(), ReconcilerConfig::default())
             .unwrap()

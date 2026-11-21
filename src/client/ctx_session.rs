@@ -9,7 +9,9 @@ use super::{
     Backend, Ctx, PlanKindListSnapshot, PlanKindListTick, PlanRetargetTickGuard, block_operational,
 };
 use crate::pb::sekai::Object;
-use crate::storage::{CatalogGraph, OperationalStore};
+use crate::storage::OperationalStore;
+#[cfg(any(test, feature = "test-support"))]
+use crate::storage::StoreBackup;
 
 impl Ctx {
     /// Configure host-owned release roots for deployment re-verification.
@@ -18,25 +20,72 @@ impl Ctx {
         self.require_host_release_trust = true;
         self
     }
-    /// Open the complete in-process backend used by the solo CLI.
+    /// Open a throwaway in-memory session for tests. Path-keyed so a reopen
+    /// of the same path sees the same maps. Community hosts that persist a
+    /// SQLite file use `tenkai_sqlite::embedded_ctx`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn embedded(path: impl AsRef<Path>) -> Result<Self> {
         Self::embedded_with_outcome_export(path, false)
     }
 
-    /// Open embedded application state and optionally enable atomic terminal
-    /// outcome enqueueing into the Tenkai-owned provider outbox.
+    /// Test helper matching the former SQLite embedded constructor.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn embedded_with_outcome_export(
         path: impl AsRef<Path>,
         outcome_export_enabled: bool,
     ) -> Result<Self> {
-        Self::embedded_application_state(path, outcome_export_enabled, true)
+        crate::storage::refuse_postgres_on_embedded().map_err(anyhow::Error::from)?;
+        Self::memory_application_state(path, outcome_export_enabled)
     }
 
-    /// Open hub application state. SQLite remains the control plane; a
-    /// process-level `TENKAI_POSTGRES_URL` is the tenant store, not a substitute
-    /// operational database.
+    /// Test helper matching the former hub constructor (Postgres URL allowed).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn embedded_hub(path: impl AsRef<Path>, outcome_export_enabled: bool) -> Result<Self> {
-        Self::embedded_application_state(path, outcome_export_enabled, false)
+        Self::memory_application_state(path, outcome_export_enabled)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn memory_application_state(
+        path: impl AsRef<Path>,
+        outcome_export_enabled: bool,
+    ) -> Result<Self> {
+        let store = std::sync::Arc::new(crate::storage::MemoryCatalogGraph::open(path)?);
+        let backup = std::sync::Arc::clone(&store);
+        Ok(Self::from_embedded(
+            std::sync::Arc::clone(&store) as std::sync::Arc<dyn crate::storage::CatalogGraph>,
+            store as std::sync::Arc<dyn crate::storage::OperationalStore>,
+            move |destination: &Path| backup.backup(destination),
+            outcome_export_enabled,
+        ))
+    }
+
+    /// Open an in-process session from store ports. Hosts that open a SQLite
+    /// file construct the adapter in `tenkai-sqlite` and pass it here.
+    pub fn from_embedded(
+        catalog: Arc<dyn crate::storage::CatalogGraph>,
+        operational: Arc<dyn crate::storage::OperationalStore>,
+        backup: impl Fn(&Path) -> anyhow::Result<()> + Send + Sync + 'static,
+        outcome_export_enabled: bool,
+    ) -> Self {
+        Self {
+            backend: Backend::Embedded {
+                catalog,
+                operational,
+                backup: Arc::new(backup),
+            },
+            canary_schema_preflight: Arc::new(OnceCell::new()),
+            outcome_export_enabled,
+            feedback_export_enabled: false,
+            outcome_inspection_enabled: true,
+            release_trust_roots: None,
+            require_host_release_trust: false,
+            plan_kind_list: Arc::new(PlanKindListTick::default()),
+            health_metrics: None,
+            trust_sources: None,
+            execution_capabilities: None,
+            held_execution_leases: Vec::new(),
+            plan_proposer: None,
+        }
     }
 
     /// Enterprise hub catalog port. PostgreSQL owns authority; this context
@@ -89,39 +138,6 @@ impl Ctx {
             *bound = Some(tenant.into());
         }
         self
-    }
-
-    fn embedded_application_state(
-        path: impl AsRef<Path>,
-        outcome_export_enabled: bool,
-        refuse_postgres_url: bool,
-    ) -> Result<Self> {
-        let principal = std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "tenkai".into());
-        let store = Arc::new(if refuse_postgres_url {
-            crate::storage::SqliteStore::open_embedded(path, principal)?
-        } else {
-            crate::storage::SqliteStore::open_control_plane(path, principal)?
-        });
-        let backup_store = Arc::clone(&store);
-        Ok(Self {
-            backend: Backend::Embedded {
-                catalog: Arc::clone(&store) as Arc<dyn CatalogGraph>,
-                operational: Arc::clone(&store) as Arc<dyn OperationalStore>,
-                backup: Arc::new(move |destination: &Path| backup_store.backup(destination)),
-            },
-            canary_schema_preflight: Arc::new(OnceCell::new()),
-            outcome_export_enabled,
-            feedback_export_enabled: false,
-            outcome_inspection_enabled: true,
-            release_trust_roots: None,
-            require_host_release_trust: false,
-            plan_kind_list: Arc::new(PlanKindListTick::default()),
-            health_metrics: None,
-            trust_sources: None,
-            execution_capabilities: None,
-            held_execution_leases: Vec::new(),
-            plan_proposer: None,
-        })
     }
 
     /// Certificates this host serves and trusts, so plans can flag one that
