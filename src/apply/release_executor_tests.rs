@@ -373,6 +373,10 @@ async fn apply_refuses_an_executor_change_its_plan_did_not_see() {
 async fn a_declared_executor_that_is_not_installed_fails_closed() {
     for (declared, expected) in [
         ("docker", "\"docker\", and that executor is not installed"),
+        (
+            "apple-container",
+            "\"apple-container\", and that executor is not installed",
+        ),
         ("host", "the host executor is not available"),
     ] {
         let mut fixture = Fixture::new(declared).await;

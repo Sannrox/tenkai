@@ -21,6 +21,7 @@ before `SoftwareExecutors::from_process`.
 | **Native Kubernetes** (#105) | `kubernetes` / `k8s` / `native` | `{workdir}/manifests/**/*.yaml` | `TENKAI_KUBECTL_BIN` or `kubectl` |
 | **In-process Kubernetes** (#376) | `kubernetes-inprocess` | `{workdir}/manifests/**/*.yaml` | in-process client |
 | **Docker host** (#528) | `docker` | `{workdir}/docker/host.json` | `TENKAI_DOCKER_BIN` or `docker` |
+| **Apple container** (#1374) | `apple-container` | `{workdir}/docker/host.json` | `TENKAI_APPLE_CONTAINER_BIN` or `container` |
 | Fake (tests) | `fake` | in-memory | n/a |
 
 **Helm** is the chart-oriented path. **Native** is for plain multi-doc YAML via
@@ -50,7 +51,7 @@ and the object.
 | `HelmSoftwareExecutor` | Helm chart path (`tenkai-executor`) |
 | `KubernetesSoftwareExecutor` | Native manifests path (`kubectl`, `tenkai-executor`) |
 | `InProcessKubernetesExecutor` | Native manifests with server-side apply (`tenkai-executor`) |
-| `DockerHostExecutor` | Digest-pinned host containers, networks, and volumes (`tenkai-executor`) |
+| `DockerHostExecutor` | Digest-pinned host containers, networks, and volumes (`tenkai-executor`); Apple `container` is a dialect of the same adapter |
 
 Hosts (`tenkaictl`, the reconciler) call `tenkai_executor::install()`, then
 pass `SoftwareExecutors::try_from_process()` into apply: the
@@ -90,6 +91,7 @@ or `pre-pull failed for <image>: <cause>` on the plan. Apply still runs when
 the window opens.
 
 - Docker host: `docker pull` by digest.
+- Apple container: `container image pull` by digest.
 - Kubernetes (kubectl and in-process): a short-lived Job per image, named
   `tenkai-pp-<12 hex>` and labeled `tenkai.pre-pull=true`. Cleanup deletes
   those Jobs (cascading their pods) and leftover labeled pods by label and
@@ -555,6 +557,45 @@ Shell `deploy.install` remains the default when `TENKAI_SOFTWARE_EXECUTOR` is
 unset. A typo or an adapter this process did not install is refused; it does
 not become shell. Docker products should keep a fail-closed install reminder, the same
 pattern as Helm and Kubernetes examples. Default tests drive a fake Docker CLI.
+
+## Apple container enablement (#1374)
+
+The same `docker/host.json` contract through the Apple `container` CLI. Select
+it with `TENKAI_SOFTWARE_EXECUTOR=apple-container` or
+`[deploy] executor = "apple-container"`. `/readyz` lists
+`software_executor:apple-container` only while `container system status`
+succeeds.
+
+```bash
+export TENKAI_SOFTWARE_EXECUTOR=apple-container
+export TENKAI_APPLE_CONTAINER_BIN=container   # optional
+tenkaictl env docker-secrets set lab /var/lib/tenkai/lab-secrets
+tenkaictl reconcile --once
+```
+
+Replace creates a new generation name and puts the declared container name as
+a DNS alias on each network. Exact aliases are unique across running and
+stopped containers and are fixed at create, so a replacement that still has a
+previous generation is created without those aliases under a cutover name.
+The previous generation is stopped first so published ports and writable
+volumes are free, then retained for restore. Health runs against the cutover.
+A failed health check before aliases are claimed deletes the cutover and
+starts the previous container. After a container is healthy, its previous
+generation is deleted, the cutover is stopped, the aliased generation is
+created, and the cutover is removed so dependents resolve the declared name.
+A later container's failed health restores that container's previous
+generation and leaves already-claimed containers in place. If alias handoff
+fails after the previous generation is gone, the healthy cutover stays and
+rollback does not delete it. Health is
+`container exec … sh -c` with the same attempt and delay bounds as Docker
+inspect, and each exec is killed after 10 seconds; observe runs that command
+once and treats a failing command like
+Docker `unhealthy`. Restart is `stop` then `start`. This version refuses
+`restart` other than `no`, `files`, `tmpfs` with a non-default mode, uid,
+or gid, and one-shot jobs (`inspect` has no exit code to prove completion).
+Default
+CI drives a fake `container` CLI. The live engine is Apple silicon
+darwin-aarch64.
 
 ## Local dogfood
 

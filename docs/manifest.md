@@ -56,6 +56,7 @@ executor = "kubernetes-inprocess"
 | `kubernetes` (aliases `k8s`, `native`) | `{workdir}/manifests/**` through `kubectl` |
 | `kubernetes-inprocess` | `{workdir}/manifests/**` with server-side apply |
 | `docker` | `{workdir}/docker/host.json` |
+| `apple-container` | `{workdir}/docker/host.json` through the Apple `container` CLI |
 
 These are the [`TENKAI_SOFTWARE_EXECUTOR`](software-executor.md) names, matched
 the same way (ASCII case-insensitively); `fake` is a test selector and is not

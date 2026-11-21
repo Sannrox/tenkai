@@ -36,6 +36,9 @@ pub fn install() {
     tenkai::software_executor::install_docker_software_executor(|| {
         Box::new(DockerHostExecutor::default())
     });
+    tenkai::software_executor::install_apple_container_software_executor(|| {
+        Box::new(DockerHostExecutor::apple_container())
+    });
     tenkai::software_executor::install_in_process_software_executor(|| {
         Box::new(selected_in_process_executor())
     });

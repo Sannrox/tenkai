@@ -12,11 +12,16 @@ fn install_selects_helm_kubernetes_and_docker_adapters() {
     ));
     std::fs::create_dir_all(&root).unwrap();
 
+    let (container_bin, _) = tenkai::rollout_time::install_fake_container(&root).unwrap();
+    unsafe {
+        std::env::set_var("TENKAI_APPLE_CONTAINER_BIN", &container_bin);
+    }
     let cases = [
         ("helm", root.join("missing-chart"), "helm chart workdir"),
         ("kubernetes", root.clone(), "manifests"),
         ("k8s", root.clone(), "manifests"),
         ("docker", root.clone(), "docker/"),
+        ("apple-container", root.clone(), "docker/"),
     ];
     for (value, workdir, needle) in cases {
         unsafe {
@@ -45,6 +50,7 @@ fn install_selects_helm_kubernetes_and_docker_adapters() {
 
     unsafe {
         std::env::remove_var("TENKAI_SOFTWARE_EXECUTOR");
+        std::env::remove_var("TENKAI_APPLE_CONTAINER_BIN");
     }
     let _ = std::fs::remove_dir_all(root);
 }
