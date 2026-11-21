@@ -317,6 +317,7 @@ mod tests {
                 artifact_digest: "artifact-digest".into(),
                 deployed_version: Some("1.0.0".into()),
                 providers: Default::default(),
+                saved_plan_digest: String::new(),
             }],
             steps: vec![Step {
                 id: "tenkai:plan:prod:test:step:0".into(),
@@ -340,6 +341,7 @@ mod tests {
                 target_changes: Vec::new(),
                 reason: String::new(),
                 cluster_namespace: None,
+                provision: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,
@@ -602,6 +604,7 @@ mod tests {
                 target_changes: Vec::new(),
                 reason: String::new(),
                 cluster_namespace: None,
+                provision: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,

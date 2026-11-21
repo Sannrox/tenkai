@@ -857,6 +857,7 @@ fn issuer_step(
         target_changes: Vec::new(),
         reason: String::new(),
         cluster_namespace: None,
+        provision: None,
     }
 }
 

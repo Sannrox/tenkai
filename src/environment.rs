@@ -5545,6 +5545,7 @@ mod tests {
                 artifact_digest: "abc".into(),
                 deployed_version: None,
                 providers: Default::default(),
+                saved_plan_digest: String::new(),
             }],
             steps: vec![crate::plan::Step {
                 id: String::new(),
@@ -5568,6 +5569,7 @@ mod tests {
                 target_changes: Vec::new(),
                 reason: String::new(),
                 cluster_namespace: None,
+                provision: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,
@@ -5987,6 +5989,7 @@ mod tests {
                 artifact_digest: "abc".into(),
                 deployed_version: None,
                 providers: Default::default(),
+                saved_plan_digest: String::new(),
             }],
             steps: vec![crate::plan::Step {
                 id: String::new(),
@@ -6010,6 +6013,7 @@ mod tests {
                 target_changes: Vec::new(),
                 reason: String::new(),
                 cluster_namespace: None,
+                provision: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,
@@ -6237,6 +6241,7 @@ mod tests {
                 artifact_digest: "abc".into(),
                 deployed_version: None,
                 providers: Default::default(),
+                saved_plan_digest: String::new(),
             }],
             steps: vec![crate::plan::Step {
                 id: String::new(),
@@ -6260,6 +6265,7 @@ mod tests {
                 target_changes: Vec::new(),
                 reason: String::new(),
                 cluster_namespace: None,
+                provision: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,
@@ -6374,6 +6380,7 @@ mod tests {
                 artifact_digest: "abc".into(),
                 deployed_version: None,
                 providers: Default::default(),
+                saved_plan_digest: String::new(),
             }],
             steps: vec![crate::plan::Step {
                 id: String::new(),
@@ -6397,6 +6404,7 @@ mod tests {
                 target_changes: Vec::new(),
                 reason: String::new(),
                 cluster_namespace: None,
+                provision: None,
             }],
             state: crate::plan::PlanState::Computed,
             gates_skipped: None,

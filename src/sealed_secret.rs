@@ -35,6 +35,8 @@ pub const SEALED_FORMAT_VERSION: u32 = 1;
 const WRAP_INFO: &[u8] = b"tenkai.sealed-secret.v1";
 /// Largest value accepted. A Kubernetes Secret holds at most 1 MiB in all.
 pub const MAX_VALUE_BYTES: usize = 64 * 1024;
+/// Largest saved plan a provision prepare may seal (ADR 0052).
+pub const MAX_SAVED_PLAN_BYTES: usize = 16 * 1024 * 1024;
 /// Most wraps one value may carry; a value with more opens for no one.
 pub(crate) const MAX_WRAPS: usize = 64;
 const NONCE_BYTES: usize = 12;
@@ -169,11 +171,29 @@ pub fn seal(
     value: &[u8],
     recipients: &[SealingPublicKey],
 ) -> Result<SealedValue> {
+    seal_with_limit(target, value, recipients, MAX_VALUE_BYTES)
+}
+
+/// Seal a provision saved plan, which may be larger than a secret value.
+pub fn seal_saved_plan(
+    target: &SealedTarget,
+    value: &[u8],
+    recipients: &[SealingPublicKey],
+) -> Result<SealedValue> {
+    seal_with_limit(target, value, recipients, MAX_SAVED_PLAN_BYTES)
+}
+
+fn seal_with_limit(
+    target: &SealedTarget,
+    value: &[u8],
+    recipients: &[SealingPublicKey],
+    max_bytes: usize,
+) -> Result<SealedValue> {
     use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
     use ring::rand::SecureRandom as _;
 
-    if value.is_empty() || value.len() > MAX_VALUE_BYTES {
-        bail!("a sealed value must be 1..={MAX_VALUE_BYTES} bytes");
+    if value.is_empty() || value.len() > max_bytes {
+        bail!("a sealed value must be 1..={max_bytes} bytes");
     }
     if recipients.is_empty() {
         bail!("{} has no recipient keys to seal to", target.environment);

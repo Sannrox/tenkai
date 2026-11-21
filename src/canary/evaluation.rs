@@ -452,6 +452,7 @@ mod tests {
             target_changes: Vec::new(),
             reason: String::new(),
             cluster_namespace: None,
+            provision: None,
         }];
         let content_id = plan_content_id(environment, created_at, &steps);
         let id = plan_id(environment, created_at, &content_id);

@@ -425,6 +425,7 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
             artifact_digest: "abc".into(),
             deployed_version: None,
             providers: Default::default(),
+            saved_plan_digest: String::new(),
         }],
         steps: vec![Step {
             id: format!("{}:step:0", plan_id(env, created_at, "digest-a")),
@@ -448,6 +449,7 @@ fn sample_plan(env: &str, created_at: i64) -> Plan {
             target_changes: Vec::new(),
             reason: String::new(),
             cluster_namespace: None,
+            provision: None,
         }],
         state: PlanState::Computed,
         gates_skipped: None,

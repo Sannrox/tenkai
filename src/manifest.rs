@@ -71,6 +71,9 @@ pub struct Manifest {
     /// host releases may carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os_image: Option<OsImageSection>,
+    /// Terraform/OpenTofu CLI pair for `deploy.executor = "provision"` (ADR 0052).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<crate::provision::ProvisionSection>,
 }
 
 /// The image an OS image host release asks the on-host updater to boot.
@@ -655,6 +658,9 @@ pub fn load(path: &Path) -> Result<LoadedManifest> {
     if crate::staged_artifact::is_staged_kind(manifest.product.kind) {
         crate::staged_artifact::validate_staged_manifest(&manifest, &workdir)?;
     }
+    if manifest.deploy.executor == Some(crate::software_executor::SoftwareExecutorKind::Provision) {
+        crate::provision::admit_locking_backend(&workdir)?;
+    }
     Ok(LoadedManifest {
         manifest,
         raw,
@@ -698,6 +704,7 @@ pub fn validate_declared(manifest: &Manifest) -> Result<()> {
                 Some(
                     crate::software_executor::SoftwareExecutorKind::Kubernetes
                         | crate::software_executor::SoftwareExecutorKind::KubernetesInProcess
+                        | crate::software_executor::SoftwareExecutorKind::Provision
                 )
             );
             if reads_install && manifest.deploy.install.trim().is_empty() {
@@ -959,6 +966,19 @@ fn validate_deploy_executor(manifest: &Manifest) -> Result<()> {
         }
     } else if manifest.deploy.confirm.is_some() {
         bail!("deploy.confirm is only supported on releases with [os_image]");
+    }
+    match (
+        manifest.deploy.executor == Some(crate::software_executor::SoftwareExecutorKind::Provision),
+        manifest.provision.as_ref(),
+    ) {
+        (true, Some(provision)) => provision.validate()?,
+        (true, None) => {
+            bail!("deploy.executor = \"provision\" needs a [provision] cli and cli_version")
+        }
+        (false, Some(_)) => {
+            bail!("[provision] is only supported on releases with deploy.executor = \"provision\"")
+        }
+        (false, None) => {}
     }
     Ok(())
 }
@@ -1406,6 +1426,7 @@ mod tests {
             inventory: None,
             topology: None,
             os_image: None,
+            provision: None,
         };
         assert_eq!(manifest.immutable_inputs(), vec!["routing.json"]);
     }
@@ -1442,6 +1463,7 @@ mod tests {
             }),
             topology: None,
             os_image: None,
+            provision: None,
         };
         assert_eq!(manifest.immutable_inputs(), vec!["sbom.json"]);
         manifest.deploy.inputs = vec!["bin".into()];
@@ -1704,8 +1726,17 @@ max_startup_seconds = 30
             ("kubernetes-inprocess", Kind::KubernetesInProcess),
             ("docker", Kind::Docker),
             ("apple-container", Kind::AppleContainer),
+            ("provision", Kind::Provision),
         ] {
-            let manifest = parse_raw(&with_executor(HELLO_LOCAL, written)).unwrap();
+            let raw = if written == "provision" {
+                format!(
+                    "{}\n[provision]\ncli = \"tofu\"\ncli_version = \"1.9.0\"\n",
+                    with_executor(HELLO_LOCAL, written)
+                )
+            } else {
+                with_executor(HELLO_LOCAL, written)
+            };
+            let manifest = parse_raw(&raw).unwrap();
             assert_eq!(manifest.deploy.executor, Some(kind), "{written}");
         }
     }

@@ -292,6 +292,7 @@ pub(super) async fn create_pin_plan(
         target_changes: Vec::new(),
         reason: String::new(),
         cluster_namespace: None,
+        provision: None,
     };
     plan::create_from_steps(ctx, &record.environment, vec![step]).await
 }

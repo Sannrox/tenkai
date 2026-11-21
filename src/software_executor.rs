@@ -18,6 +18,10 @@
 //! CLI via `TENKAI_SOFTWARE_EXECUTOR=apple-container`. The CLI dialect lives
 //! in `tenkai-executor`; this crate only names the kind.
 //!
+//! **Provision (#1385):** Terraform or OpenTofu saved plans through
+//! `TENKAI_SOFTWARE_EXECUTOR=provision` (ADR 0052). Prepare and apply live
+//! in `tenkai-executor`; this crate names the kind.
+//!
 //! Hosts call `tenkai_executor::install()` then [`SoftwareExecutors::try_from_process`].
 //! Each release runs with the executor it declares in `[deploy] executor`, or
 //! with the process default when it declares none (ADR 0041). Community
@@ -75,6 +79,7 @@ static HELM_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::ne
 static KUBERNETES_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::new();
 static DOCKER_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::new();
 static APPLE_CONTAINER_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::new();
+static PROVISION_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::new();
 static IN_PROCESS_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::new();
 
 /// Install the Helm CLI adapter from `tenkai-executor`.
@@ -95,6 +100,11 @@ pub fn install_docker_software_executor(factory: fn() -> Box<dyn SoftwareExecuto
 /// Install the Apple `container` CLI adapter from `tenkai-executor`.
 pub fn install_apple_container_software_executor(factory: fn() -> Box<dyn SoftwareExecutor>) {
     let _ = APPLE_CONTAINER_EXECUTOR.set(factory);
+}
+
+/// Install the Terraform/OpenTofu provision adapter from `tenkai-executor`.
+pub fn install_provision_software_executor(factory: fn() -> Box<dyn SoftwareExecutor>) {
+    let _ = PROVISION_EXECUTOR.set(factory);
 }
 
 /// Install the in-process Kubernetes adapter from `tenkai-executor`.
@@ -517,6 +527,68 @@ pub trait SoftwareExecutor: Send + Sync {
         let _ = request;
         Ok(())
     }
+    /// Run the tool's plan command and return the saved plan plus a value-free
+    /// summary (ADR 0052). Default: this adapter is not a provision executor.
+    fn prepare_provision(
+        &self,
+        request: &SoftwareApplyRequest,
+        destroy: bool,
+        stop: &AtomicBool,
+    ) -> Result<crate::provision::PreparedPlan> {
+        let _ = (request, destroy, stop);
+        bail!(
+            "provision prepare is not supported for {}@{} in {}",
+            request.product,
+            request.version,
+            request.environment
+        )
+    }
+    /// Apply exactly `saved_plan`. Default: this adapter is not a provision executor.
+    fn apply_provision(
+        &self,
+        request: &SoftwareApplyRequest,
+        saved_plan: &[u8],
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        let _ = (request, saved_plan, stop);
+        bail!(
+            "provision apply is not supported for {}@{} in {}",
+            request.product,
+            request.version,
+            request.environment
+        )
+    }
+    /// Refresh-only plan used for drift observation. Default: none.
+    fn observe_provision_drift(
+        &self,
+        request: &SoftwareApplyRequest,
+    ) -> Result<crate::provision::ProvisionSummary> {
+        let _ = request;
+        bail!(
+            "provision drift observation is not supported for {}@{} in {}",
+            request.product,
+            request.version,
+            request.environment
+        )
+    }
+    /// The CLI this adapter will run and the version it reports.
+    fn provision_cli_version(&self) -> Result<(crate::provision::ProvisionCli, String)> {
+        bail!("this executor does not run a provision CLI")
+    }
+    /// Render a value-free summary from plaintext saved-plan bytes.
+    fn summarize_saved_plan(
+        &self,
+        request: &SoftwareApplyRequest,
+        saved_plan: &[u8],
+    ) -> Result<crate::provision::ProvisionSummary> {
+        let _ = (request, saved_plan);
+        bail!(
+            "provision summary is not supported for {}@{} in {}",
+            request.product,
+            request.version,
+            request.environment
+        )
+    }
 }
 
 /// One image a [`SoftwareExecutor::pre_pull`] attempted.
@@ -771,6 +843,68 @@ impl SoftwareExecutor for FakeSoftwareExecutor {
             .push(request.clone());
         Ok(())
     }
+
+    fn prepare_provision(
+        &self,
+        request: &SoftwareApplyRequest,
+        destroy: bool,
+        stop: &AtomicBool,
+    ) -> Result<crate::provision::PreparedPlan> {
+        let _ = stop;
+        validate_request(request)?;
+        Ok(fake_saved_plan(destroy))
+    }
+
+    fn apply_provision(
+        &self,
+        request: &SoftwareApplyRequest,
+        saved_plan: &[u8],
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        let _ = (saved_plan, stop);
+        self.apply(request)
+    }
+
+    fn observe_provision_drift(
+        &self,
+        request: &SoftwareApplyRequest,
+    ) -> Result<crate::provision::ProvisionSummary> {
+        validate_request(request)?;
+        Ok(crate::provision::ProvisionSummary::default())
+    }
+
+    fn provision_cli_version(&self) -> Result<(crate::provision::ProvisionCli, String)> {
+        Ok((crate::provision::ProvisionCli::Tofu, "1.8.0".into()))
+    }
+
+    fn summarize_saved_plan(
+        &self,
+        request: &SoftwareApplyRequest,
+        saved_plan: &[u8],
+    ) -> Result<crate::provision::ProvisionSummary> {
+        validate_request(request)?;
+        crate::provision::summary_from_plan_json(saved_plan)
+    }
+}
+
+fn fake_saved_plan(destroy: bool) -> crate::provision::PreparedPlan {
+    let actions = if destroy {
+        vec!["delete"]
+    } else {
+        vec!["create"]
+    };
+    let json = serde_json::to_vec(&serde_json::json!({
+        "format_version": "1.2",
+        "resource_changes": [{
+            "address": "null_resource.demo",
+            "change": { "actions": actions }
+        }]
+    }))
+    .expect("fake plan json");
+    crate::provision::PreparedPlan {
+        plaintext: zeroize::Zeroizing::new(json.clone()),
+        summary: crate::provision::summary_from_plan_json(&json).expect("fake plan json"),
+    }
 }
 
 /// Directory under the release workdir that holds native Kubernetes manifests.
@@ -885,13 +1019,14 @@ pub enum SoftwareExecutorKind {
     Docker,
     /// `docker/host.json` through Apple `container` on darwin-aarch64.
     AppleContainer,
+    /// Terraform or OpenTofu saved plans (ADR 0052).
+    Provision,
 }
 
-const SOFTWARE_EXECUTOR_NAME_HINT: &str =
-    "shell, host, helm, kubernetes (k8s, native), kubernetes-inprocess, docker, apple-container";
+const SOFTWARE_EXECUTOR_NAME_HINT: &str = "shell, host, helm, kubernetes (k8s, native), kubernetes-inprocess, docker, apple-container, provision";
 
 impl SoftwareExecutorKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Shell,
         Self::Host,
         Self::Helm,
@@ -899,6 +1034,7 @@ impl SoftwareExecutorKind {
         Self::KubernetesInProcess,
         Self::Docker,
         Self::AppleContainer,
+        Self::Provision,
     ];
 
     /// Canonical name; aliases normalize to it.
@@ -911,6 +1047,7 @@ impl SoftwareExecutorKind {
             Self::KubernetesInProcess => "kubernetes-inprocess",
             Self::Docker => "docker",
             Self::AppleContainer => "apple-container",
+            Self::Provision => "provision",
         }
     }
 
@@ -969,6 +1106,7 @@ pub fn software_executor_for(kind: SoftwareExecutorKind) -> Option<Box<dyn Softw
         SoftwareExecutorKind::KubernetesInProcess => IN_PROCESS_EXECUTOR.get(),
         SoftwareExecutorKind::Docker => DOCKER_EXECUTOR.get(),
         SoftwareExecutorKind::AppleContainer => APPLE_CONTAINER_EXECUTOR.get(),
+        SoftwareExecutorKind::Provision => PROVISION_EXECUTOR.get(),
     };
     factory.map(|factory| factory())
 }
@@ -1013,7 +1151,11 @@ fn lists_live_workloads(kind: Option<SoftwareExecutorKind>, cluster: bool, docke
         | Some(SoftwareExecutorKind::Kubernetes)
         | Some(SoftwareExecutorKind::KubernetesInProcess) => cluster,
         Some(SoftwareExecutorKind::Docker | SoftwareExecutorKind::AppleContainer) => docker,
-        Some(SoftwareExecutorKind::Shell | SoftwareExecutorKind::Host) => false,
+        Some(
+            SoftwareExecutorKind::Shell
+            | SoftwareExecutorKind::Host
+            | SoftwareExecutorKind::Provision,
+        ) => false,
     }
 }
 

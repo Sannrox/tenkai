@@ -56,6 +56,7 @@ async fn compatible_migration_approves_executes_resumes_and_rolls_back() {
             target_changes: Vec::new(),
             reason: String::new(),
             cluster_namespace: None,
+            provision: None,
         }],
     )
     .await

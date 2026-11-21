@@ -1099,6 +1099,7 @@ async fn compute_snapshot_with_policy(
                 &env_obj.properties,
             )
             .for_dependent(&instance),
+            saved_plan_digest: String::new(),
         });
         if let Some((record, health)) = &host_record {
             host_products.insert(product.clone());
@@ -1769,6 +1770,7 @@ async fn compute_snapshot_with_policy(
                 target_changes: Vec::new(),
                 reason: String::new(),
                 cluster_namespace: None,
+                provision: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1778,7 +1780,52 @@ async fn compute_snapshot_with_policy(
         persist_unmanaged_workloads(ctx, env, &env_obj).await?;
     }
     let steps = with_cluster_namespace_steps(env, &env_obj, steps)?;
+    let (inputs, steps) = attach_provision(ctx, env, &env_obj, inputs, steps).await?;
     Ok((inputs, steps, recalled_upgrade))
+}
+
+async fn attach_provision(
+    ctx: &mut Ctx,
+    env: &str,
+    env_obj: &crate::pb::sekai::Object,
+    mut inputs: Vec<DesiredStateInput>,
+    mut steps: Vec<Step>,
+) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
+    let mut recipients = None;
+    for step in &mut steps {
+        if step.cluster_namespace.is_some() || step.rewrap.is_some() || step.issuer.is_some() {
+            continue;
+        }
+        let Some(manifest) = readable_manifest(ctx, &step.release_id).await? else {
+            continue;
+        };
+        if manifest.deploy.executor
+            != Some(crate::software_executor::SoftwareExecutorKind::Provision)
+        {
+            continue;
+        }
+        let section = manifest.provision.as_ref().with_context(|| {
+            format!(
+                "release {} declares the provision executor without [provision]",
+                step.release_id
+            )
+        })?;
+        if recipients.is_none() {
+            recipients = Some(crate::provision::plan_recipients(ctx, env).await?);
+        }
+        let instance = step.instance_name().to_string();
+        let input = inputs
+            .iter_mut()
+            .find(|input| input.instance_name() == instance);
+        crate::provision::bind_step(
+            step,
+            input,
+            section,
+            env_obj,
+            recipients.clone().unwrap_or_default(),
+        )?;
+    }
+    Ok((inputs, steps))
 }
 
 /// Create and update cluster-namespace steps run before product steps; deletes after.
@@ -1830,6 +1877,7 @@ fn with_cluster_namespace_steps(
             target_changes: Vec::new(),
             reason: String::new(),
             cluster_namespace: Some(ns),
+            provision: None,
         }
     };
     let mut prefix = Vec::new();
@@ -2078,7 +2126,8 @@ pub(super) fn model_routing_rollout_rank(kind: crate::manifest::ProductKind, act
         }
         Action::CreateClusterNamespace
         | Action::UpdateClusterNamespace
-        | Action::DeleteClusterNamespace => RolloutDirection::Forward,
+        | Action::DeleteClusterNamespace
+        | Action::ProvisionPrepare => RolloutDirection::Forward,
     };
     kind.policy().rollout_rank(direction)
 }
@@ -3340,6 +3389,7 @@ pub(super) async fn rollback_step_with_recovery(
         target_changes: Vec::new(),
         reason: String::new(),
         cluster_namespace: None,
+        provision: None,
     })
 }
 
@@ -3401,6 +3451,7 @@ async fn pin_same_version_step(ctx: &mut Ctx, pin: SameVersionPin<'_>) -> Result
         target_changes: Vec::new(),
         reason,
         cluster_namespace: None,
+        provision: None,
     })
 }
 
@@ -3589,6 +3640,7 @@ pub(super) async fn adopt_step(
         target_changes: Vec::new(),
         reason: String::new(),
         cluster_namespace: None,
+        provision: None,
     };
     attach_target_changes(
         ctx,
@@ -3697,6 +3749,7 @@ pub(super) async fn rewrap_steps(
             target_changes: Vec::new(),
             reason: String::new(),
             cluster_namespace: None,
+            provision: None,
         });
     }
     Ok((steps, undeployed))
