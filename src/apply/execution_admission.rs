@@ -138,7 +138,9 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
     let Some(environment) = ctx.get(&env_id(&plan.environment)).await? else {
         return Ok(Err(Rejection::EnvironmentMissing));
     };
-    if let Err(error) = crate::preview::admit_plan(&environment, crate::now_millis()) {
+    if let Err(error) =
+        crate::preview::admit_executable_plan(&environment, crate::now_millis(), &plan.steps)
+    {
         return Ok(Err(Rejection::PreviewClosed {
             detail: error.to_string(),
         }));
@@ -624,6 +626,91 @@ mod tests {
         );
         let error = admit(&mut ctx, &leftover).await.unwrap_err().to_string();
         assert!(error.contains("torn down"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn closing_preview_refuses_leftover_non_remove_and_admits_remove() {
+        let mut ctx = context("preview-closing");
+        crate::ontology::register(&mut ctx).await.unwrap();
+        let pin = crate::preview::BranchPin {
+            contract: crate::preview::PIN_CONTRACT.into(),
+            namespace: "acme".into(),
+            branch_id: "types".into(),
+            head_revision: "rev-1".into(),
+            pin_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        crate::preview::provision(
+            &mut ctx,
+            "review",
+            pin,
+            crate::now_millis() + 86_400_000,
+            "",
+            1_000,
+        )
+        .await
+        .unwrap();
+        let mut environment = crate::environment::environment(&mut ctx, "review")
+            .await
+            .unwrap();
+        environment
+            .properties
+            .insert("deployed.api".into(), "1.0.0".into());
+        ctx.put(environment).await.unwrap();
+        crate::preview::close_branch(&mut ctx, "review", 2_000)
+            .await
+            .unwrap();
+
+        let mut leftover = Plan {
+            format_version: PLAN_FORMAT_VERSION,
+            id: "tenkai:plan:review:leftover".into(),
+            content_id: "content".into(),
+            environment: "review".into(),
+            created_at: 1,
+            inputs: Vec::new(),
+            steps: vec![Step {
+                id: "tenkai:plan:review:leftover:step:0".into(),
+                order: 0,
+                product: "api".into(),
+                instance: String::new(),
+                action: Action::Rollback,
+                from: Some("1.0.0".into()),
+                to: "1.0.0".into(),
+                release_id: "tenkai:release:api@1.0.0".into(),
+                release_digest: "digest".into(),
+                artifact_digest: "artifact".into(),
+                workdir: "/srv/api".into(),
+                host: None,
+                sealed: Vec::new(),
+                restore: None,
+                rewrap: None,
+                issuer: None,
+                identity: None,
+                restore_identity: None,
+                target_changes: Vec::new(),
+                reason: String::new(),
+                cluster_namespace: None,
+                provision: None,
+            }],
+            state: PlanState::Computed,
+            gates_skipped: None,
+            status_detail: String::new(),
+            maintenance_blocked: false,
+            prior_warnings: Vec::new(),
+            recalled_recovery_reason: None,
+            recalled_upgrade: Vec::new(),
+            credential_runway: None,
+            artifact_availability: Vec::new(),
+            config_presets: Vec::new(),
+            approval_brief: None,
+        };
+        let error = admit(&mut ctx, &leftover).await.unwrap_err().to_string();
+        assert!(error.contains("closing"), "{error}");
+
+        leftover.steps[0].action = Action::Remove;
+        leftover.steps[0].from = Some("1.0.0".into());
+        leftover.steps[0].to = "1.0.0".into();
+        leftover.steps[0].release_id = "tenkai:release:api@1.0.0".into();
+        admit(&mut ctx, &leftover).await.unwrap();
     }
 
     #[tokio::test]

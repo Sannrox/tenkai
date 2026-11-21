@@ -3,7 +3,9 @@
 //! A preview environment is a `tenkai.environment` with `environment_kind=preview`.
 //! It is not a channel subscriber, cannot be promoted onto a channel, and is
 //! torn down on expiry or recorded branch close. Teardown never deletes the
-//! environment object and never mutates a non-preview environment.
+//! environment object and never mutates a non-preview environment. A preview
+//! with deployed instances first moves to `closing` and plans `Remove` steps;
+//! it is `torn_down` only after those steps succeed.
 
 use std::collections::HashMap;
 use std::io::Read as _;
@@ -23,6 +25,7 @@ use crate::signature_verification;
 pub const PIN_CONTRACT: &str = "tenkai.branch_pin.v1";
 pub const ENVIRONMENT_KIND_PREVIEW: &str = "preview";
 pub const STATUS_ACTIVE: &str = "active";
+pub const STATUS_CLOSING: &str = "closing";
 pub const STATUS_TORN_DOWN: &str = "torn_down";
 pub const TEARDOWN_EXPIRED: &str = "expired";
 pub const TEARDOWN_BRANCH_CLOSED: &str = "branch_closed";
@@ -69,6 +72,11 @@ pub struct TeardownEvidence {
     pub plan_digest: String,
     pub reason: String,
     pub torn_down_at: i64,
+}
+
+struct TeardownProgress {
+    evidence: TeardownEvidence,
+    status: String,
 }
 
 impl BranchPin {
@@ -159,6 +167,7 @@ pub fn admit_plan(object: &Object, now: i64) -> Result<()> {
                 .as_deref()
                 .unwrap_or("recorded teardown")
         ),
+        STATUS_CLOSING => Ok(()),
         STATUS_ACTIVE if preview.expires_at <= now => bail!(
             "preview environment {} expired at {}; teardown required",
             object.name,
@@ -170,6 +179,30 @@ pub fn admit_plan(object: &Object, now: i64) -> Result<()> {
             object.name
         ),
     }
+}
+
+/// Snapshot planning may create a `Remove` plan while a preview is `closing`.
+/// Any other step is refused so leftover Computed installs cannot land.
+pub fn admit_executable_plan(object: &Object, now: i64, steps: &[crate::plan::Step]) -> Result<()> {
+    admit_plan(object, now)?;
+    let Some(preview) = inspect_from_object(object)? else {
+        return Ok(());
+    };
+    if preview.status == STATUS_CLOSING
+        && steps
+            .iter()
+            .any(|step| step.action != crate::plan::Action::Remove)
+    {
+        bail!(
+            "preview environment {} is closing ({}); only removal is admitted",
+            object.name,
+            preview
+                .teardown_reason
+                .as_deref()
+                .unwrap_or("recorded teardown")
+        );
+    }
+    Ok(())
 }
 
 pub async fn provision(
@@ -237,8 +270,10 @@ pub async fn provision(
     ))
 }
 
-/// Preview residue that must stay Current: already torn down, or expiry
-/// teardown just recorded. Non-preview environments are never terminal residue.
+/// Preview residue that must stay Current: already torn down, or teardown
+/// finished because nothing remains to remove. A `closing` preview with
+/// deployed instances is not terminal: the reconciler plans `Remove` steps.
+/// Non-preview environments are never terminal residue.
 pub async fn is_terminal_residue(ctx: &mut Ctx, env: &str, now: i64) -> Result<bool> {
     validate_identifier("environment", env)?;
     let Some(object) = ctx.get(&env_id(env)).await? else {
@@ -251,11 +286,20 @@ pub async fn is_terminal_residue(ctx: &mut Ctx, env: &str, now: i64) -> Result<b
     if preview.status == STATUS_TORN_DOWN {
         return Ok(true);
     }
-    if preview.expires_at > now {
+    let expired = preview.expires_at <= now;
+    if preview.status == STATUS_ACTIVE && !expired {
         return Ok(false);
     }
-    persist_teardown(ctx, object, TEARDOWN_EXPIRED, now).await?;
-    Ok(true)
+    let reason = if preview.status == STATUS_CLOSING {
+        preview
+            .teardown_reason
+            .as_deref()
+            .unwrap_or(TEARDOWN_EXPIRED)
+    } else {
+        TEARDOWN_EXPIRED
+    };
+    let progress = begin_teardown(ctx, object, reason, now).await?;
+    Ok(progress.status == STATUS_TORN_DOWN)
 }
 
 pub async fn close_branch(ctx: &mut Ctx, env: &str, now: i64) -> Result<TeardownEvidence> {
@@ -276,7 +320,14 @@ pub async fn close_branch(ctx: &mut Ctx, env: &str, now: i64) -> Result<Teardown
             torn_down_at: preview.teardown_at.unwrap_or(now),
         });
     }
-    persist_teardown(ctx, object, TEARDOWN_BRANCH_CLOSED, now).await
+    let reason = if preview.status == STATUS_CLOSING {
+        preview
+            .teardown_reason
+            .unwrap_or_else(|| TEARDOWN_BRANCH_CLOSED.into())
+    } else {
+        TEARDOWN_BRANCH_CLOSED.into()
+    };
+    Ok(begin_teardown(ctx, object, &reason, now).await?.evidence)
 }
 
 fn replay_or_conflict(
@@ -300,7 +351,7 @@ fn replay_or_conflict(
     if stored.pin_digest != pin.pin_digest || stored.plan_digest != *plan_digest {
         bail!("preview environment {name} already exists with a different branch pin");
     }
-    if stored.status == STATUS_TORN_DOWN {
+    if stored.status == STATUS_TORN_DOWN || stored.status == STATUS_CLOSING {
         bail!(
             "preview environment {name} was torn down ({}); choose a new environment name",
             stored
@@ -345,7 +396,7 @@ fn stored_inspect(object: &Object) -> Result<PreviewInspect> {
         })?;
     let status = required_prop(object, PROP_STATUS)?;
     match status.as_str() {
-        STATUS_ACTIVE | STATUS_TORN_DOWN => {}
+        STATUS_ACTIVE | STATUS_CLOSING | STATUS_TORN_DOWN => {}
         other => bail!(
             "preview environment {} has unknown status {other:?}",
             object.name
@@ -377,12 +428,38 @@ fn required_prop(object: &Object, key: &str) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("preview environment {} is missing {key}", object.name))
 }
 
-async fn persist_teardown(
+fn has_removal_residue(object: &Object) -> bool {
+    object
+        .properties
+        .keys()
+        .any(|key| key.starts_with("deployed.") || key.starts_with("failed_target."))
+}
+
+fn evidence_from(
+    object: &Object,
+    preview: &PreviewInspect,
+    reason: &str,
+    status: &str,
+    at: i64,
+) -> TeardownProgress {
+    TeardownProgress {
+        evidence: TeardownEvidence {
+            environment: object.name.clone(),
+            pin_digest: preview.pin_digest.clone(),
+            plan_digest: preview.plan_digest.clone(),
+            reason: reason.into(),
+            torn_down_at: at,
+        },
+        status: status.into(),
+    }
+}
+
+async fn begin_teardown(
     ctx: &mut Ctx,
-    mut object: Object,
+    object: Object,
     reason: &str,
     now: i64,
-) -> Result<TeardownEvidence> {
+) -> Result<TeardownProgress> {
     if !is_preview(&object) {
         bail!(
             "refusing to tear down environment {}; expiry must never delete a non-preview environment",
@@ -390,6 +467,59 @@ async fn persist_teardown(
         );
     }
     let preview = stored_inspect(&object)?;
+    if preview.status == STATUS_TORN_DOWN {
+        return Ok(evidence_from(
+            &object,
+            &preview,
+            preview.teardown_reason.as_deref().unwrap_or(reason),
+            STATUS_TORN_DOWN,
+            preview.teardown_at.unwrap_or(now),
+        ));
+    }
+    if preview.status == STATUS_CLOSING && has_removal_residue(&object) {
+        return Ok(evidence_from(
+            &object,
+            &preview,
+            preview.teardown_reason.as_deref().unwrap_or(reason),
+            STATUS_CLOSING,
+            preview.teardown_at.unwrap_or(now),
+        ));
+    }
+    if has_removal_residue(&object) {
+        persist_status(ctx, object, preview, STATUS_CLOSING, reason, now).await
+    } else {
+        persist_teardown(ctx, object, preview, reason, now).await
+    }
+}
+
+async fn persist_status(
+    ctx: &mut Ctx,
+    mut object: Object,
+    preview: PreviewInspect,
+    status: &str,
+    reason: &str,
+    now: i64,
+) -> Result<TeardownProgress> {
+    object.properties.insert(PROP_STATUS.into(), status.into());
+    object
+        .properties
+        .insert(PROP_TEARDOWN_REASON.into(), reason.into());
+    object
+        .properties
+        .insert(PROP_TEARDOWN_AT.into(), now.to_string());
+    object.updated = now;
+    let progress = evidence_from(&object, &preview, reason, status, now);
+    ctx.put(object).await?;
+    Ok(progress)
+}
+
+async fn persist_teardown(
+    ctx: &mut Ctx,
+    mut object: Object,
+    preview: PreviewInspect,
+    reason: &str,
+    now: i64,
+) -> Result<TeardownProgress> {
     let keys: Vec<String> = object
         .properties
         .keys()
@@ -404,25 +534,7 @@ async fn persist_teardown(
     for key in keys {
         object.properties.remove(&key);
     }
-    object
-        .properties
-        .insert(PROP_STATUS.into(), STATUS_TORN_DOWN.into());
-    object
-        .properties
-        .insert(PROP_TEARDOWN_REASON.into(), reason.into());
-    object
-        .properties
-        .insert(PROP_TEARDOWN_AT.into(), now.to_string());
-    object.updated = now;
-    let evidence = TeardownEvidence {
-        environment: object.name.clone(),
-        pin_digest: preview.pin_digest,
-        plan_digest: preview.plan_digest,
-        reason: reason.into(),
-        torn_down_at: now,
-    };
-    ctx.put(object).await?;
-    Ok(evidence)
+    persist_status(ctx, object, preview, STATUS_TORN_DOWN, reason, now).await
 }
 
 fn validate_text(label: &str, value: &str) -> Result<()> {
@@ -709,54 +821,98 @@ mod tests {
         );
     }
 
+    async fn stamp_deployed(ctx: &mut Ctx, env: &str, instance: &str, version: &str) {
+        let mut object = crate::environment::environment(ctx, env).await.unwrap();
+        object
+            .properties
+            .insert(format!("deployed.{instance}"), version.into());
+        object.properties.insert(
+            format!("deployed_release.{instance}"),
+            format!("tenkai:release:{instance}@{version}"),
+        );
+        ctx.put(object).await.unwrap();
+    }
+
     #[tokio::test]
-    async fn torn_down_and_expired_previews_refuse_create_from_steps() {
+    async fn close_with_deployed_instance_records_closing_not_torn_down() {
+        let mut ctx = ctx().await;
+        provision(&mut ctx, "review", sample_pin(), 50_000, "", 1_000)
+            .await
+            .unwrap();
+        stamp_deployed(&mut ctx, "review", "api", "1.0.0").await;
+        let evidence = close_branch(&mut ctx, "review", 2_000).await.unwrap();
+        assert_eq!(evidence.reason, TEARDOWN_BRANCH_CLOSED);
+        let stored = crate::environment::environment(&mut ctx, "review")
+            .await
+            .unwrap();
+        let inspect = inspect_from_object(&stored).unwrap().unwrap();
+        assert_eq!(inspect.status, STATUS_CLOSING);
+        assert_eq!(
+            stored.properties.get("deployed.api").map(String::as_str),
+            Some("1.0.0")
+        );
+        let rows = crate::environment::status(&mut ctx, "review")
+            .await
+            .unwrap();
+        assert!(
+            rows.iter().any(|row| {
+                row.instance == "api"
+                    && row.deployed.as_deref() == Some("1.0.0")
+                    && row
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("closing"))
+            }),
+            "{rows:?}"
+        );
+        assert!(
+            !is_terminal_residue(&mut ctx, "review", 3_000)
+                .await
+                .unwrap()
+        );
+        let again = inspect_from_object(
+            &crate::environment::environment(&mut ctx, "review")
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(again.status, STATUS_CLOSING);
+        assert_eq!(again.teardown_at, Some(2_000));
+        let refused = crate::plan::create_from_steps(&mut ctx, "review", vec![rollback_step()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("closing"), "{refused}");
+        let reuse = provision(&mut ctx, "review", sample_pin(), 50_000, "", 4_000)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(reuse.contains("torn down"), "{reuse}");
+    }
+
+    #[tokio::test]
+    async fn expiry_with_deployed_instance_records_closing() {
         let mut ctx = ctx().await;
         provision(&mut ctx, "review", sample_pin(), 5_000, "", 1_000)
             .await
             .unwrap();
-        let expired = crate::plan::create_from_steps(&mut ctx, "review", vec![rollback_step()])
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(expired.contains("expired"), "{expired}");
-
-        close_branch(&mut ctx, "review", 2_000).await.unwrap();
-        let torn_down = crate::plan::create_from_steps(&mut ctx, "review", vec![rollback_step()])
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(torn_down.contains("torn down"), "{torn_down}");
-        let recovery = crate::plan::create_from_steps_with_recovery(
-            &mut ctx,
-            "review",
-            vec![rollback_step()],
-            "operator rollback".into(),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(recovery.contains("torn down"), "{recovery}");
-    }
-
-    #[tokio::test]
-    async fn active_preview_still_allows_create_from_steps() {
-        let mut ctx = ctx().await;
-        provision(
-            &mut ctx,
-            "review",
-            sample_pin(),
-            crate::now_millis() + 86_400_000,
-            "",
-            1_000,
-        )
-        .await
-        .unwrap();
-        let plan = crate::plan::create_from_steps(&mut ctx, "review", vec![rollback_step()])
+        stamp_deployed(&mut ctx, "review", "api", "1.0.0").await;
+        assert!(
+            !is_terminal_residue(&mut ctx, "review", 5_000)
+                .await
+                .unwrap()
+        );
+        let stored = crate::environment::environment(&mut ctx, "review")
             .await
             .unwrap();
-        assert_eq!(plan.environment, "review");
-        assert_eq!(plan.steps.len(), 1);
+        let inspect = inspect_from_object(&stored).unwrap().unwrap();
+        assert_eq!(inspect.status, STATUS_CLOSING);
+        assert_eq!(inspect.teardown_reason.as_deref(), Some(TEARDOWN_EXPIRED));
+        assert_eq!(
+            stored.properties.get("deployed.api").map(String::as_str),
+            Some("1.0.0")
+        );
     }
 
     #[tokio::test]
@@ -778,5 +934,111 @@ mod tests {
         pin.contract = "tenkai.branch_pin.v0".into();
         let error = pin.validate().unwrap_err().to_string();
         assert!(error.contains("unknown branch pin contract"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn closing_preview_remove_plan_runs_on_the_executor_before_torn_down() {
+        use std::sync::Arc;
+
+        use crate::apply::{ExecutionAuthorization, ExecutionOptions};
+        use crate::software_executor::{FakeSoftwareExecutor, SoftwareExecutors};
+
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-preview-teardown-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("state.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        provision(
+            &mut ctx,
+            "local",
+            sample_pin(),
+            crate::now_millis() + 86_400_000,
+            "",
+            1_000,
+        )
+        .await
+        .unwrap();
+        let dir = root.join("api-1.0.0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tenkai.toml"),
+            "[product]\nname = \"api\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\nuninstall = \"true\"\n",
+        )
+        .unwrap();
+        crate::catalog::publish(
+            &mut ctx,
+            &dir.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        stamp_deployed(&mut ctx, "local", "api", "1.0.0").await;
+        let executors = SoftwareExecutors::with_default(Arc::new(FakeSoftwareExecutor::new()));
+
+        close_branch(&mut ctx, "local", crate::now_millis())
+            .await
+            .unwrap();
+        let closing = inspect_from_object(
+            &crate::environment::environment(&mut ctx, "local")
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(closing.status, STATUS_CLOSING);
+        assert!(
+            !is_terminal_residue(&mut ctx, "local", crate::now_millis())
+                .await
+                .unwrap()
+        );
+
+        let remove = crate::plan::create_with(&mut ctx, "local", &executors)
+            .await
+            .unwrap();
+        assert_eq!(remove.steps.len(), 1, "{remove:?}");
+        assert_eq!(remove.steps[0].action, Action::Remove);
+        let outcomes = crate::apply::execute_with_options(
+            &mut ctx,
+            &remove.id,
+            ExecutionOptions {
+                rollback_hold: true,
+                skip_gates: true,
+                emergency_reason: None,
+                authorization: ExecutionAuthorization::LocalDevelopment {
+                    reason: "preview teardown fixture",
+                },
+                software_executors: executors,
+                model_runtime_executor: None,
+                worker_lifecycle: None,
+                artifact_registry: None,
+                delivery_adapter: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| outcome.classified_status().unwrap().is_success()),
+            "{outcomes:?}"
+        );
+        assert!(
+            is_terminal_residue(&mut ctx, "local", crate::now_millis())
+                .await
+                .unwrap()
+        );
+        let stored = crate::environment::environment(&mut ctx, "local")
+            .await
+            .unwrap();
+        let inspect = inspect_from_object(&stored).unwrap().unwrap();
+        assert_eq!(inspect.status, STATUS_TORN_DOWN);
+        assert!(!stored.properties.contains_key("deployed.api"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

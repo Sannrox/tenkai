@@ -2204,6 +2204,7 @@ pub async fn status(ctx: &mut Ctx, env: &str) -> Result<Vec<StatusRow>> {
     let env_obj = environment(ctx, env).await?;
     let mut rows = status_from_object(ctx, &env_obj).await?;
     append_unmanaged_rows(&env_obj, &mut rows);
+    append_closing_preview_rows(&env_obj, &mut rows)?;
     Ok(rows)
 }
 
@@ -2613,7 +2614,8 @@ async fn inspect_environment_base(
     execution: crate::approval_policy::ExecutionPolicy,
 ) -> Result<EnvironmentInspectReport> {
     let env_obj = environment(ctx, env).await?;
-    let rows = status_from_object(ctx, &env_obj).await?;
+    let mut rows = status_from_object(ctx, &env_obj).await?;
+    append_closing_preview_rows(&env_obj, &mut rows)?;
     let subscriptions = subscription_views_from_status(ctx, &env_obj, rows).await?;
     let facts = environment_facts_from_object(&env_obj);
     let overlays = environment_overlays_from_object(&env_obj);
@@ -3974,6 +3976,60 @@ fn append_unmanaged_rows(env_obj: &Object, rows: &mut Vec<StatusRow>) {
             .cmp(&b.instance)
             .then_with(|| a.product.cmp(&b.product))
     });
+}
+
+/// Deployed instances of a closing preview still need a status row after
+/// desired-state is ignored so `env status` shows why removal is unfinished.
+fn append_closing_preview_rows(env_obj: &Object, rows: &mut Vec<StatusRow>) -> Result<()> {
+    let Some(preview) = crate::preview::inspect_from_object(env_obj)? else {
+        return Ok(());
+    };
+    if preview.status != crate::preview::STATUS_CLOSING {
+        return Ok(());
+    }
+    let listed: BTreeSet<String> = rows.iter().map(|row| row.instance.clone()).collect();
+    let reason = preview
+        .teardown_reason
+        .as_deref()
+        .unwrap_or("recorded teardown");
+    let mut extra = Vec::new();
+    for (key, version) in &env_obj.properties {
+        let Some(instance) = key.strip_prefix("deployed.") else {
+            continue;
+        };
+        if listed.contains(instance) {
+            continue;
+        }
+        extra.push(StatusRow {
+            product: instance.to_string(),
+            instance: instance.to_string(),
+            channel: String::new(),
+            deployed: Some(version.clone()),
+            health: env_obj
+                .properties
+                .get(&format!("deployment_health.{instance}"))
+                .cloned(),
+            error: Some(format!("preview closing ({reason})")),
+            head: String::new(),
+            overlay_stale: false,
+            delivery_hold: None,
+            dependency_hold: None,
+            spec_drift: None,
+            certificate: None,
+            health_checks: Vec::new(),
+            health_observed_at_ms: None,
+            owner: None,
+            unmanaged: None,
+            cluster_namespace: None,
+        });
+    }
+    rows.extend(extra);
+    rows.sort_by(|a, b| {
+        a.instance
+            .cmp(&b.instance)
+            .then_with(|| a.product.cmp(&b.product))
+    });
+    Ok(())
 }
 
 /// Record live workloads the adapters listed. Always writes, including an

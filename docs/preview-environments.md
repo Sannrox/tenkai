@@ -42,15 +42,21 @@ not import member payloads and does not recover from the branch service.
   are refused. Catalog `promote` of a signed release onto a channel is
   unchanged and is not a preview graduation path.
 - Expiry or recorded branch close tears the preview down and stores reason and
-  timestamp on the environment object. Teardown never deletes the object and
-  never mutates a non-preview environment, even if preview expiry properties
-  are forged onto it.
+  timestamp on the environment object. A preview with deployed instances first
+  records status `closing` and plans `Remove` steps through its approval
+  policy; it is `torn_down` only after those steps succeed. A preview that
+  never deployed anything is marked `torn_down` immediately. Teardown never
+  deletes the object and never mutates a non-preview environment, even if
+  preview expiry properties are forged onto it. Existing `torn_down` previews
+  have already dropped their deployment records; leftover workloads from
+  those names stay a manual cleanup.
 - Planning a torn-down or expired preview fails closed on snapshot planning,
   explicit `create_from_steps` (rollback/restart), and apply admission of a
-  leftover Computed plan. The reconciler tears down expired preview
-  environments after in-flight apply recovery, never while a plan is still
-  Busy or awaiting runtime. Later ticks treat the retained torn-down object
-  as terminal Current and do not re-plan or admit.
+  leftover Computed plan. A `closing` preview admits only `Remove` steps.
+  The reconciler starts teardown after in-flight apply recovery, never while
+  a plan is still Busy or awaiting runtime. Interrupted removal resumes on
+  the next tick. Later ticks treat the retained torn-down object as terminal
+  Current and do not re-plan or admit.
 
 Issue: [#379](https://github.com/Sannrox/tenkai/issues/379).
 Related: [change-set closure pins](change-set-pin.md),

@@ -50,7 +50,12 @@ pub(super) async fn reconcile(ctx: &mut Ctx, request: Request<'_>) -> Result<Env
     if let Some(held) = held(ctx, &stored).await? {
         return Ok(held);
     }
-    execute(ctx, request, stored, approval_required).await
+    let environment = request.environment;
+    let status = execute(ctx, request, stored, approval_required).await?;
+    if matches!(status, EnvironmentStatus::Applied { .. }) {
+        let _ = crate::preview::is_terminal_residue(ctx, environment, crate::now_millis()).await?;
+    }
+    Ok(status)
 }
 
 async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<EnvironmentStatus> {
