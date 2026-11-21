@@ -10,14 +10,10 @@ use std::sync::Mutex;
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use cryptoki::mechanism::Mechanism;
-use cryptoki::mechanism::eddsa::{EddsaParams, EddsaSignatureScheme};
-use cryptoki::object::{Attribute, AttributeType, KeyType, ObjectClass, ObjectHandle};
-use cryptoki::session::{Session, UserType};
-use cryptoki::types::AuthPin;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
+use tenkai_keys::pkcs11::{TokenObject, TokenSession};
 
 use crate::key_provider::{DeployProfile, ProfileClass};
 use crate::plan_approval::{APPROVAL_SCHEMA, ApprovalEnvelope, ApprovalStatement};
@@ -37,8 +33,6 @@ pub const PIN_ENV: &str = "TENKAI_SIGNER_PIN";
 pub const KEY_LABEL_ENV: &str = "TENKAI_SIGNER_KEY_LABEL";
 /// Path of a 32-byte Ed25519 seed. Lab profiles only.
 pub const FILE_KEY_ENV: &str = "TENKAI_SIGNER_KEY";
-
-const ED25519_OID: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x70];
 
 /// Backing store for a content signer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -560,8 +554,8 @@ impl fmt::Debug for FileSigner {
 }
 
 struct Pkcs11Inner {
-    session: Session,
-    private: ObjectHandle,
+    session: TokenSession,
+    private: TokenObject,
 }
 
 /// PKCS#11-backed Ed25519 signer. The private key stays on the token.
@@ -576,11 +570,11 @@ pub struct Pkcs11Signer {
 
 impl Pkcs11Signer {
     fn from_session(
-        session: Session,
+        session: TokenSession,
         claim: tenkai_keys::pkcs11::TokenClaim,
         token_label: &str,
         key_label: &str,
-        private: ObjectHandle,
+        private: TokenObject,
         public: [u8; 32],
     ) -> Self {
         Self {
@@ -597,7 +591,7 @@ impl Pkcs11Signer {
     pub fn open(module: &Path, token_label: &str, pin: &str, key_label: &str) -> Result<Self> {
         validate_token_field("key label", key_label)?;
         let (session, claim) = connect(module, token_label, pin, key_label)?;
-        let (private, public) = restore(&session, key_label)?;
+        let (private, public) = session.restore_ed25519(key_label)?;
         Ok(Self::from_session(
             session,
             claim,
@@ -612,8 +606,8 @@ impl Pkcs11Signer {
     pub fn provision(module: &Path, token_label: &str, pin: &str, key_label: &str) -> Result<Self> {
         validate_token_field("key label", key_label)?;
         let (session, claim) = connect(module, token_label, pin, key_label)?;
-        ensure_provisioned(&session, key_label)?;
-        let (private, public) = restore(&session, key_label)?;
+        session.ensure_ed25519(key_label)?;
+        let (private, public) = session.restore_ed25519(key_label)?;
         Ok(Self::from_session(
             session,
             claim,
@@ -643,14 +637,7 @@ impl ContentSigner for Pkcs11Signer {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("PKCS#11 signer lock was poisoned"))?;
-        let params = EddsaParams::new(EddsaSignatureScheme::Pure);
-        let signature = inner
-            .session
-            .sign(&Mechanism::Eddsa(params), inner.private, payload)
-            .map_err(|error| anyhow::anyhow!("PKCS#11 Ed25519 sign failed: {error}"))?;
-        signature.try_into().map_err(|bytes: Vec<u8>| {
-            anyhow::anyhow!("PKCS#11 signature must be 64 bytes, got {}", bytes.len())
-        })
+        Ok(inner.session.sign_ed25519(inner.private, payload)?)
     }
 }
 
@@ -798,232 +785,15 @@ fn connect(
     token_label: &str,
     pin: &str,
     key_label: &str,
-) -> Result<(Session, tenkai_keys::pkcs11::TokenClaim)> {
+) -> Result<(TokenSession, tenkai_keys::pkcs11::TokenClaim)> {
     validate_token_field("token label", token_label)?;
     // Claimed per key, so families with different keys on one token never
     // refuse each other.
     let purpose = format!("signer:{key_label}");
     let claim = tenkai_keys::pkcs11::claim_token_for(module, token_label, &purpose)
         .map_err(|_| anyhow::anyhow!("PKCS#11 token {token_label} is already in use"))?;
-    let pkcs11 = tenkai_keys::pkcs11::load_pkcs11(module)
-        .map_err(|_| anyhow::anyhow!("loading PKCS#11 module {}", module.display()))?;
-    let slot = tenkai_keys::pkcs11::slot_with_label(&pkcs11, token_label)
-        .map_err(|_| anyhow::anyhow!("PKCS#11 token {token_label} was not found"))?;
-    let session = pkcs11
-        .open_rw_session(slot)
-        .map_err(|error| anyhow::anyhow!("opening PKCS#11 session: {error}"))?;
-    match session.login(UserType::User, Some(&AuthPin::new(pin.into()))) {
-        Ok(())
-        | Err(cryptoki::error::Error::Pkcs11(cryptoki::error::RvError::UserAlreadyLoggedIn, _)) => {
-        }
-        Err(error) => bail!("PKCS#11 login failed: {error}"),
-    }
+    let session = TokenSession::open(module, token_label, pin)?;
     Ok((session, claim))
-}
-
-fn restore(session: &Session, key_label: &str) -> Result<(ObjectHandle, [u8; 32])> {
-    match find_labeled(session, ObjectClass::PRIVATE_KEY, key_label)?.as_slice() {
-        [] => bail!("PKCS#11 signing key {key_label} is not provisioned"),
-        [private] => {
-            require_private_protection(session, *private, key_label)?;
-            let id = object_id(session, *private)?;
-            let public = unique_object(
-                find_by_id(session, ObjectClass::PUBLIC_KEY, &id)?,
-                &format!("PKCS#11 signing key {key_label} public object"),
-            )?;
-            let bytes = public_key_bytes(session, public)?;
-            Ok((*private, bytes))
-        }
-        found => bail!(
-            "PKCS#11 signing key {key_label} is ambiguous ({} private objects)",
-            found.len()
-        ),
-    }
-}
-
-fn ensure_provisioned(session: &Session, key_label: &str) -> Result<()> {
-    // Ceremony mints when the label is empty. Two processes can both mint;
-    // restore then fails closed on an ambiguous label. Cross-process HSM
-    // locking is out of scope, same as the wrap provider.
-    match find_labeled(session, ObjectClass::PRIVATE_KEY, key_label)?.as_slice() {
-        [] => {
-            mint_ed25519(session, key_label)?;
-            Ok(())
-        }
-        [_] => Ok(()),
-        found => bail!(
-            "PKCS#11 signing key {key_label} is ambiguous ({} private objects)",
-            found.len()
-        ),
-    }
-}
-
-fn require_private_protection(
-    session: &Session,
-    handle: ObjectHandle,
-    key_label: &str,
-) -> Result<()> {
-    let attributes = session
-        .get_attributes(
-            handle,
-            &[
-                AttributeType::Extractable,
-                AttributeType::Sensitive,
-                AttributeType::Sign,
-                AttributeType::Token,
-                AttributeType::Private,
-            ],
-        )
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "reading PKCS#11 signing key {key_label} protection attributes: {error}"
-            )
-        })?;
-    let mut extractable = None;
-    let mut sensitive = None;
-    let mut sign = None;
-    let mut token = None;
-    let mut private = None;
-    for attribute in attributes {
-        match attribute {
-            Attribute::Extractable(value) => extractable = Some(value),
-            Attribute::Sensitive(value) => sensitive = Some(value),
-            Attribute::Sign(value) => sign = Some(value),
-            Attribute::Token(value) => token = Some(value),
-            Attribute::Private(value) => private = Some(value),
-            _ => {}
-        }
-    }
-    let extractable = extractable.ok_or_else(|| {
-        anyhow::anyhow!("PKCS#11 signing key {key_label} is missing CKA_EXTRACTABLE")
-    })?;
-    let sensitive = sensitive.ok_or_else(|| {
-        anyhow::anyhow!("PKCS#11 signing key {key_label} is missing CKA_SENSITIVE")
-    })?;
-    let sign =
-        sign.ok_or_else(|| anyhow::anyhow!("PKCS#11 signing key {key_label} is missing CKA_SIGN"))?;
-    let token = token
-        .ok_or_else(|| anyhow::anyhow!("PKCS#11 signing key {key_label} is missing CKA_TOKEN"))?;
-    let private = private
-        .ok_or_else(|| anyhow::anyhow!("PKCS#11 signing key {key_label} is missing CKA_PRIVATE"))?;
-    if extractable || !sensitive || !sign || !token || !private {
-        bail!(
-            "PKCS#11 signing key {key_label} is not a token-resident non-extractable signing key"
-        );
-    }
-    Ok(())
-}
-
-fn find_labeled(
-    session: &Session,
-    class: ObjectClass,
-    key_label: &str,
-) -> Result<Vec<ObjectHandle>> {
-    session
-        .find_objects(&[
-            Attribute::Class(class),
-            Attribute::KeyType(KeyType::EC_EDWARDS),
-            Attribute::Label(key_label.as_bytes().to_vec()),
-        ])
-        .map_err(|error| anyhow::anyhow!("searching PKCS#11 signing key {key_label}: {error}"))
-}
-
-fn find_by_id(session: &Session, class: ObjectClass, id: &[u8]) -> Result<Vec<ObjectHandle>> {
-    session
-        .find_objects(&[Attribute::Class(class), Attribute::Id(id.to_vec())])
-        .map_err(|error| anyhow::anyhow!("searching PKCS#11 object by CKA_ID: {error}"))
-}
-
-fn unique_object(found: Vec<ObjectHandle>, what: &str) -> Result<ObjectHandle> {
-    match found.as_slice() {
-        [handle] => Ok(*handle),
-        [] => bail!("{what} was not found"),
-        objects => bail!("{what} is ambiguous ({} objects)", objects.len()),
-    }
-}
-
-fn object_id(session: &Session, handle: ObjectHandle) -> Result<Vec<u8>> {
-    let attributes = session
-        .get_attributes(handle, &[AttributeType::Id])
-        .map_err(|error| anyhow::anyhow!("reading PKCS#11 CKA_ID: {error}"))?;
-    let Some(Attribute::Id(id)) = attributes.into_iter().next() else {
-        bail!("PKCS#11 signing key is missing CKA_ID");
-    };
-    if id.is_empty() {
-        bail!("PKCS#11 signing key CKA_ID is empty");
-    }
-    Ok(id)
-}
-
-fn mint_ed25519(session: &Session, key_label: &str) -> Result<(ObjectHandle, [u8; 32])> {
-    let label = key_label.as_bytes().to_vec();
-    let mut id = [0_u8; 16];
-    SystemRandom::new()
-        .fill(&mut id)
-        .map_err(|_| anyhow::anyhow!("generating PKCS#11 signing key id"))?;
-    let id = id.to_vec();
-    let (public, private) = session
-        .generate_key_pair(
-            &Mechanism::EccEdwardsKeyPairGen,
-            &[
-                Attribute::Class(ObjectClass::PUBLIC_KEY),
-                Attribute::KeyType(KeyType::EC_EDWARDS),
-                Attribute::Label(label.clone()),
-                Attribute::Id(id.clone()),
-                Attribute::Token(true),
-                Attribute::Verify(true),
-                Attribute::EcParams(ED25519_OID.to_vec()),
-            ],
-            &[
-                Attribute::Class(ObjectClass::PRIVATE_KEY),
-                Attribute::KeyType(KeyType::EC_EDWARDS),
-                Attribute::Label(label),
-                Attribute::Id(id),
-                Attribute::Token(true),
-                Attribute::Private(true),
-                Attribute::Sensitive(true),
-                Attribute::Extractable(false),
-                Attribute::Sign(true),
-            ],
-        )
-        .map_err(|error| anyhow::anyhow!("generating PKCS#11 Ed25519 signing key: {error}"))?;
-    let privates = find_labeled(session, ObjectClass::PRIVATE_KEY, key_label)?;
-    if privates.len() != 1 {
-        bail!(
-            "PKCS#11 signing key {key_label} became ambiguous during mint ({} private objects)",
-            privates.len()
-        );
-    }
-    let bytes = public_key_bytes(session, public)?;
-    Ok((private, bytes))
-}
-
-fn public_key_bytes(session: &Session, handle: ObjectHandle) -> Result<[u8; 32]> {
-    let attributes = session
-        .get_attributes(handle, &[AttributeType::EcPoint])
-        .map_err(|error| anyhow::anyhow!("reading PKCS#11 Ed25519 public key: {error}"))?;
-    let Some(Attribute::EcPoint(point)) = attributes.into_iter().next() else {
-        bail!("PKCS#11 Ed25519 public key is missing CKA_EC_POINT");
-    };
-    parse_ed25519_point(&point)
-}
-
-fn parse_ed25519_point(point: &[u8]) -> Result<[u8; 32]> {
-    match point {
-        raw if raw.len() == 32 => raw
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("PKCS#11 Ed25519 public key is not 32 bytes")),
-        [0x04, 0x20, rest @ ..] if rest.len() == 32 => rest
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("PKCS#11 Ed25519 OCTET STRING is not 32 bytes")),
-        [0x03, 0x21, 0x00, rest @ ..] if rest.len() == 32 => rest
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("PKCS#11 Ed25519 BIT STRING is not 32 bytes")),
-        other => bail!(
-            "PKCS#11 Ed25519 public key has unexpected CKA_EC_POINT length {}",
-            other.len()
-        ),
-    }
 }
 
 #[cfg(test)]

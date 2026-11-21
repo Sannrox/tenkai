@@ -3096,7 +3096,6 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
- "cryptoki",
  "ed25519-dalek",
  "fencing-lease",
  "hkdf",
