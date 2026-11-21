@@ -1393,7 +1393,7 @@ impl OperationalStore for MemoryCatalogGraph {
                     detail: "fixture plans are non-executable".into(),
                 });
             }
-            let generation = match partition.runtime_claims.get(plan_id).cloned() {
+            let (generation, progress_json) = match partition.runtime_claims.get(plan_id).cloned() {
                 Some(current) if current.environment_id != environment => {
                     return Err(StoreError::EnvironmentMismatch {
                         kind: "runtime claim",
@@ -1413,8 +1413,10 @@ impl OperationalStore for MemoryCatalogGraph {
                     return Ok(Some(stored));
                 }
                 Some(current) if current.expires_at > now => return Ok(None),
-                Some(current) => current.generation.saturating_add(1),
-                None => 1,
+                // SQLite's ON CONFLICT update leaves progress_json; a later
+                // claim must still see the boot resume point (ADR 0051 §3).
+                Some(current) => (current.generation.saturating_add(1), current.progress_json),
+                None => (1, None),
             };
             let claim = RuntimeClaim {
                 plan_id: plan_id.into(),
@@ -1423,12 +1425,16 @@ impl OperationalStore for MemoryCatalogGraph {
                 generation,
                 expires_at,
                 completion_json: None,
-                progress_json: None,
+                progress_json,
             };
             partition
                 .runtime_claims
                 .insert(plan_id.into(), claim.clone());
-            Ok(Some(claim))
+            // Match the SQLite claim row: progress is read via runtime_progress.
+            Ok(Some(RuntimeClaim {
+                progress_json: None,
+                ..claim
+            }))
         })
     }
 

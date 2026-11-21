@@ -2069,6 +2069,32 @@ mod tests {
     }
 
     #[test]
+    fn runtime_progress_outlives_a_later_claim() {
+        use crate::storage::OperationalStore as _;
+        let store = MemoryCatalogGraph::new();
+        let expiry = crate::now_millis() + 10_000;
+        let claim = store
+            .claim_runtime_plan("prod", "plan-1", "runtime-a", expiry)
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .record_runtime_progress("plan-1", "runtime-a", claim.generation, "{\"a\":1}")
+                .unwrap()
+        );
+        store.lapse_runtime_claims(1).unwrap();
+        let next = store
+            .claim_runtime_plan("prod", "plan-1", "runtime-a", expiry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.generation, claim.generation + 1);
+        assert_eq!(
+            store.runtime_progress("plan-1").unwrap().as_deref(),
+            Some("{\"a\":1}")
+        );
+    }
+
+    #[test]
     fn memory_catalog_path_keyed_enqueues_provider_events_atomically() {
         let path = std::env::temp_dir().join(format!(
             "tenkai-765-memory-outbox-{}-{}.db",
