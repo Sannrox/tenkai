@@ -69,15 +69,8 @@ pub async fn rehearse(
             continue;
         };
         let envelope = approval_dir.join(format!("{}.json", plan_id.replace(':', "_")));
-        crate::dev_sign::sign_plan_approval(
-            &keys,
-            &root.join("tenkai.db"),
-            plan_id,
-            &envelope,
-            &trust,
-            3600,
-        )
-        .await?;
+        crate::dev_sign::sign_plan_approval(&keys, ctx.clone(), plan_id, &envelope, &trust, 3600)
+            .await?;
     }
 
     let exporter = SigningKey::from_bytes(&[7; 32]);
@@ -194,7 +187,7 @@ pub async fn rehearse(
         let approval = approval_dir.join(format!("rollback-{}.json", name));
         crate::dev_sign::sign_plan_approval(
             &keys,
-            &root.join("tenkai.db"),
+            ctx.clone(),
             &rollback.id,
             &approval,
             &trust,

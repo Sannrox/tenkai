@@ -2804,7 +2804,7 @@ mod tests {
                     .unwrap(),
                 );
                 let store = std::sync::Arc::new(
-                    crate::storage::SqliteStore::open(root.join("state.db")).unwrap(),
+                    crate::storage::MemoryCatalogGraph::open(root.join("state.db")).unwrap(),
                 );
                 let operations = crate::runtime_delivery::RuntimeDeliveryOperations::new(
                     std::collections::HashMap::from([("fixture-runtime".into(), "local".into())]),

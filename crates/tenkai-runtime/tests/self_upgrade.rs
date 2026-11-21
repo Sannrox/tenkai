@@ -157,7 +157,8 @@ async fn tenkai_upgrades_rolls_back_and_reverts_its_runtime_agent() {
     std::fs::create_dir_all(&home).unwrap();
     let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
-    let store = Arc::new(tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap());
+    let store =
+        Arc::new(tenkai::storage::MemoryCatalogGraph::open(root.join("tenkai.db")).unwrap());
     let reconciler = Arc::new(
         Reconciler::new(ctx.clone(), ReconcilerConfig::default())
             .unwrap()

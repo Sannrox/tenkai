@@ -626,7 +626,7 @@ fn stored_extension(
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(crate::storage::SqliteStore::open(dir.join("tenkai.db")).unwrap());
+    let store = Arc::new(crate::storage::MemoryCatalogGraph::open(dir.join("tenkai.db")).unwrap());
     let stored = crate::grant_rules::StoredGrants::load(
         store,
         file.grants.rules.iter().map(|rule| rule.value.clone()),
@@ -783,14 +783,14 @@ fn a_withheld_stored_rule_never_widens_a_grant() {
             None,
         )
         .unwrap();
-    let raw = rusqlite::Connection::open(dir.join("tenkai.db")).unwrap();
-    raw.execute_batch(
-        r#"INSERT INTO grant_rules(value, rule_json) VALUES('confined',
-             '{"rule":{"value":"confined","capabilities":["read"],"products_only":["api"]},
-               "created_by":"admin","created_at_ms":2,"reason":"newer"}');
-           UPDATE grant_rule_generation SET generation = generation + 1;"#,
-    )
-    .unwrap();
+    crate::storage::MemoryCatalogGraph::open(dir.join("tenkai.db"))
+        .unwrap()
+        .put_grant_rule_row(
+            "confined",
+            r#"{"rule":{"value":"confined","capabilities":["read"],"products_only":["api"]},
+               "created_by":"admin","created_at_ms":2,"reason":"newer"}"#,
+        )
+        .unwrap();
     assert!(stored.refresh().unwrap());
     assert_eq!(stored.withheld(), 1);
     let login = |groups: serde_json::Value| authenticate(&ext, signer.sign(&far_future(groups)));

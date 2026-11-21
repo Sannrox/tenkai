@@ -1,5 +1,4 @@
 use anyhow::Result;
-use tenkai::client;
 
 use crate::args::{Cli, Command};
 use crate::client_config::{self, ClientConfig};
@@ -30,6 +29,8 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
                 .map(|log| log as &mut (dyn std::io::BufRead + Send)),
             &signing_key,
             tenkai::now_millis(),
+            tenkai_sqlite::copy_store_file,
+            |path| tenkai_sqlite::hub_ctx(path, false).ok(),
         )
         .await?;
         // A new file only: the output can never replace the database, the
@@ -51,7 +52,7 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
         );
         return Ok(());
     }
-    let mut ctx = client::Ctx::embedded(&database)?;
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false)?;
     let fill_env = client_config::needs_env_resolution(&mut cli.command);
     if fill_env {
         let names = if config.default_environment.is_some() {

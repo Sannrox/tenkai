@@ -73,7 +73,15 @@ pub(crate) async fn run(
                 current_version,
                 behind_version,
             };
-            let (plan, report) = fleet_fairness::observe(ctx, &spec, &backup, database).await?;
+            let (plan, report) = fleet_fairness::observe(
+                ctx,
+                &spec,
+                &backup,
+                database,
+                tenkai_sqlite::copy_store_file,
+                |path| tenkai_sqlite::embedded_ctx(path, false),
+            )
+            .await?;
             println!("{}", fleet_workload::format_workload(&plan));
             println!("{}", fleet_fairness::format_report(&report));
         }
@@ -92,7 +100,7 @@ pub(crate) async fn run(
                     // Re-open embedded ctx per sample so long watches see durable writes.
                     let database = database.to_path_buf();
                     async move {
-                        let mut sample_ctx = client::Ctx::embedded(&database)?;
+                        let mut sample_ctx = tenkai_sqlite::embedded_ctx(&database, false)?;
                         plan::fleet_status(&mut sample_ctx).await
                     }
                 },

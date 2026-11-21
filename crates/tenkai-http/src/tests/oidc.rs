@@ -46,7 +46,7 @@ fn oidc_app(signer: &Signer) -> Router {
         false,
     )
     .unwrap();
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let mut server = ServerConfig::community("management-secret", HashMap::new());
     server.capabilities = tenkai::runtime_capabilities::community_sqlite_profile(
         tenkai::runtime_capabilities::enterprise_auth_capabilities(),

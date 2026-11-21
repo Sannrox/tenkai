@@ -708,7 +708,7 @@ pub fn verify_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{AuditRecord, SqliteStore};
+    use crate::storage::{AuditRecord, MemoryCatalogGraph};
     use ed25519_dalek::SigningKey;
 
     fn seed(dir: &Path) -> (std::path::PathBuf, TrustRoots) {
@@ -732,7 +732,7 @@ mod tests {
         (path, roots)
     }
 
-    fn audit(store: &SqliteStore, at: i64, operation: &str) {
+    fn audit(store: &MemoryCatalogGraph, at: i64, operation: &str) {
         store
             .append_audit(&AuditRecord {
                 id: format!("a-{at}"),
@@ -754,7 +754,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let (seed_path, roots) = seed(&dir);
-        let store = SqliteStore::open(dir.join("tenkai.db")).unwrap();
+        let store = MemoryCatalogGraph::open(dir.join("tenkai.db")).unwrap();
         audit(&store, 100, "plan.approve.completed");
 
         let first = export(&store, None, 200, &seed_path).unwrap();
@@ -828,7 +828,7 @@ mod tests {
         let empty = export(&store, Some(&second), 450, &seed_path).unwrap();
         let empty = export(&store, Some(&empty), 460, &seed_path).unwrap();
         assert!(observed(&empty).is_empty());
-        let restored = SqliteStore::open(dir.join("restored.db")).unwrap();
+        let restored = MemoryCatalogGraph::open(dir.join("restored.db")).unwrap();
         audit(&restored, 100, "plan.approve.completed");
         audit(&restored, 700, "someone.else.completed");
         restored
@@ -867,7 +867,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let (seed_path, roots) = seed(&dir);
-        let store = SqliteStore::open(dir.join("tenkai.db")).unwrap();
+        let store = MemoryCatalogGraph::open(dir.join("tenkai.db")).unwrap();
         let chain = dir.join("chain");
         let mut written = Vec::new();
         for at in [100, 200, 300, 400] {
@@ -965,7 +965,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let (seed_path, roots) = seed(&dir);
-        let store = SqliteStore::open(dir.join("tenkai.db")).unwrap();
+        let store = MemoryCatalogGraph::open(dir.join("tenkai.db")).unwrap();
         store
             .append_change_event(1_000, "release_published", "rel-1", "")
             .unwrap();

@@ -136,11 +136,11 @@ pub(crate) fn with_tenant_retirement(
     Ok(serde_json::to_string(&value)?)
 }
 
-pub(crate) fn retirement_from_object(object: &Object) -> Option<EnvironmentRetirement> {
+pub fn retirement_from_object(object: &Object) -> Option<EnvironmentRetirement> {
     retirement_from_properties(&object.properties)
 }
 
-pub(crate) fn is_retired_object(object: &Object) -> bool {
+pub fn is_retired_object(object: &Object) -> bool {
     retirement_from_object(object).is_some()
 }
 
@@ -5785,7 +5785,7 @@ mod tests {
                 Err(error) => error.to_string(),
             };
         assert!(lease_error.contains("retired"), "{lease_error}");
-        let store = crate::storage::SqliteStore::open(&database).unwrap();
+        let store = crate::storage::MemoryCatalogGraph::open(&database).unwrap();
         assert!(
             crate::storage::OperationalStore::claim_runtime_plan(
                 &store,

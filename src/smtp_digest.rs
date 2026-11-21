@@ -562,7 +562,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::SqliteStore;
+    use crate::storage::MemoryCatalogGraph;
     use tokio::io::AsyncReadExt as _;
 
     fn sink(relay: &str) -> SmtpSink {
@@ -640,7 +640,12 @@ mod tests {
         }
     }
 
-    fn enqueue(store: &SqliteStore, sinks: &[SmtpSink], transition: &Transition<'_>, now: i64) {
+    fn enqueue(
+        store: &MemoryCatalogGraph,
+        sinks: &[SmtpSink],
+        transition: &Transition<'_>,
+        now: i64,
+    ) {
         for record in records(sinks, transition, now) {
             store.enqueue_provider_event(&record).unwrap();
         }
@@ -654,7 +659,7 @@ mod tests {
     async fn a_window_of_transitions_is_one_digest_sent_once() {
         let (address, received) = relay(1).await;
         let sinks = [sink(&address)];
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         enqueue(
             &store,
             &sinks,
@@ -704,7 +709,7 @@ mod tests {
     async fn a_store_error_on_one_line_still_marks_the_others_delivered() {
         let (address, received) = relay(1).await;
         let sinks = [sink(&address)];
-        let inner = SqliteStore::open_in_memory().unwrap();
+        let inner = MemoryCatalogGraph::open_in_memory().unwrap();
         enqueue(
             &inner,
             &sinks,
@@ -748,7 +753,7 @@ mod tests {
             listener.local_addr().unwrap().to_string()
         };
         let sinks = [sink(&address)];
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         enqueue(
             &store,
             &sinks,

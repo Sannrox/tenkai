@@ -1192,7 +1192,7 @@ max_startup_seconds = 30
 
     #[test]
     fn outbox_exports_passing_and_failed_runtime_evidence() {
-        let store = crate::storage::SqliteStore::open_in_memory().unwrap();
+        let store = crate::storage::MemoryCatalogGraph::open_in_memory().unwrap();
         let passing = signed_outcome(RuntimeHealth::Healthy, RuntimeCanary::Passed);
         let failed = signed_outcome(RuntimeHealth::Unhealthy, RuntimeCanary::Failed);
         enqueue_runtime_evidence(

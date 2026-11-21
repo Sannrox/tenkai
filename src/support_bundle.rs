@@ -353,6 +353,8 @@ pub async fn export_from_database(
     log: Option<&mut (dyn std::io::BufRead + Send)>,
     seed_path: &Path,
     now_ms: i64,
+    copy_store: crate::storage::CopyStoreFile,
+    open_hub: impl Fn(&Path) -> Option<Ctx>,
 ) -> Result<SupportBundle> {
     let private = std::env::temp_dir().join(format!("tenkai-support-{}", uuid::Uuid::new_v4()));
     {
@@ -363,23 +365,14 @@ pub async fn export_from_database(
             .context("creating the support snapshot directory")?;
     }
     let copy = private.join("tenkai.db");
-    let copied =
-        database.is_file() && crate::storage::SqliteStore::restore(database, &copy).is_ok();
+    let copied = database.is_file() && copy_store(database, &copy).is_ok();
     // The database's own version, before opening the copy migrates it.
     let schema_version = copied
-        .then(|| {
-            rusqlite::Connection::open_with_flags(&copy, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .and_then(|connection| {
-                    connection.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
-                })
-                .ok()
-        })
+        .then(|| crate::storage::sqlite_user_version(&copy).ok())
         .flatten();
     // The control-plane opener: a tenant-mode hub's TENKAI_POSTGRES_URL does
     // not make its SQLite control plane unreadable here.
-    let mut ctx = copied
-        .then(|| Ctx::embedded_hub(&copy, false).ok())
-        .flatten();
+    let mut ctx = copied.then(|| open_hub(&copy)).flatten();
     let bundle = export(ctx.as_mut(), schema_version, log, seed_path, now_ms).await;
     drop(ctx);
     let _ = std::fs::remove_dir_all(&private);
@@ -757,9 +750,16 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
         drop(ctx);
         let database = dir.join("tenkai.db");
         let before = std::fs::read(&database).unwrap();
-        let from_path = export_from_database(&database, None, &seed, 1_000)
-            .await
-            .unwrap();
+        let from_path = export_from_database(
+            &database,
+            None,
+            &seed,
+            1_000,
+            crate::storage::MemoryCatalogGraph::copy_store_file,
+            |path| crate::client::Ctx::embedded_hub(path, false).ok(),
+        )
+        .await
+        .unwrap();
         assert_eq!(from_path.statement.store.environments, 1);
         assert_eq!(
             from_path.statement.store.schema_version,
@@ -767,9 +767,16 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
         );
         assert_eq!(std::fs::read(&database).unwrap(), before);
         let missing = dir.join("missing.db");
-        let none = export_from_database(&missing, None, &seed, 1_000)
-            .await
-            .unwrap();
+        let none = export_from_database(
+            &missing,
+            None,
+            &seed,
+            1_000,
+            crate::storage::MemoryCatalogGraph::copy_store_file,
+            |path| crate::client::Ctx::embedded_hub(path, false).ok(),
+        )
+        .await
+        .unwrap();
         assert_eq!(none.statement.store.health, "unreadable");
         assert!(!missing.exists());
 

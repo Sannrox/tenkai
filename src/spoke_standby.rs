@@ -25,8 +25,8 @@ use fencing_lease::{Fence, FencingToken, refuse_older, require_auto_promote};
 use serde::{Deserialize, Serialize};
 
 use crate::storage::{
-    EnvironmentRecord, LeaseRecord, OperationalStore as _, PlanRecord, PlanStatus, ReceiptRecord,
-    SqliteStore,
+    CopyStoreFile, EnvironmentRecord, LeaseRecord, OperationalStore, PlanRecord, PlanStatus,
+    ReceiptRecord, StoreBackup,
 };
 use crate::writer_fence::{WriterFence, WriterRole};
 
@@ -156,7 +156,8 @@ pub struct SpokeStep<'a> {
 pub struct SpokeNode {
     holder: String,
     environment: String,
-    store: SqliteStore,
+    store: Arc<dyn OperationalStore>,
+    files: Arc<dyn StoreBackup>,
     ttl: Duration,
     role: WriterFence,
     /// Site runtimes share one fence so a promoted generation fences the old.
@@ -167,7 +168,8 @@ impl SpokeNode {
     pub fn new(
         holder: &str,
         environment: &str,
-        store: SqliteStore,
+        store: Arc<dyn OperationalStore>,
+        files: Arc<dyn StoreBackup>,
         ttl: Duration,
         runtime: Arc<Mutex<Fence>>,
     ) -> Result<Self> {
@@ -178,6 +180,7 @@ impl SpokeNode {
             holder: holder.into(),
             environment: environment.into(),
             store,
+            files,
             ttl,
             role: WriterFence::default(),
             runtime,
@@ -188,8 +191,12 @@ impl SpokeNode {
         &self.holder
     }
 
-    pub fn store(&self) -> &SqliteStore {
-        &self.store
+    pub fn store(&self) -> &dyn OperationalStore {
+        &*self.store
+    }
+
+    pub fn backup_store(&self, destination: &Path) -> Result<()> {
+        self.files.backup(destination)
     }
 
     pub fn role(&self) -> WriterRole {
@@ -613,8 +620,10 @@ const DRILL_LIVE_MARGIN: Duration = Duration::from_millis(200);
 const DRILL_ENVIRONMENT: &str = "site";
 const DRILL_PLAN: &str = "spoke-drill-plan";
 
-fn drill_store(path: &Path) -> Result<SqliteStore> {
-    let store = SqliteStore::open(path)?;
+type OpenPorts = (Arc<dyn OperationalStore>, Arc<dyn StoreBackup>);
+
+fn drill_store(path: &Path, open: &dyn Fn(&Path) -> Result<OpenPorts>) -> Result<OpenPorts> {
+    let (store, files) = open(path)?;
     store.put_environment(&EnvironmentRecord {
         id: DRILL_ENVIRONMENT.into(),
         revision: 0,
@@ -629,7 +638,7 @@ fn drill_store(path: &Path) -> Result<SqliteStore> {
         status: PlanStatus::Computed,
         status_detail: String::new(),
     })?;
-    Ok(store)
+    Ok((store, files))
 }
 
 fn drill_step<'a>(receipt_id: &'a str, release: &'a str) -> SpokeStep<'a> {
@@ -666,8 +675,13 @@ impl Drop for DrillDir {
 /// Two-node drill with egress blocked: kill the writer, restore its shipped
 /// backup on the standby, promote it, prove no duplicate apply, and refuse
 /// the old generation when it returns.
-pub fn drill(profile: &SpokeStandbyProfile, seed_path: &Path) -> Result<SignedDrill> {
-    drill_after(profile, seed_path, Duration::ZERO)
+pub fn drill(
+    profile: &SpokeStandbyProfile,
+    seed_path: &Path,
+    open: impl Fn(&Path) -> Result<OpenPorts>,
+    restore: CopyStoreFile,
+) -> Result<SignedDrill> {
+    drill_after(profile, seed_path, Duration::ZERO, &open, restore)
 }
 
 /// The drill, waiting `before_first_apply` between acquiring and the first
@@ -676,6 +690,8 @@ fn drill_after(
     profile: &SpokeStandbyProfile,
     seed_path: &Path,
     before_first_apply: Duration,
+    open: &dyn Fn(&Path) -> Result<OpenPorts>,
+    restore: CopyStoreFile,
 ) -> Result<SignedDrill> {
     profile.validate()?;
     if profile.members != 2 {
@@ -686,10 +702,12 @@ fn drill_after(
     }
     let dir = DrillDir::create()?;
     let runtime = Arc::new(Mutex::new(Fence::empty()));
+    let (writer_store, writer_files) = drill_store(&dir.0.join("spoke-a.db"), open)?;
     let mut writer = SpokeNode::new(
         "spoke-a",
         DRILL_ENVIRONMENT,
-        drill_store(&dir.0.join("spoke-a.db"))?,
+        writer_store,
+        writer_files,
         LEASE_TTL,
         Arc::clone(&runtime),
     )?;
@@ -708,7 +726,7 @@ fn drill_after(
         bail!("renewing the writer's lease must keep generation 1");
     }
     let backup = dir.0.join("shipped.db");
-    writer.store().backup(&backup)?;
+    writer.backup_store(&backup)?;
 
     // Egress blocked: neither spoke can reach the hub. Workloads hold.
     writer.kill();
@@ -724,11 +742,13 @@ fn drill_after(
     }
 
     let restored = dir.0.join("spoke-b.db");
-    SqliteStore::restore(&backup, &restored)?;
+    restore(&backup, &restored)?;
+    let (standby_store, standby_files) = open(&restored)?;
     let mut standby = SpokeNode::new(
         "spoke-b",
         DRILL_ENVIRONMENT,
-        SqliteStore::open(&restored)?,
+        standby_store,
+        standby_files,
         LEASE_TTL,
         Arc::clone(&runtime),
     )?;
@@ -887,6 +907,7 @@ pub fn promote_on_disk(
     store_path: &Path,
     lock_dir: &Path,
     seed_path: &Path,
+    open: impl Fn(&Path) -> Result<OpenPorts>,
 ) -> Result<SignedPromotion> {
     profile.validate()?;
     anyhow::ensure!(
@@ -894,9 +915,9 @@ pub fn promote_on_disk(
         "restored spoke store {} does not exist",
         store_path.display()
     );
-    let store = SqliteStore::open(store_path)?;
+    let (store, files) = open(store_path)?;
     let runtime = Arc::new(Mutex::new(Fence::empty()));
-    let mut node = SpokeNode::new(holder, environment, store, LEASE_TTL, runtime)?;
+    let mut node = SpokeNode::new(holder, environment, store, files, LEASE_TTL, runtime)?;
     // Refuse a live lease before claiming, so a refused attempt does not
     // spend an epoch. A rerun after a crash is refused the same way until
     // the lease lapses, then promotes afresh at a later epoch.
@@ -955,9 +976,23 @@ pub fn write_evidence(path: &Path, evidence: &Evidence) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::MemoryCatalogGraph;
     use ed25519_dalek::SigningKey;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
+
+    fn open_memory(path: &Path) -> Result<(Arc<dyn OperationalStore>, Arc<dyn StoreBackup>)> {
+        MemoryCatalogGraph::open_ports(path)
+    }
+
+    fn seeded(path: &Path) -> Result<(Arc<dyn OperationalStore>, Arc<dyn StoreBackup>)> {
+        drill_store(path, &open_memory)
+    }
+
+    fn node(holder: &str, path: &Path, ttl: Duration, runtime: Arc<Mutex<Fence>>) -> SpokeNode {
+        let (store, files) = seeded(path).unwrap();
+        SpokeNode::new(holder, "site", store, files, ttl, runtime).unwrap()
+    }
 
     fn tmp_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -1027,7 +1062,13 @@ mod tests {
     fn two_node_drill_promotes_fences_and_holds_workloads() {
         let root = tmp_root("drill");
         let seed = write_seed(&root);
-        let evidence = drill(&profile(), &seed).unwrap();
+        let evidence = drill(
+            &profile(),
+            &seed,
+            open_memory,
+            MemoryCatalogGraph::copy_store_file,
+        )
+        .unwrap();
         assert_eq!(
             verify_evidence::<DrillStatement>(
                 &serde_json::to_vec(&evidence.evidence).unwrap(),
@@ -1067,6 +1108,8 @@ mod tests {
             &profile(),
             &seed,
             DRILL_LEASE_TTL + Duration::from_millis(100),
+            &open_memory,
+            MemoryCatalogGraph::copy_store_file,
         )
         .unwrap();
         assert_eq!(evidence.statement.fenced_generation, 1);
@@ -1110,16 +1153,9 @@ promotion = "manual"
         let path = root.join("spoke.db");
         let runtime = Arc::new(Mutex::new(Fence::empty()));
         let ttl = DRILL_LEASE_TTL;
-        let mut a = SpokeNode::new(
-            "a",
-            "site",
-            drill_store(&path).unwrap(),
-            ttl,
-            Arc::clone(&runtime),
-        )
-        .unwrap();
-        let mut b =
-            SpokeNode::new("b", "site", SqliteStore::open(&path).unwrap(), ttl, runtime).unwrap();
+        let mut a = node("a", &path, ttl, Arc::clone(&runtime));
+        let (store, files) = open_memory(&path).unwrap();
+        let mut b = SpokeNode::new("b", "site", store, files, ttl, runtime).unwrap();
         let acquired = Instant::now();
         a.acquire().unwrap();
         if acquired.elapsed() + DRILL_LIVE_MARGIN < ttl {
@@ -1153,14 +1189,12 @@ promotion = "manual"
     fn a_reused_receipt_id_for_another_step_is_a_conflict() {
         let root = tmp_root("receipt-id");
         let runtime = Arc::new(Mutex::new(Fence::empty()));
-        let mut a = SpokeNode::new(
+        let mut a = node(
             "a",
-            "site",
-            drill_store(&root.join("spoke.db")).unwrap(),
+            &root.join("spoke.db"),
             Duration::from_secs(60),
             runtime,
-        )
-        .unwrap();
+        );
         a.acquire().unwrap();
         a.apply(&drill_step("apply-1", "edge@1.0.0")).unwrap();
         assert!(a.apply(&drill_step("apply-1", "edge@9.9.9")).is_err());
@@ -1173,14 +1207,7 @@ promotion = "manual"
         let seed = write_seed(&root);
         let store = root.join("spoke.db");
         let runtime = Arc::new(Mutex::new(Fence::empty()));
-        let mut a = SpokeNode::new(
-            "a",
-            "site",
-            drill_store(&store).unwrap(),
-            DRILL_LEASE_TTL,
-            runtime,
-        )
-        .unwrap();
+        let mut a = node("a", &store, DRILL_LEASE_TTL, runtime);
         let acquired = Instant::now();
         a.acquire().unwrap();
         if acquired.elapsed() + DRILL_LIVE_MARGIN < DRILL_LEASE_TTL {
@@ -1215,19 +1242,17 @@ promotion = "manual"
         let root = tmp_root("interrupted");
         let seed = write_seed(&root);
         let restored = root.join("spoke-b.db");
-        let mut node = SpokeNode::new(
+        let mut node = node(
             "spoke-b",
-            "site",
-            drill_store(&restored).unwrap(),
+            &restored,
             LEASE_TTL,
             Arc::new(Mutex::new(Fence::empty())),
-        )
-        .unwrap();
+        );
         // Crash after the takeover committed, before the file was written.
         let evidence = node.prepare_promotion(&seed, 0).unwrap();
         node.commit_promotion(&evidence).unwrap();
-        let (owner, stored) = node
-            .store()
+        let (owner, stored) = MemoryCatalogGraph::open(&restored)
+            .unwrap()
             .lease_takeover("site", evidence.statement.generation)
             .unwrap()
             .unwrap();
@@ -1238,7 +1263,15 @@ promotion = "manual"
         );
         let locks = root.join("locks");
         for holder in ["spoke-b", "spoke-c"] {
-            let rerun = promote_on_disk(&profile(), holder, "site", &restored, &locks, &seed);
+            let rerun = promote_on_disk(
+                &profile(),
+                holder,
+                "site",
+                &restored,
+                &locks,
+                &seed,
+                open_memory,
+            );
             assert!(rerun.is_err(), "the live lease refuses {holder}");
         }
         let _ = std::fs::remove_dir_all(&root);
@@ -1249,14 +1282,12 @@ promotion = "manual"
         let root = tmp_root("expired-promotion");
         let seed = write_seed(&root);
         let restored = root.join("spoke-b.db");
-        let mut node = SpokeNode::new(
+        let mut node = node(
             "spoke-b",
-            "site",
-            drill_store(&restored).unwrap(),
+            &restored,
             Duration::from_millis(50),
             Arc::new(Mutex::new(Fence::empty())),
-        )
-        .unwrap();
+        );
         node.promote(&seed, 0).unwrap();
         std::thread::sleep(Duration::from_millis(80));
         let again = promote_on_disk(
@@ -1266,6 +1297,7 @@ promotion = "manual"
             &restored,
             &root.join("locks"),
             &seed,
+            open_memory,
         )
         .unwrap();
         assert_eq!(
@@ -1289,17 +1321,19 @@ promotion = "manual"
         let root = tmp_root("exclusive");
         let seed = write_seed(&root);
         let backup = root.join("shipped.db");
-        drill_store(&backup).unwrap();
+        seeded(&backup).unwrap();
         let (b, c) = (root.join("spoke-b.db"), root.join("spoke-c.db"));
-        SqliteStore::restore(&backup, &b).unwrap();
-        SqliteStore::restore(&backup, &c).unwrap();
+        MemoryCatalogGraph::restore(&backup, &b).unwrap();
+        MemoryCatalogGraph::restore(&backup, &c).unwrap();
         let profile = SpokeStandbyProfile {
             exclusive_lock: true,
             ..profile()
         };
         let locks = root.join("locks");
-        let first = promote_on_disk(&profile, "spoke-b", "site", &b, &locks, &seed).unwrap();
-        let second = promote_on_disk(&profile, "spoke-c", "site", &c, &locks, &seed).unwrap();
+        let first =
+            promote_on_disk(&profile, "spoke-b", "site", &b, &locks, &seed, open_memory).unwrap();
+        let second =
+            promote_on_disk(&profile, "spoke-c", "site", &c, &locks, &seed, open_memory).unwrap();
         assert!(second.statement.generation > first.statement.generation);
         let mut runtime = Fence::empty();
         runtime
@@ -1320,23 +1354,19 @@ promotion = "manual"
         let seed = write_seed(&root);
         let live = root.join("spoke-a.db");
         let runtime = Arc::new(Mutex::new(Fence::empty()));
-        let mut writer = SpokeNode::new(
-            "spoke-a",
-            "site",
-            drill_store(&live).unwrap(),
-            Duration::from_millis(50),
-            runtime,
-        )
-        .unwrap();
+        let mut writer = node("spoke-a", &live, Duration::from_millis(50), runtime);
         writer.acquire().unwrap();
         writer.apply(&drill_step("apply-1", "edge@1.0.0")).unwrap();
         let backup = root.join("shipped.db");
-        writer.store().backup(&backup).unwrap();
+        MemoryCatalogGraph::open(&live)
+            .unwrap()
+            .backup(&backup)
+            .unwrap();
         writer.kill();
 
         // Restart: restore the backup and promote once the lease lapsed.
         let restored = root.join("spoke-b.db");
-        SqliteStore::restore(&backup, &restored).unwrap();
+        MemoryCatalogGraph::restore(&backup, &restored).unwrap();
         std::thread::sleep(Duration::from_millis(70));
         let evidence = promote_on_disk(
             &profile(),
@@ -1345,6 +1375,7 @@ promotion = "manual"
             &restored,
             &root.join("locks"),
             &seed,
+            open_memory,
         )
         .unwrap();
         // The convenience copy verifies to the statement that was signed.
@@ -1355,7 +1386,7 @@ promotion = "manual"
         );
         assert_eq!(evidence.statement.fenced_generation, 1);
         assert_eq!(evidence.statement.generation, 1 << EPOCH_SHIFT);
-        let store = SqliteStore::open(&restored).unwrap();
+        let store = MemoryCatalogGraph::open(&restored).unwrap();
         assert_eq!(
             store.current_lease("site").unwrap().unwrap().owner,
             "spoke-b"
@@ -1370,9 +1401,9 @@ promotion = "manual"
         );
         // Rollback: the untouched backup restores the pre-promotion state.
         let rolled_back = root.join("rolled-back.db");
-        SqliteStore::restore(&backup, &rolled_back).unwrap();
+        MemoryCatalogGraph::restore(&backup, &rolled_back).unwrap();
         assert_eq!(
-            SqliteStore::open(&rolled_back)
+            MemoryCatalogGraph::open(&rolled_back)
                 .unwrap()
                 .current_lease("site")
                 .unwrap()
@@ -1388,6 +1419,7 @@ promotion = "manual"
             &rolled_back,
             &root.join("locks"),
             &seed,
+            open_memory,
         )
         .unwrap();
         assert!(repromoted.statement.generation > evidence.statement.generation);
@@ -1399,6 +1431,7 @@ promotion = "manual"
             &restored,
             &root.join("locks"),
             &seed,
+            open_memory,
         );
         assert!(live_err.is_err());
         let _ = std::fs::remove_dir_all(&root);

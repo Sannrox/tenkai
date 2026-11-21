@@ -809,7 +809,7 @@ mod tests {
     use crate::pb::sekai::SubmitActionInstanceResponse;
     use crate::plan::Action;
     use crate::providers::{LocalEventSink, enqueue_optional_event};
-    use crate::storage::{OperationalStore, SqliteStore};
+    use crate::storage::{MemoryCatalogGraph, OperationalStore};
 
     fn observation(status: &str, reason: Reason) -> FeedbackObservation {
         FeedbackObservation::capture(Capture {
@@ -1214,14 +1214,14 @@ mod tests {
         let path = dir.join("tenkai.db");
         let captured = observation("failed", Reason::ProductFailed);
         let event = {
-            let store = SqliteStore::open(&path).unwrap();
+            let store = MemoryCatalogGraph::open(&path).unwrap();
             let record = record(&captured).unwrap();
             let parsed: ProviderEvent = serde_json::from_str(&record.payload_json).unwrap();
             enqueue_optional_event(&store, FEEDBACK_PROVIDER_KIND, &parsed, 100).unwrap();
             enqueue_optional_event(&store, FEEDBACK_PROVIDER_KIND, &parsed, 100).unwrap();
             parsed
         };
-        let store = SqliteStore::open(&path).unwrap();
+        let store = MemoryCatalogGraph::open(&path).unwrap();
         let pending =
             OperationalStore::list_provider_events(&store, FEEDBACK_PROVIDER_KIND, "prod", 8)
                 .unwrap();
@@ -1385,7 +1385,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let store = SqliteStore::open(dir.join("tenkai.db")).unwrap();
+        let store = MemoryCatalogGraph::open(dir.join("tenkai.db")).unwrap();
         let record = record(&observation("failed", Reason::ProductFailed)).unwrap();
         let event: ProviderEvent = serde_json::from_str(&record.payload_json).unwrap();
         enqueue_optional_event(&store, FEEDBACK_PROVIDER_KIND, &event, 100).unwrap();

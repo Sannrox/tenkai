@@ -5078,7 +5078,7 @@ mod tests {
         CompletionFuture, FleetStatusFuture, HealthFuture, InspectEnvFuture, InventoryFuture,
         ListEnvFuture, ReconcileFuture, StatusEnvFuture, WorkFuture,
     };
-    use crate::storage::SqliteStore;
+    use crate::storage::MemoryCatalogGraph;
     use base64::Engine as _;
     use ed25519_dalek::{Signer as _, SigningKey};
     use std::collections::{BTreeMap, BTreeSet};
@@ -5346,7 +5346,7 @@ mod tests {
             auth,
             false,
             Arc::new(FixedReconciler),
-            Arc::new(SqliteStore::open_in_memory().unwrap()),
+            Arc::new(MemoryCatalogGraph::open_in_memory().unwrap()),
             None,
             None,
             None,
@@ -5540,7 +5540,7 @@ mod tests {
             .unwrap();
         let reconciler =
             crate::reconciler::Reconciler::new(ctx, crate::reconciler::Config::default()).unwrap();
-        let store = Arc::new(SqliteStore::open(&database).unwrap());
+        let store = Arc::new(MemoryCatalogGraph::open(&database).unwrap());
         store
             .put_environment(&crate::storage::EnvironmentRecord {
                 id: "stage".into(),

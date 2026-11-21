@@ -33,6 +33,7 @@ pub(crate) fn run(command: &SpokeStandbyCommand) -> Result<()> {
                 state,
                 lease_dir,
                 signing_key,
+                tenkai_sqlite::open_spoke,
             )?;
             println!(
                 "promoted {} generation {} (fenced {})",
@@ -47,7 +48,12 @@ pub(crate) fn run(command: &SpokeStandbyCommand) -> Result<()> {
             out,
         } => {
             let profile = spoke_standby::SpokeStandbyProfile::load(profile)?;
-            let evidence = spoke_standby::drill(&profile, signing_key)?;
+            let evidence = spoke_standby::drill(
+                &profile,
+                signing_key,
+                tenkai_sqlite::open_spoke,
+                tenkai_sqlite::copy_store_file,
+            )?;
             if let Some(path) = out {
                 spoke_standby::write_evidence(path, &evidence.evidence)?;
             }

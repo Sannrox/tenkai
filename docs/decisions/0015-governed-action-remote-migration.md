@@ -81,6 +81,6 @@ trust boundaries or invalidating stored action-type payloads.
   [#605](https://github.com/Sannrox/sekai-chisei/pull/605).
 - Client boundary: [`src/client/action_lifecycle.rs`](../../src/client/action_lifecycle.rs)
 - Bootstrap definitions: [`src/ontology.rs`](../../src/ontology.rs)
-- Embedded local store: [`src/embedded.rs`](../../src/embedded.rs)
+- Embedded local store: [`crates/tenkai-sqlite/src/legacy.rs`](../../crates/tenkai-sqlite/src/legacy.rs)
 - Vendored contract: [`proto/vendor/sekai.proto`](../../proto/vendor/sekai.proto)
 - Embedded-only wire types: [`proto/tenkai/graph_action.proto`](../../proto/tenkai/graph_action.proto)

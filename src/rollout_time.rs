@@ -469,18 +469,25 @@ pub fn docker_daemon_available() -> bool {
 }
 
 /// Planner compute plus one `run_once` tick at 100 and 1000 environments.
-pub async fn measure_reconcile(root: &Path) -> Result<Vec<ReconcileSample>> {
+pub async fn measure_reconcile(
+    root: &Path,
+    open: impl Fn(&Path) -> Result<Ctx>,
+) -> Result<Vec<ReconcileSample>> {
     let mut samples = Vec::new();
     for count in RECONCILE_COUNTS {
-        samples.push(measure_reconcile_count(root, count).await?);
+        samples.push(measure_reconcile_count(root, count, &open).await?);
     }
     Ok(samples)
 }
 
-async fn measure_reconcile_count(root: &Path, count: u32) -> Result<ReconcileSample> {
+async fn measure_reconcile_count(
+    root: &Path,
+    count: u32,
+    open: &dyn Fn(&Path) -> Result<Ctx>,
+) -> Result<ReconcileSample> {
     let database = root.join(format!("reconcile-{count}.db"));
     let _ = fs::remove_file(&database);
-    let mut ctx = Ctx::embedded(&database)?;
+    let mut ctx = open(&database)?;
     crate::ontology::register(&mut ctx).await?;
     for index in 0..count {
         plan::env_add(&mut ctx, &format!("e{index:04}"), "rollout").await?;
@@ -714,7 +721,9 @@ mod tests {
             crate::now_millis()
         ));
         fs::create_dir_all(&root).unwrap();
-        let reconcile = measure_reconcile(&root).await.unwrap();
+        let reconcile = measure_reconcile(&root, |path| crate::client::Ctx::embedded(path))
+            .await
+            .unwrap();
         assert_eq!(reconcile.len(), RECONCILE_COUNTS.len());
         let baseline = load_baseline(&baseline_path()).unwrap();
         let report = RolloutReport {

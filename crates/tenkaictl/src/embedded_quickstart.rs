@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use tenkai::{client, maintenance, ontology, plan};
+use tenkai::{maintenance, ontology, plan};
 
 use crate::args::{Cli, Command};
 
@@ -32,7 +32,7 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
         tenkai::dev_sign::write_lab_approval_policy(&policy)?;
     }
 
-    let mut ctx = client::Ctx::embedded(&cli.database)?;
+    let mut ctx = tenkai_sqlite::embedded_ctx(&cli.database, false)?;
     let registered = ontology::register(&mut ctx).await?;
     if registered.is_empty() {
         println!("schema already registered");

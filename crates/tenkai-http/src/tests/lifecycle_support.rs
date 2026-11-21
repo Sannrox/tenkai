@@ -63,9 +63,9 @@ pub(super) async fn catalog_router(root: &std::path::Path) -> (Router, ServerCon
 
 pub(super) async fn lifecycle_router(
     root: &std::path::Path,
-) -> (Router, ServerConfig, Arc<tenkai::storage::SqliteStore>) {
+) -> (Router, ServerConfig, Arc<tenkai_sqlite::SqliteStore>) {
     let database = root.join("tenkai.db");
-    let mut ctx = tenkai::client::Ctx::embedded(&database).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
     tenkai::plan::env_add(&mut ctx, "stage", "fixture")
         .await
@@ -75,7 +75,7 @@ pub(super) async fn lifecycle_router(
         .unwrap();
     let reconciler =
         tenkai::reconciler::Reconciler::new(ctx, tenkai::reconciler::Config::default()).unwrap();
-    let store = Arc::new(tenkai::storage::SqliteStore::open(&database).unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open(&database).unwrap());
     for name in ["stage", "prod"] {
         store
             .put_environment(&tenkai::storage::EnvironmentRecord {
@@ -173,7 +173,7 @@ pub(super) async fn migration_fixture(label: &str) -> MigrationFixture {
     ));
     std::fs::create_dir_all(&root).unwrap();
     let database = root.join("tenkai.db");
-    let mut ctx = tenkai::client::Ctx::embedded(&database).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
     tenkai::plan::env_add(&mut ctx, "local", "fixture")
         .await

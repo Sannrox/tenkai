@@ -11,7 +11,8 @@ requires provider evidence.
 
 Source code lives in `src/` (application core) and `crates/` (`tenkai-wire`,
 `tenkai-http`, `tenkai-server`, `tenkaictl`, `tenkai-executor`, `tenkai-runtime`,
-`tenkai-host-applier`, `tenkai-keys`, and optional `tenkai-postgres`). `src/lib.rs` exports
+`tenkai-host-applier`, `tenkai-keys`, `tenkai-sqlite`, and optional
+`tenkai-postgres`). `src/lib.rs` exports
 the application core. Shipped binaries ([release binaries](docs/release-binaries.md))
 are `tenkaictl` (embedded and remote CLI), `tenkai-server` (network service,
 plus the `tenkai-server-postgres` hub build), `tenkai-executor-guard` (local

@@ -9,7 +9,7 @@ pub(super) struct FixedReconciler {
 impl FixedReconciler {
     pub(super) fn for_runtime() -> Self {
         Self {
-            ctx: Some(tenkai::client::Ctx::embedded(":memory:").unwrap()),
+            ctx: Some(tenkai_sqlite::embedded_ctx(":memory:", false).unwrap()),
             plan: tokio::sync::OnceCell::new(),
         }
     }
@@ -205,14 +205,14 @@ impl ReconcilePort for FixedReconciler {
     }
 }
 
-pub(super) fn app() -> (Router, Arc<tenkai::storage::SqliteStore>) {
+pub(super) fn app() -> (Router, Arc<tenkai_sqlite::SqliteStore>) {
     app_with_reconciler(FixedReconciler::default())
 }
 
 pub(super) fn app_with_reconciler(
     reconciler: FixedReconciler,
-) -> (Router, Arc<tenkai::storage::SqliteStore>) {
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+) -> (Router, Arc<tenkai_sqlite::SqliteStore>) {
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     store
         .put_environment(&tenkai::storage::EnvironmentRecord {
             id: "prod".into(),

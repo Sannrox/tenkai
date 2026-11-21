@@ -156,7 +156,7 @@ async fn backups_are_fleet_management_and_their_age_shows_in_health() {
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let store = Arc::new(tenkai::storage::SqliteStore::open(root.join("tenkai.db")).unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open(root.join("tenkai.db")).unwrap());
     let backups = Arc::new(
         tenkai::backup::Backups::new(
             store.clone(),
@@ -229,7 +229,7 @@ async fn a_standby_replica_is_live_but_not_ready() {
     let fence = Arc::new(tenkai::writer_fence::WriterFence::default());
     let mut config = ServerConfig::community("management-secret", HashMap::new());
     config.writer_fence = Some(fence.clone());
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let app = router(
         config,
         Arc::new(super::support::FixedReconciler::default()),
@@ -292,7 +292,7 @@ async fn readyz_names_peers_whose_executors_differ_without_failing() {
             replicas: vec![replica("hub-a", "shell,docker"), replica("hub-b", "shell")],
         },
     }));
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let app = router(
         config,
         Arc::new(super::support::FixedReconciler::default()),
@@ -325,7 +325,7 @@ async fn health_reports_the_first_administrator_status_only() {
         (FirstAdministrator::Missing, "missing"),
         (FirstAdministrator::Configured, "configured"),
     ] {
-        let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+        let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
         let mut config = ServerConfig::community("management-secret", HashMap::new());
         config.first_administrator = status;
         let app = router(
@@ -380,7 +380,7 @@ async fn health_reports_a_stored_first_administrator_on_every_replica() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let database = dir.join("tenkai.db");
-    let replica = |store: Arc<tenkai::storage::SqliteStore>| {
+    let replica = |store: Arc<tenkai_sqlite::SqliteStore>| {
         let stored = StoredGrants::load(store.clone(), Vec::<String>::new()).unwrap();
         let mut config = ServerConfig::community("management-secret", HashMap::new());
         config.stored_grants = Some(stored.clone());
@@ -393,10 +393,10 @@ async fn health_reports_a_stored_first_administrator_on_every_replica() {
         (stored, app)
     };
     let (writer, first) = replica(Arc::new(
-        tenkai::storage::SqliteStore::open(&database).unwrap(),
+        tenkai_sqlite::SqliteStore::open(&database).unwrap(),
     ));
     let (reader, second) = replica(Arc::new(
-        tenkai::storage::SqliteStore::open(&database).unwrap(),
+        tenkai_sqlite::SqliteStore::open(&database).unwrap(),
     ));
     let status = |app: axum::Router| async move {
         let response = app
@@ -440,7 +440,7 @@ async fn health_reports_a_stored_first_administrator_on_every_replica() {
 /// #836: a replica whose stored grant rules are stale is not ready.
 #[tokio::test]
 async fn readiness_refuses_while_stored_grant_rules_are_stale() {
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let stored = tenkai::grant_rules::StoredGrants::load_with_stale_after(
         store.clone(),
         Vec::<String>::new(),

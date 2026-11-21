@@ -14,7 +14,7 @@ async fn trust_posture_grades_certificates_for_fleet_readers() {
     let listener = dir.join("listener.pem");
     std::fs::write(&listener, params.self_signed(&key).unwrap().pem()).unwrap();
 
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let mut config = ServerConfig::community(
         "management-secret",
         HashMap::from([("runtime-secret".into(), "prod".into())]),

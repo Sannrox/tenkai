@@ -81,7 +81,7 @@ async fn embedded_ctx_serves_catalog_and_operational_ports_and_file_backup() {
     ctx.put(object.clone()).await.unwrap();
     ctx.backup_embedded(&backup).await.unwrap();
     let restored = std::env::temp_dir().join(format!("tenkai-ctx-ports-{suffix}-restored.db"));
-    crate::storage::SqliteStore::restore(&backup, &restored).unwrap();
+    crate::storage::MemoryCatalogGraph::restore(&backup, &restored).unwrap();
     let mut restored_ctx = Ctx::embedded(&restored).unwrap();
     assert_eq!(restored_ctx.get(&object.id).await.unwrap(), Some(object));
 

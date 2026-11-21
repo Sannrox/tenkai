@@ -5,10 +5,11 @@ rollback recovery state, and durable executable-wave records (ADR 0017).
 `OperationalStore` is the application boundary for that authority.
 [ADR 0029](decisions/0029-hub-spoke-operational-store.md) selects the host
 topology: hub PostgreSQL only, spoke and embedded `tenkaictl` SQLite only, one
-port, and retirement of the embedded object-graph schema. `SqliteStore` is the
-complete spoke and embedded adapter; the PostgreSQL adapter must pass the same
-immutability, lifecycle, idempotency, and generation-fencing contract.
-`Ctx::embedded` and community `tenkai-server` open only `SqliteStore`.
+port, and retirement of the embedded object-graph schema. `tenkai-sqlite`
+(`SqliteStore`) is the complete spoke and embedded adapter; the PostgreSQL
+adapter must pass the same immutability, lifecycle, idempotency, and
+generation-fencing contract. Community `tenkaictl` and `tenkai-server` open
+SQLite through `tenkai_sqlite::{embedded_ctx,hub_ctx}`.
 Pre-0029 graph files migrate into typed schema 13 rows and drop `embedded_*`
 tables so leftover objects cannot authorize apply. Schema 14 keys an
 environment's deployments, subscriptions, holds, and retries by instance

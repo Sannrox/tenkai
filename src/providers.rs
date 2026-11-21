@@ -1292,7 +1292,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{OperationalStore, SqliteStore};
+    use crate::storage::{MemoryCatalogGraph, OperationalStore};
 
     fn binding() -> EvidenceBinding {
         EvidenceBinding {
@@ -1876,7 +1876,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_store_error_on_one_outcome_does_not_strand_the_batch() {
-        let inner = SqliteStore::open_in_memory().unwrap();
+        let inner = MemoryCatalogGraph::open_in_memory().unwrap();
         let first = terminal_event_for("prod", "tenkai:deployment:prod:api:1", 1_000);
         let second = terminal_event_for("prod", "tenkai:deployment:prod:api:2", 1_001);
         enqueue_optional_event(&inner, OUTCOME_PROVIDER_KIND, &first, 100).unwrap();
@@ -1913,7 +1913,7 @@ mod tests {
 
     #[tokio::test]
     async fn outcome_worker_claims_only_outcomes_and_acknowledges_idempotently() {
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         let event = terminal_event();
         enqueue_optional_event(&store, "audit", &event, 100).unwrap();
         enqueue_optional_event(&store, OUTCOME_PROVIDER_KIND, &event, 100).unwrap();
@@ -1949,7 +1949,7 @@ mod tests {
 
     #[tokio::test]
     async fn outcome_sequences_are_durable_and_monotonic_across_events() {
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         let first = terminal_event();
         let second = terminal_outcome_event(
             "tenkai:deployment:prod:web:2",
@@ -2219,7 +2219,7 @@ mod tests {
 
     #[tokio::test]
     async fn optional_failures_remain_durable_and_retry_idempotently() {
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         let event = ProviderEvent {
             id: "audit-1".into(),
             binding: binding(),
@@ -2281,7 +2281,7 @@ mod tests {
 
     #[tokio::test]
     async fn destinations_claims_and_poison_events_are_isolated() {
-        let store = SqliteStore::open_in_memory().unwrap();
+        let store = MemoryCatalogGraph::open_in_memory().unwrap();
         let event = ProviderEvent {
             id: "shared-1".into(),
             binding: binding(),

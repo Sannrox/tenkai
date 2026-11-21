@@ -35,7 +35,7 @@ async fn history_route_returns_newest_first_and_filters_product() {
         tenkai::now_millis()
     ));
     let _ = std::fs::remove_file(&database);
-    let mut ctx = tenkai::client::Ctx::embedded(&database).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
     tenkai::environment::env_add(&mut ctx, "prod", "prod")
         .await
@@ -129,7 +129,7 @@ async fn delivery_report_route_reports_the_period_and_refuses_an_empty_one() {
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
-    let mut ctx = tenkai::client::Ctx::embedded(&database).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
     tenkai::environment::env_add(&mut ctx, "prod", "prod")
         .await

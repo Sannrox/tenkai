@@ -123,8 +123,9 @@ standby; promotion is a separate signed operator action.
 ## Automated drill
 
 `cargo test --locked --lib embedded_backup_restore_stays_on_typed_schema` proves the
-operator `SqliteStore` backup → restore path on the current typed schema
-(`SCHEMA_VERSION` in `src/storage.rs`). The older
+operator SQLite backup → restore path on the current typed schema
+(`SCHEMA_VERSION` in `src/storage.rs`; community hosts restore through
+`tenkai_sqlite::restore`). The older
 `online_backup_restores_complete_embedded_state` drill still covers the
 pre-0029 graph-fixture factory used only to import leftover `embedded_*`
 rows.

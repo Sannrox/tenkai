@@ -3826,7 +3826,7 @@ mod tests {
     }
 
     fn operations() -> (RuntimeDeliveryOperations, Arc<Port>) {
-        let store = Arc::new(crate::storage::SqliteStore::open_in_memory().unwrap());
+        let store = Arc::new(crate::storage::MemoryCatalogGraph::open_in_memory().unwrap());
         let port = Arc::new(Port {
             store: store.clone(),
             calls: Mutex::new(Vec::new()),

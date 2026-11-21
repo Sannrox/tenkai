@@ -76,7 +76,7 @@ async fn tenant_mode_management_apis_isolate_environments() {
         )
         .unwrap();
 
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let tenant_app = router(config, Arc::new(FixedReconciler::default()), store).unwrap();
     // Runtime enrollment uses the host's store, which is not tenant-partitioned.
     let enrollment = tenant_app

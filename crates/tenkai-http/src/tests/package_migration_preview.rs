@@ -18,7 +18,7 @@ async fn package_migration_preview_matches_embedded_identity() {
     let reconciler =
         tenkai::reconciler::Reconciler::new(ctx.clone(), tenkai::reconciler::Config::default())
             .unwrap();
-    let store = Arc::new(tenkai::storage::SqliteStore::open(&database).unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open(&database).unwrap());
     let app = router(
         ServerConfig::community("management-secret", HashMap::new()),
         Arc::new(reconciler),
@@ -115,7 +115,7 @@ async fn package_migration_preview_hides_cross_tenant_environment() {
         )
         .unwrap();
 
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let tenant_app = router(config, Arc::new(FixedReconciler::default()), store).unwrap();
     let preview = |environment: &'static str| {
         let app = tenant_app.clone();

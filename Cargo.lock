@@ -3107,7 +3107,6 @@ dependencies = [
  "rcgen",
  "reqwest",
  "ring",
- "rusqlite",
  "rustls",
  "rustls-native-certs",
  "schemars",
@@ -3118,6 +3117,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tar",
+ "tenkai",
  "tenkai-keys",
  "tenkai-wire",
  "thiserror",
@@ -3163,7 +3163,6 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
- "rusqlite",
  "rustix",
  "serde",
  "serde_json",
@@ -3193,6 +3192,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tenkai",
+ "tenkai-sqlite",
  "time",
  "tokio",
  "tokio-rustls",
@@ -3271,7 +3271,24 @@ dependencies = [
  "tenkai-executor",
  "tenkai-http",
  "tenkai-postgres",
+ "tenkai-sqlite",
  "time",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "tenkai-sqlite"
+version = "0.9.1"
+dependencies = [
+ "anyhow",
+ "prost",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tenkai",
+ "thiserror",
  "tokio",
  "uuid",
 ]
@@ -3306,6 +3323,7 @@ dependencies = [
  "tenkai",
  "tenkai-executor",
  "tenkai-http",
+ "tenkai-sqlite",
  "tokio",
  "toml",
  "toml_edit",

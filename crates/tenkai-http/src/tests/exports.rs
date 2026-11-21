@@ -73,7 +73,7 @@ async fn exports_download_verifiably_and_stay_inside_their_scope() {
     ));
     std::fs::create_dir_all(&root).unwrap();
     let database = root.join("tenkai.db");
-    let mut ctx = tenkai::client::Ctx::embedded(&database).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
     let mut plans = HashMap::new();
     for environment in ["prod", "site-c"] {
@@ -87,7 +87,7 @@ async fn exports_download_verifiably_and_stay_inside_their_scope() {
     }
     let reconciler =
         tenkai::reconciler::Reconciler::new(ctx, tenkai::reconciler::Config::default()).unwrap();
-    let store = Arc::new(tenkai::storage::SqliteStore::open(&database).unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open(&database).unwrap());
     let mut config = ServerConfig::community("management-secret", HashMap::new());
     config
         .environment_management_assignments
@@ -323,7 +323,7 @@ async fn read_only_and_tenant_credentials_get_no_exports() {
         tenkai::tenant_store::InMemoryTenantOperationalStore::new(),
     ));
     config.exports = Some(exports(&root));
-    let store = Arc::new(tenkai::storage::SqliteStore::open_in_memory().unwrap());
+    let store = Arc::new(tenkai_sqlite::SqliteStore::open_in_memory().unwrap());
     let app = router(
         config,
         Arc::new(super::support::FixedReconciler::default()),

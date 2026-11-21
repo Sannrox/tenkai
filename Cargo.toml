@@ -36,7 +36,6 @@ url = "2"
 chrono = "0.4"
 chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4"] }
-rusqlite = { version = "0.32", default-features = false, features = ["backup", "bundled"] }
 thiserror = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 # Validates TENKAI_CA_BUNDLE certificates as trust anchors (#633); already in the tree via reqwest.
@@ -66,6 +65,7 @@ default = []
 test-support = []
 
 [dev-dependencies]
+tenkai = { path = ".", features = ["test-support"] }
 tenkai-keys = { path = "crates/tenkai-keys", features = ["test-support"] }
 tokio = { version = "1", default-features = false, features = ["test-util"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }

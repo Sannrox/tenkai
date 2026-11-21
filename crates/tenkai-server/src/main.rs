@@ -33,13 +33,14 @@ use tenkai::runtime_capabilities::{
     shell_executor_capabilities, software_executor_default_capabilities,
     validate_runtime_capabilities,
 };
-use tenkai::storage::{OperationalStore, SqliteStore};
+use tenkai::storage::OperationalStore;
 use tenkai::tenant_store::TenantOperationalStore;
 use tenkai_http::{ServerConfig, router};
 use tenkai_postgres::{
     compiled_host_feature_report_with, enterprise_postgres_hub_profile,
     refuse_mixed_store_configuration, require_hub_tenant_mode, resolve_fenced_enterprise_hub,
 };
+use tenkai_sqlite::SqliteStore;
 
 const JWT_AUTH_EXTENSION_ID: &str = "auth.jwt.aldunis";
 const JWT_VERIFIER_CONFIG_ENV: &str = "TENKAI_JWT_VERIFIER_CONFIG";
@@ -553,7 +554,11 @@ async fn main() -> Result<()> {
                 "--check-store checks the community SQLite store; PostgreSQL hubs are upgraded by their operator"
             ))
         } else {
-            tenkai::server_self_upgrade::check_store(&database)
+            tenkai::server_self_upgrade::check_store(
+                &database,
+                tenkai_sqlite::copy_store_file,
+                tenkai_sqlite::open_scratch,
+            )
         };
         match checked {
             Ok(check) => {
@@ -1057,7 +1062,7 @@ async fn main() -> Result<()> {
             let database = community_database
                 .as_ref()
                 .expect("community hosts open SQLite");
-            tenkai::client::Ctx::embedded_with_outcome_export(database, outcome_provider.is_some())
+            tenkai_sqlite::embedded_ctx(database, outcome_provider.is_some())
                 .context("opening embedded application state")?
         }
         ProviderMode::Remote => tenkai::client::connect()

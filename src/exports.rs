@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn a_chain_entry_left_without_an_export_is_stored_before_the_chain_advances() {
         let (exports, root) = exports("chain");
-        let store = crate::storage::SqliteStore::open_in_memory().unwrap();
+        let store = crate::storage::MemoryCatalogGraph::open_in_memory().unwrap();
         // A crash after the chain advanced, before the export was stored.
         crate::audit_export::export_next(
             &store,
@@ -833,7 +833,7 @@ mod tests {
     #[test]
     fn the_chain_advances_after_an_entry_that_ends_later_than_now() {
         let (exports, root) = exports("reorder");
-        let store = crate::storage::SqliteStore::open_in_memory().unwrap();
+        let store = crate::storage::MemoryCatalogGraph::open_in_memory().unwrap();
         // A request that took the lock first with a later clock.
         let later = crate::now_millis() + 3_600_000;
         exports

@@ -843,7 +843,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Flaky::new(Arc::new(
-            crate::storage::SqliteStore::open(dir.join("tenkai.db")).unwrap(),
+            crate::storage::MemoryCatalogGraph::open(dir.join("tenkai.db")).unwrap(),
         ));
         (dir, store)
     }
@@ -932,7 +932,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Flaky::new(Arc::new(
-            crate::storage::SqliteStore::open(dir.join("tenkai.db")).unwrap(),
+            crate::storage::MemoryCatalogGraph::open(dir.join("tenkai.db")).unwrap(),
         ));
         let grants =
             StoredGrants::load_with_stale_after(store.clone(), Vec::<String>::new(), STALE_BOUND)
@@ -1016,10 +1016,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let database = dir.join("tenkai.db");
         let store = Flaky::new(Arc::new(
-            crate::storage::SqliteStore::open(&database).unwrap(),
+            crate::storage::MemoryCatalogGraph::open(&database).unwrap(),
         ));
         let writer = StoredGrants::load(
-            Arc::new(crate::storage::SqliteStore::open(&database).unwrap()),
+            Arc::new(crate::storage::MemoryCatalogGraph::open(&database).unwrap()),
             Vec::<String>::new(),
         )
         .unwrap();
