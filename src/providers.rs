@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
-use tonic::metadata::MetadataValue;
+use tonic::metadata::{MetadataMap, MetadataValue};
 use tonic::transport::{Channel, Endpoint};
 
 use crate::pb::sekai::sekai_service_client::SekaiServiceClient;
@@ -860,6 +860,18 @@ impl std::fmt::Debug for ChiseiOutcomeProvider {
     }
 }
 
+/// Carry the current delivery trace on an outbound gRPC call. Missing or
+/// unusable context is a no-op: it never fails the call.
+pub(crate) fn attach_current_traceparent(metadata: &mut MetadataMap) {
+    let Some(trace) = crate::telemetry::current_trace() else {
+        return;
+    };
+    let Ok(value) = MetadataValue::try_from(trace.traceparent()) else {
+        return;
+    };
+    metadata.insert("traceparent", value);
+}
+
 pub(crate) fn provider_transport_is_safe(endpoint: &str) -> bool {
     let Ok(parsed) = url::Url::parse(endpoint) else {
         return false;
@@ -1112,19 +1124,11 @@ impl ChiseiOutcomeProvider {
             causality: None,
         })
     }
-}
 
-impl OutcomeProvider for ChiseiOutcomeProvider {
-    async fn record(&self, event: &ProviderEvent) -> Result<(), ProviderError> {
-        if !self.registration_attested {
-            return Err(ProviderError::InvalidEvidence(
-                "Sekai outcome export requires administrator-confirmed producer and schema registration".into(),
-            ));
-        }
-        let evidence = self.evidence(event)?;
-        let mut request = tonic::Request::new(SubmitEvidenceRequest {
-            envelope: Some(evidence),
-        });
+    fn authenticate<T>(
+        &self,
+        mut request: tonic::Request<T>,
+    ) -> Result<tonic::Request<T>, ProviderError> {
         let principal = MetadataValue::try_from(self.principal.as_str()).map_err(|_| {
             ProviderError::InvalidEvidence("outcome principal is not valid metadata".into())
         })?;
@@ -1140,6 +1144,22 @@ impl OutcomeProvider for ChiseiOutcomeProvider {
                 .metadata_mut()
                 .insert("authorization", authorization);
         }
+        attach_current_traceparent(request.metadata_mut());
+        Ok(request)
+    }
+}
+
+impl OutcomeProvider for ChiseiOutcomeProvider {
+    async fn record(&self, event: &ProviderEvent) -> Result<(), ProviderError> {
+        if !self.registration_attested {
+            return Err(ProviderError::InvalidEvidence(
+                "Sekai outcome export requires administrator-confirmed producer and schema registration".into(),
+            ));
+        }
+        let evidence = self.evidence(event)?;
+        let request = self.authenticate(tonic::Request::new(SubmitEvidenceRequest {
+            envelope: Some(evidence),
+        }))?;
         let mut client = self.client.clone();
         let result = client
             .submit_evidence(request)

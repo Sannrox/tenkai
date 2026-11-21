@@ -26,7 +26,8 @@ use crate::provider_event::{
 };
 use crate::providers::{
     EvidenceBinding, PROVIDER_CONTRACT_VERSION, ProviderError, ProviderEvent,
-    evidence_submission_succeeded, provider_transport_is_safe, tenant_scoped_target_id,
+    attach_current_traceparent, evidence_submission_succeeded, provider_transport_is_safe,
+    tenant_scoped_target_id,
 };
 use crate::storage::ProviderEventRecord;
 
@@ -689,6 +690,7 @@ impl ChiseiFeedbackProvider {
                 .metadata_mut()
                 .insert("authorization", authorization);
         }
+        attach_current_traceparent(request.metadata_mut());
         Ok(request)
     }
 }
@@ -1135,6 +1137,28 @@ mod tests {
             tenant_mode,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn authenticate_forwards_traceparent_only_when_a_trace_is_active() {
+        const PARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let provider = feedback_provider(false);
+        let without = provider.authenticate(tonic::Request::new(())).unwrap();
+        assert!(without.metadata().get("traceparent").is_none());
+
+        let parent = crate::telemetry::TraceContext::from_traceparent(PARENT).unwrap();
+        let with = crate::telemetry::in_trace(parent, async {
+            provider.authenticate(tonic::Request::new(())).unwrap()
+        })
+        .await;
+        assert_eq!(
+            with.metadata()
+                .get("traceparent")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            PARENT
+        );
     }
 
     /// New tenant-mode rows use the tenant-scoped kind with the tenant

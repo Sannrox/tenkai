@@ -59,6 +59,11 @@ nothing.
 Remote `tenkaictl` sends `traceparent` next to `x-request-id` when the call
 runs inside a Tenkai trace context.
 
+gRPC calls Tenkai makes to Sekai or Chisei send the same `traceparent` as
+request metadata when the call runs inside a Tenkai trace, so those servers'
+spans join the delivery trace. A call outside a trace sends none. A missing
+or unusable context never fails the call.
+
 ## Inbound correlation identity
 
 Supply the caller-owned operation identity. Hub HTTP uses `x-request-id`

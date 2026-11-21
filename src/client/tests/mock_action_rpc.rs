@@ -21,21 +21,11 @@ impl tonic::server::UnaryService<PutGovernedActionTypeRequest> for PutGovernedAc
     fn call(&mut self, request: tonic::Request<PutGovernedActionTypeRequest>) -> Self::Future {
         let state = self.0.clone();
         Box::pin(async move {
-            let principal = request
-                .metadata()
-                .get("x-principal")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
-            let authorization = request
-                .metadata()
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
             state
                 .metadata
                 .lock()
                 .unwrap()
-                .push((principal, authorization));
+                .push(super::mock_state::captured_metadata(&request));
             let mut action = request.into_inner().r#type.unwrap_or_default();
             if action.created_at_ms == 0 {
                 action.created_at_ms = mock_now_ms();

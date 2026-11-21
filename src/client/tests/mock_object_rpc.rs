@@ -19,6 +19,11 @@ impl tonic::server::UnaryService<CreateObjectRequest> for CreateObjectRpc {
     fn call(&mut self, request: tonic::Request<CreateObjectRequest>) -> Self::Future {
         let state = self.0.clone();
         Box::pin(async move {
+            state
+                .metadata
+                .lock()
+                .unwrap()
+                .push(super::mock_state::captured_metadata(&request));
             let request = request.into_inner();
             let object = request.object.clone().unwrap_or_default();
             state.creates.lock().unwrap().push(request);
