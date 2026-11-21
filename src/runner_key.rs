@@ -17,14 +17,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
-use cryptoki::mechanism::Mechanism;
-use cryptoki::object::{Attribute, AttributeType, KeyType, ObjectClass, ObjectHandle};
-use cryptoki::session::{Session, UserType};
-use cryptoki::types::AuthPin;
 use rcgen::PublicKeyData as _;
-use ring::rand::{SecureRandom, SystemRandom};
+use ring::rand::SystemRandom;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
+use tenkai_keys::pkcs11::{P256Role, TokenObject, TokenSession};
 
 use crate::secret_source;
 
@@ -39,9 +35,6 @@ pub const TOKEN_ENV: &str = "TENKAI_RUNTIME_PKCS11_TOKEN";
 pub const PIN_ENV: &str = "TENKAI_RUNTIME_PKCS11_PIN";
 pub const KEY_LABEL_ENV: &str = "TENKAI_RUNTIME_PKCS11_KEY_LABEL";
 pub const DEFAULT_KEY_LABEL: &str = "tenkai-runner";
-
-/// DER OID of `prime256v1` (secp256r1) for `CKA_EC_PARAMS`.
-const PRIME256V1_OID: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
 
 /// How the agent generates a missing runner key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -493,12 +486,6 @@ impl HardwareRunnerKey {
     }
 }
 
-#[derive(Clone, Copy)]
-enum P256Role {
-    Sign,
-    Derive,
-}
-
 fn spawn_store(store: &HardwareStore, mint: bool, role: P256Role) -> Result<HardwareRunnerKey> {
     let (commands, inbox) = std::sync::mpsc::channel();
     let worker_store = store.clone();
@@ -513,13 +500,25 @@ fn spawn_store(store: &HardwareStore, mint: bool, role: P256Role) -> Result<Hard
                 while let Ok(command) = inbox.recv() {
                     match command {
                         Command::Sign { message, reply } => {
-                            let _ = reply.send(sign_on_token(&session, private, &message));
+                            let _ = reply.send(
+                                session
+                                    .sign_ecdsa_p256(private, &message)
+                                    .map_err(|error| error.to_string()),
+                            );
                         }
                         Command::Export { reply } => {
-                            let _ = reply.send(export_on_token(&session, private));
+                            let _ = reply.send(
+                                session
+                                    .export_private_value(private)
+                                    .map_err(|error| error.to_string()),
+                            );
                         }
                         Command::Derive { peer, reply } => {
-                            let _ = reply.send(derive_on_token(&session, private, &peer));
+                            let _ = reply.send(
+                                session
+                                    .derive_ecdh(private, &peer)
+                                    .map_err(|error| error.to_string()),
+                            );
                         }
                     }
                 }
@@ -538,66 +537,6 @@ fn spawn_store(store: &HardwareStore, mint: bool, role: P256Role) -> Result<Hard
         token_label,
         key_label,
     })
-}
-
-fn sign_on_token(
-    session: &Session,
-    private: ObjectHandle,
-    message: &[u8],
-) -> Result<Vec<u8>, String> {
-    let hash = Sha256::digest(message);
-    let raw = session
-        .sign(&Mechanism::Ecdsa, private, &hash)
-        .map_err(|error| format!("signing with the hardware runner key: {error}"))?;
-    ecdsa_der(&raw).map_err(|error| error.to_string())
-}
-
-/// ECDH (`CKM_ECDH1_DERIVE`, no KDF) of the private key with `peer`, an
-/// uncompressed P-256 point, into a session object that is read once and
-/// destroyed. The shared secret leaves the token; the private key does not.
-/// Errors never carry the secret.
-fn derive_on_token(
-    session: &Session,
-    private: ObjectHandle,
-    peer: &[u8],
-) -> Result<Vec<u8>, String> {
-    use cryptoki::mechanism::elliptic_curve::{EcKdf, Ecdh1DeriveParams};
-    let mechanism = Mechanism::Ecdh1Derive(Ecdh1DeriveParams::new(EcKdf::null(), peer));
-    let template = [
-        Attribute::Class(ObjectClass::SECRET_KEY),
-        Attribute::KeyType(KeyType::GENERIC_SECRET),
-        Attribute::ValueLen(32.into()),
-        Attribute::Token(false),
-        Attribute::Sensitive(false),
-        Attribute::Extractable(true),
-    ];
-    let derived = session
-        .derive_key(&mechanism, private, &template)
-        .map_err(|error| format!("deriving with the hardware sealing key: {error}"))?;
-    let value = session.get_attributes(derived, &[AttributeType::Value]);
-    let _ = session.destroy_object(derived);
-    let value = value.map_err(|_| "reading the derived shared secret".to_string())?;
-    value
-        .into_iter()
-        .find_map(|attribute| match attribute {
-            Attribute::Value(bytes) if bytes.len() == 32 => Some(bytes),
-            _ => None,
-        })
-        .ok_or_else(|| "the token derived no 32-byte shared secret".to_string())
-}
-
-fn export_on_token(session: &Session, private: ObjectHandle) -> Result<Vec<u8>, String> {
-    match session.get_attributes(private, &[AttributeType::Value]) {
-        Ok(attributes)
-            if attributes.iter().any(
-                |attribute| matches!(attribute, Attribute::Value(bytes) if !bytes.is_empty()),
-            ) =>
-        {
-            Ok(b"exported".to_vec())
-        }
-        Ok(_) => Err("hardware runner key cannot be exported".into()),
-        Err(_) => Err("hardware runner key cannot be exported".into()),
-    }
 }
 
 impl rcgen::PublicKeyData for HardwareRunnerKey {
@@ -655,245 +594,13 @@ fn connect(
     store: &HardwareStore,
     mint: bool,
     role: P256Role,
-) -> Result<(Session, ObjectHandle, Vec<u8>)> {
-    let pkcs11 = tenkai_keys::pkcs11::load_pkcs11(&store.module)
-        .map_err(|_| anyhow::anyhow!("loading PKCS#11 module {}", store.module.display()))?;
-    let slot = tenkai_keys::pkcs11::slot_with_label(&pkcs11, &store.token_label)
-        .map_err(|_| anyhow::anyhow!("PKCS#11 token {} was not found", store.token_label))?;
-    let session = pkcs11
-        .open_rw_session(slot)
-        .map_err(|error| anyhow::anyhow!("opening PKCS#11 session: {error}"))?;
-    match session.login(UserType::User, Some(&AuthPin::new(store.pin.clone()))) {
-        Ok(())
-        | Err(cryptoki::error::Error::Pkcs11(cryptoki::error::RvError::UserAlreadyLoggedIn, _)) => {
-        }
-        Err(error) => bail!("PKCS#11 login failed: {error}"),
-    }
+) -> Result<(TokenSession, TokenObject, Vec<u8>)> {
+    let session = TokenSession::open(&store.module, &store.token_label, &store.pin)?;
     if mint {
-        ensure_provisioned(&session, &store.key_label, role)?;
+        session.ensure_p256(&store.key_label, role)?;
     }
-    let (private, point) = restore(&session, &store.key_label, role)?;
+    let (private, point) = session.restore_p256(&store.key_label, role)?;
     Ok((session, private, point))
-}
-
-fn find_labeled(
-    session: &Session,
-    class: ObjectClass,
-    key_label: &str,
-) -> Result<Vec<ObjectHandle>> {
-    session
-        .find_objects(&[
-            Attribute::Class(class),
-            Attribute::Label(key_label.as_bytes().to_vec()),
-        ])
-        .map_err(|error| anyhow::anyhow!("listing PKCS#11 runner keys: {error}"))
-}
-
-fn restore(session: &Session, key_label: &str, role: P256Role) -> Result<(ObjectHandle, Vec<u8>)> {
-    match find_labeled(session, ObjectClass::PRIVATE_KEY, key_label)?.as_slice() {
-        [] => bail!("hardware runner key {key_label} is not provisioned"),
-        [private] => {
-            require_not_extractable(session, *private, key_label, role)?;
-            let id = object_id(session, *private)?;
-            let public = unique_object(
-                session
-                    .find_objects(&[Attribute::Class(ObjectClass::PUBLIC_KEY), Attribute::Id(id)])
-                    .map_err(|error| {
-                        anyhow::anyhow!("listing PKCS#11 runner public keys: {error}")
-                    })?,
-                key_label,
-            )?;
-            Ok((*private, ec_point(session, public)?))
-        }
-        found => bail!(
-            "hardware runner key {key_label} is ambiguous ({} private objects)",
-            found.len()
-        ),
-    }
-}
-
-fn object_id(session: &Session, handle: ObjectHandle) -> Result<Vec<u8>> {
-    let attributes = session
-        .get_attributes(handle, &[AttributeType::Id])
-        .map_err(|error| anyhow::anyhow!("reading PKCS#11 runner key id: {error}"))?;
-    match attributes.into_iter().next() {
-        Some(Attribute::Id(id)) if !id.is_empty() => Ok(id),
-        _ => bail!("PKCS#11 runner key is missing CKA_ID"),
-    }
-}
-
-fn unique_object(found: Vec<ObjectHandle>, key_label: &str) -> Result<ObjectHandle> {
-    match found.as_slice() {
-        [handle] => Ok(*handle),
-        found => bail!(
-            "hardware runner key {key_label} public object is ambiguous ({} objects)",
-            found.len()
-        ),
-    }
-}
-
-fn ec_point(session: &Session, handle: ObjectHandle) -> Result<Vec<u8>> {
-    let attributes = session
-        .get_attributes(handle, &[AttributeType::EcPoint])
-        .map_err(|error| anyhow::anyhow!("reading PKCS#11 runner public key: {error}"))?;
-    let Some(Attribute::EcPoint(point)) = attributes.into_iter().next() else {
-        bail!("PKCS#11 runner public key is missing CKA_EC_POINT");
-    };
-    parse_p256_point(&point)
-}
-
-fn parse_p256_point(point: &[u8]) -> Result<Vec<u8>> {
-    let raw = match point {
-        [0x04, 0x41, rest @ ..] if rest.len() == 65 => rest,
-        raw if raw.len() == 65 => raw,
-        other => bail!(
-            "PKCS#11 runner public key has unexpected CKA_EC_POINT length {}",
-            other.len()
-        ),
-    };
-    anyhow::ensure!(
-        raw[0] == 0x04,
-        "PKCS#11 runner public key is not an uncompressed P-256 point"
-    );
-    Ok(raw.to_vec())
-}
-
-fn require_not_extractable(
-    session: &Session,
-    handle: ObjectHandle,
-    key_label: &str,
-    role: P256Role,
-) -> Result<()> {
-    let usage = match role {
-        P256Role::Sign => AttributeType::Sign,
-        P256Role::Derive => AttributeType::Derive,
-    };
-    let attributes = session
-        .get_attributes(
-            handle,
-            &[AttributeType::Extractable, AttributeType::Sensitive, usage],
-        )
-        .map_err(|error| {
-            anyhow::anyhow!("reading PKCS#11 runner key {key_label} protection attributes: {error}")
-        })?;
-    let mut extractable = None;
-    let mut sensitive = None;
-    let mut usable = None;
-    for attribute in attributes {
-        match attribute {
-            Attribute::Extractable(value) => extractable = Some(value),
-            Attribute::Sensitive(value) => sensitive = Some(value),
-            Attribute::Sign(value) if matches!(role, P256Role::Sign) => usable = Some(value),
-            Attribute::Derive(value) if matches!(role, P256Role::Derive) => usable = Some(value),
-            _ => {}
-        }
-    }
-    if extractable != Some(false) {
-        bail!("hardware runner key {key_label} is extractable");
-    }
-    if sensitive != Some(true) {
-        bail!("hardware runner key {key_label} is not sensitive");
-    }
-    match role {
-        P256Role::Sign if usable != Some(true) => {
-            bail!("hardware runner key {key_label} cannot sign")
-        }
-        P256Role::Derive if usable != Some(true) => {
-            bail!("hardware sealing key {key_label} cannot derive")
-        }
-        _ => Ok(()),
-    }
-}
-
-fn ensure_provisioned(session: &Session, key_label: &str, role: P256Role) -> Result<()> {
-    match find_labeled(session, ObjectClass::PRIVATE_KEY, key_label)?.as_slice() {
-        [] => {
-            mint_p256(session, key_label, role)?;
-            Ok(())
-        }
-        [_] => Ok(()),
-        found => bail!(
-            "hardware runner key {key_label} is ambiguous ({} private objects)",
-            found.len()
-        ),
-    }
-}
-
-fn mint_p256(session: &Session, key_label: &str, role: P256Role) -> Result<()> {
-    let label = key_label.as_bytes().to_vec();
-    let mut id = [0_u8; 16];
-    SystemRandom::new()
-        .fill(&mut id)
-        .map_err(|_| anyhow::anyhow!("generating PKCS#11 runner key id"))?;
-    let id = id.to_vec();
-    let public_usage = match role {
-        P256Role::Sign => Attribute::Verify(true),
-        P256Role::Derive => Attribute::Derive(true),
-    };
-    let private_usage = match role {
-        P256Role::Sign => Attribute::Sign(true),
-        P256Role::Derive => Attribute::Derive(true),
-    };
-    session
-        .generate_key_pair(
-            &Mechanism::EccKeyPairGen,
-            &[
-                Attribute::Class(ObjectClass::PUBLIC_KEY),
-                Attribute::KeyType(KeyType::EC),
-                Attribute::Label(label.clone()),
-                Attribute::Id(id.clone()),
-                Attribute::Token(true),
-                public_usage,
-                Attribute::EcParams(PRIME256V1_OID.to_vec()),
-            ],
-            &[
-                Attribute::Class(ObjectClass::PRIVATE_KEY),
-                Attribute::KeyType(KeyType::EC),
-                Attribute::Label(label),
-                Attribute::Id(id),
-                Attribute::Token(true),
-                Attribute::Private(true),
-                Attribute::Sensitive(true),
-                Attribute::Extractable(false),
-                private_usage,
-            ],
-        )
-        .map_err(|error| anyhow::anyhow!("generating a hardware runner key: {error}"))?;
-    let privates = find_labeled(session, ObjectClass::PRIVATE_KEY, key_label)?;
-    if privates.len() != 1 {
-        bail!(
-            "hardware runner key {key_label} became ambiguous during mint ({} private objects)",
-            privates.len()
-        );
-    }
-    Ok(())
-}
-
-/// ASN.1 DER ECDSA signature from PKCS#11 `CKM_ECDSA` `r||s`.
-fn ecdsa_der(raw: &[u8]) -> Result<Vec<u8>> {
-    anyhow::ensure!(raw.len() == 64, "ECDSA P-256 signature must be 64 bytes");
-    let integer = |half: &[u8]| {
-        let mut start = 0;
-        while start + 1 < half.len() && half[start] == 0 && half[start + 1] < 0x80 {
-            start += 1;
-        }
-        let body = &half[start..];
-        let mut out = vec![0x02];
-        if body[0] >= 0x80 {
-            out.push((body.len() + 1) as u8);
-            out.push(0);
-        } else {
-            out.push(body.len() as u8);
-        }
-        out.extend_from_slice(body);
-        out
-    };
-    let r = integer(&raw[..32]);
-    let s = integer(&raw[32..]);
-    let mut seq = vec![0x30, (r.len() + s.len()) as u8];
-    seq.extend(r);
-    seq.extend(s);
-    Ok(seq)
 }
 
 fn write_owner_only(path: &Path, contents: &str) -> Result<()> {

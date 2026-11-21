@@ -23,6 +23,9 @@ use sekai_keys::{
 };
 use serde::{Deserialize, Serialize};
 
+mod session;
+pub use session::{P256Role, SessionError, TokenObject, TokenSession};
+
 const ALGORITHM: &str = "AES-256-GCM";
 const TAG_BITS: u64 = 128;
 const NONCE_LEN: usize = 12;
