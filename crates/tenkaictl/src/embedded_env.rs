@@ -53,10 +53,23 @@ pub(crate) async fn run(
         }
         EnvCommand::ClosePreview { env } => {
             let evidence = preview::close_branch(ctx, &env, tenkai::now_millis()).await?;
-            println!(
-                "preview environment {} torn down ({}); pin {}; plan digest {}",
-                evidence.environment, evidence.reason, evidence.pin_digest, evidence.plan_digest
-            );
+            if evidence.status == preview::STATUS_CLOSING {
+                println!(
+                    "preview environment {} closing ({}); deployed instances are removed on reconcile; pin {}; plan digest {}",
+                    evidence.environment,
+                    evidence.reason,
+                    evidence.pin_digest,
+                    evidence.plan_digest
+                );
+            } else {
+                println!(
+                    "preview environment {} torn down ({}); pin {}; plan digest {}",
+                    evidence.environment,
+                    evidence.reason,
+                    evidence.pin_digest,
+                    evidence.plan_digest
+                );
+            }
         }
         EnvCommand::List { selector } => {
             let mut entries = plan::list_environments(ctx).await?;

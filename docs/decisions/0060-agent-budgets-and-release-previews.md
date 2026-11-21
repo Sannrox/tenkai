@@ -205,9 +205,9 @@ evidence writes and stay refused.
   reports the load error until every server is upgraded. That fails closed,
   but it is visible downtime for automatic approval, so release notes must
   say to upgrade every server before editing policies.
-- Branch-pin previews have the same metadata-only teardown. This decision
-  fixes it for release previews only; branch-pin previews need their own
-  Issue.
+- Branch-pin preview teardown that actually removes deployed instances is
+  [#1536](https://github.com/Sannrox/tenkai/issues/1536). This decision
+  applies the same `closing` then `Remove` path to release previews.
 - Previews widen agent authority to deploying inside a preview. Every
   human-only check still applies there, and a preview cannot receive a
   parent's secrets.

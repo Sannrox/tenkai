@@ -901,6 +901,8 @@ async fn compute_snapshot_with_policy(
 )> {
     let mut env_obj = crate::environment::active_environment(ctx, env).await?;
     crate::preview::admit_plan(&env_obj, crate::now_millis())?;
+    let tearing_down = crate::preview::inspect_from_object(&env_obj)?
+        .is_some_and(|preview| preview.status == crate::preview::STATUS_CLOSING);
     let cluster_config =
         crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;
     let list_docker = crate::software_executor::secret_dir_from_properties(&env_obj.properties)?
@@ -918,7 +920,13 @@ async fn compute_snapshot_with_policy(
         crate::environment::stamp_unmanaged_workloads(&mut env_obj, &live_workloads);
     }
     let live_names: BTreeSet<String> = live_workloads.iter().map(|w| w.name.clone()).collect();
-    let subscriptions = crate::environment::list_subscriptions(ctx, &env_obj).await?;
+    // A closing preview keeps its deployed pins until Remove succeeds; skip
+    // desired-state so the unsubscribed-deployed path plans those removals.
+    let subscriptions = if tearing_down {
+        Vec::new()
+    } else {
+        crate::environment::list_subscriptions(ctx, &env_obj).await?
+    };
 
     let mut instances = std::collections::HashSet::new();
     for sub in &subscriptions {
@@ -3075,7 +3083,7 @@ pub(super) async fn create_holding_failed_targets(ctx: &mut Ctx, env: &str) -> R
 
 /// Persist an explicitly constructed operation, such as a rollback, as a plan.
 pub(super) async fn create_from_steps(ctx: &mut Ctx, env: &str, steps: Vec<Step>) -> Result<Plan> {
-    admit_preview_environment(ctx, env).await?;
+    admit_preview_environment(ctx, env, &steps).await?;
     let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
     create_with_content(
         ctx,
@@ -3096,7 +3104,7 @@ pub(super) async fn create_from_steps_with_recovery(
     steps: Vec<Step>,
     reason: String,
 ) -> Result<Plan> {
-    admit_preview_environment(ctx, env).await?;
+    admit_preview_environment(ctx, env, &steps).await?;
     let executors = crate::software_executor::SoftwareExecutors::try_from_process()?;
     create_with_content(
         ctx,
@@ -3111,9 +3119,9 @@ pub(super) async fn create_from_steps_with_recovery(
     .await
 }
 
-async fn admit_preview_environment(ctx: &mut Ctx, env: &str) -> Result<()> {
+async fn admit_preview_environment(ctx: &mut Ctx, env: &str, steps: &[Step]) -> Result<()> {
     let env_obj = crate::environment::active_environment(ctx, env).await?;
-    crate::preview::admit_plan(&env_obj, crate::now_millis())
+    crate::preview::admit_executable_plan(&env_obj, crate::now_millis(), steps)
 }
 
 fn assemble_plan(
