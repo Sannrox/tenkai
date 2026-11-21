@@ -1003,14 +1003,14 @@ async fn main() -> Result<()> {
         Ok(None) => {}
         Err(error) => eprintln!("tenkai-server warning: host executor unavailable: {error:#}"),
     }
-    capabilities
-        .components
-        .push(software_executor_default_capabilities(
-            software_executors.effective_kind(None).map_or(
-                "fake",
-                tenkai::software_executor::SoftwareExecutorKind::as_str,
-            ),
-        ));
+    if let Some(token) = software_executors.readiness_token() {
+        let kind = token
+            .strip_prefix(tenkai::runtime_capabilities::SOFTWARE_EXECUTOR_DEFAULT_PREFIX)
+            .unwrap_or(&token);
+        capabilities
+            .components
+            .push(software_executor_default_capabilities(kind));
+    }
 
     let requirements = RuntimeRequirements {
         tenant_mode: cli.tenant_mode,

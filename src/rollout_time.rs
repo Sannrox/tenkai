@@ -397,6 +397,26 @@ pub fn install_fake_docker(root: &Path) -> Result<(PathBuf, PathBuf)> {
     Ok((script, root.join("fake-state.json")))
 }
 
+/// Install the fake Apple `container` CLI into `root` and return `(script, state)`.
+pub fn install_fake_container(root: &Path) -> Result<(PathBuf, PathBuf)> {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/docker/fake-container.py");
+    let script = root.join("fake-container");
+    let status = std::process::Command::new("install")
+        .arg("-m")
+        .arg("755")
+        .arg(&fixture)
+        .arg(&script)
+        .status()
+        .context("running install for the fake container fixture")?;
+    anyhow::ensure!(
+        status.success(),
+        "installing fake container from {} failed: {status}",
+        fixture.display()
+    );
+    Ok((script, root.join("fake-state.json")))
+}
+
 /// Digest-pinned pause image for live Docker, pulling the tag if needed.
 pub fn live_pause_image(tag: &str) -> Result<String> {
     let named = format!("registry.k8s.io/pause:{tag}");

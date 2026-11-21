@@ -1,8 +1,10 @@
 //! Docker host executor for multi-container `product.kind = software` releases.
 //!
-//! Selected with `TENKAI_SOFTWARE_EXECUTOR=docker`. Topology lives at
-//! `{workdir}/docker/host.json`. Images must be digest-pinned. Secret values
-//! stay in operator-managed env files; Tenkai stores only the directory path.
+//! Selected with `TENKAI_SOFTWARE_EXECUTOR=docker` or `apple-container`.
+//! Topology lives at `{workdir}/docker/host.json`. The Apple dialect is argv
+//! and inspect parsing in this module. Images must be digest-pinned. Secret
+//! values stay in operator-managed env files; Tenkai stores only the directory
+//! path.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
@@ -21,9 +23,9 @@ use tenkai::now_millis;
 use tenkai::observed_runtime;
 use tenkai::software_executor::{
     LiveWorkload, PrePullImage, PrePullReport, RolloutPhaseTimes, SoftwareApplyRequest,
-    SoftwareDeployPhase, SoftwareExecutor, SoftwareObserveStatus, digest_pinned_registry_image,
-    format_software_phase_error, run_captured_command, sanitize_diagnostic_text, validate_request,
-    validate_secret_dir_path,
+    SoftwareDeployPhase, SoftwareExecutor, SoftwareObserveStatus, TargetUnavailable,
+    digest_pinned_registry_image, format_software_phase_error, run_captured_command,
+    sanitize_diagnostic_text, validate_request, validate_secret_dir_path,
 };
 
 /// Directory under the release workdir that holds the Docker host topology.
@@ -234,12 +236,21 @@ pub struct DockerHealthCheck {
     pub cmd: String,
 }
 
+/// Local engine that applies a `docker/host.json` topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostEngine {
+    Docker,
+    AppleContainer,
+}
+
 /// Docker CLI adapter (`docker network/volume/run/inspect/rm/restart`).
 ///
-/// Binary from `TENKAI_DOCKER_BIN` or `docker` on PATH. Default CI uses a fake
-/// CLI; live Docker remains an ignored operator smoke.
+/// Binary from `TENKAI_DOCKER_BIN` or `docker` on PATH, or
+/// `TENKAI_APPLE_CONTAINER_BIN` / `container` for the Apple dialect. Default CI
+/// uses a fake CLI; live engines remain operator smoke.
 #[derive(Debug, Clone)]
 pub struct DockerHostExecutor {
+    engine: HostEngine,
     pub docker_binary: PathBuf,
     health_attempts: u32,
     health_delay: Duration,
@@ -248,22 +259,71 @@ pub struct DockerHostExecutor {
 
 impl Default for DockerHostExecutor {
     fn default() -> Self {
-        let docker_binary = std::env::var_os("TENKAI_DOCKER_BIN")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("docker"));
+        Self::with_engine(
+            HostEngine::Docker,
+            std::env::var_os("TENKAI_DOCKER_BIN")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("docker")),
+        )
+    }
+}
+
+impl DockerHostExecutor {
+    fn with_engine(engine: HostEngine, docker_binary: PathBuf) -> Self {
         Self {
+            engine,
             docker_binary,
             health_attempts: 30,
             health_delay: Duration::from_secs(1),
             extra_env: BTreeMap::new(),
         }
     }
-}
 
-impl DockerHostExecutor {
+    /// Apple `container` dialect of the same `docker/host.json` contract.
+    pub fn apple_container() -> Self {
+        Self::with_engine(
+            HostEngine::AppleContainer,
+            std::env::var_os("TENKAI_APPLE_CONTAINER_BIN")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("container")),
+        )
+    }
+
+    fn is_apple(&self) -> bool {
+        self.engine == HostEngine::AppleContainer
+    }
+
+    fn noun(&self) -> &'static str {
+        match self.engine {
+            HostEngine::Docker => "docker",
+            HostEngine::AppleContainer => "container",
+        }
+    }
+
+    fn missing_bin_hint(&self) -> &'static str {
+        match self.engine {
+            HostEngine::Docker => "set TENKAI_DOCKER_BIN or install docker",
+            HostEngine::AppleContainer => {
+                "set TENKAI_APPLE_CONTAINER_BIN or install the Apple container CLI"
+            }
+        }
+    }
+
     /// Test adapter with a fake CLI and immediate health inspect.
     pub fn for_binary(docker_binary: PathBuf) -> Self {
         Self {
+            engine: HostEngine::Docker,
+            docker_binary,
+            health_attempts: 3,
+            health_delay: Duration::from_millis(0),
+            extra_env: BTreeMap::new(),
+        }
+    }
+
+    /// Test adapter for the Apple `container` dialect.
+    pub fn apple_for_binary(docker_binary: PathBuf) -> Self {
+        Self {
+            engine: HostEngine::AppleContainer,
             docker_binary,
             health_attempts: 3,
             health_delay: Duration::from_millis(0),
@@ -280,6 +340,14 @@ impl DockerHostExecutor {
     /// Fake-CLI executor with isolated state.
     pub fn for_fake_cli(script: &Path, state: &Path) -> Self {
         Self::for_binary(script.to_path_buf()).with_env(
+            "TENKAI_DOCKER_FAKE_STATE",
+            state.to_string_lossy().into_owned(),
+        )
+    }
+
+    /// Fake Apple `container` CLI executor with isolated state.
+    pub fn apple_for_fake_cli(script: &Path, state: &Path) -> Self {
+        Self::apple_for_binary(script.to_path_buf()).with_env(
             "TENKAI_DOCKER_FAKE_STATE",
             state.to_string_lossy().into_owned(),
         )
@@ -305,7 +373,7 @@ impl DockerHostExecutor {
         let planned = Instant::now();
         validate_request(request)?;
         let topology = self.topology(request)?;
-        validate_topology(&topology, request.secret_dir_path.as_deref())?;
+        validate_request_topology(self, &topology, request)?;
         for container in &topology.containers {
             container_spec_digest(request, container)?;
         }
@@ -332,7 +400,19 @@ impl DockerHostExecutor {
             let waited = Instant::now();
             let health = check.and_then(|()| wait_container(self, request, container));
             times.health_ms = times.health_ms.saturating_add(elapsed_ms(waited));
-            if let Err(error) = health {
+            let claimed = if self.is_apple()
+                && !matches!(container.mode, DockerContainerMode::OneShot { .. })
+            {
+                let started = Instant::now();
+                let result = health.and_then(|()| {
+                    apple_claim_declared_aliases(self, request, &[*container], &mut journal)
+                });
+                times.apply_ms = times.apply_ms.saturating_add(elapsed_ms(started));
+                result
+            } else {
+                health
+            };
+            if let Err(error) = claimed {
                 return Err(match roll_back(self, request, &journal) {
                     Ok(()) => anyhow::anyhow!("{error:#}; restored the previous containers"),
                     Err(restore) => anyhow::anyhow!(
@@ -342,7 +422,18 @@ impl DockerHostExecutor {
             }
         }
         let cleaned = Instant::now();
-        remove_unowned_containers(self, request, &desired, true)?;
+        let desired_names = if self.is_apple() {
+            let mut names = BTreeSet::new();
+            for container in &ordered {
+                if let Some(name) = serving_runtime_name(self, request, container)? {
+                    names.insert(name);
+                }
+            }
+            names
+        } else {
+            desired
+        };
+        remove_unowned_containers(self, request, &desired_names, true)?;
         times.apply_ms = times.apply_ms.saturating_add(elapsed_ms(cleaned));
         Ok(times)
     }
@@ -355,10 +446,275 @@ impl DockerHostExecutor {
         command
     }
 
+    fn engine_services_answer(&self) -> bool {
+        if !self.is_apple() {
+            return true;
+        }
+        self.docker_command()
+            .args(["system", "status"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
     fn topology(&self, request: &SoftwareApplyRequest) -> Result<DockerHostTopology> {
         let mut topology = load_topology(&request.workdir)?;
         mirror_images(&mut topology, &request.artifact_pulls)?;
         Ok(topology)
+    }
+}
+
+fn validate_request_topology(
+    executor: &DockerHostExecutor,
+    topology: &DockerHostTopology,
+    request: &SoftwareApplyRequest,
+) -> Result<()> {
+    validate_topology(topology, request.secret_dir_path.as_deref())?;
+    if executor.is_apple() {
+        refuse_apple_unsupported(topology)?;
+        if !request.dependency_document.is_empty() {
+            bail!(
+                "apple-container refuses a dependency document on product {}",
+                request.product
+            );
+        }
+    }
+    Ok(())
+}
+
+fn refuse_apple_unsupported(topology: &DockerHostTopology) -> Result<()> {
+    for container in &topology.containers {
+        if !matches!(container.restart, DockerRestartPolicy::No) {
+            bail!(
+                "apple-container refuses field restart on container {}",
+                container.name
+            );
+        }
+        if !container.files.is_empty() {
+            bail!(
+                "apple-container refuses field files on container {}",
+                container.name
+            );
+        }
+        if matches!(container.mode, DockerContainerMode::OneShot { .. }) {
+            bail!(
+                "apple-container refuses one-shot jobs on container {}",
+                container.name
+            );
+        }
+        for tmpfs in &container.tmpfs {
+            if tmpfs.uid != 0 || tmpfs.gid != 0 || tmpfs.mode != default_tmpfs_mode() {
+                bail!(
+                    "apple-container refuses field tmpfs on container {} (non-default mode, uid, or gid)",
+                    container.name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apple_generation_name(
+    request: &SoftwareApplyRequest,
+    container: &DockerHostContainer,
+) -> Result<String> {
+    let mut hash = Sha256::new();
+    hash.update(request.apply_attempt.as_bytes());
+    hash.update([0]);
+    hash.update(container_spec_digest(request, container)?.as_bytes());
+    hash.update([0]);
+    hash.update(container.image.as_bytes());
+    let hex = format!("{:x}", hash.finalize());
+    Ok(format!(
+        "{}-ctr-{}-{}",
+        scope_prefix(request),
+        container.name,
+        &hex[..8]
+    ))
+}
+
+/// Temporary generation used while a previous container still owns the
+/// declared-name DNS aliases. Aliases are unique across running and stopped
+/// containers and cannot be changed after create.
+fn apple_cutover_name(
+    request: &SoftwareApplyRequest,
+    container: &DockerHostContainer,
+) -> Result<String> {
+    Ok(format!("{}-c", apple_generation_name(request, container)?))
+}
+
+fn apple_declared_aliases(container: &DockerHostContainer) -> BTreeSet<String> {
+    let mut aliases = BTreeSet::from([container.name.clone()]);
+    for extra in container.aliases.values().flatten() {
+        aliases.insert(extra.clone());
+    }
+    aliases
+}
+
+fn apple_holds_declared_aliases(
+    container: &DockerHostContainer,
+    inspected: &InspectedContainer,
+) -> bool {
+    apple_declared_aliases(container).iter().all(|declared| {
+        inspected
+            .aliases
+            .iter()
+            .any(|alias| apple_alias_matches(declared, alias))
+    })
+}
+
+/// Apple stores a short alias with the configured DNS domain appended
+/// (`alias=api` becomes `api.test`). Compare without requiring operators to
+/// declare that domain in `docker/host.json`.
+fn apple_alias_matches(declared: &str, inspected: &str) -> bool {
+    let declared = declared.to_ascii_lowercase();
+    let inspected = inspected.to_ascii_lowercase();
+    declared == inspected
+        || inspected
+            .strip_prefix(&declared)
+            .is_some_and(|rest| rest.starts_with('.') && rest.len() > 1)
+}
+
+fn list_container_names(executor: &DockerHostExecutor) -> Result<Vec<String>> {
+    if executor.is_apple() {
+        let output = docker_output(executor, &["list", "--format", "json", "--all"])?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or(serde_json::Value::Null);
+        let mut names = Vec::new();
+        if let Some(items) = value.as_array() {
+            for item in items {
+                if let Some(name) = item
+                    .pointer("/configuration/id")
+                    .and_then(|value| value.as_str())
+                {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        return Ok(names);
+    }
+    let output = docker_output(executor, &["ps", "-a", "--format", "{{.Names}}"])?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn owned_component_containers(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    component: &str,
+) -> Result<Vec<(String, InspectedContainer)>> {
+    let mut owned = Vec::new();
+    for name in list_container_names(executor)? {
+        let Some(inspected) = inspect_container(executor, &name)? else {
+            continue;
+        };
+        if !labels_owned_by(request, &inspected.labels) {
+            continue;
+        }
+        if inspected.labels.get("tenkai.container").map(String::as_str) != Some(component) {
+            continue;
+        }
+        owned.push((name, inspected));
+    }
+    Ok(owned)
+}
+
+fn serving_runtime_name(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    container: &DockerHostContainer,
+) -> Result<Option<String>> {
+    if !executor.is_apple() {
+        let name = managed_container_name(request, container)?;
+        return Ok(inspect_container(executor, &name)?.map(|_| name));
+    }
+    let owned = owned_component_containers(executor, request, &container.name)?;
+    let spec_digest = container_spec_digest(request, container).ok();
+    let matching_spec = |inspected: &InspectedContainer| {
+        spec_digest
+            .as_deref()
+            .is_some_and(|digest| !container_mismatch(request, container, digest, inspected))
+    };
+    if let Some((name, _)) = owned.iter().find(|(_, inspected)| {
+        matching_spec(inspected)
+            && inspected.running
+            && apple_holds_declared_aliases(container, inspected)
+    }) {
+        return Ok(Some(name.clone()));
+    }
+    if let Some((name, _)) = owned
+        .iter()
+        .find(|(_, inspected)| matching_spec(inspected) && inspected.running)
+    {
+        return Ok(Some(name.clone()));
+    }
+    if let Some((name, _)) = owned.iter().find(|(_, inspected)| matching_spec(inspected)) {
+        return Ok(Some(name.clone()));
+    }
+    Ok(owned.into_iter().next().map(|(name, _)| name))
+}
+
+fn remove_args(executor: &DockerHostExecutor, name: &str) -> Vec<String> {
+    if executor.is_apple() {
+        vec!["delete".into(), "--force".into(), name.into()]
+    } else {
+        vec!["rm".into(), "-f".into(), name.into()]
+    }
+}
+
+fn probe_health_cmd(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    name: &str,
+    cmd: &str,
+) -> Result<bool> {
+    let timeout = Duration::from_secs(10);
+    let mut child = executor
+        .docker_command()
+        .args(["exec", name, "sh", "-c", cmd])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "starting {} health exec via {} ({})",
+                executor.noun(),
+                executor.docker_binary.display(),
+                executor.missing_bin_hint()
+            )
+        })?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status.success());
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "{}",
+                format_software_phase_error(
+                    SoftwareDeployPhase::Health,
+                    &request.product,
+                    &request.version,
+                    &request.environment,
+                    &format!("container {name} health exec exceeded {timeout:?}"),
+                )
+            );
+        }
+        std::thread::sleep(
+            Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
 }
 
@@ -417,6 +773,20 @@ fn image_repository(name: &str) -> String {
 }
 
 impl SoftwareExecutor for DockerHostExecutor {
+    fn require_target(&self, request: &SoftwareApplyRequest) -> Result<(), TargetUnavailable> {
+        let _ = request;
+        if self.is_apple() && !self.engine_services_answer() {
+            return Err(TargetUnavailable(
+                "apple-container engine services are not answering; start them as this user with container system start".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn advertise_readiness(&self) -> bool {
+        self.engine_services_answer()
+    }
+
     fn consumes_admitted_artifact_pulls(&self) -> bool {
         true
     }
@@ -441,6 +811,9 @@ impl SoftwareExecutor for DockerHostExecutor {
         validate_request(request)?;
         let topology = self.topology(request)?;
         let ordered = order_containers(&topology)?;
+        if self.is_apple() {
+            return cleanup_failed_apple_apply(self, request, &topology, &ordered);
+        }
         let mut kept = Vec::new();
         for container in ordered.iter().rev() {
             let name = managed_container_name(request, container)?;
@@ -468,15 +841,21 @@ impl SoftwareExecutor for DockerHostExecutor {
     fn remove(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
         let topology = self.topology(request)?;
-        validate_topology(&topology, request.secret_dir_path.as_deref())?;
+        validate_request_topology(self, &topology, request)?;
         for container in order_containers(&topology)?.iter().rev() {
-            let name = managed_container_name(request, container)?;
-            remove_if_present(self, request, &name)?;
-            remove_if_present(
-                self,
-                request,
-                &previous_runtime_name(request, &container.name),
-            )?;
+            if self.is_apple() {
+                for (name, _) in owned_component_containers(self, request, &container.name)? {
+                    remove_if_present(self, request, &name)?;
+                }
+            } else {
+                let name = managed_container_name(request, container)?;
+                remove_if_present(self, request, &name)?;
+                remove_if_present(
+                    self,
+                    request,
+                    &previous_runtime_name(request, &container.name),
+                )?;
+            }
         }
         remove_unowned_containers(self, request, &BTreeSet::new(), false)?;
         remove_networks(self, request, &topology);
@@ -486,12 +865,17 @@ impl SoftwareExecutor for DockerHostExecutor {
     fn observe(&self, request: &SoftwareApplyRequest) -> Result<SoftwareObserveStatus> {
         validate_request(request)?;
         let topology = self.topology(request)?;
-        validate_topology(&topology, request.secret_dir_path.as_deref())?;
+        validate_request_topology(self, &topology, request)?;
         let mut present = 0;
         for container in &topology.containers {
-            let name = managed_container_name(request, container)?;
             let Ok(spec_digest) = container_spec_digest(request, container) else {
                 return Ok(SoftwareObserveStatus::Unknown);
+            };
+            let Some(name) = (match serving_runtime_name(self, request, container) {
+                Ok(name) => name,
+                Err(_) => return Ok(SoftwareObserveStatus::Unknown),
+            }) else {
+                return Ok(SoftwareObserveStatus::Absent);
             };
             match inspect_container(self, &name) {
                 Ok(None) => return Ok(SoftwareObserveStatus::Absent),
@@ -501,6 +885,16 @@ impl SoftwareExecutor for DockerHostExecutor {
                             && !successful_job(&inspected)
                     {
                         return Ok(SoftwareObserveStatus::Mismatched);
+                    }
+                    if self.is_apple()
+                        && let Some(health) = &container.health
+                        && inspected.running
+                    {
+                        match probe_health_cmd(self, request, &name, &health.cmd) {
+                            Ok(true) => {}
+                            Ok(false) => return Ok(SoftwareObserveStatus::Mismatched),
+                            Err(_) => return Ok(SoftwareObserveStatus::Unknown),
+                        }
                     }
                     present += 1;
                 }
@@ -520,16 +914,28 @@ impl SoftwareExecutor for DockerHostExecutor {
     ) -> Result<Option<observed_runtime::ObservedRuntimeComponent>> {
         validate_request(request)?;
         let topology = self.topology(request)?;
-        validate_topology(&topology, request.secret_dir_path.as_deref())?;
+        validate_request_topology(self, &topology, request)?;
         Ok(Some(snapshot_observed_runtime(self, request, &topology)?))
+    }
+
+    fn render_target_changes(
+        &self,
+        request: &SoftwareApplyRequest,
+    ) -> Result<Vec<tenkai::spec_drift::TargetChange>> {
+        validate_request(request)?;
+        let topology = self.topology(request)?;
+        validate_request_topology(self, &topology, request)?;
+        Ok(Vec::new())
     }
 
     fn stop(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
         let topology = self.topology(request)?;
-        validate_topology(&topology, request.secret_dir_path.as_deref())?;
+        validate_request_topology(self, &topology, request)?;
         for container in order_containers(&topology)? {
-            let name = managed_container_name(request, container)?;
+            let Some(name) = serving_runtime_name(self, request, container)? else {
+                continue;
+            };
             refuse_foreign_container(self, request, &name)?;
             if inspect_container(self, &name)?.is_some() {
                 docker_ok(
@@ -547,7 +953,7 @@ impl SoftwareExecutor for DockerHostExecutor {
     fn restart(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
         let topology = self.topology(request)?;
-        validate_topology(&topology, request.secret_dir_path.as_deref())?;
+        validate_request_topology(self, &topology, request)?;
         for container in &topology.containers {
             container_spec_digest(request, container)?;
         }
@@ -580,22 +986,36 @@ impl SoftwareExecutor for DockerHostExecutor {
     ) -> Result<Vec<LiveWorkload>> {
         let _ = cluster_config;
         let mut names = BTreeSet::new();
-        for filter in [
-            format!("label=tenkai.environment={environment}"),
-            format!("label=com.docker.compose.project={environment}"),
-        ] {
-            let output = docker_output(
-                self,
-                &["ps", "-a", "--format", "{{.Names}}", "--filter", &filter],
-            )?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("docker ps failed: {}", stderr.trim());
+        if self.is_apple() {
+            for name in list_container_names(self)? {
+                if let Some(inspected) = inspect_container(self, &name)?
+                    && inspected
+                        .labels
+                        .get("tenkai.environment")
+                        .map(String::as_str)
+                        == Some(environment)
+                {
+                    names.insert(name);
+                }
             }
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                let name = line.trim();
-                if !name.is_empty() {
-                    names.insert(name.to_string());
+        } else {
+            for filter in [
+                format!("label=tenkai.environment={environment}"),
+                format!("label=com.docker.compose.project={environment}"),
+            ] {
+                let output = docker_output(
+                    self,
+                    &["ps", "-a", "--format", "{{.Names}}", "--filter", &filter],
+                )?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    bail!("docker ps failed: {}", stderr.trim());
+                }
+                for line in String::from_utf8_lossy(&output.stdout).lines() {
+                    let name = line.trim();
+                    if !name.is_empty() {
+                        names.insert(name.to_string());
+                    }
                 }
             }
         }
@@ -1306,13 +1726,9 @@ fn pull_missing_images(
                 container.image
             );
         }
-        docker_ok(
-            executor,
-            request,
-            SoftwareDeployPhase::Apply,
-            "pull",
-            &["pull", &container.image],
-        )?;
+        let pull = pull_args(executor, &container.image);
+        let pull: Vec<&str> = pull.iter().map(String::as_str).collect();
+        docker_ok(executor, request, SoftwareDeployPhase::Apply, "pull", &pull)?;
     }
     Ok(())
 }
@@ -1322,6 +1738,14 @@ fn image_present(executor: &DockerHostExecutor, image: &str) -> Result<bool> {
     Ok(output.status.success())
 }
 
+fn pull_args(executor: &DockerHostExecutor, image: &str) -> Vec<String> {
+    if executor.is_apple() {
+        vec!["image".into(), "pull".into(), image.into()]
+    } else {
+        vec!["pull".into(), image.into()]
+    }
+}
+
 fn pull_one(
     executor: &DockerHostExecutor,
     image: &str,
@@ -1329,12 +1753,12 @@ fn pull_one(
     stop: &AtomicBool,
 ) -> Result<(), String> {
     let mut command = executor.docker_command();
-    command.args(["pull", image]);
+    command.args(pull_args(executor, image));
     command.stdout(Stdio::null());
     command.stderr(Stdio::piped());
     let mut child = command
         .spawn()
-        .map_err(|error| format!("starting docker pull: {error}"))?;
+        .map_err(|error| format!("starting {} pull: {error}", executor.noun()))?;
     let deadline = Instant::now() + timeout;
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -1351,7 +1775,7 @@ fn pull_one(
                 }
                 let detail = sanitize_diagnostic_text(stderr.trim());
                 return Err(if detail.is_empty() {
-                    "docker pull failed".into()
+                    format!("{} pull failed", executor.noun())
                 } else {
                     detail
                 });
@@ -1362,7 +1786,7 @@ fn pull_one(
                 return Err("timed out".into());
             }
             Ok(None) => thread::sleep(Duration::from_millis(50)),
-            Err(error) => return Err(format!("waiting for docker pull: {error}")),
+            Err(error) => return Err(format!("waiting for {} pull: {error}", executor.noun())),
         }
     }
 }
@@ -1374,6 +1798,8 @@ enum Change {
     Created(String),
     /// The previous container was stopped and renamed to `previous`.
     Replaced { name: String, previous: String },
+    /// Apple alias handoff committed this generation; rollback must not delete it.
+    Committed(String),
 }
 
 /// Name a replaced container keeps until the new one is healthy. Its `-prev-`
@@ -1394,6 +1820,34 @@ fn restart_container(
 ) -> Result<()> {
     if matches!(container.mode, DockerContainerMode::OneShot { .. }) {
         return replace_container(executor, request, topology, container, journal);
+    }
+    if executor.is_apple() {
+        let Some(name) = serving_runtime_name(executor, request, container)? else {
+            return replace_container(executor, request, topology, container, journal);
+        };
+        refuse_foreign_container(executor, request, &name)?;
+        let spec_digest = container_spec_digest(request, container)?;
+        return match inspect_container(executor, &name)? {
+            Some(inspected)
+                if !container_mismatch(request, container, &spec_digest, &inspected) =>
+            {
+                docker_ok(
+                    executor,
+                    request,
+                    SoftwareDeployPhase::Restart,
+                    "stop",
+                    &["stop", &name],
+                )?;
+                docker_ok(
+                    executor,
+                    request,
+                    SoftwareDeployPhase::Restart,
+                    "start",
+                    &["start", &name],
+                )
+            }
+            _ => replace_container(executor, request, topology, container, journal),
+        };
     }
     let name = managed_container_name(request, container)?;
     refuse_foreign_container(executor, request, &name)?;
@@ -1637,6 +2091,9 @@ fn replace_container(
     container: &DockerHostContainer,
     journal: &mut Vec<Change>,
 ) -> Result<()> {
+    if executor.is_apple() {
+        return replace_apple_container(executor, request, topology, container, journal);
+    }
     let name = managed_container_name(request, container)?;
     refuse_foreign_container(executor, request, &name)?;
     let files = container
@@ -1854,6 +2311,366 @@ fn replace_container(
     Ok(())
 }
 
+/// Apple engine: create a new generation name. When a previous generation still
+/// owns the declared-name DNS aliases, the replacement is created without those
+/// aliases under a cutover name so health can fail closed and restore can start
+/// the previous container. After a successful apply, [`apple_claim_declared_aliases`]
+/// deletes the previous generation and creates the aliased name.
+fn replace_apple_container(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    topology: &DockerHostTopology,
+    container: &DockerHostContainer,
+    journal: &mut Vec<Change>,
+) -> Result<()> {
+    let aliased = apple_generation_name(request, container)?;
+    let spec_digest = container_spec_digest(request, container)?;
+    let owned = owned_component_containers(executor, request, &container.name)?;
+    for (existing, inspected) in &owned {
+        refuse_foreign_container(executor, request, existing)?;
+        if container_mismatch(request, container, &spec_digest, inspected) {
+            continue;
+        }
+        if matches!(container.mode, DockerContainerMode::Service) && inspected.running {
+            let healthy = match &container.health {
+                Some(health) => probe_health_cmd(executor, request, existing, &health.cmd)?,
+                None => true,
+            };
+            if healthy {
+                return Ok(());
+            }
+        }
+        if matches!(container.mode, DockerContainerMode::OneShot { .. })
+            && successful_job(inspected)
+        {
+            return Ok(());
+        }
+        if matches!(container.mode, DockerContainerMode::OneShot { .. }) && inspected.running {
+            journal.push(Change::Created(existing.clone()));
+            return Ok(());
+        }
+    }
+    let conflict = apple_alias_conflict(executor, container, None)?;
+    let name = if conflict {
+        apple_cutover_name(request, container)?
+    } else {
+        aliased
+    };
+    let previous = owned.into_iter().find(|(existing, _)| existing != &name);
+    if inspect_container(executor, &name)?.is_some() {
+        remove_if_present(executor, request, &name)?;
+    }
+    match &previous {
+        Some((prev, _)) => journal.push(Change::Replaced {
+            name: name.clone(),
+            previous: prev.clone(),
+        }),
+        None => journal.push(Change::Created(name.clone())),
+    }
+    if let Some((prev, inspected)) = &previous
+        && inspected.running
+    {
+        apple_stop(executor, request, prev)?;
+    }
+    apple_run_container(executor, request, container, &name, !conflict)?;
+    let _ = topology;
+    Ok(())
+}
+
+fn apple_stop(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    name: &str,
+) -> Result<()> {
+    docker_ok(
+        executor,
+        request,
+        SoftwareDeployPhase::Apply,
+        "stop",
+        &["stop", name],
+    )
+}
+
+fn apple_run_container(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    container: &DockerHostContainer,
+    name: &str,
+    include_aliases: bool,
+) -> Result<()> {
+    let spec_digest = container_spec_digest(request, container)?;
+    let mut args = vec!["run".to_string()];
+    if !matches!(container.mode, DockerContainerMode::OneShot { .. }) {
+        args.push("-d".into());
+    }
+    args.extend(["--name".into(), name.to_string()]);
+    for label in ownership_labels(request, &container.name) {
+        args.push("--label".into());
+        args.push(label);
+    }
+    args.push("--label".into());
+    args.push(format!("tenkai.spec-digest={spec_digest}"));
+    if !request.apply_attempt.is_empty() {
+        args.push("--label".into());
+        args.push(format!("tenkai.apply-attempt={}", request.apply_attempt));
+    }
+    if matches!(container.mode, DockerContainerMode::OneShot { .. }) {
+        args.push("--label".into());
+        args.push("tenkai.job=true".into());
+        args.push("--label".into());
+        args.push(format!("tenkai.job-started-at-ms={}", now_millis()));
+    }
+    for (key, value) in &request.overlays {
+        args.push("--label".into());
+        args.push(format!("tenkai.config.{key}={value}"));
+    }
+    for network in &container.networks {
+        args.push("--network".into());
+        args.push(apple_network_arg(
+            request,
+            container,
+            network,
+            include_aliases,
+        ));
+    }
+    for port in &container.ports {
+        args.push("--publish".into());
+        args.push(port.publish_arg());
+    }
+    for mount in &container.volumes {
+        args.push("--mount".into());
+        args.push(format!(
+            "type=volume,source={},target={}{}",
+            volume_runtime_name(request, &mount.name),
+            mount.path,
+            if mount.read_only { ",readonly" } else { "" }
+        ));
+    }
+    for tmpfs in &container.tmpfs {
+        args.push("--tmpfs".into());
+        args.push(tmpfs.path.clone());
+    }
+    if let Some(user) = &container.user {
+        args.push("--user".into());
+        args.push(user.clone());
+    }
+    if let Some(path) = env_file_path(request, container)? {
+        args.push("--env-file".into());
+        args.push(path.to_string_lossy().into_owned());
+    }
+    let (entrypoint, entrypoint_args) = match container.entrypoint.as_deref() {
+        Some([executable, rest @ ..]) => (Some(executable), rest),
+        _ => (None, &[][..]),
+    };
+    if let Some(executable) = entrypoint {
+        args.push("--entrypoint".into());
+        args.push(executable.clone());
+    }
+    args.push(container.image.clone());
+    args.extend(entrypoint_args.iter().cloned());
+    args.extend(container.command.iter().flatten().cloned());
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    if let DockerContainerMode::OneShot { timeout_secs } = container.mode {
+        run_one_shot(executor, request, &arg_refs, timeout_secs)
+    } else {
+        docker_ok(
+            executor,
+            request,
+            SoftwareDeployPhase::Apply,
+            "run",
+            &arg_refs,
+        )
+    }
+}
+
+/// After a container is healthy, previous generations no longer hold its DNS
+/// aliases. Create the aliased generation name and drop the unaliased cutover.
+/// One-shot jobs already completed on the first create and must not rerun.
+fn apple_claim_declared_aliases(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    ordered: &[&DockerHostContainer],
+    journal: &mut [Change],
+) -> Result<()> {
+    for container in ordered {
+        if matches!(container.mode, DockerContainerMode::OneShot { .. }) {
+            continue;
+        }
+        let aliased = apple_generation_name(request, container)?;
+        let cutover = apple_cutover_name(request, container)?;
+        let spec_digest = container_spec_digest(request, container)?;
+        let owned = owned_component_containers(executor, request, &container.name)?;
+        if owned.iter().any(|(name, inspected)| {
+            name != &cutover
+                && !container_mismatch(request, container, &spec_digest, inspected)
+                && apple_holds_declared_aliases(container, inspected)
+        }) {
+            remove_if_present(executor, request, &cutover)?;
+            continue;
+        }
+        if apple_alias_conflict(executor, container, Some(&aliased))? {
+            for (name, inspected) in owned_component_containers(executor, request, &container.name)?
+            {
+                if name == aliased || name == cutover {
+                    continue;
+                }
+                if inspected.aliases.iter().any(|alias| {
+                    apple_declared_aliases(container)
+                        .iter()
+                        .any(|declared| apple_alias_matches(declared, alias))
+                }) {
+                    remove_if_present(executor, request, &name)?;
+                }
+            }
+        }
+        if inspect_container(executor, &aliased)?.is_some() {
+            remove_if_present(executor, request, &aliased)?;
+        }
+        if cutover != aliased
+            && inspect_container(executor, &cutover)?.is_some_and(|inspected| inspected.running)
+        {
+            apple_stop(executor, request, &cutover)?;
+        }
+        let claimed = apple_run_container(executor, request, container, &aliased, true)
+            .and_then(|()| wait_container(executor, request, container));
+        if let Err(error) = claimed {
+            remove_if_present(executor, request, &aliased)?;
+            if cutover != aliased && inspect_container(executor, &cutover)?.is_some() {
+                docker_ok(
+                    executor,
+                    request,
+                    SoftwareDeployPhase::Restore,
+                    "start",
+                    &["start", &cutover],
+                )?;
+            }
+            commit_apple_change(journal, &cutover, &cutover);
+            return Err(error);
+        }
+        if cutover != aliased {
+            remove_if_present(executor, request, &cutover)?;
+        }
+        commit_apple_change(journal, &cutover, &aliased);
+    }
+    Ok(())
+}
+
+fn commit_apple_change(journal: &mut [Change], from: &str, keep: &str) {
+    for change in journal.iter_mut() {
+        let name = match change {
+            Change::Created(name) | Change::Replaced { name, .. } | Change::Committed(name) => {
+                name.as_str()
+            }
+        };
+        if name == from || name == keep {
+            *change = Change::Committed(keep.to_string());
+            return;
+        }
+    }
+}
+
+fn apple_alias_conflict(
+    executor: &DockerHostExecutor,
+    container: &DockerHostContainer,
+    except: Option<&str>,
+) -> Result<bool> {
+    let wanted = apple_declared_aliases(container);
+    for name in list_container_names(executor)? {
+        if except == Some(name.as_str()) {
+            continue;
+        }
+        let Some(inspected) = inspect_container(executor, &name)? else {
+            continue;
+        };
+        if inspected.aliases.iter().any(|alias| {
+            wanted
+                .iter()
+                .any(|declared| apple_alias_matches(declared, alias))
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn apple_network_arg(
+    request: &SoftwareApplyRequest,
+    container: &DockerHostContainer,
+    network: &str,
+    include_aliases: bool,
+) -> String {
+    let runtime = network_runtime_name(request, network);
+    if !include_aliases {
+        return runtime;
+    }
+    let mut spec = format!("{runtime},alias={}", container.name);
+    for alias in container.aliases.get(network).into_iter().flatten() {
+        if alias != &container.name {
+            spec.push_str(",alias=");
+            spec.push_str(alias);
+        }
+    }
+    spec
+}
+
+fn cleanup_failed_apple_apply(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    topology: &DockerHostTopology,
+    ordered: &[&DockerHostContainer],
+) -> Result<()> {
+    let mut kept = Vec::new();
+    for container in ordered.iter().rev() {
+        let owned = owned_component_containers(executor, request, &container.name)?;
+        let previous_alive = owned
+            .iter()
+            .any(|(_, inspected)| !created_by_attempt(request, inspected));
+        let mut previous = None;
+        for (name, inspected) in owned {
+            if apple_holds_declared_aliases(container, &inspected) {
+                previous = Some(name);
+                continue;
+            }
+            if created_by_attempt(request, &inspected) && !successful_job(&inspected) {
+                if previous_alive {
+                    remove_if_present(executor, request, &name)?;
+                } else if previous.is_none() {
+                    previous = Some(name);
+                } else {
+                    remove_if_present(executor, request, &name)?;
+                }
+            } else if previous.is_none() {
+                previous = Some(name);
+            }
+        }
+        if let Some(previous) = previous {
+            kept.push(previous);
+        }
+    }
+    for previous in kept.iter().rev() {
+        let Some(inspected) = inspect_container(executor, previous)? else {
+            continue;
+        };
+        if inspected
+            .labels
+            .get("tenkai.job")
+            .is_some_and(|value| value == "true")
+            || inspected.running
+        {
+            continue;
+        }
+        docker_ok(
+            executor,
+            request,
+            SoftwareDeployPhase::Restore,
+            "start",
+            &["start", previous],
+        )?;
+    }
+    remove_networks(executor, request, topology);
+    Ok(())
+}
+
 /// Undo `journal`: remove what the apply started in reverse dependency order,
 /// then bring back each replaced container in dependency order.
 fn roll_back(
@@ -1862,15 +2679,21 @@ fn roll_back(
     journal: &[Change],
 ) -> Result<()> {
     for change in journal.iter().rev() {
-        let (Change::Created(name) | Change::Replaced { name, .. }) = change;
-        if matches!(change, Change::Created(_))
-            && inspect_container(executor, name)?
-                .as_ref()
-                .is_some_and(successful_job)
-        {
-            continue;
+        match change {
+            Change::Committed(_) => continue,
+            Change::Created(name) => {
+                if inspect_container(executor, name)?
+                    .as_ref()
+                    .is_some_and(successful_job)
+                {
+                    continue;
+                }
+                remove_if_present(executor, request, name)?;
+            }
+            Change::Replaced { name, .. } => {
+                remove_if_present(executor, request, name)?;
+            }
         }
-        remove_if_present(executor, request, name)?;
     }
     for change in journal {
         if let Change::Replaced { name, previous } = change {
@@ -1881,6 +2704,7 @@ fn roll_back(
 }
 
 /// Rename the stopped `previous` container back to `name` and start it.
+/// Apple keeps the previous generation name and only starts it.
 fn reinstate(
     executor: &DockerHostExecutor,
     request: &SoftwareApplyRequest,
@@ -1888,6 +2712,26 @@ fn reinstate(
     previous: &str,
 ) -> Result<()> {
     refuse_foreign_container(executor, request, previous)?;
+    if executor.is_apple() {
+        let Some(inspected) = inspect_container(executor, previous)? else {
+            return Ok(());
+        };
+        if inspected
+            .labels
+            .get("tenkai.job")
+            .is_some_and(|value| value == "true")
+            || inspected.running
+        {
+            return Ok(());
+        }
+        return docker_ok(
+            executor,
+            request,
+            SoftwareDeployPhase::Restore,
+            "start",
+            &["start", previous],
+        );
+    }
     docker_ok(
         executor,
         request,
@@ -1923,12 +2767,17 @@ fn remove_networks(
 ) {
     for network in &topology.networks {
         let name = network_runtime_name(request, network);
+        let args = if executor.is_apple() {
+            ["network", "delete", name.as_str()]
+        } else {
+            ["network", "rm", name.as_str()]
+        };
         let _ = docker_ok(
             executor,
             request,
             SoftwareDeployPhase::Remove,
             "network rm",
-            &["network", "rm", &name],
+            &args,
         );
     }
 }
@@ -1946,13 +2795,9 @@ fn remove_if_present(
     if !labels_owned_by(request, &inspected.labels) {
         return Err(foreign_owner_error(request, name, &inspected.labels));
     }
-    docker_ok(
-        executor,
-        request,
-        SoftwareDeployPhase::Remove,
-        "rm",
-        &["rm", "-f", name],
-    )
+    let args = remove_args(executor, name);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    docker_ok(executor, request, SoftwareDeployPhase::Remove, "rm", &refs)
 }
 
 fn check_dependencies(
@@ -1971,14 +2816,28 @@ fn check_dependencies(
             .iter()
             .find(|target| target.name == dependency)
             .ok_or_else(|| anyhow::anyhow!("dependency {dependency} is not declared"))?;
-        let name = managed_container_name(request, target)?;
+        let name = serving_runtime_name(executor, request, target)?
+            .ok_or_else(|| anyhow::anyhow!("dependency {dependency} is absent"))?;
         let observed = inspect_container(executor, &name)?
             .ok_or_else(|| anyhow::anyhow!("dependency {dependency} is absent"))?;
         let satisfied = match condition {
             DockerDependencyCondition::Started => observed.running,
-            DockerDependencyCondition::Healthy => observed.running && observed.health == "healthy",
+            DockerDependencyCondition::Healthy => {
+                if !observed.running {
+                    false
+                } else if executor.is_apple() {
+                    match target.health.as_ref() {
+                        Some(health) => {
+                            probe_health_cmd(executor, request, &name, &health.cmd).unwrap_or(false)
+                        }
+                        None => true,
+                    }
+                } else {
+                    observed.health == "healthy"
+                }
+            }
             DockerDependencyCondition::CompletedSuccessfully => {
-                observed.status == "exited" && observed.exit_code == Some(0)
+                !observed.running && observed.exit_code == Some(0)
             }
         };
         if !satisfied {
@@ -2035,21 +2894,39 @@ fn wait_container(
     request: &SoftwareApplyRequest,
     container: &DockerHostContainer,
 ) -> Result<()> {
-    let name = managed_container_name(request, container)?;
+    let name = if executor.is_apple() {
+        serving_runtime_name(executor, request, container)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} container {} disappeared during health wait",
+                executor.noun(),
+                container.name
+            )
+        })?
+    } else {
+        managed_container_name(request, container)?
+    };
     if let DockerContainerMode::OneShot { timeout_secs } = container.mode {
         let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
         loop {
             let observed = inspect_container(executor, &name)?
                 .ok_or_else(|| anyhow::anyhow!("one-shot job {} disappeared", container.name))?;
-            if observed.status == "exited" {
+            if !observed.running {
                 if observed.exit_code == Some(0) {
                     return Ok(());
                 }
-                bail!(
-                    "one-shot job {} exited unsuccessfully (code {:?})",
-                    container.name,
-                    observed.exit_code
-                );
+                if observed.exit_code.is_some() {
+                    bail!(
+                        "one-shot job {} exited unsuccessfully (code {:?})",
+                        container.name,
+                        observed.exit_code
+                    );
+                }
+                if executor.is_apple() {
+                    bail!(
+                        "apple-container refuses one-shot job {} without an inspect exit code",
+                        container.name
+                    );
+                }
             }
             if std::time::Instant::now() >= deadline {
                 remove_if_present(executor, request, &name)?;
@@ -2071,6 +2948,9 @@ fn wait_container(
                     .min(deadline.saturating_duration_since(std::time::Instant::now())),
             );
         }
+    }
+    if executor.is_apple() {
+        return wait_apple_health(executor, request, container, &name);
     }
     for attempt in 0..executor.health_attempts {
         let inspected = inspect_container(executor, &name)?.ok_or_else(|| {
@@ -2110,6 +2990,65 @@ fn wait_container(
     )
 }
 
+fn wait_apple_health(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    container: &DockerHostContainer,
+    name: &str,
+) -> Result<()> {
+    for attempt in 0..executor.health_attempts {
+        let inspected = inspect_container(executor, name)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} container {name} disappeared during health wait",
+                executor.noun()
+            )
+        })?;
+        if !inspected.running {
+            bail!(
+                "{}",
+                format_software_phase_error(
+                    SoftwareDeployPhase::Health,
+                    &request.product,
+                    &request.version,
+                    &request.environment,
+                    &format!("container {} health is stopped", container.name),
+                )
+            );
+        }
+        let healthy = match &container.health {
+            Some(health) => probe_health_cmd(executor, request, name, &health.cmd)?,
+            None => true,
+        };
+        if healthy {
+            return Ok(());
+        }
+        if attempt + 1 < executor.health_attempts && !executor.health_delay.is_zero() {
+            std::thread::sleep(executor.health_delay);
+            continue;
+        }
+        bail!(
+            "{}",
+            format_software_phase_error(
+                SoftwareDeployPhase::Health,
+                &request.product,
+                &request.version,
+                &request.environment,
+                &format!("container {} health is unhealthy", container.name),
+            )
+        );
+    }
+    bail!(
+        "{}",
+        format_software_phase_error(
+            SoftwareDeployPhase::Health,
+            &request.product,
+            &request.version,
+            &request.environment,
+            &format!("container {} health wait exhausted", container.name),
+        )
+    )
+}
+
 #[derive(Debug, Clone)]
 struct InspectedContainer {
     image: String,
@@ -2118,6 +3057,7 @@ struct InspectedContainer {
     status: String,
     exit_code: Option<i64>,
     health: String,
+    aliases: BTreeSet<String>,
 }
 
 fn restart_policy_flag(policy: DockerRestartPolicy) -> String {
@@ -2137,7 +3077,8 @@ fn snapshot_observed_runtime(
     let mut units = Vec::new();
     let mut last_init_job = None;
     for container in order_containers(topology)? {
-        let name = managed_container_name(request, container)?;
+        let name = serving_runtime_name(executor, request, container)?
+            .unwrap_or_else(|| container.name.clone());
         let inspected = inspect_container(executor, &name)?;
         match container.mode {
             DockerContainerMode::Service => {
@@ -2179,7 +3120,11 @@ fn snapshot_observed_runtime(
     }
     Ok(observed_runtime::ObservedRuntimeComponent {
         product: request.product.clone(),
-        executor_kind: "docker".into(),
+        executor_kind: if executor.is_apple() {
+            "apple-container".into()
+        } else {
+            "docker".into()
+        },
         health: None,
         units,
         last_init_job,
@@ -2197,7 +3142,8 @@ fn inspect_container(
         .output()
         .with_context(|| {
             format!(
-                "starting docker inspect via {}",
+                "starting {} inspect via {}",
+                executor.noun(),
                 executor.docker_binary.display()
             )
         })?;
@@ -2207,11 +3153,13 @@ fn inspect_container(
             || stderr.contains("no such container")
             || stderr.contains("no such network")
             || stderr.contains("no such volume")
+            || stderr.contains("not found")
         {
             return Ok(None);
         }
         bail!(
-            "docker inspect {name} failed: {}",
+            "{} inspect {name} failed: {}",
+            executor.noun(),
             sanitize_diagnostic_text(&String::from_utf8_lossy(&output.stderr))
         );
     }
@@ -2219,10 +3167,13 @@ fn inspect_container(
 }
 
 fn parse_inspect_json(raw: &str) -> Result<Option<InspectedContainer>> {
-    let value: serde_json::Value = serde_json::from_str(raw).context("parsing docker inspect")?;
+    let value: serde_json::Value = serde_json::from_str(raw).context("parsing inspect")?;
     let Some(entry) = value.as_array().and_then(|items| items.first()) else {
         return Ok(None);
     };
+    if entry.get("configuration").is_some() {
+        return parse_apple_inspect(entry);
+    }
     let image = entry
         .pointer("/Config/Image")
         .and_then(|value| value.as_str())
@@ -2262,6 +3213,81 @@ fn parse_inspect_json(raw: &str) -> Result<Option<InspectedContainer>> {
         status,
         exit_code,
         health,
+        aliases: BTreeSet::new(),
+    }))
+}
+
+fn apple_image_reference(entry: &serde_json::Value) -> String {
+    let image = entry.pointer("/configuration/image");
+    image
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            image
+                .and_then(|value| value.get("reference"))
+                .and_then(|value| value.as_str())
+        })
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn apple_inspect_aliases(entry: &serde_json::Value) -> BTreeSet<String> {
+    let mut aliases = BTreeSet::new();
+    let Some(networks) = entry
+        .pointer("/configuration/networks")
+        .and_then(|value| value.as_array())
+    else {
+        return aliases;
+    };
+    for network in networks {
+        let Some(items) = network
+            .pointer("/options/aliases")
+            .and_then(|value| value.as_array())
+        else {
+            continue;
+        };
+        for item in items {
+            if let Some(alias) = item.as_str() {
+                aliases.insert(alias.to_string());
+            }
+        }
+    }
+    aliases
+}
+
+fn parse_apple_inspect(entry: &serde_json::Value) -> Result<Option<InspectedContainer>> {
+    let image = apple_image_reference(entry);
+    let mut labels = BTreeMap::new();
+    if let Some(map) = entry
+        .pointer("/configuration/labels")
+        .and_then(|value| value.as_object())
+    {
+        for (key, value) in map {
+            if let Some(text) = value.as_str() {
+                labels.insert(key.clone(), text.to_string());
+            }
+        }
+    }
+    let state = entry
+        .pointer("/status/state")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let running = state.eq_ignore_ascii_case("running");
+    let status = if state.eq_ignore_ascii_case("stopped") {
+        "exited".into()
+    } else {
+        state.to_string()
+    };
+    let exit_code = entry
+        .pointer("/status/exitCode")
+        .and_then(|value| value.as_i64());
+    Ok(Some(InspectedContainer {
+        image,
+        labels,
+        running,
+        status,
+        exit_code,
+        health: String::new(),
+        aliases: apple_inspect_aliases(entry),
     }))
 }
 
@@ -2304,32 +3330,14 @@ fn remove_unowned_containers(
     desired: &BTreeSet<String>,
     retain_completed_jobs: bool,
 ) -> Result<()> {
-    let filter = format!("label=tenkai.product={}", request.product);
-    let env_filter = format!("label=tenkai.environment={}", request.environment);
-    let output = docker_output(
-        executor,
-        &[
-            "ps",
-            "-a",
-            "--format",
-            "{{.Names}}",
-            "--filter",
-            &filter,
-            "--filter",
-            &env_filter,
-        ],
-    )?;
-    if !output.status.success() {
-        return Ok(());
-    }
+    let listed = listed_owned_names(executor, request)?;
     let mut observed = Vec::new();
     let mut active_jobs = BTreeSet::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let name = line.trim();
+    for name in listed {
         if name.is_empty() {
             continue;
         }
-        let inspected = inspect_container(executor, name)?;
+        let inspected = inspect_container(executor, &name)?;
         if inspected
             .as_ref()
             .is_some_and(|inspected| !labels_owned_by(request, &inspected.labels))
@@ -2337,13 +3345,13 @@ fn remove_unowned_containers(
             continue;
         }
         if retain_completed_jobs
-            && desired.contains(name)
+            && desired.contains(&name)
             && let Some(job) = inspected.as_ref().filter(|job| successful_job(job))
             && let Some(component) = job.labels.get("tenkai.container")
         {
             active_jobs.insert(component.clone());
         }
-        observed.push((name.to_string(), inspected));
+        observed.push((name, inspected));
     }
     // Keep the active generation and one recent predecessor per declared job.
     let mut previous = BTreeMap::<String, (i64, String)>::new();
@@ -2381,15 +3389,50 @@ fn remove_unowned_containers(
         if desired.contains(&name) || retained.contains(&name) {
             continue;
         }
+        let args = remove_args(executor, &name);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         docker_ok(
             executor,
             request,
             SoftwareDeployPhase::Apply,
             "rm extra",
-            &["rm", "-f", &name],
+            &refs,
         )?;
     }
     Ok(())
+}
+
+fn listed_owned_names(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+) -> Result<Vec<String>> {
+    if executor.is_apple() {
+        return list_container_names(executor);
+    }
+    let filter = format!("label=tenkai.product={}", request.product);
+    let env_filter = format!("label=tenkai.environment={}", request.environment);
+    let output = docker_output(
+        executor,
+        &[
+            "ps",
+            "-a",
+            "--format",
+            "{{.Names}}",
+            "--filter",
+            &filter,
+            "--filter",
+            &env_filter,
+        ],
+    )?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 fn labels_owned_by(request: &SoftwareApplyRequest, labels: &BTreeMap<String, String>) -> bool {
@@ -2439,6 +3482,61 @@ fn refuse_foreign_container(
     Err(foreign_owner_error(request, name, &inspected.labels))
 }
 
+fn inspect_resource_labels(
+    executor: &DockerHostExecutor,
+    kind: &str,
+    name: &str,
+) -> Result<Option<BTreeMap<String, String>>> {
+    let args = match kind {
+        "network" => ["network", "inspect", name],
+        "volume" => ["volume", "inspect", name],
+        _ => {
+            return Ok(inspect_container(executor, name)?.map(|inspected| inspected.labels));
+        }
+    };
+    let output = docker_output(executor, &args)?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parsing resource inspect")?;
+    let Some(entry) = value.as_array().and_then(|items| items.first()) else {
+        return Ok(None);
+    };
+    let mut labels = BTreeMap::new();
+    for pointer in ["/configuration/labels", "/labels", "/Labels"] {
+        if let Some(map) = entry.pointer(pointer).and_then(|value| value.as_object()) {
+            for (key, value) in map {
+                if let Some(text) = value.as_str() {
+                    labels.insert(key.clone(), text.to_string());
+                }
+            }
+        }
+    }
+    Ok(Some(labels))
+}
+
+fn require_existing_owned_resource(
+    executor: &DockerHostExecutor,
+    request: &SoftwareApplyRequest,
+    kind: &str,
+    name: &str,
+) -> Result<()> {
+    let Some(labels) = inspect_resource_labels(executor, kind, name)? else {
+        bail!(
+            "software deploy phase={} product={} environment/namespace={}: {} {name} already exists but inspect found nothing",
+            SoftwareDeployPhase::Apply.as_str(),
+            request.product,
+            request.environment,
+            kind
+        );
+    };
+    if labels_owned_by(request, &labels) {
+        return Ok(());
+    }
+    Err(foreign_owner_error(request, name, &labels))
+}
+
 fn require_existing_owned(
     executor: &DockerHostExecutor,
     request: &SoftwareApplyRequest,
@@ -2472,14 +3570,19 @@ fn docker_create_idempotent(
     let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
     if stderr.contains("already exists") {
         let name = args.last().map(String::as_str).unwrap_or("");
+        if executor.is_apple() {
+            let kind = args.first().map(String::as_str).unwrap_or("");
+            return require_existing_owned_resource(executor, request, kind, name);
+        }
         return require_existing_owned(executor, request, name);
     }
     let detail = sanitize_diagnostic_text(stderr.trim());
     bail!(
-        "software deploy phase={} product={} environment/namespace={}: docker {hint} failed: {detail}",
+        "software deploy phase={} product={} environment/namespace={}: {} {hint} failed: {detail}",
         SoftwareDeployPhase::Apply.as_str(),
         request.product,
-        request.environment
+        request.environment,
+        executor.noun()
     )
 }
 
@@ -2498,8 +3601,8 @@ fn docker_ok(
         hint,
         &request.product,
         &request.environment,
-        "docker",
-        "set TENKAI_DOCKER_BIN or install docker",
+        executor.noun(),
+        executor.missing_bin_hint(),
     )
 }
 
@@ -2510,8 +3613,10 @@ fn docker_output(executor: &DockerHostExecutor, args: &[&str]) -> Result<Output>
         .output()
         .with_context(|| {
             format!(
-                "starting docker via {} (set TENKAI_DOCKER_BIN or install docker)",
-                executor.docker_binary.display()
+                "starting {} via {} ({})",
+                executor.noun(),
+                executor.docker_binary.display(),
+                executor.missing_bin_hint()
             )
         })
 }
@@ -4020,5 +5125,465 @@ inputs = ["docker"]
         executor.remove(&request).unwrap();
         let _ = std::fs::remove_dir_all(root);
         result.unwrap();
+    }
+
+    fn fake_container(root: &Path) -> (PathBuf, PathBuf) {
+        tenkai::rollout_time::install_fake_container(root).unwrap()
+    }
+
+    fn apple_executor_for(script: &Path, state: &Path, unhealthy: &[&str]) -> DockerHostExecutor {
+        DockerHostExecutor::apple_for_binary(script.to_path_buf())
+            .with_fake_env(state, SECRET, unhealthy)
+    }
+
+    fn owned_named<'a>(
+        containers: &'a serde_json::Map<String, serde_json::Value>,
+        component: &str,
+    ) -> (&'a str, &'a serde_json::Value) {
+        containers
+            .iter()
+            .find(|(_, value)| value["labels"]["tenkai.container"] == component)
+            .map(|(name, value)| (name.as_str(), value))
+            .unwrap_or_else(|| panic!("missing owned {component} in {containers:?}"))
+    }
+
+    #[test]
+    fn apple_inspect_reads_image_description_reference_and_aliases() {
+        let raw = r#"[{
+            "configuration": {
+                "id": "ctr",
+                "image": {
+                    "reference": "registry.example:5000/edge/api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "descriptor": {"digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+                },
+                "labels": {"tenkai.container": "api"},
+                "networks": [{"network": "appnet", "options": {"aliases": ["api"]}}]
+            },
+            "status": {"state": "running"}
+        }]"#;
+        let inspected = parse_inspect_json(raw).unwrap().unwrap();
+        assert_eq!(inspected.image, DIGEST_B);
+        assert!(inspected.running);
+        assert!(inspected.aliases.contains("api"));
+        let string_image = r#"[{"configuration":{"id":"ctr","image":"busybox:latest","labels":{}},"status":{"state":"stopped"}}]"#;
+        let inspected = parse_inspect_json(string_image).unwrap().unwrap();
+        assert_eq!(inspected.image, "busybox:latest");
+        assert!(!inspected.running);
+        assert!(inspected.aliases.is_empty());
+    }
+
+    #[test]
+    fn apple_apply_observe_restart_and_remove_two_container_fixture() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-apple-exec-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let secret_dir = root.join("secrets");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("api.env"), format!("TOKEN={SECRET}\n")).unwrap();
+        write_release(&root, "1.0.0", DIGEST_B);
+        let (script, state) = fake_container(&root);
+        let executor = apple_executor_for(&script, &state, &[]);
+        let request = request_for(&root, &secret_dir, "1.0.0");
+        assert!(executor.advertise_readiness());
+        assert_eq!(
+            executor.observe(&request).unwrap(),
+            SoftwareObserveStatus::Absent
+        );
+        executor.apply(&request).unwrap();
+        let argv_after_first = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        assert!(
+            argv_after_first.contains(r#"["image", "pull""#),
+            "first apply should pull images: {argv_after_first}"
+        );
+        assert!(
+            !argv_after_first.contains("\"rename\""),
+            "{argv_after_first}"
+        );
+        assert!(
+            !argv_after_first.contains("\"restart\""),
+            "{argv_after_first}"
+        );
+        assert!(
+            argv_after_first.contains("\"exec\""),
+            "health uses container exec: {argv_after_first}"
+        );
+        let fake_state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+        let containers = fake_state["containers"].as_object().unwrap();
+        let docker_db = container_runtime_name(&request, "db");
+        let (db_name, db) = owned_named(containers, "db");
+        let (api_name, api) = owned_named(containers, "api");
+        assert_ne!(db_name, docker_db);
+        assert!(db_name.starts_with(&format!("{docker_db}-")), "{db_name}");
+        let net = network_runtime_name(&request, "appnet");
+        assert_eq!(db["networks"][&net], serde_json::json!(["db", "database"]));
+        let backnet = network_runtime_name(&request, "backnet");
+        assert_eq!(
+            db["networks"][&backnet],
+            serde_json::json!(["db", "db-backend"])
+        );
+        assert_eq!(api["ports"], serde_json::json!(["127.0.0.1:8080:80/tcp"]));
+        assert_eq!(
+            executor.observe(&request).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+        executor.apply(&request).unwrap();
+        let argv_after_second = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        let second_argv = &argv_after_second[argv_after_first.len()..];
+        assert!(
+            !second_argv.contains("\"run\""),
+            "unchanged containers must not be replaced: {second_argv}"
+        );
+        assert!(fake_containers(&state).contains_key(db_name));
+        assert!(fake_containers(&state).contains_key(api_name));
+        executor.restart(&request).unwrap();
+        let argv = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        let restart_argv = &argv[argv_after_second.len()..];
+        assert!(restart_argv.contains("\"stop\""), "{restart_argv}");
+        assert!(restart_argv.contains("\"start\""), "{restart_argv}");
+        assert!(!restart_argv.contains("\"restart\""), "{restart_argv}");
+        assert!(argv.contains("--env-file"), "{argv}");
+        assert!(!argv.contains(SECRET), "{argv}");
+        executor.remove(&request).unwrap();
+        assert_eq!(
+            executor.observe(&request).unwrap(),
+            SoftwareObserveStatus::Absent
+        );
+        let final_state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+        assert!(final_state["containers"].as_object().unwrap().is_empty());
+        assert_eq!(final_state["volumes"].as_object().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apple_upgrade_stops_then_replaces_the_previous_generation() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-apple-upgrade-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let secret_dir = root.join("secrets");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("api.env"), "TOKEN=x\n").unwrap();
+        write_release(&root, "1.0.0", DIGEST_B);
+        write_release(&root, "2.0.0", DIGEST_C);
+        let (script, state) = fake_container(&root);
+        let executor = apple_executor_for(&script, &state, &[]);
+        let v1 = request_for(&root, &secret_dir, "1.0.0");
+        let v2 = request_for(&root, &secret_dir, "2.0.0");
+        executor.apply(&v1).unwrap();
+        let first = fake_containers(&state);
+        let (api_v1, _) = owned_named(&first, "api");
+        let (db_v1, _) = owned_named(&first, "db");
+        let api_v1 = api_v1.to_string();
+        let db_v1 = db_v1.to_string();
+        let before = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        executor.apply(&v2).unwrap();
+        let upgrade = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        let upgrade = &upgrade[before.len()..];
+        assert!(upgrade.contains(r#"["run""#), "{upgrade}");
+        assert!(upgrade.contains(&api_v1), "{upgrade}");
+        assert!(!upgrade.contains("\"rename\""), "{upgrade}");
+        let stop_at = upgrade.find(r#"["stop""#).expect(upgrade);
+        let run_at = upgrade.find(r#"["run""#).expect(upgrade);
+        assert!(stop_at < run_at, "{upgrade}");
+        let containers = fake_containers(&state);
+        assert!(!containers.contains_key(&api_v1), "{containers:?}");
+        assert!(containers.contains_key(&db_v1), "{containers:?}");
+        let (api_v2, api) = owned_named(&containers, "api");
+        assert_ne!(api_v2, api_v1);
+        assert!(!api_v2.ends_with("-c"), "{api_v2}");
+        let net = network_runtime_name(&v2, "appnet");
+        assert_eq!(api["networks"][&net], serde_json::json!(["api"]), "{api:?}");
+        assert_eq!(api["labels"]["tenkai.version"], "2.0.0");
+        assert_eq!(containers[&db_v1]["labels"]["tenkai.version"], "1.0.0");
+        assert_eq!(
+            executor.observe(&v2).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+        let volume = volume_runtime_name(&v2, "appdata");
+        let fake_state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+        assert!(
+            fake_state["volumes"]
+                .as_object()
+                .unwrap()
+                .contains_key(&volume),
+            "{fake_state}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apple_failed_upgrade_restores_the_previous_containers() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-apple-restore-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let secret_dir = root.join("secrets");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("api.env"), "TOKEN=x\n").unwrap();
+        write_release(&root, "1.0.0", DIGEST_B);
+        write_release(&root, "2.0.0", DIGEST_C);
+        let (script, state) = fake_container(&root);
+        let executor = apple_executor_for(&script, &state, &[DIGEST_C]);
+        let v1 = request_for(&root, &secret_dir, "1.0.0");
+        let v2 = request_for(&root, &secret_dir, "2.0.0");
+        executor.apply(&v1).unwrap();
+        let error = executor.apply(&v2).unwrap_err().to_string();
+        assert!(error.contains("phase=health"), "{error}");
+        assert!(
+            error.contains("restored the previous containers"),
+            "{error}"
+        );
+        let argv = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        assert!(!argv.contains("\"rename\""), "{argv}");
+        let containers = fake_containers(&state);
+        assert_eq!(containers.len(), 2, "{containers:?}");
+        for container in containers.values() {
+            assert_eq!(container["labels"]["tenkai.version"], "1.0.0");
+            assert_eq!(container["running"], true);
+        }
+        let net = network_runtime_name(&v1, "appnet");
+        let (_, api) = owned_named(&containers, "api");
+        assert_eq!(api["networks"][&net], serde_json::json!(["api"]));
+        assert_eq!(
+            executor.observe(&v1).unwrap(),
+            SoftwareObserveStatus::Present
+        );
+        executor.cleanup_failed_apply(&v2).unwrap();
+        let before = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        executor.apply(&v1).unwrap();
+        let after = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        assert!(!after[before.len()..].contains("\"run\""), "{after}");
+        assert_eq!(fake_containers(&state).len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apple_later_health_failure_keeps_claimed_dependencies() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-apple-partial-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let secret_dir = root.join("secrets");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("api.env"), "TOKEN=x\n").unwrap();
+        write_release(&root, "1.0.0", DIGEST_B);
+        write_release(&root, "2.0.0", DIGEST_C);
+        let mut v2 = sample_topology();
+        v2.containers[0].image = DIGEST_B.into();
+        v2.containers[1].image = DIGEST_C.into();
+        std::fs::write(
+            root.join("2.0.0").join("docker/host.json"),
+            serde_json::to_vec_pretty(&v2).unwrap(),
+        )
+        .unwrap();
+        let (script, state) = fake_container(&root);
+        let executor = apple_executor_for(&script, &state, &[DIGEST_C]);
+        let first = request_for(&root, &secret_dir, "1.0.0");
+        let second = request_for(&root, &secret_dir, "2.0.0");
+        executor.apply(&first).unwrap();
+        let error = executor.apply(&second).unwrap_err().to_string();
+        assert!(error.contains("phase=health"), "{error}");
+        executor.cleanup_failed_apply(&second).unwrap();
+        let containers = fake_containers(&state);
+        assert_eq!(containers.len(), 2, "{containers:?}");
+        let net = network_runtime_name(&first, "appnet");
+        let (_, db) = owned_named(&containers, "db");
+        let (_, api) = owned_named(&containers, "api");
+        assert_eq!(db["labels"]["tenkai.version"], "2.0.0");
+        assert_eq!(db["networks"][&net], serde_json::json!(["db", "database"]));
+        assert_eq!(api["labels"]["tenkai.version"], "1.0.0");
+        assert_eq!(api["networks"][&net], serde_json::json!(["api"]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apple_failed_alias_claim_keeps_the_working_cutover() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-apple-claim-fail-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let secret_dir = root.join("secrets");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("api.env"), "TOKEN=x\n").unwrap();
+        write_release(&root, "1.0.0", DIGEST_B);
+        write_release(&root, "2.0.0", DIGEST_C);
+        let (script, state) = fake_container(&root);
+        let executor = apple_executor_for(&script, &state, &[]);
+        let v1 = request_for(&root, &secret_dir, "1.0.0");
+        let v2 = request_for(&root, &secret_dir, "2.0.0");
+        executor.apply(&v1).unwrap();
+        let failing = executor
+            .clone()
+            .with_env("TENKAI_DOCKER_FAKE_FAIL_ALIAS_CLAIM", "1");
+        let error = failing.apply(&v2).unwrap_err().to_string();
+        assert!(error.contains("alias claim refused"), "{error}");
+        failing.cleanup_failed_apply(&v2).unwrap();
+        let containers = fake_containers(&state);
+        assert_eq!(containers.len(), 2, "{containers:?}");
+        let (_, db) = owned_named(&containers, "db");
+        let (api_name, api) = owned_named(&containers, "api");
+        assert_eq!(db["labels"]["tenkai.version"], "1.0.0");
+        assert_eq!(api["labels"]["tenkai.version"], "2.0.0");
+        assert!(api_name.ends_with("-c"), "{api_name}");
+        assert_eq!(api["running"], true);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apple_failing_health_exec_is_a_typed_health_error() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-apple-unhealthy-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let secret_dir = root.join("secrets");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("api.env"), format!("TOKEN={SECRET}\n")).unwrap();
+        write_release(&root, "1.0.0", DIGEST_B);
+        write_release(&root, "2.0.0", DIGEST_C);
+        let (script, state) = fake_container(&root);
+        let healthy = apple_executor_for(&script, &state, &[]);
+        let request = request_for(&root, &secret_dir, "1.0.0");
+        healthy.apply(&request).unwrap();
+        let mut data: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+        for container in data["containers"].as_object_mut().unwrap().values_mut() {
+            container["health"] = "unhealthy".into();
+        }
+        std::fs::write(&state, data.to_string()).unwrap();
+        assert_eq!(
+            healthy.observe(&request).unwrap(),
+            SoftwareObserveStatus::Mismatched
+        );
+        let executor = apple_executor_for(&script, &state, &[DIGEST_C]);
+        let v2 = request_for(&root, &secret_dir, "2.0.0");
+        let err = executor.apply(&v2).unwrap_err().to_string();
+        assert!(err.contains("phase=health"), "{err}");
+        assert!(!err.contains(SECRET), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apple_refuses_restart_files_and_nondefault_tmpfs() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-apple-refuse-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (script, state) = fake_container(&root);
+        let executor = apple_executor_for(&script, &state, &[]);
+        write_release(&root, "1.0.0", DIGEST_B);
+        let request = request_for(&root, &root, "1.0.0");
+        let refuse = |needle: &str, mutate: fn(&mut DockerHostTopology)| {
+            let mut topology = sample_topology();
+            topology.containers[1].env_file = None;
+            mutate(&mut topology);
+            std::fs::write(
+                request.workdir.join("docker/host.json"),
+                serde_json::to_vec(&topology).unwrap(),
+            )
+            .unwrap();
+            let apply_err = executor.apply(&request).unwrap_err().to_string();
+            assert!(apply_err.contains(needle), "{apply_err}");
+            let plan_err = executor
+                .render_target_changes(&request)
+                .unwrap_err()
+                .to_string();
+            assert!(plan_err.contains(needle), "{plan_err}");
+        };
+        refuse("field restart on container db", |topology| {
+            topology.containers[0].restart = DockerRestartPolicy::Always;
+        });
+        refuse("one-shot jobs on container api", |topology| {
+            topology.containers[1].mode = DockerContainerMode::OneShot { timeout_secs: 1 };
+            topology.containers[1].health = None;
+            topology.containers[1].ports.clear();
+        });
+        refuse("field files on container api", |topology| {
+            topology.containers[1].env_file = None;
+            topology.containers[1].files = vec![DockerConfigFile {
+                source: "docker/host.json".into(),
+                destination: "/etc/app.json".into(),
+                read_only: true,
+            }];
+        });
+        refuse(
+            "field tmpfs on container db (non-default mode, uid, or gid)",
+            |topology| {
+                topology.containers[0].tmpfs = vec![DockerTmpfsMount {
+                    path: "/tmp/cache".into(),
+                    size_bytes: 1024,
+                    uid: 1,
+                    gid: 0,
+                    mode: default_tmpfs_mode(),
+                }];
+            },
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apple_readiness_is_omitted_when_engine_is_down() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-apple-readyz-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (script, state) = fake_container(&root);
+        let up = apple_executor_for(&script, &state, &[]);
+        assert!(up.advertise_readiness());
+        let down = up.clone().with_env("TENKAI_CONTAINER_FAKE_DOWN", "1");
+        assert!(!down.advertise_readiness());
+        let request = request_for(&root, &root, "1.0.0");
+        write_release(&root, "1.0.0", DIGEST_B);
+        let err = down.require_target(&request).unwrap_err();
+        assert!(
+            err.0.contains("engine services are not answering"),
+            "{}",
+            err.0
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apple_refuses_a_dependency_document() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-apple-deps-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("api.env"), "TOKEN=x\n").unwrap();
+        let (script, state) = fake_container(&root);
+        let executor = apple_executor_for(&script, &state, &[]);
+        write_release(&root, "1.0.0", DIGEST_B);
+        let mut request = request_for(&root, &root, "1.0.0");
+        request.dependency_document = r#"{"version":1,"contracts":{}}"#.into();
+        let err = executor.apply(&request).unwrap_err().to_string();
+        assert!(err.contains("dependency document"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -871,8 +871,13 @@ async fn compute_snapshot_with_policy(
         crate::software_executor::cluster_config_path_from_properties(&env_obj.properties)?;
     let list_docker = crate::software_executor::secret_dir_from_properties(&env_obj.properties)?
         .is_some()
-        || executors.effective_kind(None)
-            == Some(crate::software_executor::SoftwareExecutorKind::Docker);
+        || matches!(
+            executors.effective_kind(None),
+            Some(
+                crate::software_executor::SoftwareExecutorKind::Docker
+                    | crate::software_executor::SoftwareExecutorKind::AppleContainer
+            )
+        );
     let (live_workloads, stamp_live) =
         list_live_workloads(executors, env, cluster_config.as_deref(), list_docker);
     if stamp_live {

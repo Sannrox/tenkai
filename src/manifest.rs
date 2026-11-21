@@ -1703,6 +1703,7 @@ max_startup_seconds = 30
             ("native", Kind::Kubernetes),
             ("kubernetes-inprocess", Kind::KubernetesInProcess),
             ("docker", Kind::Docker),
+            ("apple-container", Kind::AppleContainer),
         ] {
             let manifest = parse_raw(&with_executor(HELLO_LOCAL, written)).unwrap();
             assert_eq!(manifest.deploy.executor, Some(kind), "{written}");

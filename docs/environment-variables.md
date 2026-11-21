@@ -153,19 +153,20 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_RUNTIME_RELEASE_TRUST_ROOTS` | unset | Built-in mode, required: release trust-root TOML the runtime verifies every release against. Owner-only, like `TENKAI_RUNTIME_APPROVAL_POLICY` |
 | `TENKAI_RUNTIME_WORK_DIR` | unset | Built-in mode, required: where verified releases are placed |
 | `TENKAI_RUNTIME_CLUSTER_CONFIG` | unset | Built-in mode: cluster configuration for `helm`, `kubernetes` and `kubernetes-inprocess` releases; without it they are refused |
-| `TENKAI_RUNTIME_SECRET_DIR` | unset | Built-in mode: directory of Docker env files for `docker` releases |
+| `TENKAI_RUNTIME_SECRET_DIR` | unset | Built-in mode: directory of Docker env files for `docker` and `apple-container` releases |
 | `TENKAI_RUNTIME_INVENTORY` | enabled | Set `0`/`false`/`off`/`no` to disable runtime inventory reports |
 
 ## Software executors
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `TENKAI_SOFTWARE_EXECUTOR` | unset | Host software adapter: `helm`, `kubernetes` (`k8s` / `native`), `kubernetes-inprocess`, `docker`, or `fake`; unset (or `shell`) keeps the shell install path. An unknown name, or a known name whose adapter is not installed, is refused at start and never falls back to shell. The default for releases that declare no `[deploy] executor` ([software executors](software-executor.md#per-release-selection)). `/readyz` advertises `software_executor:<kind>` |
+| `TENKAI_SOFTWARE_EXECUTOR` | unset | Host software adapter: `helm`, `kubernetes` (`k8s` / `native`), `kubernetes-inprocess`, `docker`, `apple-container`, or `fake`; unset (or `shell`) keeps the shell install path. An unknown name, or a known name whose adapter is not installed, is refused at start and never falls back to shell. The default for releases that declare no `[deploy] executor` ([software executors](software-executor.md#per-release-selection)). `/readyz` advertises `software_executor:<kind>` (Apple container only while `container system status` succeeds) |
 | `TENKAI_HOST_SPOOL_DIR` | unset | Enables the host executor for `executor = "host"` releases: the directory the server, or a built-in runtime, spools host steps to, the applier's `spool_dir`; on tmpfs when host steps write sealed values ([run host releases](run-tenkai-server.md#run-host-releases)) |
 | `TENKAI_HOST_STATE_DIR` | `/var/lib/tenkai-host` | The host applier's state directory, which the server reads to plan host steps and accept their results; a built-in runtime reads it to report the applier's records and accept results |
 | `TENKAI_HELM_BIN` | `helm` | Helm binary used by the Helm software executor |
 | `TENKAI_KUBECTL_BIN` | `kubectl` | kubectl binary used by the native Kubernetes software executor |
 | `TENKAI_DOCKER_BIN` | `docker` | Docker CLI used by the Docker host software executor |
+| `TENKAI_APPLE_CONTAINER_BIN` | `container` | Apple `container` CLI used by the `apple-container` software executor |
 
 ## Telemetry
 

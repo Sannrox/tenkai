@@ -14,6 +14,10 @@
 //! **Docker host (#528):** digest-pinned containers, networks, and volumes from
 //! `{workdir}/docker/host.json` via `TENKAI_SOFTWARE_EXECUTOR=docker`.
 //!
+//! **Apple container (#1374):** the same topology through the Apple `container`
+//! CLI via `TENKAI_SOFTWARE_EXECUTOR=apple-container`. The CLI dialect lives
+//! in `tenkai-executor`; this crate only names the kind.
+//!
 //! Hosts call `tenkai_executor::install()` then [`SoftwareExecutors::try_from_process`].
 //! Each release runs with the executor it declares in `[deploy] executor`, or
 //! with the process default when it declares none (ADR 0041). Community
@@ -70,6 +74,7 @@ impl RolloutPhaseTimes {
 static HELM_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::new();
 static KUBERNETES_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::new();
 static DOCKER_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::new();
+static APPLE_CONTAINER_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::new();
 static IN_PROCESS_EXECUTOR: OnceLock<fn() -> Box<dyn SoftwareExecutor>> = OnceLock::new();
 
 /// Install the Helm CLI adapter from `tenkai-executor`.
@@ -85,6 +90,11 @@ pub fn install_kubernetes_software_executor(factory: fn() -> Box<dyn SoftwareExe
 /// Install the Docker CLI adapter from `tenkai-executor`.
 pub fn install_docker_software_executor(factory: fn() -> Box<dyn SoftwareExecutor>) {
     let _ = DOCKER_EXECUTOR.set(factory);
+}
+
+/// Install the Apple `container` CLI adapter from `tenkai-executor`.
+pub fn install_apple_container_software_executor(factory: fn() -> Box<dyn SoftwareExecutor>) {
+    let _ = APPLE_CONTAINER_EXECUTOR.set(factory);
 }
 
 /// Install the in-process Kubernetes adapter from `tenkai-executor`.
@@ -421,6 +431,12 @@ pub trait SoftwareExecutor: Send + Sync {
     ) -> Result<Option<crate::observed_runtime::ObservedRuntimeComponent>> {
         let _ = request;
         Ok(None)
+    }
+    /// Whether `/readyz` may advertise this adapter as the process default.
+    /// Default is yes. An engine whose services are down returns false so the
+    /// host does not look ready to apply.
+    fn advertise_readiness(&self) -> bool {
+        true
     }
     /// Bounded, allowlisted live workload facts for a support bundle (#1017).
     /// Default is none: this adapter does not talk to a cluster.
@@ -867,19 +883,22 @@ pub enum SoftwareExecutorKind {
     Kubernetes,
     KubernetesInProcess,
     Docker,
+    /// `docker/host.json` through Apple `container` on darwin-aarch64.
+    AppleContainer,
 }
 
 const SOFTWARE_EXECUTOR_NAME_HINT: &str =
-    "shell, host, helm, kubernetes (k8s, native), kubernetes-inprocess, docker";
+    "shell, host, helm, kubernetes (k8s, native), kubernetes-inprocess, docker, apple-container";
 
 impl SoftwareExecutorKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Shell,
         Self::Host,
         Self::Helm,
         Self::Kubernetes,
         Self::KubernetesInProcess,
         Self::Docker,
+        Self::AppleContainer,
     ];
 
     /// Canonical name; aliases normalize to it.
@@ -891,6 +910,7 @@ impl SoftwareExecutorKind {
             Self::Kubernetes => "kubernetes",
             Self::KubernetesInProcess => "kubernetes-inprocess",
             Self::Docker => "docker",
+            Self::AppleContainer => "apple-container",
         }
     }
 
@@ -948,6 +968,7 @@ pub fn software_executor_for(kind: SoftwareExecutorKind) -> Option<Box<dyn Softw
         SoftwareExecutorKind::Kubernetes => KUBERNETES_EXECUTOR.get(),
         SoftwareExecutorKind::KubernetesInProcess => IN_PROCESS_EXECUTOR.get(),
         SoftwareExecutorKind::Docker => DOCKER_EXECUTOR.get(),
+        SoftwareExecutorKind::AppleContainer => APPLE_CONTAINER_EXECUTOR.get(),
     };
     factory.map(|factory| factory())
 }
@@ -991,7 +1012,7 @@ fn lists_live_workloads(kind: Option<SoftwareExecutorKind>, cluster: bool, docke
         Some(SoftwareExecutorKind::Helm)
         | Some(SoftwareExecutorKind::Kubernetes)
         | Some(SoftwareExecutorKind::KubernetesInProcess) => cluster,
-        Some(SoftwareExecutorKind::Docker) => docker,
+        Some(SoftwareExecutorKind::Docker | SoftwareExecutorKind::AppleContainer) => docker,
         Some(SoftwareExecutorKind::Shell | SoftwareExecutorKind::Host) => false,
     }
 }
@@ -1118,9 +1139,17 @@ impl SoftwareExecutors {
 
     /// `/readyz` token for the process default, for example
     /// `software_executor:shell`. `fake` when the default is the unnamed test
-    /// adapter. Absent when the configured default was refused.
+    /// adapter. Absent when the configured default was refused, or when the
+    /// default adapter's engine is not answering.
     pub fn readiness_token(&self) -> Option<String> {
         if self.process_default_error.is_some() {
+            return None;
+        }
+        if self
+            .default
+            .as_ref()
+            .is_some_and(|adapter| !adapter.advertise_readiness())
+        {
             return None;
         }
         Some(format!(
