@@ -95,6 +95,7 @@ pub(crate) async fn execute_step(
             .err()
             .unwrap_or_else(|| "built-in executor completed successfully".into()),
         wraps: Vec::new(),
+        provision: None,
     };
     let run = Run {
         client,
@@ -113,6 +114,9 @@ pub(crate) async fn execute_step(
     }
     if let Some(ns) = &step.cluster_namespace {
         return run.cluster_namespace(step, ns).await;
+    }
+    if step.provision.is_some() {
+        return run.provision(step).await;
     }
     let target = match run.prepare(step, false).await? {
         Ok(target) => target,
@@ -498,6 +502,7 @@ impl Run<'_> {
             succeeded: false,
             detail,
             wraps: Vec::new(),
+            provision: None,
         };
         let release = match self
             .client
@@ -525,6 +530,7 @@ impl Run<'_> {
                     rewrap.fingerprint
                 ),
                 wraps,
+                provision: None,
             },
             Err(error) => failed(sanitize_diagnostic_text(&format!(
                 "re-wrapping for {} failed: {error:#}",
@@ -569,6 +575,7 @@ impl Run<'_> {
                     ),
                 },
                 wraps,
+                provision: None,
             },
             Err(error) => RuntimeStepReceipt {
                 step_id: step.id.clone(),
@@ -578,6 +585,7 @@ impl Run<'_> {
                     key.generation
                 )),
                 wraps: Vec::new(),
+                provision: None,
             },
         })
     }
@@ -609,7 +617,66 @@ impl Run<'_> {
                 Err(detail) => detail.clone(),
             },
             wraps: Vec::new(),
+            provision: None,
         })
+    }
+
+    /// Prepare or apply a provision saved plan (ADR 0052).
+    async fn provision(&self, step: &Step) -> Result<RuntimeStepReceipt> {
+        let failed = |detail: String| RuntimeStepReceipt {
+            step_id: step.id.clone(),
+            succeeded: false,
+            detail,
+            wraps: Vec::new(),
+            provision: None,
+        };
+        let target = match self.prepare(step, false).await? {
+            Ok(target) => target,
+            Err(detail) => return Ok(failed(detail)),
+        };
+        let Some(executor) = &target.executor else {
+            return Ok(failed(
+                "provision steps run with the provision executor, not the shell path".into(),
+            ));
+        };
+        let Some(provision) = &step.provision else {
+            return Ok(failed("the step names no provision binding".into()));
+        };
+        let stop = AtomicBool::new(false);
+        let result = tokio::task::spawn_blocking({
+            let executor = executor.clone();
+            let request = target.request.clone();
+            let provision = provision.clone();
+            let action = step.action;
+            let environment = self.client.environment().to_owned();
+            let instance = step.instance_name().to_owned();
+            let sealing_dir = self.config.sealing_dir.clone();
+            move || {
+                run_provision(
+                    executor.as_ref(),
+                    &request,
+                    &provision,
+                    action,
+                    ProvisionScope {
+                        environment: &environment,
+                        instance: &instance,
+                        sealing_dir: sealing_dir.as_deref(),
+                    },
+                    &stop,
+                )
+            }
+        })
+        .await?;
+        match result {
+            Ok(outcome) => Ok(RuntimeStepReceipt {
+                step_id: step.id.clone(),
+                succeeded: true,
+                detail: outcome.detail,
+                wraps: Vec::new(),
+                provision: outcome.receipt,
+            }),
+            Err(error) => Ok(failed(sanitize_diagnostic_text(&format!("{error:#}")))),
+        }
     }
 
     fn lock(&self, release: &Prepared) -> PathBuf {
@@ -1504,6 +1571,102 @@ impl BuiltinConfig {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct ProvisionOutcome {
+    pub detail: String,
+    pub receipt: Option<crate::provision::ProvisionReceipt>,
+}
+
+pub(crate) struct ProvisionScope<'a> {
+    pub environment: &'a str,
+    pub instance: &'a str,
+    pub sealing_dir: Option<&'a Path>,
+}
+
+pub(crate) fn run_provision(
+    executor: &dyn SoftwareExecutor,
+    request: &SoftwareApplyRequest,
+    provision: &crate::provision::ProvisionStep,
+    action: Action,
+    scope: ProvisionScope<'_>,
+    stop: &AtomicBool,
+) -> Result<ProvisionOutcome> {
+    let (cli, version) = executor.provision_cli_version()?;
+    anyhow::ensure!(
+        cli.as_str() == provision.cli && version == provision.cli_version,
+        "this runtime runs {cli} {version}, and the plan names {} {}",
+        provision.cli,
+        provision.cli_version
+    );
+    if action == Action::ProvisionPrepare {
+        let prepared = executor.prepare_provision(request, provision.destroy, stop)?;
+        let saved_plan_digest = prepared.saved_plan_digest();
+        let summary_digest = prepared.summary_digest()?;
+        let recipients = crate::provision::recipient_keys(&provision.recipients)?;
+        anyhow::ensure!(
+            !recipients.is_empty(),
+            "provision prepare names no recipient keys to seal the saved plan to"
+        );
+        if let Some(dir) = scope.sealing_dir {
+            let opener = SealedOpener::load(dir)?;
+            anyhow::ensure!(
+                recipients
+                    .iter()
+                    .any(|key| key.fingerprint() == opener.fingerprint()),
+                "the approved recipients do not include this runtime's sealing key"
+            );
+        }
+        let target = crate::provision::saved_plan_target(scope.environment, scope.instance)?;
+        let sealed =
+            crate::sealed_secret::seal_saved_plan(&target, &prepared.plaintext, &recipients)?;
+        return Ok(ProvisionOutcome {
+            detail: format!(
+                "prepared {} {} saved plan {saved_plan_digest}",
+                provision.cli, provision.cli_version
+            ),
+            receipt: Some(crate::provision::ProvisionReceipt {
+                saved_plan_digest,
+                summary_digest,
+                summary: prepared.summary,
+                sealed: Some(sealed),
+            }),
+        });
+    }
+    let sealed = provision
+        .sealed
+        .as_ref()
+        .context("the apply step names no sealed saved plan")?;
+    let dir = scope.sealing_dir.context(
+        "provision apply opens the saved plan, and this runtime has no sealing key (enroll with --credential-file)",
+    )?;
+    let opener = SealedOpener::load(dir)?;
+    let target = crate::provision::saved_plan_target(scope.environment, scope.instance)?;
+    let plaintext = opener.open(&target, sealed)?;
+    let digest = crate::provision::saved_plan_digest(&plaintext);
+    anyhow::ensure!(
+        digest == provision.saved_plan_digest,
+        "opened saved plan {digest} is not the approved {}",
+        provision.saved_plan_digest
+    );
+    let summary = executor.summarize_saved_plan(request, &plaintext)?;
+    let approved = provision
+        .summary
+        .as_ref()
+        .context("the apply step names no approved summary")?;
+    anyhow::ensure!(
+        summary == *approved && summary.risky_codes() == approved.risky_codes(),
+        "re-rendered provision summary does not match the approved plan"
+    );
+    executor.apply_provision(request, &plaintext, stop)?;
+    Ok(ProvisionOutcome {
+        detail: format!(
+            "applied {} {} saved plan {digest}",
+            provision.cli, provision.cli_version
+        ),
+        receipt: None,
+    })
+}
+
 fn is_hex_digest(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -2091,6 +2254,7 @@ mod tests {
             target_changes: Vec::new(),
             reason: String::new(),
             cluster_namespace: None,
+            provision: None,
         };
         Case {
             config: BuiltinConfig {

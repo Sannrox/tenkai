@@ -257,6 +257,7 @@ install = "true"
                 succeeded: true,
                 detail: "profile runtime completion".into(),
                 wraps: Vec::new(),
+                provision: None,
             }],
         };
         admit_runtime_completion(&mut ctx, "prod", &success)

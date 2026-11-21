@@ -36,6 +36,9 @@ pub(super) async fn execute(
     if let Some(ns) = step.cluster_namespace.as_ref() {
         return execute_cluster_namespace(ctx, step_context, step, ns).await;
     }
+    if step.provision.is_some() {
+        return execute_provision(ctx, step_context, step, recalled_recovery).await;
+    }
     let target = ReleasePin {
         release_id: step.release_id.clone(),
         digest: step.release_digest.clone(),
@@ -451,12 +454,104 @@ async fn execute_cluster_namespace(
     Ok(outcome)
 }
 
+async fn execute_provision(
+    ctx: &mut Ctx,
+    step_context: StepContext<'_>,
+    step: &Step,
+    recalled_recovery: bool,
+) -> Result<Outcome> {
+    let StepContext {
+        lease,
+        environment,
+        plan_id,
+        adapters,
+        started_at_ms,
+    } = step_context;
+    let provision = step
+        .provision
+        .as_ref()
+        .context("provision step names no binding")?;
+    let target = ReleasePin {
+        release_id: step.release_id.clone(),
+        digest: step.release_digest.clone(),
+        artifact_digest: step.artifact_digest.clone(),
+        workdir: step.workdir.clone(),
+    };
+    let admit_recalled = recalled_recovery && step.action == Action::Remove;
+    let content = admit_release(ctx, &target, environment, step, admit_recalled).await?;
+    let executor = adapters
+        .software
+        .resolve(content.manifest.deploy.executor)?
+        .context("provision steps need the provision executor")?;
+    let request = product_execution::software_request(ctx, &content, String::new()).await?;
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let result = tokio::task::spawn_blocking({
+        let request = request.clone();
+        let provision = provision.clone();
+        let action = step.action;
+        let environment = environment.to_string();
+        let instance = step.instance_name().to_string();
+        move || {
+            crate::runtime_builtin::run_provision(
+                executor.as_ref(),
+                &request,
+                &provision,
+                action,
+                crate::runtime_builtin::ProvisionScope {
+                    environment: &environment,
+                    instance: &instance,
+                    sealing_dir: None,
+                },
+                &stop,
+            )
+        }
+    })
+    .await?;
+    let mut env_obj = crate::environment::environment(ctx, environment).await?;
+    let receipt = match result {
+        Ok(outcome) => crate::runtime_delivery::RuntimeStepReceipt {
+            step_id: step.id.clone(),
+            succeeded: true,
+            detail: outcome.detail,
+            wraps: Vec::new(),
+            provision: outcome.receipt,
+        },
+        Err(error) => crate::runtime_delivery::RuntimeStepReceipt {
+            step_id: step.id.clone(),
+            succeeded: false,
+            detail: format!("{error:#}"),
+            wraps: Vec::new(),
+            provision: None,
+        },
+    };
+    crate::provision::apply_receipt(&mut env_obj, step, &receipt)?;
+    ctx.put(env_obj).await?;
+    let status = if receipt.succeeded {
+        StepOutcomeStatus::Succeeded
+    } else {
+        StepOutcomeStatus::Failed
+    };
+    let mut outcome = Outcome::new(step.clone(), status, receipt.detail.clone());
+    record(
+        ctx,
+        started_at_ms,
+        lease,
+        environment,
+        plan_id,
+        &mut outcome,
+        recorded_transition(step),
+    )
+    .await?;
+    Ok(outcome)
+}
+
 fn recorded_transition(step: &Step) -> crate::environment::DeploymentTransition {
     match step.action {
         Action::Restart | Action::Start => crate::environment::DeploymentTransition::Refreshed,
         Action::Stop => crate::environment::DeploymentTransition::Stopped {
             reason: step.reason.clone(),
         },
+        Action::ProvisionPrepare => crate::environment::DeploymentTransition::Unchanged,
         _ => crate::environment::DeploymentTransition::Deployed {
             version: step.to.clone(),
             previous: step.from.clone(),

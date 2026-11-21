@@ -97,6 +97,9 @@ pub enum Action {
     /// Delete a declared cluster namespace (#1096). Unknown to older replicas.
     #[serde(rename = "delete_cluster_namespace")]
     DeleteClusterNamespace,
+    /// Run the provision tool's plan command and seal the saved plan (ADR 0052).
+    #[serde(rename = "provision_prepare")]
+    ProvisionPrepare,
 }
 
 impl std::fmt::Display for Action {
@@ -114,6 +117,7 @@ impl std::fmt::Display for Action {
             Action::CreateClusterNamespace => "create_cluster_namespace",
             Action::UpdateClusterNamespace => "update_cluster_namespace",
             Action::DeleteClusterNamespace => "delete_cluster_namespace",
+            Action::ProvisionPrepare => "provision_prepare",
         };
         f.write_str(s)
     }
@@ -212,6 +216,10 @@ pub struct Step {
     /// drops it; the action variants above still fail closed on deserialize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster_namespace: Option<crate::cluster_namespace::ClusterNamespaceStep>,
+    /// Set on provision prepare and apply steps (ADR 0052). Omitted on every
+    /// other step so their digests stay unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<crate::provision::ProvisionStep>,
 }
 
 /// The issuer key an identity issuer step activates or re-wraps.
@@ -290,7 +298,10 @@ impl Step {
     /// Whether the environment runtime must verify this step against a local
     /// approval policy before it runs (ADR 0045 §4).
     pub fn requires_local_approval_policy(&self) -> bool {
-        !self.sealed.is_empty() || self.issuer.is_some() || self.identity_grants().next().is_some()
+        !self.sealed.is_empty()
+            || self.issuer.is_some()
+            || self.identity_grants().next().is_some()
+            || (self.provision.is_some() && self.action != Action::ProvisionPrepare)
     }
 
     /// Whether this step deploys its release. A re-wrap step, an identity
@@ -298,6 +309,11 @@ impl Step {
     /// checks (compatibility, placement, deployment records) skip them.
     pub fn deploys_release(&self) -> bool {
         self.rewrap.is_none() && self.issuer.is_none() && self.cluster_namespace.is_none()
+    }
+
+    /// Whether a successful step records a deployed pin. Prepare does not.
+    pub fn records_deployment(&self) -> bool {
+        self.deploys_release() && self.action != Action::ProvisionPrepare
     }
 
     /// Whether this step creates, changes, or deletes a cluster namespace.
@@ -432,6 +448,10 @@ pub struct DesiredStateInput {
     /// Empty when unbound so existing plan hashes stay.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub providers: std::collections::BTreeMap<String, String>,
+    /// Digest of the approved saved plan this apply will use (ADR 0052).
+    /// Empty on every other input so existing plan hashes stay.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub saved_plan_digest: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1073,6 +1093,7 @@ mod tests {
                 artifact_digest: "target-artifact-digest".into(),
                 deployed_version: Some("1.0.0".into()),
                 providers: Default::default(),
+                saved_plan_digest: String::new(),
             }],
             steps: vec![Step {
                 id: String::new(),
@@ -1101,6 +1122,7 @@ mod tests {
                 target_changes: Vec::new(),
                 reason: String::new(),
                 cluster_namespace: None,
+                provision: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,

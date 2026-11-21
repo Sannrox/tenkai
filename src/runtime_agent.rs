@@ -660,6 +660,7 @@ impl RuntimeClient {
                                 "not executed after an earlier step failed".into()
                             },
                             wraps: Vec::new(),
+                            provision: None,
                         })
                         .collect();
                     self.complete(RuntimeCompletion {
@@ -718,6 +719,7 @@ impl RuntimeClient {
                         succeeded: false,
                         detail,
                         wraps: Vec::new(),
+                        provision: None,
                     },
                 }
             } else if step.product == crate::runtime_self_upgrade::SELF_PRODUCT {
@@ -775,6 +777,7 @@ impl RuntimeClient {
                 succeeded: false,
                 detail: "not executed after an earlier step failed".into(),
                 wraps: Vec::new(),
+                provision: None,
             });
         }
         self.complete(RuntimeCompletion {
@@ -811,6 +814,7 @@ impl RuntimeClient {
                 succeeded,
                 detail,
                 wraps: Vec::new(),
+                provision: None,
             })
         };
         if !last {
@@ -963,6 +967,7 @@ impl RuntimeClient {
                 succeeded,
                 detail,
                 wraps: Vec::new(),
+                provision: None,
             });
             let all = receipts.iter().all(|receipt| receipt.succeeded);
             self.complete(RuntimeCompletion {
@@ -1916,11 +1921,20 @@ impl RuntimeClient {
     ) -> Result<RuntimeStepReceipt> {
         // A sealed value is never handed to a command or program (ADR 0048
         // §4), nor is the identity issuer key (ADR 0046 §2). Cluster-namespace
-        // steps run on the built-in cluster executor.
-        if !step.sealed.is_empty() || step.issuer.is_some() || step.is_cluster_namespace() {
+        // and provision steps run on the built-in executors.
+        if !step.sealed.is_empty()
+            || step.issuer.is_some()
+            || step.is_cluster_namespace()
+            || step.provision.is_some()
+        {
             let detail = if step.is_cluster_namespace() {
                 format!(
                     "step {} manages a cluster namespace; operator executor programs never receive it (run the runtime in built-in mode)",
+                    step.id
+                )
+            } else if step.provision.is_some() {
+                format!(
+                    "step {} prepares or applies a provision saved plan; operator executor programs never receive it (run the runtime in built-in mode)",
                     step.id
                 )
             } else {
@@ -1934,6 +1948,7 @@ impl RuntimeClient {
                 succeeded: false,
                 detail,
                 wraps: Vec::new(),
+                provision: None,
             });
         }
         let guard = std::env::current_exe().ok().and_then(|path| {
@@ -1946,6 +1961,7 @@ impl RuntimeClient {
                 succeeded: false,
                 detail: "runtime guard could not be located".into(),
                 wraps: Vec::new(),
+                provision: None,
             });
         };
         let mut command = Command::new(guard);
@@ -2008,18 +2024,21 @@ impl RuntimeClient {
                 succeeded: true,
                 detail: "executor completed successfully".into(),
                 wraps: Vec::new(),
+                provision: None,
             }),
             Ok(_) => Ok(RuntimeStepReceipt {
                 step_id: step.id.clone(),
                 succeeded: false,
                 detail: "executor returned a non-success status".into(),
                 wraps: Vec::new(),
+                provision: None,
             }),
             Err(_) => Ok(RuntimeStepReceipt {
                 step_id: step.id.clone(),
                 succeeded: false,
                 detail: "executor could not be started".into(),
                 wraps: Vec::new(),
+                provision: None,
             }),
         }
     }

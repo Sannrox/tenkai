@@ -53,6 +53,9 @@ pub struct RuntimeStepReceipt {
     /// otherwise, so older servers read every other receipt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wraps: Vec<crate::sealed_secret::RecipientWrap>,
+    /// Prepare receipt: sealed saved plan plus digests (ADR 0052).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<crate::provision::ProvisionReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,7 +273,7 @@ pub(crate) async fn complete_runtime_work(
     let deploying: Vec<crate::plan::Step> = stored
         .steps
         .iter()
-        .filter(|step| step.deploys_release())
+        .filter(|step| step.records_deployment())
         .cloned()
         .collect();
     // A plan of re-wrap and issuer steps only, as `secret rewrap` and
@@ -282,7 +285,7 @@ pub(crate) async fn complete_runtime_work(
         && !stored
             .steps
             .iter()
-            .any(|step| step.cluster_namespace.is_some())
+            .any(|step| step.cluster_namespace.is_some() || step.provision.is_some())
     {
         crate::plan::transition(
             ctx,
@@ -378,6 +381,16 @@ pub(crate) async fn complete_runtime_work(
                 crate::cluster_namespace::apply_record(object, ns)?;
             }
         }
+        for step in &stored.steps {
+            let Some(receipt) = completion
+                .receipts
+                .iter()
+                .find(|receipt| receipt.step_id == step.id)
+            else {
+                continue;
+            };
+            crate::provision::apply_receipt(object, step, receipt)?;
+        }
         let subscribed: std::collections::HashSet<String> =
             crate::environment::list_subscriptions(ctx, object)
                 .await?
@@ -395,7 +408,7 @@ pub(crate) async fn complete_runtime_work(
             // Its wraps or issuer were stored before, under the environment
             // lease (`sealed_secret::store_completion_wraps`,
             // `identity_issuer::record_activated`).
-            if !step.deploys_release() {
+            if !step.records_deployment() {
                 continue;
             }
             // Keyed by instance, as the server records failures.
@@ -3196,6 +3209,7 @@ mod tests {
             target_changes: Vec::new(),
             reason: String::new(),
             cluster_namespace: None,
+            provision: None,
         };
         // What an older runtime sends: no removal field.
         let older: super::RuntimeReleaseRequest =
@@ -3313,6 +3327,7 @@ mod tests {
                     recovered: Vec::new(),
                 }),
                 cluster_namespace: None,
+                provision: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,
@@ -3378,6 +3393,7 @@ mod tests {
                         digest: "sha256:value".into(),
                         wrap: wrap(&new),
                     }],
+                    provision: None,
                 }],
             },
         )
@@ -3447,6 +3463,7 @@ mod tests {
                 recovered,
             }),
             cluster_namespace: None,
+            provision: None,
         };
         let plan = |step| Plan {
             format_version: crate::plan::PLAN_FORMAT_VERSION,
@@ -3535,6 +3552,7 @@ mod tests {
                 succeeded: true,
                 detail: String::new(),
                 wraps: vec![wrap("sha256:kept"), wrap("sha256:revoked")],
+                provision: None,
             }],
         };
         assert_eq!(
@@ -3580,6 +3598,7 @@ mod tests {
                 recovered: Vec::new(),
             }),
             cluster_namespace: None,
+            provision: None,
         };
         let wrap = |fingerprint: &str, digest: &str| crate::sealed_secret::RecipientWrap {
             secret: "db".into(),
@@ -3596,6 +3615,7 @@ mod tests {
             succeeded,
             detail: String::new(),
             wraps,
+            provision: None,
         };
         require_approved_wraps(
             "prod",
@@ -4825,6 +4845,7 @@ health = "curl -f http://127.0.0.1:9/health"
                 succeeded: true,
                 detail: "done".into(),
                 wraps: Vec::new(),
+                provision: None,
             }],
         };
         validate_runtime_completion(&mut ctx, "prod", &completion(&plans[0]))

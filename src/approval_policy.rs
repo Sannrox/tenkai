@@ -324,6 +324,16 @@ pub fn evaluate(
             reason: "downgrade or rollback requires a human-signed envelope".into(),
         };
     }
+    if plan.steps.iter().any(|step| {
+        step.provision
+            .as_ref()
+            .and_then(|provision| provision.summary.as_ref())
+            .is_some_and(|summary| summary.has_destroy_or_replace())
+    }) {
+        return Decision::RequireHuman {
+            reason: crate::provision::risky_human_reason().into(),
+        };
+    }
     if signals.has_migration {
         return Decision::RequireHuman {
             reason: "has_migration requires a human-signed envelope".into(),
@@ -1079,7 +1089,11 @@ pub(crate) async fn delivery_signals_for_plan(
     for step in &plan.steps {
         if matches!(
             step.action,
-            Action::Restart | Action::Stop | Action::Start | Action::Adopt
+            Action::Restart
+                | Action::Stop
+                | Action::Start
+                | Action::Adopt
+                | Action::ProvisionPrepare
         ) {
             continue;
         }
@@ -1161,6 +1175,7 @@ mod tests {
                 artifact_digest: "abc".into(),
                 deployed_version: None,
                 providers: Default::default(),
+                saved_plan_digest: String::new(),
             }],
             steps: vec![Step {
                 id: "step-0".into(),
@@ -1192,6 +1207,7 @@ mod tests {
                 target_changes: Vec::new(),
                 reason: String::new(),
                 cluster_namespace: None,
+                provision: None,
             }],
             state: PlanState::Computed,
             gates_skipped: None,
@@ -1959,6 +1975,36 @@ n = 2
         assert!(matches!(
             evaluate(&manual, &install, false, DeliverySignals::default(), None),
             Decision::RequireHuman { reason } if reason.contains("manual")
+        ));
+    }
+
+    #[test]
+    fn evaluate_requires_human_for_destroyed_or_replaced_resources() {
+        let policy = auto_policy(Path::new("/tmp/key"), None);
+        let mut plan = sample_plan(Action::Install, "infra");
+        plan.steps[0].provision = Some(crate::provision::ProvisionStep {
+            cli: "tofu".into(),
+            cli_version: "1.8.0".into(),
+            recipients: Vec::new(),
+            saved_plan_digest: "sha256:plan".into(),
+            summary: Some(crate::provision::ProvisionSummary {
+                resources: vec![crate::provision::ResourceSummary {
+                    address: "aws_s3_bucket.old".into(),
+                    action: crate::provision::ResourceAction::Delete,
+                }],
+            }),
+            destroy: false,
+            sealed: None,
+        });
+        assert!(matches!(
+            evaluate(&policy, &plan, false, DeliverySignals::default(), None),
+            Decision::RequireHuman { reason }
+                if reason.contains("destroyed_resource") || reason.contains("replaced_resource")
+        ));
+        plan.steps[0].provision.as_mut().unwrap().summary = None;
+        assert!(matches!(
+            evaluate(&policy, &plan, false, DeliverySignals::default(), None),
+            Decision::Auto { .. }
         ));
     }
 

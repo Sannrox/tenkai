@@ -7,7 +7,7 @@ into the core crate by default.
 Software releases can declare [signed compatibility preflight requirements](software-compatibility.md) independently of executor health checks.
 
 Source: `src/software_executor.rs` (port, fake, selector) and
-`crates/tenkai-executor` (Helm, kubectl, Docker CLI, in-process Kubernetes).
+`crates/tenkai-executor` (Helm, kubectl, Docker CLI, in-process Kubernetes, provision).
 Apply wiring: `src/apply.rs`. Rollout-time harness: `src/rollout_time.rs`,
 baseline `perf/rollout-baseline.json`. Hosts call `tenkai_executor::install()`
 before `SoftwareExecutors::from_process`.
@@ -22,6 +22,7 @@ before `SoftwareExecutors::from_process`.
 | **In-process Kubernetes** (#376) | `kubernetes-inprocess` | `{workdir}/manifests/**/*.yaml` | in-process client |
 | **Docker host** (#528) | `docker` | `{workdir}/docker/host.json` | `TENKAI_DOCKER_BIN` or `docker` |
 | **Apple container** (#1374) | `apple-container` | `{workdir}/docker/host.json` | `TENKAI_APPLE_CONTAINER_BIN` or `container` |
+| **Provision** (#1385) | `provision` | Terraform or OpenTofu configuration with a locking remote backend | `TENKAI_TOFU_BIN` / `tofu`, or `TENKAI_TERRAFORM_BIN` / `terraform` |
 | Fake (tests) | `fake` | in-memory | n/a |
 
 **Helm** is the chart-oriented path. **Native** is for plain multi-doc YAML via
@@ -52,6 +53,7 @@ and the object.
 | `KubernetesSoftwareExecutor` | Native manifests path (`kubectl`, `tenkai-executor`) |
 | `InProcessKubernetesExecutor` | Native manifests with server-side apply (`tenkai-executor`) |
 | `DockerHostExecutor` | Digest-pinned host containers, networks, and volumes (`tenkai-executor`); Apple `container` is a dialect of the same adapter |
+| `ProvisionExecutor` | Terraform or OpenTofu saved plans (`tenkai-executor`); prepare and apply are two Tenkai plans ([ADR 0052](decisions/0052-provisioning-executor.md)) |
 
 Hosts (`tenkaictl`, the reconciler) call `tenkai_executor::install()`, then
 pass `SoftwareExecutors::try_from_process()` into apply: the
@@ -467,6 +469,38 @@ cargo test --locked software_executor
 ```
 
 Default CI does not require a cluster, helm, kubectl, or docker binary.
+
+## Provision enablement (#1385)
+
+A software release with `deploy.executor = "provision"` names the CLI pair
+in `[provision]`:
+
+```toml
+[deploy]
+executor = "provision"
+workdir = "."
+
+[provision]
+cli = "tofu"
+cli_version = "1.8.0"
+```
+
+The workdir must declare exactly one remote state backend with locking.
+Publication and prepare refuse a local state file and never pass
+`-lock=false` or `force-unlock`. A leftover lock is reported and left for
+an operator.
+
+Changes are two Tenkai plans. Prepare runs `plan -out` and seals the saved
+plan to the approved runtime recipients. Apply opens that saved plan, checks
+its digest, re-renders the value-free resource summary, and applies exactly
+that plan. Destroy and replace are `destroyed_resource` / `replaced_resource`
+on the approval brief and always require a human. Drift observation is
+`plan -refresh-only` and never applies.
+
+```bash
+export TENKAI_SOFTWARE_EXECUTOR=provision
+export TENKAI_TOFU_BIN=/usr/bin/tofu   # or TENKAI_TERRAFORM_BIN
+```
 
 ## Docker host enablement (#528)
 

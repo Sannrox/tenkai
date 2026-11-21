@@ -465,6 +465,7 @@ mod tests {
             target_changes: Vec::new(),
             reason: String::new(),
             cluster_namespace: None,
+            provision: None,
         }
     }
 

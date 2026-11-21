@@ -482,6 +482,7 @@ mod tests {
                 inventory: None,
                 topology: None,
                 os_image: None,
+                provision: None,
             },
             artifact_digest: manifest::artifact_digest(&workdir, &[]).unwrap(),
             workdir,

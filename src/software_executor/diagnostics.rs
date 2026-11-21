@@ -19,6 +19,8 @@ pub enum SoftwareDeployPhase {
     Stop,
     /// Digest-pinned image pull before a maintenance window (#1093).
     PrePull,
+    /// Provision tool plan command (ADR 0052).
+    Plan,
 }
 
 impl SoftwareDeployPhase {
@@ -31,6 +33,7 @@ impl SoftwareDeployPhase {
             Self::Restart => "restart",
             Self::Stop => "stop",
             Self::PrePull => "pre-pull",
+            Self::Plan => "plan",
         }
     }
 }

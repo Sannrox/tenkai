@@ -104,6 +104,7 @@ pub fn settled_reboot(reboot: &Step, verify: &RuntimeStepReceipt) -> RuntimeStep
         succeeded: verify.succeeded,
         detail: format!("settled by {}: {}", verify.step_id, verify.detail),
         wraps: Vec::new(),
+        provision: None,
     }
 }
 
@@ -269,6 +270,7 @@ mod tests {
             succeeded,
             detail: String::new(),
             wraps: Vec::new(),
+            provision: None,
         }
     }
 

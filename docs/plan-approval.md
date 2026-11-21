@@ -68,6 +68,15 @@ Risky-change codes are a fixed list, not heuristics:
 - `changed_ports` — a `ports` field differs
 - `widened_grant` — Role/ClusterRole `rules` differ, or an identity grant
   names a server provider or client its restore grant does not
+- `destroyed_resource` — a provision saved plan deletes a resource
+- `replaced_resource` — a provision saved plan deletes and recreates a resource
+
+A plan that carries `destroyed_resource` or `replaced_resource` always
+requires a human, like a downgrade or a rollback. The brief lists the
+affected addresses. Provision changes are two plans: `provision_prepare`
+computes and seals the saved plan; apply binds its digest into desired
+state. The runtime re-renders the summary from the opened saved plan
+before it applies.
 
 Plans stored before this field omit the brief and keep their original digest.
 

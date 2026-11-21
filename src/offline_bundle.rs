@@ -1488,6 +1488,7 @@ impl VerifiedReceipt {
                         receipt.receipt_id, receipt.result_digest
                     ),
                     wraps: Vec::new(),
+                    provision: None,
                 })
                 .collect(),
         }

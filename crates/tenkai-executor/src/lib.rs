@@ -6,6 +6,7 @@ mod helm_secrets;
 mod in_process_kubernetes;
 mod kubernetes;
 mod kubernetes_model_runtime;
+mod provision;
 mod temp_doc;
 mod workload_stall;
 
@@ -41,6 +42,9 @@ pub fn install() {
     });
     tenkai::software_executor::install_in_process_software_executor(|| {
         Box::new(selected_in_process_executor())
+    });
+    tenkai::software_executor::install_provision_software_executor(|| {
+        Box::new(provision::ProvisionExecutor::default())
     });
     tenkai::model_runtime::install_model_runtime_executor_factory(std::sync::Arc::new(
         KubernetesModelRuntimeFactory,

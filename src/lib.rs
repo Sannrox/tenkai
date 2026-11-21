@@ -279,6 +279,7 @@ pub mod preview;
 mod product_kind;
 pub mod provider_event;
 pub mod providers;
+pub mod provision;
 pub mod recall_notice;
 pub mod recipient_pins;
 pub mod reconciler;

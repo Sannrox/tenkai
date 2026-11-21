@@ -485,6 +485,7 @@ fn existing_success_receipts(plan: &Plan) -> Vec<RuntimeStepReceipt> {
             succeeded: true,
             detail: "idempotent replay".into(),
             wraps: Vec::new(),
+            provision: None,
         })
         .collect()
 }
@@ -528,6 +529,7 @@ fn completion(plan: &Plan, succeeded: bool) -> RuntimeCompletion {
                     "adapter observed health failure".into()
                 },
                 wraps: Vec::new(),
+                provision: None,
             })
             .collect(),
     }

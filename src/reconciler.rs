@@ -478,6 +478,7 @@ mod tests {
             artifact_digest: "target-artifact-digest".into(),
             deployed_version: Some(from.into()),
             providers: Default::default(),
+            saved_plan_digest: String::new(),
         }];
         let steps = vec![Step {
             id: String::new(),
@@ -506,6 +507,7 @@ mod tests {
             target_changes: Vec::new(),
             reason: String::new(),
             cluster_namespace: None,
+            provision: None,
         }];
         sealed_test_plan(env, created_at, state, inputs, steps)
     }
@@ -583,6 +585,7 @@ mod tests {
             target_changes: Vec::new(),
             reason: String::new(),
             cluster_namespace: None,
+            provision: None,
         };
         sealed_test_plan(env, created_at, PlanState::Computed, Vec::new(), vec![step])
     }
@@ -697,6 +700,7 @@ mod tests {
                     succeeded: false,
                     detail: "uninstall failed half way".into(),
                     wraps: Vec::new(),
+                    provision: None,
                 }],
             },
         )
@@ -747,6 +751,7 @@ mod tests {
                     succeeded: false,
                     detail: "not executed after an earlier step failed".into(),
                     wraps: Vec::new(),
+                    provision: None,
                 }],
             },
         )
@@ -779,6 +784,7 @@ mod tests {
                 succeeded,
                 detail: "runtime fixture".into(),
                 wraps: Vec::new(),
+                provision: None,
             }],
         };
         let before = crate::now_millis();
@@ -882,6 +888,7 @@ mod tests {
                 succeeded: true,
                 detail: "runtime fixture".into(),
                 wraps: Vec::new(),
+                provision: None,
             }],
         };
         // A configuration change holds the lease while the completion arrives.

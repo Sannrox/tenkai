@@ -456,6 +456,7 @@ mod tests {
             target_changes: Vec::new(),
             reason: String::new(),
             cluster_namespace: None,
+            provision: None,
         };
         let mut running = plan::create_from_steps(&mut ctx, "local", vec![step])
             .await
@@ -539,6 +540,7 @@ mod tests {
                     target_changes: Vec::new(),
                     reason: String::new(),
                     cluster_namespace: None,
+                    provision: None,
                 };
                 let old = plan::create_from_steps(&mut ctx, "local", vec![step.clone()])
                     .await

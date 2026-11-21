@@ -2,7 +2,8 @@
 //!
 //! Risky-change codes are a fixed list, not heuristics: `deleted_volume` when a
 //! `volumes` field drops a live volume, `changed_ports` when `ports` differ,
-//! `widened_grant` when Role/ClusterRole `rules` differ.
+//! `widened_grant` when Role/ClusterRole `rules` differ, `destroyed_resource`
+//! and `replaced_resource` from a provision saved-plan summary (ADR 0052).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -269,6 +270,16 @@ fn summarize_changes(steps: &[Step]) -> ApprovalBriefChanges {
         if grant_widened(step) {
             risky.insert(format!("{WIDENED_GRANT}:{}", step.instance_name()));
         }
+        if let Some(summary) = step
+            .provision
+            .as_ref()
+            .and_then(|provision| provision.summary.as_ref())
+        {
+            for (action, count) in summary.counts() {
+                *counts.entry(action).or_insert(0) += count;
+            }
+            risky.extend(summary.risky_codes());
+        }
     }
     ApprovalBriefChanges {
         counts,
@@ -452,6 +463,7 @@ mod tests {
             target_changes,
             reason: String::new(),
             cluster_namespace: None,
+            provision: None,
         }
     }
 
@@ -781,6 +793,46 @@ mod tests {
         assert_eq!(
             brief.policy.reason.as_deref(),
             Some("malformed plan approval policy")
+        );
+    }
+
+    #[test]
+    fn destroy_and_replace_are_risky_provision_codes() {
+        let mut step = step_with_changes(Vec::new());
+        step.provision = Some(crate::provision::ProvisionStep {
+            cli: "tofu".into(),
+            cli_version: "1.8.0".into(),
+            recipients: Vec::new(),
+            saved_plan_digest: "sha256:ab".into(),
+            summary: Some(crate::provision::ProvisionSummary {
+                resources: vec![
+                    crate::provision::ResourceSummary {
+                        address: "aws_instance.web".into(),
+                        action: crate::provision::ResourceAction::Replace,
+                    },
+                    crate::provision::ResourceSummary {
+                        address: "aws_s3_bucket.old".into(),
+                        action: crate::provision::ResourceAction::Delete,
+                    },
+                ],
+            }),
+            destroy: false,
+            sealed: None,
+        });
+        let changes = summarize_changes(&[step]);
+        assert_eq!(changes.counts.get("replace"), Some(&1));
+        assert_eq!(changes.counts.get("delete"), Some(&1));
+        assert!(
+            changes
+                .risky
+                .iter()
+                .any(|code| code == "replaced_resource:aws_instance.web")
+        );
+        assert!(
+            changes
+                .risky
+                .iter()
+                .any(|code| code == "destroyed_resource:aws_s3_bucket.old")
         );
     }
 }

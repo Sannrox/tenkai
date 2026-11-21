@@ -1751,6 +1751,7 @@ mod tests {
             inventory: None,
             topology: None,
             os_image: None,
+            provision: None,
         };
         let descriptor = ModelRuntimeDescriptor::from_manifest(&manifest).unwrap();
         assert_eq!(descriptor.product_name, "qwen-coder");

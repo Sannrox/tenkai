@@ -407,7 +407,8 @@ fn evidence_release(step: &crate::plan::Step) -> Option<&str> {
         | Action::Adopt
         | Action::CreateClusterNamespace
         | Action::UpdateClusterNamespace
-        | Action::DeleteClusterNamespace => None,
+        | Action::DeleteClusterNamespace
+        | Action::ProvisionPrepare => None,
     }
 }
 
@@ -516,6 +517,7 @@ mod tests {
                 target_changes: Vec::new(),
                 reason: String::new(),
                 cluster_namespace: None,
+                provision: None,
             }],
             state,
             gates_skipped: Some(false),
