@@ -1016,7 +1016,13 @@ pub struct ChannelRecallRuleRequest {
     pub soak_duration_ms: i64,
     /// Maximum share of soak time with any replica failing (0.0–1.0).
     pub failing_max_share: f64,
-    /// When true, exceeding `failing_max_share` recalls the soaking release.
+    /// Optional maximum currently failing instances during soak. Absent
+    /// means the rule uses only `failing_max_share`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub failing_max_instances: Option<u32>,
+    /// When true, exceeding `failing_max_share` or reaching
+    /// `failing_max_instances` recalls the soaking release.
     pub recall_on_failing: bool,
 }
 

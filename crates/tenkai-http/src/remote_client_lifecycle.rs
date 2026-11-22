@@ -886,10 +886,7 @@ impl RemoteClient {
         &self,
         product: &str,
         channel: &str,
-        expected_generation: u64,
-        soak_duration_ms: i64,
-        failing_max_share: f64,
-        recall_on_failing: bool,
+        request: &tenkai::management_lifecycle::ChannelRecallRuleRequest,
     ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
         self.lifecycle_result(
             reqwest::Method::PUT,
@@ -898,17 +895,7 @@ impl RemoteClient {
                 encode_path_segment(product),
                 encode_path_segment(channel)
             ),
-            Some(&tenkai::management_lifecycle::ChannelRecallRuleRequest {
-                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
-                operation:
-                    tenkai::management_lifecycle::ManagementLifecycleOperation::ChannelConfigure
-                        .as_str()
-                        .into(),
-                expected_generation,
-                soak_duration_ms,
-                failing_max_share,
-                recall_on_failing,
-            }),
+            Some(request),
         )
         .await
     }

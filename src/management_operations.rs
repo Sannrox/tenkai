@@ -3588,6 +3588,7 @@ impl ManagementOperations {
             crate::channel_promotion::ChannelRecallRule {
                 soak_duration_ms: request.soak_duration_ms,
                 failing_max_share: request.failing_max_share,
+                failing_max_instances: request.failing_max_instances,
                 recall_on_failing: request.recall_on_failing,
             },
         )

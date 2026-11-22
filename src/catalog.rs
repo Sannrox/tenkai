@@ -141,6 +141,16 @@ pub struct RecallView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub failing_max_share: Option<f64>,
+    /// The policy's `failing_max_instances` threshold that the failing
+    /// instance count reached. Omitted when the recall tripped on share or
+    /// was not a promotion-policy recall.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub failing_max_instances: Option<u32>,
+    /// Measured failing instance count when the count threshold fired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub failing_instance_count: Option<u32>,
 }
 
 /// One audited widening of a recall's removal scope.
@@ -1691,6 +1701,11 @@ pub async fn inspect_recall(ctx: &mut Ctx, spec: &str) -> Result<RecallView> {
             .and_then(|properties| properties.get(key))
             .and_then(|value| value.parse::<f64>().ok())
     };
+    let claim_count = |key: &str| {
+        properties
+            .and_then(|properties| properties.get(key))
+            .and_then(|value| value.parse::<u32>().ok())
+    };
     let current = recalled_holders(ctx, &release.id).await?;
     let deployed = release
         .id
@@ -1762,6 +1777,8 @@ pub async fn inspect_recall(ctx: &mut Ctx, spec: &str) -> Result<RecallView> {
         healthy_share: claim_share("healthy_share"),
         failing_share: claim_share("failing_share"),
         failing_max_share: claim_share("failing_max_share"),
+        failing_max_instances: claim_count("failing_max_instances"),
+        failing_instance_count: claim_count("failing_instance_count"),
     })
 }
 

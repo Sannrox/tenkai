@@ -1165,6 +1165,12 @@
           "default": false,
           "type": "boolean"
         },
+        "failing_max_instances": {
+          "description": "Optional maximum currently failing instances during soak. Absent\nmeans the rule uses only `failing_max_share`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
         "failing_max_share": {
           "default": 0.0,
           "description": "Maximum share of soak time with any replica failing (0.0–1.0).",
@@ -1183,7 +1189,7 @@
         },
         "recall_on_failing": {
           "default": false,
-          "description": "When true, exceeding `failing_max_share` recalls the soaking source\nrelease instead of only resetting the soak.",
+          "description": "When true, exceeding `failing_max_share` or reaching\n`failing_max_instances` recalls the soaking source release instead of\nonly resetting the soak.",
           "type": "boolean"
         }
       },
@@ -1342,6 +1348,12 @@
           "minimum": 0,
           "type": "integer"
         },
+        "failing_max_instances": {
+          "description": "Optional maximum currently failing instances during soak. Absent\nmeans the rule uses only `failing_max_share`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
         "failing_max_share": {
           "description": "Maximum share of soak time with any replica failing (0.0–1.0).",
           "format": "double",
@@ -1351,7 +1363,7 @@
           "type": "string"
         },
         "recall_on_failing": {
-          "description": "When true, exceeding `failing_max_share` recalls the soaking release.",
+          "description": "When true, exceeding `failing_max_share` or reaching\n`failing_max_instances` recalls the soaking release.",
           "type": "boolean"
         },
         "soak_duration_ms": {
@@ -8228,12 +8240,24 @@
         "covers_future": {
           "type": "boolean"
         },
+        "failing_instance_count": {
+          "description": "Measured failing instance count when the count threshold fired.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
         "failing_instances": {
           "default": [],
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "failing_max_instances": {
+          "description": "The policy's `failing_max_instances` threshold that the failing\ninstance count reached. Omitted when the recall tripped on share or\nwas not a promotion-policy recall.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
         },
         "failing_max_share": {
           "description": "The policy's `failing_max_share` threshold that `failing_share` exceeded.",

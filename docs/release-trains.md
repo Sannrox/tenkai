@@ -96,7 +96,7 @@ pause actor, and soak progress. Pause and resume are
 `POST .../policy/pause` and `POST .../policy/resume`. Remote `tenkaictl
 channel policy --pause/--resume` uses those routes; declaring a policy
 still needs `--target embedded`. `PUT .../policy` replaces the recall
-rule (`soak_duration_ms`, `failing_max_share`, `recall_on_failing`) of an
+rule (`soak_duration_ms`, `failing_max_share`, optional `failing_max_instances`, `recall_on_failing`) of an
 existing policy, fenced by its `policy_version`. A replica that does not
 advertise `channel_promotion_policy` does not evaluate policies; stored
 policies stay inert.
