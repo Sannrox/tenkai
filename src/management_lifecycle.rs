@@ -142,11 +142,11 @@ pub enum ManagementLifecycleOperation {
     ReleaseLabelSet,
     ReleaseLabelClear,
     Register,
-    Preview,
-    ClosePreview,
     Configure,
     Cancel,
     Reconcile,
+    Preview,
+    ClosePreview,
 }
 
 impl ManagementLifecycleOperation {
@@ -186,11 +186,11 @@ impl ManagementLifecycleOperation {
             Self::ReleaseLabelSet => "release_label_set",
             Self::ReleaseLabelClear => "release_label_clear",
             Self::Register => "register",
-            Self::Preview => "preview",
-            Self::ClosePreview => "close_preview",
             Self::Configure => "configure",
             Self::Cancel => "cancel",
             Self::Reconcile => "reconcile",
+            Self::Preview => "preview",
+            Self::ClosePreview => "close_preview",
         }
     }
 
@@ -317,11 +317,11 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "release_label_set" => Ok(ManagementLifecycleOperation::ReleaseLabelSet),
         "release_label_clear" => Ok(ManagementLifecycleOperation::ReleaseLabelClear),
         "register" => Ok(ManagementLifecycleOperation::Register),
-        "preview" => Ok(ManagementLifecycleOperation::Preview),
-        "close_preview" => Ok(ManagementLifecycleOperation::ClosePreview),
         "configure" => Ok(ManagementLifecycleOperation::Configure),
         "cancel" => Ok(ManagementLifecycleOperation::Cancel),
         "reconcile" => Ok(ManagementLifecycleOperation::Reconcile),
+        "preview" => Ok(ManagementLifecycleOperation::Preview),
+        "close_preview" => Ok(ManagementLifecycleOperation::ClosePreview),
         other => bail!("unknown management lifecycle operation {other:?}"),
     }
 }
