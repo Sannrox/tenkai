@@ -27,7 +27,10 @@ use tenkai::delivery_hold::DeliveryHoldView;
 use tenkai::deploy_webhook::WebhookEndpoint;
 use tenkai::deployment_history::{DeploymentHistoryPage, DeploymentHistoryQuery};
 use tenkai::environment::{EnvironmentInspectReport, EnvironmentListEntry, StatusRow};
-use tenkai::environment_config::{EnvironmentConfigRequest, RegisterEnvironmentRequest};
+use tenkai::environment_config::{
+    ClosePreviewRequest, EnvironmentConfigRequest, ProvisionPreviewRequest,
+    RegisterEnvironmentRequest,
+};
 use tenkai::environment_dependencies::EnvironmentDependencies;
 use tenkai::exposure::{
     AdvisoryFeedStatus, ExposureQueryRequest, ExposureQueryResult, ExposureWaiverList,
@@ -303,6 +306,20 @@ pub fn http_contract() -> Value {
             path: "/v1/environments",
             auth: Auth::Management,
             request: Some(schema::<RegisterEnvironmentRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/environments/preview",
+            auth: Auth::Management,
+            request: Some(schema::<ProvisionPreviewRequest>(&mut g)),
+            response: lifecycle.clone(),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/environments/{environment}/close-preview",
+            auth: Auth::Management,
+            request: Some(schema::<ClosePreviewRequest>(&mut g)),
             response: lifecycle.clone(),
         },
         Route {

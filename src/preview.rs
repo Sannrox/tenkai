@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::Read as _;
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -41,7 +41,7 @@ const PROP_STATUS: &str = "preview_status";
 const PROP_TEARDOWN_REASON: &str = "preview_teardown_reason";
 const PROP_TEARDOWN_AT: &str = "preview_teardown_at";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BranchPin {
     pub contract: String,
@@ -203,6 +203,28 @@ pub fn admit_executable_plan(object: &Object, now: i64, steps: &[crate::plan::St
         );
     }
     Ok(())
+}
+
+/// Parse a preview expiry as RFC 3339 milliseconds since epoch.
+pub fn parse_expires_at(value: &str) -> Result<i64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(value)
+        .with_context(|| format!("preview expiry {value:?} is not RFC 3339"))?;
+    Ok(parsed.timestamp_millis())
+}
+
+/// Operator message after [`close_branch`], matching embedded `env close-preview`.
+pub fn format_close_message(evidence: &TeardownEvidence, status: &str) -> String {
+    if status == STATUS_CLOSING {
+        format!(
+            "preview environment {} closing ({}); deployed instances are removed on reconcile; pin {}; plan digest {}",
+            evidence.environment, evidence.reason, evidence.pin_digest, evidence.plan_digest
+        )
+    } else {
+        format!(
+            "preview environment {} torn down ({}); pin {}; plan digest {}",
+            evidence.environment, evidence.reason, evidence.pin_digest, evidence.plan_digest
+        )
+    }
 }
 
 pub async fn provision(
@@ -597,6 +619,13 @@ mod tests {
         let mut ctx = Ctx::embedded(path).unwrap();
         crate::ontology::register(&mut ctx).await.unwrap();
         ctx
+    }
+
+    #[test]
+    fn rfc3339_expiry_parses_to_millis() {
+        assert_eq!(parse_expires_at("1970-01-01T00:00:00Z").unwrap(), 0);
+        let error = parse_expires_at("tomorrow").unwrap_err().to_string();
+        assert!(error.contains("not RFC 3339"), "{error}");
     }
 
     #[tokio::test]

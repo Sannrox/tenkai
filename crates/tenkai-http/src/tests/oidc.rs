@@ -306,6 +306,51 @@ async fn agent_actor_reads_but_cannot_mutate() {
     assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
     assert!(body.contains("agent-initiated"), "{body}");
 
+    let preview = serde_json::to_vec(&tenkai::environment_config::ProvisionPreviewRequest {
+        version: 1,
+        operation: "preview".into(),
+        environment: "review".into(),
+        pin: tenkai::preview::BranchPin {
+            contract: tenkai::preview::PIN_CONTRACT.into(),
+            namespace: "acme".into(),
+            branch_id: "types".into(),
+            head_revision: "rev-1".into(),
+            pin_digest: format!("sha256:{}", "a".repeat(64)),
+        },
+        expires_at: "2099-01-01T00:00:00Z".into(),
+        description: String::new(),
+        reason: "review branch".into(),
+    })
+    .unwrap();
+    let (code, body) = status(
+        &app,
+        Request::post("/v1/environments/preview")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(preview))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("agent-initiated"), "{body}");
+
+    let close = serde_json::to_vec(&tenkai::environment_config::ClosePreviewRequest {
+        version: 1,
+        operation: "close_preview".into(),
+    })
+    .unwrap();
+    let (code, body) = status(
+        &app,
+        Request::post("/v1/environments/prod/close-preview")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(close))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("agent-initiated"), "{body}");
+
     let malformed = agent_token(serde_json::json!({"kind": "human"}));
     let (code, _) = status(&app, get("/v1/environments", &malformed)).await;
     assert_eq!(code, StatusCode::UNAUTHORIZED);

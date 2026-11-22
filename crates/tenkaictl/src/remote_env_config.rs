@@ -333,6 +333,33 @@ pub(crate) async fn register(
     Ok(())
 }
 
+/// `env preview` with --target remote.
+pub(crate) async fn preview(
+    client: &tenkai_http::RemoteClient,
+    name: &str,
+    pin: &std::path::Path,
+    expires_at: &str,
+    description: &str,
+    reason: Option<&str>,
+) -> Result<()> {
+    let reason =
+        reason.ok_or_else(|| anyhow::anyhow!("--reason is required with --target remote"))?;
+    tenkai::preview::parse_expires_at(expires_at)?;
+    let pin = tenkai::preview::BranchPin::load_file(pin)?;
+    let result = client
+        .provision_preview(name, pin, expires_at, description, reason)
+        .await?;
+    println!("{}", result.message);
+    Ok(())
+}
+
+/// `env close-preview` with --target remote.
+pub(crate) async fn close_preview(client: &tenkai_http::RemoteClient, env: &str) -> Result<()> {
+    let result = client.close_preview(env).await?;
+    println!("{}", result.message);
+    Ok(())
+}
+
 pub(crate) fn require(remote: &RemoteChange) -> Result<(u64, &str)> {
     let generation = remote
         .generation

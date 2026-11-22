@@ -1,6 +1,9 @@
 //! Remote environment registration and configuration (#679).
 //!
-//! `POST /v1/environments` registers an environment. Generation-fenced
+//! `POST /v1/environments` registers an environment.
+//! `POST /v1/environments/preview` and
+//! `POST /v1/environments/{environment}/close-preview` admit and tear down
+//! branch-pin previews through [`crate::preview`]. Generation-fenced
 //! `PUT`/`DELETE` routes under `/v1/environments/{environment}/` change its
 //! facts, labels, constraints, maintenance windows, webhooks, owner, approval policy,
 //! runner attestation policy (#675), declared criticality (#694),
@@ -36,6 +39,29 @@ pub struct RegisterEnvironmentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connectivity_class: Option<ConnectivityClass>,
     pub reason: String,
+}
+
+/// Body of `POST /v1/environments/preview`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProvisionPreviewRequest {
+    pub version: u32,
+    pub operation: String,
+    pub environment: String,
+    pub pin: crate::preview::BranchPin,
+    /// RFC 3339 expiry. Teardown never deletes a non-preview environment.
+    pub expires_at: String,
+    #[serde(default)]
+    pub description: String,
+    pub reason: String,
+}
+
+/// Body of `POST /v1/environments/{environment}/close-preview`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClosePreviewRequest {
+    pub version: u32,
+    pub operation: String,
 }
 
 /// Body of every `PUT`/`DELETE` configuration route.

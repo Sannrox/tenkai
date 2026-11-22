@@ -44,6 +44,9 @@ pub(crate) enum EnvCommand {
         expires_at: String,
         #[arg(long, default_value = "")]
         description: String,
+        /// Why the preview is registered; required with --target remote.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Record branch close and tear down a preview environment.
     ClosePreview { env: String },

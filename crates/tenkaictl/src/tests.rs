@@ -1182,13 +1182,17 @@ fn parses_env_list_and_inspect() {
         "pin.json",
         "--expires-at",
         "2026-09-16T00:00:00Z",
+        "--reason",
+        "review branch",
     ])
     .unwrap();
     assert!(matches!(
         preview.command,
         Command::Env {
-            command: EnvCommand::Preview { ref name, ref expires_at, .. }
-        } if name == "review" && expires_at == "2026-09-16T00:00:00Z"
+            command: EnvCommand::Preview { ref name, ref expires_at, ref reason, .. }
+        } if name == "review"
+            && expires_at == "2026-09-16T00:00:00Z"
+            && reason.as_deref() == Some("review branch")
     ));
     let close = Cli::try_parse_from(["tenkaictl", "env", "close-preview", "review"]).unwrap();
     assert!(matches!(

@@ -31,6 +31,49 @@ pub(super) async fn register_environment(
     )
 }
 
+pub(super) async fn provision_preview(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .provision_preview(&credential, request)
+            .await,
+    )
+}
+
+pub(super) async fn close_preview(
+    State(state): State<Arc<AppState>>,
+    Path(environment): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .close_preview(&credential, &environment, request)
+            .await,
+    )
+}
+
 pub(super) async fn configure_bindings(
     state: State<Arc<AppState>>,
     method: Method,

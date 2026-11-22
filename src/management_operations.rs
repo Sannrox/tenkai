@@ -2258,6 +2258,88 @@ impl ManagementOperations {
         ))
     }
 
+    /// `POST /v1/environments/preview`: admit a branch-pin preview as
+    /// `env preview` does.
+    pub async fn provision_preview(
+        &self,
+        credential: &CredentialMaterial,
+        request: crate::environment_config::ProvisionPreviewRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "environment.preview")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_provision_preview(
+            &request,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let expires_at =
+            crate::preview::parse_expires_at(&request.expires_at).map_err(map_lifecycle_error)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "environment.preview.requested")?;
+        let mut ctx = self.application_ctx()?;
+        let message = crate::preview::provision(
+            &mut ctx,
+            &request.environment,
+            request.pin,
+            expires_at,
+            &request.description,
+            crate::now_millis(),
+        )
+        .await
+        .map_err(map_preview_error)?;
+        self.audit(actor, "environment.preview.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Preview,
+            message,
+            Some(request.environment),
+        ))
+    }
+
+    /// `POST /v1/environments/{environment}/close-preview`: record branch
+    /// close as `env close-preview` does.
+    pub async fn close_preview(
+        &self,
+        credential: &CredentialMaterial,
+        environment: &str,
+        request: crate::environment_config::ClosePreviewRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "environment.close_preview")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        self.require_community_catalog_host()?;
+        management_lifecycle::admit_close_preview(
+            &request,
+            environment,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        self.require_environment_visible(&context, environment)
+            .await?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "environment.close_preview.requested")?;
+        let mut ctx = self.application_ctx()?;
+        let evidence = crate::preview::close_branch(&mut ctx, environment, crate::now_millis())
+            .await
+            .map_err(map_preview_error)?;
+        let status = crate::environment::environment(&mut ctx, environment)
+            .await
+            .ok()
+            .and_then(|object| crate::preview::inspect_from_object(&object).ok().flatten())
+            .map(|inspect| inspect.status)
+            .unwrap_or_default();
+        let message = crate::preview::format_close_message(&evidence, &status);
+        self.audit(actor, "environment.close_preview.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::ClosePreview,
+            message,
+            Some(environment.to_string()),
+        ))
+    }
+
     /// Generation-fenced `PUT`/`DELETE` under `/v1/environments/{environment}/`.
     /// `route` is the resource, whether the method is `DELETE`, and the
     /// maintenance window named in the path.
@@ -4994,6 +5076,22 @@ fn map_environment_error(error: anyhow::Error) -> ManagementError {
 /// Errors after admission: requests are validated already, so what is left
 /// is a missing environment or entry, a busy environment, or a change the
 /// host could not carry out (for example an unreadable policy file).
+fn map_preview_error(error: anyhow::Error) -> ManagementError {
+    let message = format!("{error:#}");
+    if message.contains("not registered") {
+        ManagementError::NotFound(message)
+    } else if message.contains("different branch pin")
+        || message.contains("different expiry")
+        || message.contains("was torn down")
+        || message.contains("not a preview environment")
+        || message.contains("already registered")
+    {
+        ManagementError::Conflict(message)
+    } else {
+        ManagementError::BadRequest(message)
+    }
+}
+
 fn map_config_error(error: anyhow::Error) -> ManagementError {
     let message = format!("{error:#}");
     if crate::clock_guard::is_clock_refusal(&message) {
