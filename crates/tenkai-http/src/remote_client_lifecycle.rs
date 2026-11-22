@@ -202,6 +202,54 @@ impl RemoteClient {
         .await
     }
 
+    /// `POST /v1/environments/preview`.
+    pub async fn provision_preview(
+        &self,
+        environment: &str,
+        pin: tenkai::preview::BranchPin,
+        expires_at: &str,
+        description: &str,
+        reason: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            "/v1/environments/preview",
+            Some(&tenkai::environment_config::ProvisionPreviewRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Preview
+                    .as_str()
+                    .into(),
+                environment: environment.to_string(),
+                pin,
+                expires_at: expires_at.to_string(),
+                description: description.to_string(),
+                reason: reason.to_string(),
+            }),
+        )
+        .await
+    }
+
+    /// `POST /v1/environments/{environment}/close-preview`.
+    pub async fn close_preview(
+        &self,
+        environment: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!(
+                "/v1/environments/{}/close-preview",
+                encode_path_segment(environment)
+            ),
+            Some(&tenkai::environment_config::ClosePreviewRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::ClosePreview
+                    .as_str()
+                    .into(),
+            }),
+        )
+        .await
+    }
+
     /// `POST /v1/environments`.
     pub async fn register_environment(
         &self,

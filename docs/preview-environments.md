@@ -18,13 +18,24 @@ an unmerged branch of definitions without graduating that work onto a channel.
 tenkaictl env preview review \
   --pin pin.json \
   --expires-at 2026-09-16T00:00:00Z
+tenkaictl --target remote env preview review \
+  --pin pin.json \
+  --expires-at 2026-09-16T00:00:00Z \
+  --reason "review branch"
 tenkaictl plan --env review
 tenkaictl env inspect review
 tenkaictl env close-preview review
+tenkaictl --target remote env close-preview review
 ```
 
-Provision is an embedded `tenkaictl` mutation. The v1 remote management API
-does not create or close preview environments.
+HTTP v1 create and close use the same provision and close rules as
+embedded `tenkaictl`:
+
+- `POST /v1/environments/preview` with the branch pin and an RFC 3339 expiry
+- `POST /v1/environments/{environment}/close-preview`
+
+An agent in the actor chain is refused on create and close. ADR 0034 is
+unchanged.
 
 The pin is Tenkai-owned identity after admission. Sekai-Chisei remains the
 authority for branch membership, merge, and compatibility gates. Tenkai does

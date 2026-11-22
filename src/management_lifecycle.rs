@@ -142,6 +142,8 @@ pub enum ManagementLifecycleOperation {
     ReleaseLabelSet,
     ReleaseLabelClear,
     Register,
+    Preview,
+    ClosePreview,
     Configure,
     Cancel,
     Reconcile,
@@ -184,6 +186,8 @@ impl ManagementLifecycleOperation {
             Self::ReleaseLabelSet => "release_label_set",
             Self::ReleaseLabelClear => "release_label_clear",
             Self::Register => "register",
+            Self::Preview => "preview",
+            Self::ClosePreview => "close_preview",
             Self::Configure => "configure",
             Self::Cancel => "cancel",
             Self::Reconcile => "reconcile",
@@ -211,6 +215,7 @@ impl ManagementLifecycleOperation {
                 | Self::ReleaseLabelSet
                 | Self::ReleaseLabelClear
                 | Self::Register
+                | Self::Preview
         )
     }
 
@@ -312,6 +317,8 @@ pub fn parse_management_lifecycle_operation(name: &str) -> Result<ManagementLife
         "release_label_set" => Ok(ManagementLifecycleOperation::ReleaseLabelSet),
         "release_label_clear" => Ok(ManagementLifecycleOperation::ReleaseLabelClear),
         "register" => Ok(ManagementLifecycleOperation::Register),
+        "preview" => Ok(ManagementLifecycleOperation::Preview),
+        "close_preview" => Ok(ManagementLifecycleOperation::ClosePreview),
         "configure" => Ok(ManagementLifecycleOperation::Configure),
         "cancel" => Ok(ManagementLifecycleOperation::Cancel),
         "reconcile" => Ok(ManagementLifecycleOperation::Reconcile),
@@ -2128,6 +2135,48 @@ pub fn admit_register_environment(
     Ok(admitted)
 }
 
+/// Admit `POST /v1/environments/preview`. Catalog-wide: an environment-scoped
+/// credential cannot create preview environments.
+pub fn admit_provision_preview(
+    request: &crate::environment_config::ProvisionPreviewRequest,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    crate::ontology::validate_identifier("environment", &request.environment)?;
+    crate::environment_config::require_reason(&request.reason)?;
+    request.pin.validate()?;
+    crate::preview::parse_expires_at(&request.expires_at)?;
+    let admitted = admit_management_lifecycle(
+        &ManagementLifecycleEnvelope {
+            version: request.version,
+            operation: request.operation.clone(),
+            environment: None,
+            expected_generation: None,
+        },
+        kind,
+        granted_environment,
+    )?;
+    require_route_operation(admitted.operation, ManagementLifecycleOperation::Preview)?;
+    Ok(admitted)
+}
+
+/// Admit `POST /v1/environments/{environment}/close-preview`.
+pub fn admit_close_preview(
+    request: &crate::environment_config::ClosePreviewRequest,
+    environment: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<()> {
+    require_management_lifecycle_api_version(request.version)?;
+    let operation = parse_management_lifecycle_operation(&request.operation)?;
+    require_route_operation(operation, ManagementLifecycleOperation::ClosePreview)?;
+    if environment.trim().is_empty() {
+        bail!("preview close requires an environment");
+    }
+    crate::ontology::validate_identifier("environment", environment)?;
+    authorize_management_lifecycle_scope(kind, granted_environment, operation, Some(environment))
+}
+
 /// Admit one configuration route: the path environment, the route's
 /// resource, method and window name, and the generation-fenced envelope.
 pub fn admit_environment_config(
@@ -2669,6 +2718,65 @@ mod tests {
 
     fn env_apply() -> &'static str {
         r#"{"version":1,"operation":"apply","environment":"stage","expected_generation":7}"#
+    }
+
+    fn sample_preview_pin() -> crate::preview::BranchPin {
+        crate::preview::BranchPin {
+            contract: crate::preview::PIN_CONTRACT.into(),
+            namespace: "acme".into(),
+            branch_id: "types".into(),
+            head_revision: "rev-1".into(),
+            pin_digest: format!("sha256:{}", "a".repeat(64)),
+        }
+    }
+
+    #[test]
+    fn preview_create_is_catalog_wide_and_close_is_environment_scoped() {
+        let request = crate::environment_config::ProvisionPreviewRequest {
+            version: 1,
+            operation: "preview".into(),
+            environment: "review".into(),
+            pin: sample_preview_pin(),
+            expires_at: "2026-09-16T00:00:00Z".into(),
+            description: String::new(),
+            reason: "review branch".into(),
+        };
+        admit_provision_preview(&request, PrincipalKind::Management, None).unwrap();
+        let err = admit_provision_preview(&request, PrincipalKind::Management, Some("stage"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("cannot call catalog-wide management operation preview"),
+            "{err}"
+        );
+        let mut bad_expiry = request.clone();
+        bad_expiry.expires_at = "tomorrow".into();
+        let err = admit_provision_preview(&bad_expiry, PrincipalKind::Management, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not RFC 3339"), "{err}");
+
+        let close = crate::environment_config::ClosePreviewRequest {
+            version: 1,
+            operation: "close_preview".into(),
+        };
+        admit_close_preview(&close, "review", PrincipalKind::Management, Some("review")).unwrap();
+        let err = admit_close_preview(&close, "review", PrincipalKind::Management, Some("stage"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot act on another environment"), "{err}");
+        let err = admit_close_preview(
+            &crate::environment_config::ClosePreviewRequest {
+                version: 1,
+                operation: "retire".into(),
+            },
+            "review",
+            PrincipalKind::Management,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not valid on this route"), "{err}");
     }
 
     #[test]

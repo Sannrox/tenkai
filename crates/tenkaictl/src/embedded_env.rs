@@ -1,4 +1,4 @@
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use tenkai::{apply, client, connectivity, plan, preview};
 
 use crate::args::OutputFormat;
@@ -35,9 +35,10 @@ pub(crate) async fn run(
             pin,
             expires_at,
             description,
+            reason: _,
         } => {
             let pin = preview::BranchPin::load_file(&pin)?;
-            let expires_at = parse_preview_expiry(&expires_at)?;
+            let expires_at = preview::parse_expires_at(&expires_at)?;
             println!(
                 "{}",
                 preview::provision(
@@ -53,27 +54,12 @@ pub(crate) async fn run(
         }
         EnvCommand::ClosePreview { env } => {
             let evidence = preview::close_branch(ctx, &env, tenkai::now_millis()).await?;
-            let closing = plan::inspect_environment(ctx, &env)
+            let status = plan::inspect_environment(ctx, &env)
                 .await?
                 .preview
-                .is_some_and(|inspect| inspect.status == preview::STATUS_CLOSING);
-            if closing {
-                println!(
-                    "preview environment {} closing ({}); deployed instances are removed on reconcile; pin {}; plan digest {}",
-                    evidence.environment,
-                    evidence.reason,
-                    evidence.pin_digest,
-                    evidence.plan_digest
-                );
-            } else {
-                println!(
-                    "preview environment {} torn down ({}); pin {}; plan digest {}",
-                    evidence.environment,
-                    evidence.reason,
-                    evidence.pin_digest,
-                    evidence.plan_digest
-                );
-            }
+                .map(|inspect| inspect.status)
+                .unwrap_or_default();
+            println!("{}", preview::format_close_message(&evidence, &status));
         }
         EnvCommand::List { selector } => {
             let mut entries = plan::list_environments(ctx).await?;
@@ -325,10 +311,4 @@ pub(crate) async fn run(
         }
     }
     Ok(())
-}
-
-pub(crate) fn parse_preview_expiry(value: &str) -> Result<i64> {
-    let parsed = chrono::DateTime::parse_from_rfc3339(value)
-        .with_context(|| format!("preview expiry {value:?} is not RFC 3339"))?;
-    Ok(parsed.timestamp_millis())
 }

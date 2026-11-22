@@ -29,12 +29,16 @@ A refusal with `reason.code` `agent_budget` means the actor is outside that budg
 
 ## Previews
 
-A preview environment is a short-lived, non-promotable environment bound to one branch pin. The brief records evidence `preview` when the environment is a preview. Provision is embedded-only.
+A preview environment is a short-lived, non-promotable environment bound to one branch pin. The brief records evidence `preview` when the environment is a preview. Create and close are management mutations: an agent in the actor chain is refused.
 
 ```sh
 tenkaictl env preview review \
   --pin pin.json \
   --expires-at 2026-09-16T00:00:00Z
+tenkaictl --target remote env preview review \
+  --pin pin.json \
+  --expires-at 2026-09-16T00:00:00Z \
+  --reason "review branch"
 tenkaictl --output json-v1 plan --env review
 tenkaictl env close-preview review
 ```

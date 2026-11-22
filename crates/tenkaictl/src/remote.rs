@@ -420,6 +420,29 @@ pub(crate) async fn run(
             )
             .await
         }
+        Command::Env {
+            command:
+                EnvCommand::Preview {
+                    name,
+                    pin,
+                    expires_at,
+                    description,
+                    reason,
+                },
+        } => {
+            crate::remote_env_config::preview(
+                &client,
+                &name,
+                &pin,
+                &expires_at,
+                &description,
+                reason.as_deref(),
+            )
+            .await
+        }
+        Command::Env {
+            command: EnvCommand::ClosePreview { env },
+        } => crate::remote_env_config::close_preview(&client, &env).await,
         Command::Env { command } if crate::remote_env_config::change(&command).is_some() => {
             crate::remote_env_config::run(&client, &command).await
         }

@@ -13,12 +13,12 @@ use tenkai::tenant_store::TenantOperationalStore;
 use super::auth::{import_development_fixture, reset_development_fixture};
 use super::config::ServerConfig;
 use super::environment_config::{
-    configure_approval_policy, configure_bindings, configure_cluster_namespace,
+    close_preview, configure_approval_policy, configure_bindings, configure_cluster_namespace,
     configure_cluster_namespace_bindings, configure_cluster_namespace_delete,
     configure_constraints, configure_criticality, configure_facts, configure_labels,
     configure_maintenance_window, configure_owner, configure_runner_attestation,
     configure_sealed_secrets, configure_webhooks, environment_label_history,
-    list_environment_labels, list_sealed_secrets, register_environment,
+    list_environment_labels, list_sealed_secrets, provision_preview, register_environment,
 };
 use super::exports::{create_export, download_export, inspect_export, list_exports};
 use super::grant_rules::{create_grant_rule, list_grant_rules, remove_grant_rule};
@@ -229,6 +229,11 @@ pub fn router(
         .route(
             "/v1/environments",
             get(list_environments).post(register_environment),
+        )
+        .route("/v1/environments/preview", post(provision_preview))
+        .route(
+            "/v1/environments/{environment}/close-preview",
+            post(close_preview),
         )
         .route(
             "/v1/releases",
