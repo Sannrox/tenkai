@@ -80,8 +80,14 @@ pub struct ChannelPromotionEvidence {
     /// Maximum share of soak time with any replica failing (0.0–1.0).
     #[serde(default)]
     pub failing_max_share: f64,
-    /// When true, exceeding `failing_max_share` recalls the soaking source
-    /// release instead of only resetting the soak.
+    /// Optional maximum currently failing instances during soak. Absent
+    /// means the rule uses only `failing_max_share`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub failing_max_instances: Option<u32>,
+    /// When true, exceeding `failing_max_share` or reaching
+    /// `failing_max_instances` recalls the soaking source release instead of
+    /// only resetting the soak.
     #[serde(default)]
     pub recall_on_failing: bool,
 }
@@ -98,6 +104,7 @@ impl Default for ChannelPromotionEvidence {
             evaluation: false,
             healthy_min_share: 1.0,
             failing_max_share: 0.0,
+            failing_max_instances: None,
             recall_on_failing: false,
         }
     }
@@ -140,6 +147,9 @@ impl ChannelPromotionPolicy {
         }
         if !(0.0..=1.0).contains(&failing) {
             bail!("failing_max_share must be between 0 and 1");
+        }
+        if self.evidence.failing_max_instances == Some(0) {
+            bail!("failing_max_instances must be greater than zero");
         }
         Ok(())
     }
@@ -526,7 +536,10 @@ pub struct ChannelRecallRule {
     pub soak_duration_ms: i64,
     /// Maximum share of soak time with any replica failing (0.0–1.0).
     pub failing_max_share: f64,
-    /// When true, exceeding `failing_max_share` recalls the soaking release.
+    /// Optional maximum currently failing instances during soak.
+    pub failing_max_instances: Option<u32>,
+    /// When true, exceeding `failing_max_share` or reaching
+    /// `failing_max_instances` recalls the soaking release.
     pub recall_on_failing: bool,
 }
 
@@ -547,6 +560,7 @@ pub async fn set_recall_rule(
         .policy;
     policy.soak_duration_ms = rule.soak_duration_ms;
     policy.evidence.failing_max_share = rule.failing_max_share;
+    policy.evidence.failing_max_instances = rule.failing_max_instances;
     policy.evidence.recall_on_failing = rule.recall_on_failing;
     // The version check under the lock proves `policy` was read from the
     // version the caller expected: every replace allocates a new version.
@@ -1348,9 +1362,20 @@ async fn evaluate_ready_locked(
         } else {
             soak.failing_ms as f64 / elapsed as f64
         };
-        if failing_share > active.policy.evidence.failing_max_share {
+        let failing_count = failing_labels.len() as u32;
+        let count_trip = active
+            .policy
+            .evidence
+            .failing_max_instances
+            .filter(|threshold| failing_count >= *threshold);
+        let share_trip = failing_share > active.policy.evidence.failing_max_share;
+        if count_trip.is_some() || share_trip {
             if active.policy.evidence.recall_on_failing {
-                let reason = format!("failing share {failing_share:.3}");
+                let reason = if count_trip.is_some() {
+                    format!("failing instances {failing_count}")
+                } else {
+                    format!("failing share {failing_share:.3}")
+                };
                 if crate::catalog::release_is_recalled(ctx, source_release).await? {
                     return Ok(LockedTick::Outcome(TickOutcome::Recalled { spec, reason }));
                 }
@@ -1361,23 +1386,29 @@ async fn evaluate_ready_locked(
                     .ok_or_else(|| {
                         anyhow::anyhow!("channel promotion recall requires a promotion lock")
                     })?;
+                let mut extra = vec![
+                    ("policy_id".into(), active.id()),
+                    ("policy_version".into(), active.version.to_string()),
+                    ("reason".into(), reason.clone()),
+                    ("failing_instances".into(), failing_labels.join(",")),
+                    ("healthy_share".into(), healthy_share.to_string()),
+                    ("failing_share".into(), failing_share.to_string()),
+                ];
+                if let Some(threshold) = count_trip {
+                    extra.push(("failing_instance_count".into(), failing_count.to_string()));
+                    extra.push(("failing_max_instances".into(), threshold.to_string()));
+                } else {
+                    extra.push((
+                        "failing_max_share".into(),
+                        active.policy.evidence.failing_max_share.to_string(),
+                    ));
+                }
                 crate::catalog::persist_recall_claim_with_fence(
                     ctx,
                     &actor,
                     source_release,
                     Some(fence),
-                    &[
-                        ("policy_id".into(), active.id()),
-                        ("policy_version".into(), active.version.to_string()),
-                        ("reason".into(), reason.clone()),
-                        ("failing_instances".into(), failing_labels.join(",")),
-                        ("healthy_share".into(), healthy_share.to_string()),
-                        ("failing_share".into(), failing_share.to_string()),
-                        (
-                            "failing_max_share".into(),
-                            active.policy.evidence.failing_max_share.to_string(),
-                        ),
-                    ],
+                    &extra,
                 )
                 .await?;
                 soak = reset_soak(
@@ -1391,7 +1422,11 @@ async fn evaluate_ready_locked(
                 emit_recall(ctx, &spec)?;
                 return Ok(LockedTick::Outcome(TickOutcome::Recalled { spec, reason }));
             }
-            let reason = format!("reset: failing share {failing_share:.3}");
+            let reason = if count_trip.is_some() {
+                format!("reset: failing instances {failing_count}")
+            } else {
+                format!("reset: failing share {failing_share:.3}")
+            };
             soak = reset_soak(soak, source_release.to_string(), now, reason.clone());
             persist_soak(ctx, product, target, soak, locks).await?;
             return Ok(LockedTick::Outcome(TickOutcome::Reset { reason, missing }));
@@ -2412,6 +2447,100 @@ mod tests {
             "{events_after:?}"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn failing_instance_count_recalls_before_share() {
+        let _clock = Clock;
+        Clock::set(10_000);
+        let (root, mut ctx, actor) = fixture("recall-count").await;
+        publish(&mut ctx, &root, "promo", "1.0.0").await;
+        crate::catalog::promote(&mut ctx, &actor, "promo@1.0.0", "candidate")
+            .await
+            .unwrap();
+        crate::environment::env_add(&mut ctx, "lab", "lab")
+            .await
+            .unwrap();
+        crate::plan::subscribe(&mut ctx, "lab", "promo", "candidate")
+            .await
+            .unwrap();
+        observe(&mut ctx, "lab", "promo", "1.0.0", true).await;
+        let mut policy = policy("promo", 60_000);
+        policy.evidence.failing_max_share = 0.9;
+        policy.evidence.failing_max_instances = Some(1);
+        policy.evidence.recall_on_failing = true;
+        configure(&mut ctx, &actor, policy).await.unwrap();
+        Clock::set(10_000);
+        reconcile_tick(&mut ctx, true).await.unwrap();
+        Clock::set(40_000);
+        reconcile_tick(&mut ctx, true).await.unwrap();
+        observe(&mut ctx, "lab", "promo", "1.0.0", false).await;
+        Clock::set(41_000);
+        let recalled = reconcile_tick(&mut ctx, true).await.unwrap();
+        assert_eq!(recalled[0].state, "recalled", "{recalled:?}");
+        let view = crate::catalog::inspect_recall(&mut ctx, "promo@1.0.0")
+            .await
+            .unwrap();
+        assert_eq!(view.failing_max_instances, Some(1), "{view:?}");
+        assert_eq!(view.failing_instance_count, Some(1), "{view:?}");
+        assert_eq!(view.failing_max_share, None, "{view:?}");
+        assert!(
+            view.reason
+                .as_ref()
+                .is_some_and(|reason| reason.contains("failing instances")),
+            "{view:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn share_still_recalls_when_count_threshold_is_higher() {
+        let _clock = Clock;
+        Clock::set(10_000);
+        let (root, mut ctx, actor) = fixture("recall-share-over-count").await;
+        publish(&mut ctx, &root, "promo", "1.0.0").await;
+        crate::catalog::promote(&mut ctx, &actor, "promo@1.0.0", "candidate")
+            .await
+            .unwrap();
+        crate::environment::env_add(&mut ctx, "lab", "lab")
+            .await
+            .unwrap();
+        crate::plan::subscribe(&mut ctx, "lab", "promo", "candidate")
+            .await
+            .unwrap();
+        observe(&mut ctx, "lab", "promo", "1.0.0", true).await;
+        let mut policy = policy("promo", 60_000);
+        policy.evidence.failing_max_share = 0.25;
+        policy.evidence.failing_max_instances = Some(10);
+        policy.evidence.recall_on_failing = true;
+        configure(&mut ctx, &actor, policy).await.unwrap();
+        Clock::set(10_000);
+        reconcile_tick(&mut ctx, true).await.unwrap();
+        observe(&mut ctx, "lab", "promo", "1.0.0", false).await;
+        Clock::set(40_000);
+        let recalled = reconcile_tick(&mut ctx, true).await.unwrap();
+        assert_eq!(recalled[0].state, "recalled", "{recalled:?}");
+        let view = crate::catalog::inspect_recall(&mut ctx, "promo@1.0.0")
+            .await
+            .unwrap();
+        assert_eq!(view.failing_max_share, Some(0.25), "{view:?}");
+        assert_eq!(view.failing_max_instances, None, "{view:?}");
+        assert_eq!(view.failing_instance_count, None, "{view:?}");
+        assert!(
+            view.reason
+                .as_ref()
+                .is_some_and(|reason| reason.contains("failing share")),
+            "{view:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zero_failing_max_instances_is_refused() {
+        let mut policy = policy("promo", 1_000);
+        policy.evidence.failing_max_instances = Some(0);
+        let error = policy.validate().unwrap_err().to_string();
+        assert!(error.contains("failing_max_instances"), "{error}");
     }
 
     #[tokio::test]

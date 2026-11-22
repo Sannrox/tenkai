@@ -6,7 +6,30 @@ use tenkai::auth_context::{
     PrincipalKind,
 };
 use tenkai::channel_promotion::{ChannelPromotionEvidence, ChannelPromotionPolicy};
+use tenkai::management_lifecycle::{
+    ChannelRecallRuleRequest, MANAGEMENT_LIFECYCLE_API_VERSION, ManagementLifecycleOperation,
+};
 use tenkai::ontology::{env_id, release_id};
+
+fn recall_rule(
+    expected_generation: u64,
+    soak_duration_ms: i64,
+    failing_max_share: f64,
+    recall_on_failing: bool,
+    failing_max_instances: Option<u32>,
+) -> ChannelRecallRuleRequest {
+    ChannelRecallRuleRequest {
+        version: MANAGEMENT_LIFECYCLE_API_VERSION,
+        operation: ManagementLifecycleOperation::ChannelConfigure
+            .as_str()
+            .into(),
+        expected_generation,
+        soak_duration_ms,
+        failing_max_share,
+        failing_max_instances,
+        recall_on_failing,
+    }
+}
 
 fn management_actor() -> AuthenticatedRequestContext {
     AuthenticatedRequestContextBuilder::new(
@@ -131,19 +154,19 @@ async fn remote_recall_rule_triggers_a_recall_with_typed_measures() {
     assert_eq!(wrong_operation.status().as_u16(), 400);
     let scoped = RemoteClient::new(&base, "stage-secret").unwrap();
     let scoped_err = scoped
-        .set_channel_recall_rule("api", "stable", 1, 60_000, 0.25, true)
+        .set_channel_recall_rule("api", "stable", &recall_rule(1, 60_000, 0.25, true, None))
         .await
         .unwrap_err()
         .to_string();
     assert!(scoped_err.contains("403"), "{scoped_err}");
     let stale = management
-        .set_channel_recall_rule("api", "stable", 0, 60_000, 0.25, true)
+        .set_channel_recall_rule("api", "stable", &recall_rule(0, 60_000, 0.25, true, None))
         .await
         .unwrap_err()
         .to_string();
     assert!(stale.contains("409"), "{stale}");
     management
-        .set_channel_recall_rule("api", "stable", 1, 60_000, 0.25, true)
+        .set_channel_recall_rule("api", "stable", &recall_rule(1, 60_000, 0.25, true, None))
         .await
         .unwrap();
     let events = store.audit_events().unwrap();
@@ -203,6 +226,8 @@ async fn remote_recall_rule_triggers_a_recall_with_typed_measures() {
     assert_eq!(view.healthy_share, Some(0.0), "{view:?}");
     assert_eq!(view.failing_share, Some(1.0), "{view:?}");
     assert_eq!(view.failing_max_share, Some(0.25), "{view:?}");
+    assert_eq!(view.failing_max_instances, None, "{view:?}");
+    assert_eq!(view.failing_instance_count, None, "{view:?}");
     assert!(
         view.removal_progress
             .iter()
@@ -229,6 +254,101 @@ async fn remote_recall_rule_triggers_a_recall_with_typed_measures() {
     assert_eq!(
         removal(&view),
         [("prod".to_string(), 1, 1), ("stage".to_string(), 0, 1)]
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn remote_recall_rule_count_threshold_fires_before_share() {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-recall-count-http-{}-{}",
+        std::process::id(),
+        tenkai::now_millis()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (app, _config, _store) = lifecycle_router(&root).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let management = RemoteClient::new(&base, "management-secret").unwrap();
+    let first = signed_catalog_fixture(&root, "1.0.0");
+    management.publish_release(&first).await.unwrap();
+    management
+        .promote_release("api@1.0.0", "candidate")
+        .await
+        .unwrap();
+    let generation = current_generation(&management, "stage").await;
+    management
+        .subscribe_environment("stage", "api=candidate", generation, None)
+        .await
+        .unwrap();
+    let database = root.join("tenkai.db");
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    observe(&mut ctx, "stage", "api", "1.0.0", true).await;
+    let actor = management_actor();
+    tenkai::channel_promotion::configure(
+        &mut ctx,
+        &actor,
+        ChannelPromotionPolicy {
+            product: "api".into(),
+            target_channel: "stable".into(),
+            source_channel: "candidate".into(),
+            soak_duration_ms: 60_000,
+            stale_after_ms: 60_000,
+            evidence: ChannelPromotionEvidence::default(),
+        },
+    )
+    .await
+    .unwrap();
+    drop(ctx);
+
+    let zero = management
+        .set_channel_recall_rule("api", "stable", &recall_rule(1, 60_000, 0.9, true, Some(0)))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(zero.contains("failing_max_instances"), "{zero}");
+    let stale = management
+        .set_channel_recall_rule("api", "stable", &recall_rule(0, 60_000, 0.9, true, Some(1)))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(stale.contains("409"), "{stale}");
+    management
+        .set_channel_recall_rule("api", "stable", &recall_rule(1, 60_000, 0.9, true, Some(1)))
+        .await
+        .unwrap();
+    let policy = management
+        .channel_promotion_policy("api", "stable")
+        .await
+        .unwrap();
+    assert_eq!(policy.policy_version, 2, "{policy:?}");
+    assert_eq!(policy.evidence.failing_max_instances, Some(1), "{policy:?}");
+    assert_eq!(policy.evidence.failing_max_share, 0.9, "{policy:?}");
+    assert!(policy.evidence.recall_on_failing, "{policy:?}");
+
+    management.reconcile().await.unwrap();
+    backdate_soak(&database, 30_000).await;
+    management.reconcile().await.unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    observe(&mut ctx, "stage", "api", "1.0.0", false).await;
+    drop(ctx);
+    backdate_soak(&database, 1_000).await;
+    management.reconcile().await.unwrap();
+
+    let view = management.inspect_recall("api@1.0.0").await.unwrap();
+    assert_eq!(view.release, "api@1.0.0");
+    assert_eq!(view.failing_max_instances, Some(1), "{view:?}");
+    assert_eq!(view.failing_instance_count, Some(1), "{view:?}");
+    assert_eq!(view.failing_max_share, None, "{view:?}");
+    assert!(
+        view.reason
+            .as_ref()
+            .is_some_and(|reason| reason.contains("failing instances")),
+        "{view:?}"
     );
     let _ = std::fs::remove_dir_all(root);
 }
