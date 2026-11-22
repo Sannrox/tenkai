@@ -106,6 +106,9 @@ pub(crate) async fn run(
                     before,
                     close,
                     reason,
+                    environments,
+                    widen,
+                    fleet,
                 },
         } => {
             let result = if let Some(from) = close {
@@ -118,11 +121,27 @@ pub(crate) async fn run(
                 client
                     .record_recall_range(&spec, &from, before.as_deref(), &reason)
                     .await?
+            } else if widen {
+                if before.is_some() {
+                    anyhow::bail!("--before requires --from or --close");
+                }
+                let reason =
+                    reason.ok_or_else(|| anyhow::anyhow!("--reason is required with --widen"))?;
+                client
+                    .widen_recall(&spec, environments, fleet, &reason)
+                    .await?
             } else {
                 if before.is_some() {
                     anyhow::bail!("--before requires --from or --close");
                 }
-                client.recall_release(&spec).await?
+                if fleet {
+                    anyhow::bail!("--fleet requires --widen");
+                }
+                if environments.is_empty() {
+                    client.recall_release(&spec).await?
+                } else {
+                    client.recall_release_scoped(&spec, environments).await?
+                }
             };
             if machine {
                 return print_machine_result(

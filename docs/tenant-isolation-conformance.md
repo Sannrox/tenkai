@@ -123,6 +123,7 @@ and are not registered.
 
 Remote management lifecycle routes (`POST /v1/releases`,
 `POST /v1/channels/{channel}/promote`, `POST /v1/releases/{release}/recall`,
+`POST /v1/releases/{release}/recall/widen`,
 `POST /v1/products/{product}/recall-range`,
 `POST /v1/products/{product}/recall-range/close`,
 `POST /v1/environments/{environment}/subscriptions`,

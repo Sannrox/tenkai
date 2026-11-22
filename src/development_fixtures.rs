@@ -163,6 +163,7 @@ impl FixtureEnvironmentProjection {
                     owner: None,
                     unmanaged: None,
                     cluster_namespace: None,
+                    recall: None,
                 }
             })
             .collect()
@@ -192,6 +193,7 @@ impl FixtureEnvironmentProjection {
                 applied_overlay: None,
                 delivery_hold: None,
                 spec_drift: None,
+                recall: None,
             })
             .collect();
         crate::plan::EnvironmentInspectReport {

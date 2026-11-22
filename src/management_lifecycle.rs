@@ -672,6 +672,25 @@ impl PromoteHttpRequest {
 pub struct RecallRequest {
     pub version: u32,
     pub operation: String,
+    /// Environments whose already-deployed instances roll off. Omitted covers
+    /// the fleet. Older servers refuse this field (`deny_unknown_fields`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<String>,
+}
+
+/// Body of `POST /v1/releases/{release}/recall/widen`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RecallWidenRequest {
+    pub version: u32,
+    pub operation: String,
+    pub reason: String,
+    /// Environments to append. Empty when `fleet_wide` is true.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<String>,
+    /// Switch the recall to fleet-wide. Mutually exclusive with `environments`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fleet_wide: bool,
 }
 
 /// Body of `POST /v1/products/{product}/recall-range`.
@@ -1287,6 +1306,31 @@ pub fn admit_recall(
         granted_environment,
     )?;
     require_route_operation(admitted.operation, ManagementLifecycleOperation::Recall)?;
+    Ok(admitted)
+}
+
+pub fn admit_recall_widen(
+    request: &RecallWidenRequest,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    let admitted = admit_recall(
+        &RecallRequest {
+            version: request.version,
+            operation: request.operation.clone(),
+            environments: Vec::new(),
+        },
+        kind,
+        granted_environment,
+    )?;
+    anyhow::ensure!(
+        !request.reason.trim().is_empty(),
+        "widening a recall requires a reason"
+    );
+    anyhow::ensure!(
+        request.fleet_wide == request.environments.is_empty(),
+        "widen names environments or switches to fleet-wide, not both"
+    );
     Ok(admitted)
 }
 

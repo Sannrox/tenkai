@@ -138,6 +138,7 @@ async fn remote_catalog_lifecycle_publish_promote_subscribe_and_recall() {
                     serde_json::to_vec(&tenkai::management_lifecycle::RecallRequest {
                         version: 1,
                         operation: "recall".into(),
+                        environments: Vec::new(),
                     })
                     .unwrap(),
                 ))

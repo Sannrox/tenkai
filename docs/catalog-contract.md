@@ -40,12 +40,20 @@ Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
   bound of an open-ended range; a range never widens. `release inspect` names
   the range that currently recalls a release. `GET /v1/releases/{release}/recall`
   and `GET /v1/products/{product}/recall-ranges` project those recorded facts,
-  including remaining `deployed_release` instances, over `tenkai.http.v1`. Recall does not delete
+  including remaining `deployed_release` instances, over `tenkai.http.v1`.
+  A recall may name the environments its removal covers (`--env`, or
+  `environments` on `POST /v1/releases/{release}/recall`); omitted, removal
+  covers the fleet. An unlisted holder keeps running the release and is
+  reported as `recalled, removal not in scope` on status, env inspect, and
+  the recall read. `POST /v1/releases/{release}/recall/widen` appends
+  environments or switches to fleet-wide; the scope never narrows. Lookup
+  and planning onto the recalled release stay fail-closed everywhere.
+  Recall does not delete
   immutable descriptors or bytes. Planning will not target a recalled channel
   head unless the operator admits an upgrade whose blocking advisory set is a
   proper subset of the current pin (`--allow-recalled-upgrade
   --recalled-upgrade-reason`, recorded as `recalled_upgrade` on the signed
-  plan). A deployed recalled release otherwise rolls off to a non-recalled
+  plan). A deployed recalled release in the removal scope otherwise rolls off to a non-recalled
   head without restoring the recalled pin. Rollback onto recalled content is
   denied unless the Plan records an audited `--allow-recalled-recovery
   --recovery-reason` inside the signed executable digest. Ordinary lookup and

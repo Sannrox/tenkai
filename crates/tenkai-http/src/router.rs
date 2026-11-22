@@ -53,7 +53,7 @@ use super::lifecycle::{
     set_channel_recall_rule, set_environment_failure_threshold, set_environment_hold,
     set_exposure_waiver, set_product_criticality, set_product_owner, set_product_webhook,
     set_release_label, software_compatibility_report, start_environment, stop_environment,
-    subscribe_environment, unsubscribe_environment,
+    subscribe_environment, unsubscribe_environment, widen_recall,
 };
 use super::package_migration::{
     apply_package_migration, package_migration_status, preview_package_migration,
@@ -417,6 +417,7 @@ pub fn router(
             "/v1/releases/{release}/recall",
             get(inspect_recall).post(recall_release),
         )
+        .route("/v1/releases/{release}/recall/widen", post(widen_recall))
         .route(
             "/v1/releases/{product}/{version}/labels/history",
             get(release_label_history),

@@ -81,6 +81,9 @@ pub(crate) async fn run(
                 before,
                 close,
                 reason,
+                environments,
+                widen,
+                fleet,
             } => {
                 let actor = embedded_management_actor()?;
                 let message = if let Some(from) = close {
@@ -99,11 +102,21 @@ pub(crate) async fn run(
                         &reason,
                     )
                     .await?
+                } else if widen {
+                    if before.is_some() {
+                        anyhow::bail!("--before requires --from or --close");
+                    }
+                    let reason = reason
+                        .ok_or_else(|| anyhow::anyhow!("--reason is required with --widen"))?;
+                    catalog::widen_recall(ctx, &actor, &spec, &environments, fleet, &reason).await?
                 } else {
                     if before.is_some() {
                         anyhow::bail!("--before requires --from or --close");
                     }
-                    catalog::recall(ctx, &actor, &spec).await?
+                    if fleet {
+                        anyhow::bail!("--fleet requires --widen");
+                    }
+                    catalog::recall_with_scope(ctx, &actor, &spec, &environments).await?
                 };
                 if output == OutputFormat::JsonV1 {
                     print_machine_result(

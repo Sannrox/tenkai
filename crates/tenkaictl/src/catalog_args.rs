@@ -56,6 +56,15 @@ pub(crate) enum ReleaseCommand {
         close: Option<String>,
         #[arg(long)]
         reason: Option<String>,
+        /// Limit removal to these environments. Repeatable. Omitted covers the fleet.
+        #[arg(long = "env", conflicts_with_all = ["from", "close"])]
+        environments: Vec<String>,
+        /// Append environments, or with `--fleet` switch to fleet-wide. Requires `--reason`.
+        #[arg(long, requires = "reason", conflicts_with_all = ["from", "close"])]
+        widen: bool,
+        /// With `--widen`, switch the recall to fleet-wide.
+        #[arg(long, requires = "widen")]
+        fleet: bool,
     },
     /// Manage operator grouping labels on a published release.
     Labels {
@@ -517,6 +526,7 @@ mod tests {
                     before: Some(ref before),
                     close: None,
                     reason: Some(ref reason),
+                    ..
                 }
             } if spec == "api"
                 && from == "1.0.0"
@@ -565,6 +575,52 @@ mod tests {
             ])
             .is_err()
         );
+
+        let scoped = Cli::try_parse_from([
+            "tenkaictl",
+            "release",
+            "recall",
+            "api@1.0.0",
+            "--env",
+            "stage",
+        ])
+        .unwrap();
+        assert!(matches!(
+            scoped.command,
+            Command::Release {
+                command: ReleaseCommand::Recall {
+                    ref spec,
+                    ref environments,
+                    widen: false,
+                    fleet: false,
+                    ..
+                }
+            } if spec == "api@1.0.0" && environments == &["stage".to_string()]
+        ));
+        let widen = Cli::try_parse_from([
+            "tenkaictl",
+            "release",
+            "recall",
+            "api@1.0.0",
+            "--widen",
+            "--env",
+            "prod",
+            "--reason",
+            "roll off prod",
+        ])
+        .unwrap();
+        assert!(matches!(
+            widen.command,
+            Command::Release {
+                command: ReleaseCommand::Recall {
+                    widen: true,
+                    fleet: false,
+                    reason: Some(ref reason),
+                    ref environments,
+                    ..
+                }
+            } if reason == "roll off prod" && environments == &["prod".to_string()]
+        ));
     }
 
     #[test]

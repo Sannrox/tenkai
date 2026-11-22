@@ -35,6 +35,10 @@ pub(crate) use trust::{
     load_deployable_snapshot, load_recoverable_snapshot, release_is_recalled, signature_envelope,
 };
 
+/// Warning on status, env inspect, and the recall read when a holder is
+/// recalled but its environment is not in the removal scope (ADR 0056).
+pub const REMOVAL_NOT_IN_SCOPE: &str = "recalled, removal not in scope";
+
 /// Version of the transport-independent Catalog application contract.
 pub const CATALOG_CONTRACT_VERSION: u32 = 1;
 
@@ -106,9 +110,23 @@ pub struct RecallView {
     pub covers_future: bool,
     #[serde(default)]
     pub removal_progress: Vec<RecallRemovalProgress>,
-    /// Per-environment removal counts, sorted by environment.
+    /// Per-environment removal counts, sorted by environment. Counts only
+    /// environments in the removal scope; omitted scope is fleet-wide.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removal_environments: Vec<RecallEnvironmentRemoval>,
+    /// Environments this recall's removal covers. Omitted when fleet-wide,
+    /// including recalls recorded before scoped removal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub removal_scope: Option<Vec<String>>,
+    /// Later audited writes that appended environments or switched the recall
+    /// to fleet-wide. Oldest first. Empty when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub widenings: Vec<RecallWidening>,
+    /// Environments that still run the release and are not in the removal
+    /// scope. Each row's `status` is [`REMOVAL_NOT_IN_SCOPE`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_scope: Vec<RecallOutOfScopeHolder>,
     /// Share of soak time with every replica healthy when a promotion policy
     /// recalled the release. Omitted for other recalls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,6 +140,28 @@ pub struct RecallView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub failing_max_share: Option<f64>,
+}
+
+/// One audited widening of a recall's removal scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecallWidening {
+    pub widened_at: i64,
+    pub widened_by: String,
+    pub principal_kind: String,
+    pub reason: String,
+    /// Environments appended by this write. Empty when the write switched
+    /// the recall to fleet-wide.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<String>,
+    pub fleet_wide: bool,
+}
+
+/// An environment still running a recalled release whose removal is not in
+/// scope. A warning, not a hold or gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecallOutOfScopeHolder {
+    pub environment: String,
+    pub status: String,
 }
 
 impl From<crate::page::Page<ReleaseListEntry>> for ReleasePage {
@@ -1427,14 +1467,33 @@ pub(crate) async fn persist_recall_claim_with_fence(
 }
 
 /// Mark a published release recalled. Lookup and planning fail closed afterwards.
+/// Removal covers the fleet; use [`recall_with_scope`] to name environments.
 pub async fn recall(
     ctx: &mut Ctx,
     actor: &AuthenticatedRequestContext,
     spec: &str,
 ) -> Result<String> {
+    recall_with_scope(ctx, actor, spec, &[]).await
+}
+
+/// Recall `spec` and limit removal to `environments`. An empty list covers
+/// the fleet, as [`recall`] does. Lookup and planning onto the release stay
+/// fail-closed everywhere.
+pub async fn recall_with_scope(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    spec: &str,
+    environments: &[String],
+) -> Result<String> {
     actor
         .require_delivery_capability(DeliveryCapability::Management)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let extra = if environments.is_empty() {
+        Vec::new()
+    } else {
+        let scope = require_named_environments(ctx, environments).await?;
+        vec![("removal_scope".into(), scope.join(","))]
+    };
     let release = release_for_spec(ctx, spec).await?;
     if release
         .properties
@@ -1443,9 +1502,163 @@ pub async fn recall(
     {
         return Ok(format!("release {spec} is already recalled"));
     }
-    persist_recall_claim(ctx, actor, &release.id).await?;
+    persist_recall_claim_with_fence(ctx, actor, &release.id, None, &extra).await?;
     announce_recall(ctx, &release, spec).await;
     Ok(format!("recalled {spec}"))
+}
+
+/// Append environments to a recall's removal scope, or switch it to fleet-wide.
+/// The scope never narrows. A retry of the same write is a no-op.
+pub async fn widen_recall(
+    ctx: &mut Ctx,
+    actor: &AuthenticatedRequestContext,
+    spec: &str,
+    environments: &[String],
+    fleet_wide: bool,
+    reason: &str,
+) -> Result<String> {
+    actor
+        .require_delivery_capability(DeliveryCapability::Management)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let reason = reason.trim();
+    anyhow::ensure!(!reason.is_empty(), "widening a recall requires a reason");
+    anyhow::ensure!(
+        fleet_wide == environments.is_empty(),
+        "widen names environments or switches to fleet-wide, not both"
+    );
+    let added = if fleet_wide {
+        Vec::new()
+    } else {
+        require_named_environments(ctx, environments).await?
+    };
+    let release = release_for_spec(ctx, spec).await?;
+    let claim_id = release_recall_id(&release.id);
+    let Some(mut claim) = ctx
+        .get(&claim_id)
+        .await?
+        .filter(|object| object.kind == KIND_RELEASE_RECALL)
+    else {
+        bail!("release {spec} has no recall claim to widen");
+    };
+    let current = parse_removal_scope(&claim.properties);
+    if current.is_none() {
+        return Ok(format!("recall {spec} already covers the fleet"));
+    }
+    if !fleet_wide {
+        let scope = current.as_ref().expect("scoped recall");
+        if added.iter().all(|name| scope.iter().any(|env| env == name)) {
+            return Ok(format!(
+                "recall {spec} already covers the named environments"
+            ));
+        }
+    }
+    let mut widenings = parse_widenings(&claim.properties);
+    widenings.push(RecallWidening {
+        widened_at: crate::now_millis(),
+        widened_by: actor.principal_id().to_string(),
+        principal_kind: actor.principal_kind_name().to_string(),
+        reason: reason.to_string(),
+        environments: added.clone(),
+        fleet_wide,
+    });
+    if fleet_wide {
+        claim.properties.remove("removal_scope");
+    } else {
+        let mut scope = current.expect("scoped recall");
+        for name in &added {
+            if !scope.iter().any(|env| env == name) {
+                scope.push(name.clone());
+            }
+        }
+        scope.sort();
+        claim
+            .properties
+            .insert("removal_scope".into(), scope.join(","));
+    }
+    claim
+        .properties
+        .insert("widenings".into(), encode_widenings(&widenings)?);
+    ctx.put(claim).await?;
+    if fleet_wide {
+        Ok(format!("widened recall of {spec} to the fleet"))
+    } else {
+        Ok(format!("widened recall of {spec} to {}", added.join(", ")))
+    }
+}
+
+/// Whether this environment is in the recall's removal scope. No claim, or a
+/// claim without `removal_scope`, covers the fleet.
+pub(crate) async fn recall_removal_covers(
+    ctx: &mut Ctx,
+    release_id: &str,
+    environment: &str,
+) -> Result<bool> {
+    let Some(claim) = ctx
+        .get(&release_recall_id(release_id))
+        .await?
+        .filter(|object| object.kind == KIND_RELEASE_RECALL)
+    else {
+        return Ok(true);
+    };
+    Ok(scope_covers(
+        parse_removal_scope(&claim.properties).as_deref(),
+        environment,
+    ))
+}
+
+fn parse_removal_scope(properties: &HashMap<String, String>) -> Option<Vec<String>> {
+    let raw = properties.get("removal_scope")?;
+    let names: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect();
+    if names.is_empty() { None } else { Some(names) }
+}
+
+fn scope_covers(scope: Option<&[String]>, environment: &str) -> bool {
+    match scope {
+        None => true,
+        Some(names) => names.iter().any(|name| name == environment),
+    }
+}
+
+async fn require_named_environments(ctx: &mut Ctx, names: &[String]) -> Result<Vec<String>> {
+    let mut unique = names
+        .iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    unique.sort();
+    unique.dedup();
+    anyhow::ensure!(
+        !unique.is_empty(),
+        "recall removal scope requires at least one environment"
+    );
+    for name in &unique {
+        validate_identifier("environment", name)?;
+        let Some(object) = ctx.get(&env_id(name)).await? else {
+            bail!("environment {name} is not registered");
+        };
+        anyhow::ensure!(
+            object.kind == KIND_ENVIRONMENT,
+            "{name} is {}, not {KIND_ENVIRONMENT}",
+            object.kind
+        );
+    }
+    Ok(unique)
+}
+
+fn parse_widenings(properties: &HashMap<String, String>) -> Vec<RecallWidening> {
+    properties
+        .get("widenings")
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default()
+}
+
+fn encode_widenings(events: &[RecallWidening]) -> Result<String> {
+    serde_json::to_string(events).context("encoding recall widenings")
 }
 
 fn optional_claim_property(properties: &HashMap<String, String>, key: &str) -> Option<String> {
@@ -1489,6 +1702,24 @@ pub async fn inspect_recall(ctx: &mut Ctx, spec: &str) -> Result<RecallView> {
                 .collect()
         })
         .unwrap_or_default();
+    let removal_scope = properties.and_then(parse_removal_scope);
+    let scope = removal_scope.as_deref();
+    let widenings = properties.map(parse_widenings).unwrap_or_default();
+    let out_of_scope = current
+        .iter()
+        .filter(|(environment, _)| !scope_covers(scope, environment))
+        .map(|(environment, _)| environment.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|environment| RecallOutOfScopeHolder {
+            environment,
+            status: REMOVAL_NOT_IN_SCOPE.to_string(),
+        })
+        .collect();
+    let in_scope: Vec<(String, String)> = current
+        .into_iter()
+        .filter(|(environment, _)| scope_covers(scope, environment))
+        .collect();
     Ok(RecallView {
         release: spec.to_string(),
         recalled_at: properties
@@ -1508,9 +1739,10 @@ pub async fn inspect_recall(ctx: &mut Ctx, spec: &str) -> Result<RecallView> {
         covers_future: range.as_ref().is_some_and(|range| range.before.is_none()),
         removal_environments: recall_environment_removal(
             properties.and_then(|properties| properties.get("holders")),
-            &current,
+            &in_scope,
+            scope,
         ),
-        removal_progress: current
+        removal_progress: in_scope
             .into_iter()
             .map(|(environment, instance)| RecallRemovalProgress {
                 environment,
@@ -1519,6 +1751,9 @@ pub async fn inspect_recall(ctx: &mut Ctx, spec: &str) -> Result<RecallView> {
                 remaining: true,
             })
             .collect(),
+        removal_scope,
+        widenings,
+        out_of_scope,
         healthy_share: claim_share("healthy_share"),
         failing_share: claim_share("failing_share"),
         failing_max_share: claim_share("failing_max_share"),
@@ -1530,10 +1765,13 @@ pub async fn inspect_recall(ctx: &mut Ctx, spec: &str) -> Result<RecallView> {
 fn recall_environment_removal(
     holders: Option<&String>,
     current: &[(String, String)],
+    scope: Option<&[String]>,
 ) -> Vec<RecallEnvironmentRemoval> {
     let mut instances = std::collections::BTreeMap::<&str, HashMap<&str, bool>>::new();
     for holder in holders.into_iter().flat_map(|value| value.split(',')) {
-        if let Some((environment, instance)) = holder.split_once('/') {
+        if let Some((environment, instance)) = holder.split_once('/')
+            && scope_covers(scope, environment)
+        {
             instances
                 .entry(environment)
                 .or_default()
@@ -1541,10 +1779,12 @@ fn recall_environment_removal(
         }
     }
     for (environment, instance) in current {
-        instances
-            .entry(environment)
-            .or_default()
-            .insert(instance, true);
+        if scope_covers(scope, environment) {
+            instances
+                .entry(environment)
+                .or_default()
+                .insert(instance, true);
+        }
     }
     instances
         .into_iter()
@@ -2015,9 +2255,230 @@ install = "true"
                 total: 1,
             }]
         );
+        assert_eq!(view.removal_scope, None, "{view:?}");
+        assert!(view.widenings.is_empty(), "{view:?}");
+        assert!(view.out_of_scope.is_empty(), "{view:?}");
         let ranges = list_recall_ranges(&mut ctx, "api").await.unwrap();
         assert_eq!(ranges.items.len(), 1);
         assert!(ranges.items[0].covers_future);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn scoped_recall_leaves_unlisted_holders_and_widen_appends() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-recall-scope-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("tenkai.toml"),
+            r#"
+[product]
+name = "api"
+version = "1.0.0"
+
+[deploy]
+install = "true"
+"#,
+        )
+        .unwrap();
+        let database = root.join("tenkai.db");
+        let mut ctx = Ctx::embedded(&database).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        publish(
+            &mut ctx,
+            &root.join("tenkai.toml"),
+            &PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for env in ["stage", "prod"] {
+            crate::environment::env_add(&mut ctx, env, env)
+                .await
+                .unwrap();
+            let mut environment = ctx.get(&env_id(env)).await.unwrap().unwrap();
+            environment
+                .properties
+                .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
+            ctx.put(environment).await.unwrap();
+        }
+        let actor = crate::auth_context::test_management_context("recall-scope");
+        recall_with_scope(&mut ctx, &actor, "api@1.0.0", &["stage".into()])
+            .await
+            .unwrap();
+        let view = inspect_recall(&mut ctx, "api@1.0.0").await.unwrap();
+        assert_eq!(
+            view.removal_scope.as_deref(),
+            Some(["stage".to_string()].as_slice())
+        );
+        assert_eq!(
+            view.removal_environments,
+            vec![RecallEnvironmentRemoval {
+                environment: "stage".into(),
+                done: 0,
+                total: 1,
+            }]
+        );
+        assert_eq!(
+            view.out_of_scope,
+            vec![RecallOutOfScopeHolder {
+                environment: "prod".into(),
+                status: REMOVAL_NOT_IN_SCOPE.into(),
+            }]
+        );
+        assert!(view.widenings.is_empty(), "{view:?}");
+        let rid = release_id("api", "1.0.0");
+        assert!(
+            recall_removal_covers(&mut ctx, &rid, "stage")
+                .await
+                .unwrap()
+        );
+        assert!(!recall_removal_covers(&mut ctx, &rid, "prod").await.unwrap());
+
+        let first = widen_recall(
+            &mut ctx,
+            &actor,
+            "api@1.0.0",
+            &["prod".into()],
+            false,
+            "roll off prod next",
+        )
+        .await
+        .unwrap();
+        assert!(first.contains("prod"), "{first}");
+        let view = inspect_recall(&mut ctx, "api@1.0.0").await.unwrap();
+        assert_eq!(
+            view.removal_scope.as_deref(),
+            Some(["prod".to_string(), "stage".to_string()].as_slice())
+        );
+        assert!(view.out_of_scope.is_empty(), "{view:?}");
+        assert_eq!(view.widenings.len(), 1, "{view:?}");
+        assert_eq!(view.widenings[0].reason, "roll off prod next");
+        assert_eq!(view.widenings[0].environments, vec!["prod".to_string()]);
+        assert!(!view.widenings[0].fleet_wide);
+
+        let retry = widen_recall(
+            &mut ctx,
+            &actor,
+            "api@1.0.0",
+            &["prod".into()],
+            false,
+            "roll off prod next",
+        )
+        .await
+        .unwrap();
+        assert!(retry.contains("already covers"), "{retry}");
+        let view = inspect_recall(&mut ctx, "api@1.0.0").await.unwrap();
+        assert_eq!(view.widenings.len(), 1, "{view:?}");
+
+        widen_recall(&mut ctx, &actor, "api@1.0.0", &[], true, "fleet")
+            .await
+            .unwrap();
+        let view = inspect_recall(&mut ctx, "api@1.0.0").await.unwrap();
+        assert_eq!(view.removal_scope, None, "{view:?}");
+        assert!(view.widenings[1].fleet_wide, "{view:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn scoped_recall_plans_roll_off_only_in_scope_environments() {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-recall-scope-plan-{}-{}",
+            std::process::id(),
+            crate::now_millis()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        for version in ["1.0.0", "1.1.0"] {
+            let product = root.join(format!("product-{version}"));
+            std::fs::create_dir_all(&product).unwrap();
+            std::fs::write(
+                product.join("tenkai.toml"),
+                format!(
+                    r#"
+[product]
+name = "api"
+version = "{version}"
+
+[deploy]
+install = "true"
+"#
+                ),
+            )
+            .unwrap();
+            let keys = root.join("keys");
+            let signature = root.join(format!("signature-{version}.json"));
+            let trust = root.join("trust-roots.toml");
+            crate::dev_sign::sign_release(&keys, &product.join("tenkai.toml"), &signature, &trust)
+                .unwrap();
+            publish(
+                &mut ctx,
+                &product.join("tenkai.toml"),
+                &PublishOptions {
+                    signature: Some(signature),
+                    trust_roots: Some(trust),
+                    state_dir: Some(root.join("state")),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let actor = crate::auth_context::test_management_context("recall-scope-plan");
+        crate::catalog::promote(&mut ctx, &actor, "api@1.0.0", "stable")
+            .await
+            .unwrap();
+        for env in ["stage", "prod"] {
+            crate::environment::env_add(&mut ctx, env, env)
+                .await
+                .unwrap();
+            crate::environment::subscribe(&mut ctx, env, "api", "stable")
+                .await
+                .unwrap();
+            let mut environment = ctx.get(&env_id(env)).await.unwrap().unwrap();
+            environment
+                .properties
+                .insert("deployed.api".into(), "1.0.0".into());
+            environment
+                .properties
+                .insert("deployed_release.api".into(), release_id("api", "1.0.0"));
+            ctx.put(environment).await.unwrap();
+        }
+        crate::catalog::promote(&mut ctx, &actor, "api@1.1.0", "stable")
+            .await
+            .unwrap();
+        recall_with_scope(&mut ctx, &actor, "api@1.0.0", &["stage".into()])
+            .await
+            .unwrap();
+        let stage = crate::plan::create(&mut ctx, "stage").await.unwrap();
+        assert!(
+            stage
+                .steps
+                .iter()
+                .any(|step| step.action == crate::plan::Action::Upgrade && step.to == "1.1.0"),
+            "{stage:?}"
+        );
+        let prod = crate::plan::create(&mut ctx, "prod").await.unwrap();
+        assert!(
+            prod.steps
+                .iter()
+                .all(|step| step.to != "1.1.0" || step.from.as_deref() != Some("1.0.0")),
+            "{prod:?}"
+        );
+        let rows = crate::environment::status(&mut ctx, "prod").await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.product == "api")
+                .and_then(|row| row.recall.as_deref()),
+            Some(REMOVAL_NOT_IN_SCOPE),
+            "{rows:?}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

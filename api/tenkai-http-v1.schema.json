@@ -4835,6 +4835,10 @@
         "product": {
           "type": "string"
         },
+        "recall": {
+          "description": "Present when this instance still runs a recalled release whose\nremoval is not in scope. A warning, not a hold or gate.",
+          "type": "string"
+        },
         "spec_drift": {
           "$ref": "#/$defs/SpecDriftView",
           "description": "Report-only live-spec comparison (#1028). Omitted when unknown."
@@ -7935,6 +7939,22 @@
       ],
       "type": "object"
     },
+    "RecallOutOfScopeHolder": {
+      "description": "An environment still running a recalled release whose removal is not in\nscope. A warning, not a hold or gate.",
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment",
+        "status"
+      ],
+      "type": "object"
+    },
     "RecallRangeCloseRequest": {
       "additionalProperties": false,
       "description": "Body of `POST /v1/products/{product}/recall-range/close`.",
@@ -8078,6 +8098,13 @@
     "RecallRequest": {
       "additionalProperties": false,
       "properties": {
+        "environments": {
+          "description": "Environments whose already-deployed instances roll off. Omitted covers\nthe fleet. Older servers refuse this field (`deny_unknown_fields`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "operation": {
           "type": "string"
         },
@@ -8121,6 +8148,13 @@
           "format": "double",
           "type": "number"
         },
+        "out_of_scope": {
+          "description": "Environments that still run the release and are not in the removal\nscope. Each row's `status` is [`REMOVAL_NOT_IN_SCOPE`].",
+          "items": {
+            "$ref": "#/$defs/RecallOutOfScopeHolder"
+          },
+          "type": "array"
+        },
         "policy_id": {
           "type": "string"
         },
@@ -8147,7 +8181,7 @@
           "type": "string"
         },
         "removal_environments": {
-          "description": "Per-environment removal counts, sorted by environment.",
+          "description": "Per-environment removal counts, sorted by environment. Counts only\nenvironments in the removal scope; omitted scope is fleet-wide.",
           "items": {
             "$ref": "#/$defs/RecallEnvironmentRemoval"
           },
@@ -8159,11 +8193,95 @@
             "$ref": "#/$defs/RecallRemovalProgress"
           },
           "type": "array"
+        },
+        "removal_scope": {
+          "description": "Environments this recall's removal covers. Omitted when fleet-wide,\nincluding recalls recorded before scoped removal.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "widenings": {
+          "description": "Later audited writes that appended environments or switched the recall\nto fleet-wide. Oldest first. Empty when none.",
+          "items": {
+            "$ref": "#/$defs/RecallWidening"
+          },
+          "type": "array"
         }
       },
       "required": [
         "release",
         "covers_future"
+      ],
+      "type": "object"
+    },
+    "RecallWidenRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/releases/{release}/recall/widen`.",
+      "properties": {
+        "environments": {
+          "description": "Environments to append. Empty when `fleet_wide` is true.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fleet_wide": {
+          "description": "Switch the recall to fleet-wide. Mutually exclusive with `environments`.",
+          "type": "boolean"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "RecallWidening": {
+      "description": "One audited widening of a recall's removal scope.",
+      "properties": {
+        "environments": {
+          "description": "Environments appended by this write. Empty when the write switched\nthe recall to fleet-wide.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fleet_wide": {
+          "type": "boolean"
+        },
+        "principal_kind": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "widened_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "widened_by": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "widened_at",
+        "widened_by",
+        "principal_kind",
+        "reason",
+        "fleet_wide"
       ],
       "type": "object"
     },
@@ -9460,6 +9578,10 @@
           "type": "string"
         },
         "product": {
+          "type": "string"
+        },
+        "recall": {
+          "description": "Present when this instance still runs a recalled release whose\nremoval is not in scope. A warning, not a hold or gate.",
           "type": "string"
         },
         "spec_drift": {
@@ -11727,6 +11849,17 @@
       "path": "/v1/releases/{release}/recall",
       "request": {
         "$ref": "#/$defs/RecallRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/releases/{release}/recall/widen",
+      "request": {
+        "$ref": "#/$defs/RecallWidenRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"
