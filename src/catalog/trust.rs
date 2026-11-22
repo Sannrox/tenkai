@@ -400,6 +400,7 @@ pub(super) fn verification_view(
                 governance_provenance: stored_provenance(release)?,
                 change_set_pin: change_set_pin::stored_projection(release)?,
                 recall_range: None,
+                recall_range_exclusions: Vec::new(),
             })
         }
         "unsigned-development" => {
@@ -421,6 +422,7 @@ pub(super) fn verification_view(
                 governance_provenance: stored_provenance(release)?,
                 change_set_pin: change_set_pin::stored_projection(release)?,
                 recall_range: None,
+                recall_range_exclusions: Vec::new(),
             })
         }
         other => bail!("release has unknown verification status {other:?}"),
@@ -434,6 +436,13 @@ pub async fn inspect_release(ctx: &mut Ctx, spec: &str) -> Result<ReleaseVerific
     view.recall_range = super::recall_range::covering_recall_range(ctx, &release.id)
         .await?
         .map(|range| range.label());
+    view.recall_range_exclusions =
+        super::recall_range::bounds_covering_recall_ranges(ctx, &release.id)
+            .await?
+            .into_iter()
+            .next()
+            .map(|range| range.exclusions)
+            .unwrap_or_default();
     Ok(view)
 }
 

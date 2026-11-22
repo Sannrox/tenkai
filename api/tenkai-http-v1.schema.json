@@ -7986,6 +7986,101 @@
       ],
       "type": "object"
     },
+    "RecallRangeExcludeRemoveRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/products/{product}/recall-range/exclude/remove`.",
+      "properties": {
+        "excluded_version": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "product",
+        "from",
+        "excluded_version",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "RecallRangeExcludeRequest": {
+      "additionalProperties": false,
+      "description": "Body of `POST /v1/products/{product}/recall-range/exclude`.",
+      "properties": {
+        "excluded_version": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "operation",
+        "product",
+        "from",
+        "excluded_version",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "RecallRangeExclusionView": {
+      "description": "One version subtracted from a recorded recall range at lookup time.",
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "recorded_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "reason",
+        "actor",
+        "recorded_at"
+      ],
+      "type": "object"
+    },
     "RecallRangePage": {
       "description": "Recorded recall ranges for one product.",
       "properties": {
@@ -8046,6 +8141,13 @@
         },
         "covers_future": {
           "type": "boolean"
+        },
+        "exclusions": {
+          "description": "Versions subtracted from this range at lookup. Omitted when none,\nincluding ranges recorded before exclusions.",
+          "items": {
+            "$ref": "#/$defs/RecallRangeExclusionView"
+          },
+          "type": "array"
         },
         "from": {
           "type": "string"
@@ -11891,6 +11993,28 @@
       "path": "/v1/products/{product}/recall-range/close",
       "request": {
         "$ref": "#/$defs/RecallRangeCloseRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/products/{product}/recall-range/exclude",
+      "request": {
+        "$ref": "#/$defs/RecallRangeExcludeRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/ManagementLifecycleResult"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/products/{product}/recall-range/exclude/remove",
+      "request": {
+        "$ref": "#/$defs/RecallRangeExcludeRemoveRequest"
       },
       "response": {
         "$ref": "#/$defs/ManagementLifecycleResult"

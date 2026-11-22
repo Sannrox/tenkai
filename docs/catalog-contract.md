@@ -37,8 +37,12 @@ Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
   consults ranges at read time, so every published release inside the range
   is recalled, including a later publish, with the same fail-closed effect.
   `release recall <product> --close <from> --before <version>` sets the upper
-  bound of an open-ended range; a range never widens. `release inspect` names
-  the range that currently recalls a release. `GET /v1/releases/{release}/recall`
+  bound of an open-ended range; a range never widens. `release recall <product>
+  --from <from> --exclude <version> --reason <text>` subtracts one version from
+  that range at lookup; `--remove-exclusion` recalls it through the range again.
+  An exclusion lifts only the range. `release inspect` names the range that
+  currently recalls a release and lists that range's exclusions.
+  `GET /v1/releases/{release}/recall`
   and `GET /v1/products/{product}/recall-ranges` project those recorded facts,
   including remaining `deployed_release` instances, over `tenkai.http.v1`.
   A recall may name the environments its removal covers (`--env`, or

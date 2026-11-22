@@ -2124,6 +2124,86 @@ impl ManagementOperations {
         ))
     }
 
+    pub async fn exclude_from_recall_range(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        request: crate::management_lifecycle::RecallRangeExcludeRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.recall")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_recall_range_exclude(
+            &request,
+            product,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.recall.range.exclude.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let message = crate::catalog::exclude_from_recall_range(
+            &mut ctx,
+            &context,
+            product,
+            &request.from,
+            &request.excluded_version,
+            &request.reason,
+        )
+        .await
+        .map_err(map_catalog_error)?;
+        self.audit(actor, "catalog.recall.range.exclude.completed")?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Recall,
+            message,
+            Some(product.to_string()),
+        ))
+    }
+
+    pub async fn remove_recall_range_exclusion(
+        &self,
+        credential: &CredentialMaterial,
+        product: &str,
+        request: crate::management_lifecycle::RecallRangeExcludeRemoveRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.recall")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_recall_range_exclude_remove(
+            &request,
+            product,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.recall.range.exclude.remove.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let message = crate::catalog::remove_recall_range_exclusion(
+            &mut ctx,
+            &context,
+            product,
+            &request.from,
+            &request.excluded_version,
+            &request.reason,
+        )
+        .await
+        .map_err(map_catalog_error)?;
+        self.audit(actor, "catalog.recall.range.exclude.remove.completed")?;
+        self.record_change(
+            &context,
+            crate::change_stream::ChangeEventKind::ReleaseRecalled,
+            product,
+            None,
+        )?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Recall,
+            message,
+            Some(product.to_string()),
+        ))
+    }
+
     pub async fn subscribe_environment(
         &self,
         credential: &CredentialMaterial,

@@ -27,8 +27,9 @@ pub use pin_export::{
     WithheldReleasePin, export_release_pins, import_release_pins,
 };
 pub use recall_range::{
-    RecallRange, RecallRangePage, RecallRangeView, close_recall_range, list_recall_ranges,
-    record_recall_range,
+    RecallRange, RecallRangeExclusionView, RecallRangePage, RecallRangeView, close_recall_range,
+    exclude_from_recall_range, list_recall_ranges, record_recall_range,
+    remove_recall_range_exclusion,
 };
 pub use trust::{inspect_release, require_deployable_trust, reverify_release};
 pub(crate) use trust::{
@@ -460,6 +461,10 @@ pub struct ReleaseVerificationView {
     /// Range that currently recalls this release, when any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recall_range: Option<String>,
+    /// Exclusions on the range whose bounds cover this release, even when this
+    /// version is one of them. Empty when no such range exists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recall_range_exclusions: Vec<RecallRangeExclusionView>,
 }
 
 fn parse_release_spec(spec: &str) -> Result<(&str, &str)> {

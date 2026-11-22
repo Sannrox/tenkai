@@ -394,3 +394,86 @@ async fn open_recall_range_covers_future_and_close_is_audited() {
     assert!(!view.covers_future, "{view:?}");
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[tokio::test]
+async fn recall_range_exclusion_is_on_the_versioned_http_contract() {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-recall-range-exclude-http-{}-{}",
+        std::process::id(),
+        tenkai::now_millis()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (app, _config, store) = lifecycle_router(&root).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let management = RemoteClient::new(&base, "management-secret").unwrap();
+    management
+        .publish_release(&signed_catalog_fixture(&root, "1.0.0"))
+        .await
+        .unwrap();
+    management
+        .publish_release(&signed_catalog_fixture(&root, "1.1.0"))
+        .await
+        .unwrap();
+    management
+        .record_recall_range("api", "1.0.0", None, "open defect")
+        .await
+        .unwrap();
+
+    let scoped = RemoteClient::new(&base, "stage-secret").unwrap();
+    let denied = scoped
+        .exclude_from_recall_range("api", "1.0.0", "1.1.0", "keep serving")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(denied.contains("403"), "{denied}");
+
+    management
+        .exclude_from_recall_range("api", "1.0.0", "1.1.0", "keep serving")
+        .await
+        .unwrap();
+    let ranges = management.list_recall_ranges("api").await.unwrap();
+    assert_eq!(ranges.items.len(), 1, "{ranges:?}");
+    assert_eq!(
+        ranges.items[0]
+            .exclusions
+            .iter()
+            .map(|exclusion| exclusion.version.as_str())
+            .collect::<Vec<_>>(),
+        ["1.1.0"]
+    );
+    let still_recalled = management.inspect_recall("api@1.0.0").await.unwrap();
+    assert_eq!(still_recalled.range.as_deref(), Some("api [1.0.0, ∞)"));
+    let excluded = management.inspect_recall("api@1.1.0").await.unwrap_err();
+    assert!(
+        excluded.to_string().contains("not recalled") || excluded.to_string().contains("404"),
+        "{excluded}"
+    );
+
+    management
+        .remove_recall_range_exclusion("api", "1.0.0", "1.1.0", "put 1.1.0 back")
+        .await
+        .unwrap();
+    let view = management.inspect_recall("api@1.1.0").await.unwrap();
+    assert_eq!(view.range.as_deref(), Some("api [1.0.0, ∞)"));
+    let ranges = management.list_recall_ranges("api").await.unwrap();
+    assert!(ranges.items[0].exclusions.is_empty(), "{ranges:?}");
+    let events = store.audit_events().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.operation == "catalog.recall.range.exclude.completed"),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.operation == "catalog.recall.range.exclude.remove.completed"),
+        "{events:?}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
