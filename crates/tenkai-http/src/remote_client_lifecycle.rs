@@ -245,6 +245,62 @@ impl RemoteClient {
         .await
     }
 
+    pub async fn exclude_from_recall_range(
+        &self,
+        product: &str,
+        from: &str,
+        excluded_version: &str,
+        reason: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!(
+                "/v1/products/{}/recall-range/exclude",
+                encode_path_segment(product)
+            ),
+            Some(&tenkai::management_lifecycle::RecallRangeExcludeRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Recall
+                    .as_str()
+                    .into(),
+                product: product.to_string(),
+                from: from.to_string(),
+                excluded_version: excluded_version.to_string(),
+                reason: reason.to_string(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn remove_recall_range_exclusion(
+        &self,
+        product: &str,
+        from: &str,
+        excluded_version: &str,
+        reason: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!(
+                "/v1/products/{}/recall-range/exclude/remove",
+                encode_path_segment(product)
+            ),
+            Some(
+                &tenkai::management_lifecycle::RecallRangeExcludeRemoveRequest {
+                    version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                    operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Recall
+                        .as_str()
+                        .into(),
+                    product: product.to_string(),
+                    from: from.to_string(),
+                    excluded_version: excluded_version.to_string(),
+                    reason: reason.to_string(),
+                },
+            ),
+        )
+        .await
+    }
+
     /// `POST /v1/environments/preview`.
     pub async fn provision_preview(
         &self,

@@ -570,6 +570,16 @@ pub fn known_object_types() -> Vec<ObjectType> {
                     false,
                     "Principal that set exclusive --before on an open range",
                 ),
+                prop(
+                    "excluded_version",
+                    false,
+                    "Version subtracted from this range at lookup",
+                ),
+                prop(
+                    "removed_by",
+                    false,
+                    "Principal that removed a range exclusion",
+                ),
             ],
         ),
         object_type(

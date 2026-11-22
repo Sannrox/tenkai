@@ -22,7 +22,7 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Catalog application boundary | [Catalog contract](catalog-contract.md); ADR 0001 |
 | Health probes, auto-rollback, deliberate rollback | [Upgrade and rollback](upgrade-and-rollback.md) |
 | Same-version restart, recall roll-off, product windows | [ADR 0016](decisions/0016-same-version-remediation.md); `restart`, `release recall`, `product maintenance` |
-| Product recall ranges | [Catalog contract](catalog-contract.md); `release recall --from` / `--close`; #1183 |
+| Product recall ranges | [Catalog contract](catalog-contract.md); `release recall --from` / `--close` / `--exclude`; #1183, #1547 |
 | Maintenance windows | [Manage environments](manage-environments.md#maintenance-windows); `product maintenance` |
 | Dated change freezes | [Manage environments](manage-environments.md#delivery-hold); `env hold schedule` / `cancel` |
 | Channel upgrade pace | [Manage environments](manage-environments.md#channel-upgrade-pace); `channel configure --upgrade-pace`; #1063 |

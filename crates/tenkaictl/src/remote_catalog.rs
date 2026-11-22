@@ -105,6 +105,8 @@ pub(crate) async fn run(
                     from,
                     before,
                     close,
+                    exclude,
+                    remove_exclusion,
                     reason,
                     environments,
                     widen,
@@ -118,9 +120,21 @@ pub(crate) async fn run(
             } else if let Some(from) = from {
                 let reason =
                     reason.ok_or_else(|| anyhow::anyhow!("--reason is required with --from"))?;
-                client
-                    .record_recall_range(&spec, &from, before.as_deref(), &reason)
-                    .await?
+                if let Some(version) = exclude {
+                    if remove_exclusion {
+                        client
+                            .remove_recall_range_exclusion(&spec, &from, &version, &reason)
+                            .await?
+                    } else {
+                        client
+                            .exclude_from_recall_range(&spec, &from, &version, &reason)
+                            .await?
+                    }
+                } else {
+                    client
+                        .record_recall_range(&spec, &from, before.as_deref(), &reason)
+                        .await?
+                }
             } else if widen {
                 if before.is_some() {
                     anyhow::bail!("--before requires --from or --close");

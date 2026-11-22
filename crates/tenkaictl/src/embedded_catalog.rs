@@ -80,6 +80,8 @@ pub(crate) async fn run(
                 from,
                 before,
                 close,
+                exclude,
+                remove_exclusion,
                 reason,
                 environments,
                 widen,
@@ -93,15 +95,29 @@ pub(crate) async fn run(
                 } else if let Some(from) = from {
                     let reason = reason
                         .ok_or_else(|| anyhow::anyhow!("--reason is required with --from"))?;
-                    catalog::record_recall_range(
-                        ctx,
-                        &actor,
-                        &spec,
-                        &from,
-                        before.as_deref(),
-                        &reason,
-                    )
-                    .await?
+                    if let Some(version) = exclude {
+                        if remove_exclusion {
+                            catalog::remove_recall_range_exclusion(
+                                ctx, &actor, &spec, &from, &version, &reason,
+                            )
+                            .await?
+                        } else {
+                            catalog::exclude_from_recall_range(
+                                ctx, &actor, &spec, &from, &version, &reason,
+                            )
+                            .await?
+                        }
+                    } else {
+                        catalog::record_recall_range(
+                            ctx,
+                            &actor,
+                            &spec,
+                            &from,
+                            before.as_deref(),
+                            &reason,
+                        )
+                        .await?
+                    }
                 } else if widen {
                     if before.is_some() {
                         anyhow::bail!("--before requires --from or --close");

@@ -718,6 +718,30 @@ pub struct RecallRangeCloseRequest {
     pub before: String,
 }
 
+/// Body of `POST /v1/products/{product}/recall-range/exclude`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RecallRangeExcludeRequest {
+    pub version: u32,
+    pub operation: String,
+    pub product: String,
+    pub from: String,
+    pub excluded_version: String,
+    pub reason: String,
+}
+
+/// Body of `POST /v1/products/{product}/recall-range/exclude/remove`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RecallRangeExcludeRemoveRequest {
+    pub version: u32,
+    pub operation: String,
+    pub product: String,
+    pub from: String,
+    pub excluded_version: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SubscribeRequest {
@@ -1387,6 +1411,54 @@ pub fn admit_recall_range_close(
     kind: PrincipalKind,
     granted_environment: Option<&str>,
 ) -> Result<AdmittedManagementLifecycle> {
+    admit_catalog_recall(
+        request.version,
+        &request.operation,
+        &request.product,
+        path_product,
+        kind,
+        granted_environment,
+    )
+}
+
+pub fn admit_recall_range_exclude(
+    request: &RecallRangeExcludeRequest,
+    path_product: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    anyhow::ensure!(
+        !request.reason.trim().is_empty(),
+        "recall range exclusion reason must not be empty"
+    );
+    anyhow::ensure!(
+        !request.excluded_version.trim().is_empty(),
+        "recall range exclusion version must not be empty"
+    );
+    admit_catalog_recall(
+        request.version,
+        &request.operation,
+        &request.product,
+        path_product,
+        kind,
+        granted_environment,
+    )
+}
+
+pub fn admit_recall_range_exclude_remove(
+    request: &RecallRangeExcludeRemoveRequest,
+    path_product: &str,
+    kind: PrincipalKind,
+    granted_environment: Option<&str>,
+) -> Result<AdmittedManagementLifecycle> {
+    anyhow::ensure!(
+        !request.reason.trim().is_empty(),
+        "recall range exclusion removal reason must not be empty"
+    );
+    anyhow::ensure!(
+        !request.excluded_version.trim().is_empty(),
+        "recall range exclusion version must not be empty"
+    );
     admit_catalog_recall(
         request.version,
         &request.operation,

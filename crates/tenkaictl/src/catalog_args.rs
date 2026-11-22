@@ -54,6 +54,16 @@ pub(crate) enum ReleaseCommand {
         /// Open-ended range `--from` to close.
         #[arg(long, conflicts_with = "from", requires = "before")]
         close: Option<String>,
+        /// Exclude this version from the range named by `--from`.
+        #[arg(
+            long,
+            requires = "from",
+            conflicts_with_all = ["before", "close", "environments", "widen"]
+        )]
+        exclude: Option<String>,
+        /// Remove `--exclude` so the range recalls that version again.
+        #[arg(long = "remove-exclusion", requires = "exclude")]
+        remove_exclusion: bool,
         #[arg(long)]
         reason: Option<String>,
         /// Limit removal to these environments. Repeatable. Omitted covers the fleet.
@@ -620,6 +630,56 @@ mod tests {
                     ..
                 }
             } if reason == "roll off prod" && environments == &["prod".to_string()]
+        ));
+        let exclude = Cli::try_parse_from([
+            "tenkaictl",
+            "release",
+            "recall",
+            "api",
+            "--from",
+            "1.0.0",
+            "--exclude",
+            "1.1.0",
+            "--reason",
+            "keep serving 1.1.0",
+        ])
+        .unwrap();
+        assert!(matches!(
+            exclude.command,
+            Command::Release {
+                command: ReleaseCommand::Recall {
+                    ref spec,
+                    from: Some(ref from),
+                    exclude: Some(ref version),
+                    remove_exclusion: false,
+                    reason: Some(ref reason),
+                    ..
+                }
+            } if spec == "api" && from == "1.0.0" && version == "1.1.0" && reason == "keep serving 1.1.0"
+        ));
+        let remove = Cli::try_parse_from([
+            "tenkaictl",
+            "release",
+            "recall",
+            "api",
+            "--from",
+            "1.0.0",
+            "--exclude",
+            "1.1.0",
+            "--remove-exclusion",
+            "--reason",
+            "put 1.1.0 back",
+        ])
+        .unwrap();
+        assert!(matches!(
+            remove.command,
+            Command::Release {
+                command: ReleaseCommand::Recall {
+                    exclude: Some(ref version),
+                    remove_exclusion: true,
+                    ..
+                }
+            } if version == "1.1.0"
         ));
     }
 

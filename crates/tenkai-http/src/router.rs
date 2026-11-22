@@ -43,11 +43,12 @@ use super::lifecycle::{
     clear_product_criticality, clear_product_owner, clear_product_webhooks, clear_release_label,
     close_recall_range, configure_channel_exposure_grace, configure_channel_pace,
     configure_environment_exposure_grace, designate_canaries, environment_hold,
-    import_derived_criticality, install_model_evaluation_trust, list_release_labels,
-    pause_channel_policy, plan_environment, plan_identity_issuer, prepare_identity_issuer,
-    promote_release, publish_release, recall_release, reconcile_deployment,
-    record_model_evaluation_evidence, record_recall_range, record_software_compatibility_evidence,
-    release_channel_hold, release_environment_hold, release_label_history, remove_channel_head,
+    exclude_from_recall_range, import_derived_criticality, install_model_evaluation_trust,
+    list_release_labels, pause_channel_policy, plan_environment, plan_identity_issuer,
+    prepare_identity_issuer, promote_release, publish_release, recall_release,
+    reconcile_deployment, record_model_evaluation_evidence, record_recall_range,
+    record_software_compatibility_evidence, release_channel_hold, release_environment_hold,
+    release_label_history, remove_channel_head, remove_recall_range_exclusion,
     resume_channel_policy, retire_environment, retry_failed_target, rewrap_identity_issuer,
     rewrap_sealed_secrets, rollback_environment, schedule_environment_freeze, set_channel_hold,
     set_channel_recall_rule, set_environment_failure_threshold, set_environment_hold,
@@ -439,6 +440,14 @@ pub fn router(
         .route(
             "/v1/products/{product}/recall-range/close",
             post(close_recall_range),
+        )
+        .route(
+            "/v1/products/{product}/recall-range/exclude",
+            post(exclude_from_recall_range),
+        )
+        .route(
+            "/v1/products/{product}/recall-range/exclude/remove",
+            post(remove_recall_range_exclusion),
         )
         .route(
             "/v1/environments/{environment}/subscriptions",
