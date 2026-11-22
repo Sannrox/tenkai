@@ -1733,6 +1733,11 @@ pub struct StatusRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub cluster_namespace: Option<String>,
+    /// Present when this instance still runs a recalled release whose
+    /// removal is not in scope. A warning, not a hold or gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub recall: Option<String>,
 }
 
 /// Unmet contract named by a dependency hold.
@@ -2047,6 +2052,11 @@ pub struct EnvironmentSubscriptionView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub spec_drift: Option<crate::spec_drift::SpecDriftView>,
+    /// Present when this instance still runs a recalled release whose
+    /// removal is not in scope. A warning, not a hold or gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub recall: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -2308,6 +2318,18 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             .properties
             .get(&format!("deployed.{instance}"))
             .cloned();
+        let recall = match env_obj
+            .properties
+            .get(&format!("deployed_release.{applied_key}"))
+        {
+            Some(id)
+                if crate::catalog::release_is_recalled(ctx, id).await?
+                    && !crate::catalog::recall_removal_covers(ctx, id, &env_obj.name).await? =>
+            {
+                Some(crate::catalog::REMOVAL_NOT_IN_SCOPE.to_string())
+            }
+            _ => None,
+        };
         rows.push(StatusRow {
             instance: instance.clone(),
             deployed: deployed.clone(),
@@ -2349,6 +2371,7 @@ async fn status_from_object(ctx: &mut Ctx, env_obj: &Object) -> Result<Vec<Statu
             owner,
             unmanaged: unmanaged_for_subscription(env_obj, &instance, deployed.as_deref()),
             cluster_namespace: cluster_namespace_for_instance(env_obj, &instance),
+            recall,
         });
     }
     rows.sort_by(|a, b| {
@@ -2401,6 +2424,7 @@ async fn subscription_views_from_status(
                 state,
                 delivery_hold: row.delivery_hold,
                 spec_drift: row.spec_drift,
+                recall: row.recall,
             }
         });
     }
@@ -3969,6 +3993,7 @@ fn append_unmanaged_rows(env_obj: &Object, rows: &mut Vec<StatusRow>) {
             owner: None,
             unmanaged: Some(workload),
             cluster_namespace: None,
+            recall: None,
         });
     }
     rows.sort_by(|a, b| {
@@ -4021,6 +4046,7 @@ fn append_closing_preview_rows(env_obj: &Object, rows: &mut Vec<StatusRow>) -> R
             owner: None,
             unmanaged: None,
             cluster_namespace: None,
+            recall: None,
         });
     }
     rows.extend(extra);
@@ -5316,6 +5342,7 @@ mod tests {
             owner: None,
             unmanaged: None,
             cluster_namespace: None,
+            recall: None,
             dependency_hold: Some(StatusDependencyHold {
                 release_id: "tenkai:release:app@1.0.0".into(),
                 contracts: vec![UnmetContract {

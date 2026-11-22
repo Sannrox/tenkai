@@ -311,6 +311,7 @@ mod tests {
                     state: state.into(),
                     delivery_hold: None,
                     spec_drift: None,
+                    recall: None,
                 }]
             },
             facts: Default::default(),

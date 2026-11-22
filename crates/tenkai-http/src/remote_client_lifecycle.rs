@@ -126,6 +126,49 @@ impl RemoteClient {
                 operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Recall
                     .as_str()
                     .into(),
+                environments: Vec::new(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn recall_release_scoped(
+        &self,
+        spec: &str,
+        environments: Vec<String>,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/releases/{}/recall", encode_path_segment(spec)),
+            Some(&tenkai::management_lifecycle::RecallRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Recall
+                    .as_str()
+                    .into(),
+                environments,
+            }),
+        )
+        .await
+    }
+
+    pub async fn widen_recall(
+        &self,
+        spec: &str,
+        environments: Vec<String>,
+        fleet_wide: bool,
+        reason: &str,
+    ) -> anyhow::Result<tenkai::management_lifecycle::ManagementLifecycleResult> {
+        self.lifecycle_result(
+            reqwest::Method::POST,
+            &format!("/v1/releases/{}/recall/widen", encode_path_segment(spec)),
+            Some(&tenkai::management_lifecycle::RecallWidenRequest {
+                version: tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+                operation: tenkai::management_lifecycle::ManagementLifecycleOperation::Recall
+                    .as_str()
+                    .into(),
+                reason: reason.to_string(),
+                environments,
+                fleet_wide,
             }),
         )
         .await

@@ -575,6 +575,7 @@ mod tests {
             state: "current".into(),
             delivery_hold: None,
             spec_drift,
+            recall: None,
         }
     }
 
@@ -689,6 +690,7 @@ mod tests {
                 state: "current".into(),
                 delivery_hold: None,
                 spec_drift: None,
+                recall: None,
             }],
             facts: Default::default(),
             overlays: Default::default(),
@@ -754,6 +756,7 @@ mod tests {
                 state: "behind".into(),
                 delivery_hold: None,
                 spec_drift: None,
+                recall: None,
             }],
             facts: Default::default(),
             overlays: Default::default(),
@@ -806,6 +809,7 @@ mod tests {
                 state: "unknown".into(),
                 delivery_hold: None,
                 spec_drift: None,
+                recall: None,
             }],
             facts: Default::default(),
             overlays: Default::default(),
@@ -922,6 +926,7 @@ mod tests {
                 state: "config_stale".into(),
                 delivery_hold: None,
                 spec_drift: None,
+                recall: None,
             }],
             facts: Default::default(),
             overlays: Default::default(),

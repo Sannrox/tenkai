@@ -1963,9 +1963,10 @@ impl ManagementOperations {
         let actor = &context.audit_principal();
         self.audit(actor, "catalog.recall.requested")?;
         let mut ctx = self.catalog_ctx(&context)?;
-        let message = crate::catalog::recall(&mut ctx, &context, release)
-            .await
-            .map_err(map_catalog_error)?;
+        let message =
+            crate::catalog::recall_with_scope(&mut ctx, &context, release, &request.environments)
+                .await
+                .map_err(map_catalog_error)?;
         self.audit(actor, "catalog.recall.completed")?;
         self.record_change(
             &context,
@@ -1973,6 +1974,42 @@ impl ManagementOperations {
             release,
             None,
         )?;
+        Ok(ManagementLifecycleResult::new(
+            ManagementLifecycleOperation::Recall,
+            message,
+            Some(release.to_string()),
+        ))
+    }
+
+    pub async fn widen_recall(
+        &self,
+        credential: &CredentialMaterial,
+        release: &str,
+        request: crate::management_lifecycle::RecallWidenRequest,
+    ) -> Result<ManagementLifecycleResult, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "catalog.recall")?;
+        Self::require_capability(&context, DeliveryCapability::Management)?;
+        management_lifecycle::admit_recall_widen(
+            &request,
+            context.principal.kind,
+            self.granted_environment(credential, &context),
+        )
+        .map_err(map_lifecycle_error)?;
+        let actor = &context.audit_principal();
+        self.audit(actor, "catalog.recall.widen.requested")?;
+        let mut ctx = self.catalog_ctx(&context)?;
+        let message = crate::catalog::widen_recall(
+            &mut ctx,
+            &context,
+            release,
+            &request.environments,
+            request.fleet_wide,
+            &request.reason,
+        )
+        .await
+        .map_err(map_catalog_error)?;
+        self.audit(actor, "catalog.recall.widen.completed")?;
         Ok(ManagementLifecycleResult::new(
             ManagementLifecycleOperation::Recall,
             message,

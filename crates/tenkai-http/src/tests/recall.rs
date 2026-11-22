@@ -234,6 +234,108 @@ async fn remote_recall_rule_triggers_a_recall_with_typed_measures() {
 }
 
 #[tokio::test]
+async fn scoped_recall_and_widen_are_on_the_versioned_http_contract() {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-recall-scope-http-{}-{}",
+        std::process::id(),
+        tenkai::now_millis()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (app, _config, store) = lifecycle_router(&root).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let management = RemoteClient::new(&base, "management-secret").unwrap();
+    management
+        .publish_release(&signed_catalog_fixture(&root, "1.0.0"))
+        .await
+        .unwrap();
+    let database = root.join("tenkai.db");
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    for env in ["stage", "prod"] {
+        observe(&mut ctx, env, "api", "1.0.0", true).await;
+    }
+    drop(ctx);
+
+    let unknown = reqwest::Client::new()
+        .post(format!("{base}/v1/releases/api@1.0.0/recall/widen"))
+        .bearer_auth("management-secret")
+        .json(&serde_json::json!({
+            "version": tenkai::management_lifecycle::MANAGEMENT_LIFECYCLE_API_VERSION,
+            "operation": "not_a_verb",
+            "reason": "try",
+            "environments": ["prod"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        unknown.status().as_u16(),
+        400,
+        "{}",
+        unknown.text().await.unwrap()
+    );
+
+    management
+        .recall_release_scoped("api@1.0.0", vec!["stage".into()])
+        .await
+        .unwrap();
+    let view = management.inspect_recall("api@1.0.0").await.unwrap();
+    assert_eq!(
+        view.removal_scope.as_deref(),
+        Some(["stage".to_string()].as_slice()),
+        "{view:?}"
+    );
+    assert_eq!(
+        view.out_of_scope
+            .iter()
+            .map(|row| (row.environment.as_str(), row.status.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("prod", tenkai::catalog::REMOVAL_NOT_IN_SCOPE)]
+    );
+
+    let scoped = RemoteClient::new(&base, "stage-secret").unwrap();
+    let denied = scoped
+        .widen_recall("api@1.0.0", vec!["prod".into()], false, "roll off prod")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(denied.contains("403"), "{denied}");
+
+    management
+        .widen_recall("api@1.0.0", vec!["prod".into()], false, "roll off prod")
+        .await
+        .unwrap();
+    let view = management.inspect_recall("api@1.0.0").await.unwrap();
+    assert!(view.out_of_scope.is_empty(), "{view:?}");
+    assert_eq!(view.widenings.len(), 1, "{view:?}");
+    assert_eq!(view.widenings[0].reason, "roll off prod");
+
+    let retry = management
+        .widen_recall("api@1.0.0", vec!["prod".into()], false, "roll off prod")
+        .await
+        .unwrap();
+    assert!(
+        retry.message.contains("already covers"),
+        "{}",
+        retry.message
+    );
+    let view = management.inspect_recall("api@1.0.0").await.unwrap();
+    assert_eq!(view.widenings.len(), 1, "{view:?}");
+    let events = store.audit_events().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.operation == "catalog.recall.widen.completed"),
+        "{events:?}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn open_recall_range_covers_future_and_close_is_audited() {
     let root = std::env::temp_dir().join(format!(
         "tenkai-recall-range-http-{}-{}",

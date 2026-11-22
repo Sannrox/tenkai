@@ -993,6 +993,18 @@ async fn compute_snapshot_with_policy(
             .or_default()
             .push((instance.clone(), instances_mode));
         let mut admitted_recalled = false;
+        if let Some(version) = env_obj
+            .properties
+            .get(&format!("deployed.{instance}"))
+            .filter(|value| !value.is_empty())
+        {
+            let current_id = release_id(&product, version);
+            if release_is_recalled(ctx, &current_id).await?
+                && !crate::catalog::recall_removal_covers(ctx, &current_id, env).await?
+            {
+                continue;
+            }
+        }
         if release_is_recalled(ctx, &release).await? {
             if policy.observe_live {
                 bail!(
@@ -1312,8 +1324,8 @@ async fn compute_snapshot_with_policy(
                 }
             }
             Some(v) => {
-                let action = classify_change(&v, &desired);
                 let current_id = release_id(&product, &v);
+                let action = classify_change(&v, &desired);
                 let restore = if release_is_recalled(ctx, &current_id).await? {
                     None
                 } else {

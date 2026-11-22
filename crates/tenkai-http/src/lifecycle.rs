@@ -70,6 +70,28 @@ pub(super) async fn recall_release(
     )
 }
 
+pub(super) async fn widen_recall(
+    State(state): State<Arc<AppState>>,
+    Path(release): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .widen_recall(&credential, &release, request)
+            .await,
+    )
+}
+
 pub(super) async fn record_recall_range(
     State(state): State<Arc<AppState>>,
     Path(product): Path<String>,
