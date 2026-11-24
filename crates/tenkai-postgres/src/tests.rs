@@ -375,6 +375,8 @@ mod live_catalog_put;
 #[cfg(feature = "postgres")]
 mod live_change_events;
 #[cfg(feature = "postgres")]
+mod live_debug_session;
+#[cfg(feature = "postgres")]
 mod live_delivery;
 #[cfg(feature = "postgres")]
 mod live_delivery_pages;

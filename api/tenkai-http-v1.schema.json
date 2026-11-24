@@ -2302,6 +2302,143 @@
       ],
       "type": "string"
     },
+    "DebugSession": {
+      "description": "A debug session as stored and as returned by the management API.",
+      "properties": {
+        "close_reason": {
+          "type": "string"
+        },
+        "closed_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "closed_by": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/DebugSessionMode"
+        },
+        "not_after": {
+          "description": "Unix ms after which the session is over, whoever notices first.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "opened_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "opened_by": {
+          "description": "The audit principal: subject and every delegating actor.",
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/DebugSessionState"
+        },
+        "subject": {
+          "description": "The human principal that opened the session.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "environment",
+        "instance",
+        "subject",
+        "opened_by",
+        "mode",
+        "reason",
+        "opened_at",
+        "not_after",
+        "state"
+      ],
+      "type": "object"
+    },
+    "DebugSessionCloseRequest": {
+      "additionalProperties": false,
+      "description": "`POST /v1/debug-sessions/{session}/close`.",
+      "properties": {
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "DebugSessionList": {
+      "properties": {
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/DebugSession"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "sessions"
+      ],
+      "type": "object"
+    },
+    "DebugSessionMode": {
+      "description": "Access a session grants. Write needs a live elevation (#1560).",
+      "enum": [
+        "read"
+      ],
+      "type": "string"
+    },
+    "DebugSessionOpenRequest": {
+      "additionalProperties": false,
+      "description": "`POST /v1/debug-sessions`.",
+      "properties": {
+        "duration_ms": {
+          "default": null,
+          "description": "Session length; default and maximum are the environment's\n`debug_session_max_ms` (four hours unless lower).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "environment": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why the session is needed; recorded and audited.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment",
+        "instance",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "DebugSessionState": {
+      "description": "Lifecycle of a session. `closed` and `expired` are final.",
+      "enum": [
+        "open",
+        "closed",
+        "expired"
+      ],
+      "type": "string"
+    },
     "DebugSessions": {
       "description": "Debug sessions an environment allows (ADR 0061 §3).",
       "oneOf": [
@@ -3096,6 +3233,11 @@
         },
         "configured": {
           "type": "boolean"
+        },
+        "debug_session_max_ms": {
+          "description": "Longest debug session, in milliseconds; absent from servers before\nit existed.",
+          "format": "int64",
+          "type": "integer"
         },
         "debug_sessions": {
           "$ref": "#/$defs/DebugSessions",
@@ -11769,6 +11911,46 @@
       "request": null,
       "response": {
         "$ref": "#/$defs/PlanRunways"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/debug-sessions",
+      "request": {
+        "$ref": "#/$defs/DebugSessionOpenRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/DebugSession"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/debug-sessions",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/DebugSessionList"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/debug-sessions/{session}",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/DebugSession"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/debug-sessions/{session}/close",
+      "request": {
+        "$ref": "#/$defs/DebugSessionCloseRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/DebugSession"
       }
     },
     {
