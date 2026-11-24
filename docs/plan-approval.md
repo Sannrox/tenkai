@@ -206,12 +206,14 @@ the `debug` capability may open a debug session on one of its instances
 
 ```toml
 debug_sessions = "read"
+debug_session_max_ms = 3600000   # optional; at most and by default 4 hours
 ```
 
-A server older than this field refuses a policy file that sets it. Set it only
-after every replica runs a release that knows it.
+A server older than these fields refuses a policy file that sets them. Set
+them only after every replica runs a release that knows them.
 `GET /v1/environments/{environment}/approval-policy` reports the effective
-value.
+values. Opening and closing sessions is described in
+[debug sessions](debug-sessions.md).
 
 ## Unattended approval policy
 

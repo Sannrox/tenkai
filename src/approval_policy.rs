@@ -66,10 +66,17 @@ pub struct ApprovalPolicy {
     /// so every policy written before the field keeps sessions closed.
     #[serde(default, skip_serializing_if = "DebugSessions::is_forbid")]
     pub debug_sessions: DebugSessions,
+    /// Longest debug session here, in milliseconds (ADR 0061 §6). At most
+    /// [`DEBUG_SESSION_BOUND_MS`], which also applies when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_session_max_ms: Option<i64>,
     /// SHA-256 of the TOML file bytes when loaded from disk.
     #[serde(skip)]
     source_digest: Option<String>,
 }
+
+/// Default and longest debug session bound: four hours (ADR 0061 §6).
+pub const DEBUG_SESSION_BOUND_MS: i64 = 4 * 60 * 60 * 1_000;
 
 /// Debug sessions an environment allows (ADR 0061 §3).
 #[derive(
@@ -275,6 +282,12 @@ impl ApprovalPolicy {
             "continue_after_failure_max_criticality",
             self.continue_after_failure_max_criticality.as_deref(),
         )?;
+        if self
+            .debug_session_max_ms
+            .is_some_and(|max| max <= 0 || max > DEBUG_SESSION_BOUND_MS)
+        {
+            bail!("plan approval policy debug_session_max_ms must be 1..={DEBUG_SESSION_BOUND_MS}");
+        }
         Ok(())
     }
 
@@ -600,6 +613,11 @@ pub struct EffectiveApprovalPolicy {
     /// `forbid` when no policy is configured or the policy omits it.
     #[serde(default)]
     pub debug_sessions: DebugSessions,
+    /// Longest debug session, in milliseconds; absent from servers before
+    /// it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub debug_session_max_ms: Option<i64>,
 }
 
 /// Whether a plan was approved by policy or still needs a human, and why.
@@ -634,6 +652,7 @@ pub fn effective_policy(properties: &HashMap<String, String>) -> Result<Effectiv
             digest: None,
             quorums: Vec::new(),
             debug_sessions: DebugSessions::Forbid,
+            debug_session_max_ms: Some(DEBUG_SESSION_BOUND_MS),
         });
     };
     let require_human = match policy.mode {
@@ -669,6 +688,11 @@ pub fn effective_policy(properties: &HashMap<String, String>) -> Result<Effectiv
         digest: Some(policy.digest()?),
         quorums: policy.quorum.clone(),
         debug_sessions: policy.debug_sessions,
+        debug_session_max_ms: Some(
+            policy
+                .debug_session_max_ms
+                .unwrap_or(DEBUG_SESSION_BOUND_MS),
+        ),
     })
 }
 
@@ -1307,6 +1331,7 @@ exclude_requester = true
             quorum: Vec::new(),
             continue_after_failure_max_criticality: None,
             debug_sessions: DebugSessions::Forbid,
+            debug_session_max_ms: None,
             source_digest: None,
         }
     }

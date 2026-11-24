@@ -72,6 +72,26 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Management,
         },
         TenantVisibleRpc {
+            id: "management.debug_session_open",
+            path_template: "POST /v1/debug-sessions",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
+            id: "management.debug_session_list",
+            path_template: "GET /v1/debug-sessions",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
+            id: "management.debug_session_inspect",
+            path_template: "GET /v1/debug-sessions/{session}",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
+            id: "management.debug_session_close",
+            path_template: "POST /v1/debug-sessions/{session}/close",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
             id: "management.package_migration_preview",
             path_template: "POST /v1/migrations/{name}/preview",
             surface: TenantVisibleSurface::Management,

@@ -3,6 +3,7 @@
 mod auth;
 mod config;
 pub mod contract;
+mod debug_sessions;
 mod environment_config;
 mod exports;
 mod grant_rules;

@@ -961,6 +961,38 @@ pub fn http_contract() -> Value {
             response: schema::<tenkai::trust_posture::PlanRunways>(&mut g),
         },
         Route {
+            method: "POST",
+            path: "/v1/debug-sessions",
+            auth: Auth::Management,
+            request: Some(schema::<
+                tenkai::management_operations::DebugSessionOpenRequest,
+            >(&mut g)),
+            response: schema::<tenkai::debug_session::DebugSession>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/debug-sessions",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<tenkai::management_operations::DebugSessionList>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/debug-sessions/{session}",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<tenkai::debug_session::DebugSession>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/debug-sessions/{session}/close",
+            auth: Auth::Management,
+            request: Some(schema::<
+                tenkai::management_operations::DebugSessionCloseRequest,
+            >(&mut g)),
+            response: schema::<tenkai::debug_session::DebugSession>(&mut g),
+        },
+        Route {
             method: "GET",
             path: "/v1/runners",
             auth: Auth::Management,

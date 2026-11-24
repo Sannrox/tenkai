@@ -6,10 +6,14 @@
 
 use std::sync::Arc;
 
+mod debug_sessions;
 mod exports;
 mod grant_rules;
 mod identity_issuer;
 mod runtime_enrollment;
+pub use debug_sessions::{
+    DebugSessionCloseRequest, DebugSessionList, DebugSessionOpenRequest, DebugSessionQuery,
+};
 pub use exports::ExportRequest;
 pub use grant_rules::{CreateGrantRuleRequest, GrantRuleList, RemoveGrantRuleRequest};
 pub use runtime_enrollment::{

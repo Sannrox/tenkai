@@ -12,6 +12,7 @@ use tenkai::tenant_store::TenantOperationalStore;
 
 use super::auth::{import_development_fixture, reset_development_fixture};
 use super::config::ServerConfig;
+use super::debug_sessions;
 use super::environment_config::{
     close_preview, configure_approval_policy, configure_bindings, configure_cluster_namespace,
     configure_cluster_namespace_bindings, configure_cluster_namespace_delete,
@@ -630,6 +631,18 @@ pub fn router(
         .route(
             "/v1/runners/{credential_id}/revoke",
             post(revoke_runtime_credential),
+        )
+        .route(
+            "/v1/debug-sessions",
+            get(debug_sessions::list_debug_sessions).post(debug_sessions::open_debug_session),
+        )
+        .route(
+            "/v1/debug-sessions/{session}",
+            get(debug_sessions::inspect_debug_session),
+        )
+        .route(
+            "/v1/debug-sessions/{session}/close",
+            post(debug_sessions::close_debug_session),
         );
     if metrics_enabled {
         router = router.route("/metrics", get(openmetrics));

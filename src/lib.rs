@@ -197,6 +197,7 @@ pub mod criticality;
 pub mod criticality_store;
 pub mod customer_key_release;
 pub mod dark_site;
+pub mod debug_session;
 pub mod delivery_bridge;
 pub mod delivery_hold;
 pub mod delivery_manifest;
