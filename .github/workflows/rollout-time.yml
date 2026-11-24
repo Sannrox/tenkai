@@ -37,7 +37,7 @@ jobs:
           --health-timeout 5s
           --health-retries 30
     env:
-      TENKAI_POSTGRES_URL: postgresql://tenkai:local-test-only@127.0.0.1:5432/tenkai_test?sslmode=disable
+      TENKAI_HUB_FLEET_POSTGRES_URL: postgresql://tenkai:local-test-only@127.0.0.1:5432/tenkai_test?sslmode=disable
       # A reduced fleet with the same metric set; the full 1,000 runs by hand.
       TENKAI_HUB_FLEET_ENVIRONMENTS: "100"
     steps:
