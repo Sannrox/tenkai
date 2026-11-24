@@ -62,9 +62,34 @@ pub struct ApprovalPolicy {
     /// `critical`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continue_after_failure_max_criticality: Option<String>,
+    /// Whether debug sessions may open here (ADR 0061). Absent is `forbid`,
+    /// so every policy written before the field keeps sessions closed.
+    #[serde(default, skip_serializing_if = "DebugSessions::is_forbid")]
+    pub debug_sessions: DebugSessions,
     /// SHA-256 of the TOML file bytes when loaded from disk.
     #[serde(skip)]
     source_digest: Option<String>,
+}
+
+/// Debug sessions an environment allows (ADR 0061 §3).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugSessions {
+    /// No session opens.
+    #[default]
+    Forbid,
+    /// Read-only sessions.
+    Read,
+    /// Read-only sessions, and write after a `debug_elevate` quorum.
+    Elevate,
+}
+
+impl DebugSessions {
+    fn is_forbid(&self) -> bool {
+        *self == Self::Forbid
+    }
 }
 
 /// Purpose a quorum rule applies to. Derived from the plan and apply flags;
@@ -88,6 +113,9 @@ pub enum QuorumPurpose {
     Rollback,
     SkipGates,
     Downgrade,
+    // Write access in a debug session (ADR 0061 §3); the request carries a
+    // reason.
+    DebugElevate,
 }
 
 impl QuorumPurpose {
@@ -97,6 +125,7 @@ impl QuorumPurpose {
             Self::Rollback => "rollback",
             Self::SkipGates => "skip_gates",
             Self::Downgrade => "downgrade",
+            Self::DebugElevate => "debug_elevate",
         }
     }
 }
@@ -568,6 +597,9 @@ pub struct EffectiveApprovalPolicy {
     pub digest: Option<String>,
     #[serde(default)]
     pub quorums: Vec<QuorumRule>,
+    /// `forbid` when no policy is configured or the policy omits it.
+    #[serde(default)]
+    pub debug_sessions: DebugSessions,
 }
 
 /// Whether a plan was approved by policy or still needs a human, and why.
@@ -601,6 +633,7 @@ pub fn effective_policy(properties: &HashMap<String, String>) -> Result<Effectiv
             require_human: vec!["all plans require a human-signed envelope".into()],
             digest: None,
             quorums: Vec::new(),
+            debug_sessions: DebugSessions::Forbid,
         });
     };
     let require_human = match policy.mode {
@@ -635,6 +668,7 @@ pub fn effective_policy(properties: &HashMap<String, String>) -> Result<Effectiv
         require_human,
         digest: Some(policy.digest()?),
         quorums: policy.quorum.clone(),
+        debug_sessions: policy.debug_sessions,
     })
 }
 
@@ -1272,6 +1306,7 @@ exclude_requester = true
                 .unwrap_or_default(),
             quorum: Vec::new(),
             continue_after_failure_max_criticality: None,
+            debug_sessions: DebugSessions::Forbid,
             source_digest: None,
         }
     }

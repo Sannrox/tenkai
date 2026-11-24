@@ -200,8 +200,17 @@ impl OidcGrantRule {
         if rule.value.trim().is_empty() {
             return invalid("OIDC grant rule value must not be empty");
         }
-        if parse_delivery_capabilities(&rule.capabilities)?.is_empty() {
+        let capabilities = parse_delivery_capabilities(&rule.capabilities)?;
+        if capabilities.is_empty() {
             return invalid("OIDC grant rule must grant at least one capability");
+        }
+        // ADR 0061 §5: only a human holds `debug`.
+        if capabilities.contains(&DeliveryCapability::Debug)
+            && rule.kind.as_deref() == Some("service")
+        {
+            return invalid(
+                "OIDC grant rule of kind \"service\" cannot grant debug: only a human principal holds it",
+            );
         }
         if rule
             .environment

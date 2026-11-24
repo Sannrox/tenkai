@@ -148,6 +148,11 @@ pub enum DeliveryCapability {
     Publish,
     /// Mutating management operations such as reconcile.
     Management,
+    /// Open a debug session on one instance (ADR 0061). Never implied by
+    /// `management`, and held only by a human principal acting directly:
+    /// a service, runtime or management principal, or any call with an agent
+    /// in its actor chain, does not have it even when a grant names it.
+    Debug,
 }
 
 /// Capabilities implied by a verified principal kind when no explicit delivery
@@ -284,6 +289,12 @@ impl AuthenticatedRequestContext {
             DeliveryCapability::Management => self
                 .delivery_capabilities
                 .contains(&DeliveryCapability::Management),
+            DeliveryCapability::Debug => {
+                self.delivery_capabilities
+                    .contains(&DeliveryCapability::Debug)
+                    && self.principal.kind == PrincipalKind::Human
+                    && self.acting_agent().is_none()
+            }
         }
     }
 

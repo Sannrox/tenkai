@@ -109,6 +109,9 @@ impl AuthSession {
         if context.has_delivery_capability(DeliveryCapability::Management) {
             capabilities.push("management".into());
         }
+        if context.has_delivery_capability(DeliveryCapability::Debug) {
+            capabilities.push("debug".into());
+        }
         let (user, groups, source) = match context.host_identity() {
             Some(host) => (
                 Some(host.user_name.clone()),

@@ -113,7 +113,8 @@ The v1 envelope is unchanged. An environment policy may require N distinct
 human signers from named groups per purpose. Distinctness is by key and by
 principal: two envelopes from the same key or the same identity count once.
 Purpose is derived from the plan and apply flags (`execute_plan`, `rollback`,
-`skip_gates`, `downgrade`). When no matching `[[quorum]]` is set, one trusted
+`skip_gates`, `downgrade`). `debug_elevate` is the purpose for write access in
+a debug session. When no matching `[[quorum]]` is set, one trusted
 envelope still authorizes. Host steps are approved again on the root side
 against a separate, root-owned policy that never counts automatic approvals
 ([privileged host releases](host-releases.md#approvals)).
@@ -191,6 +192,26 @@ server operator can configure `TENKAI_PLAN_APPROVAL_DIR` and
 `$TENKAI_PLAN_APPROVAL_DIR/<plan-id>.json` lets the next tick revalidate and
 execute that exact plan. Missing files, incomplete configuration, stale plans,
 and invalid or expired approvals remain pending or fail closed.
+
+## Debug sessions
+
+`debug_sessions` on the environment approval policy says whether a human with
+the `debug` capability may open a debug session on one of its instances
+([ADR 0061](decisions/0061-time-boxed-audited-debug-sessions.md)):
+
+- `forbid` (default): no session opens. A policy without the field, and an
+  environment without a policy, forbid.
+- `read`: read-only sessions.
+- `elevate`: read-only sessions, and write after a `debug_elevate` quorum.
+
+```toml
+debug_sessions = "read"
+```
+
+A server older than this field refuses a policy file that sets it. Set it only
+after every replica runs a release that knows it.
+`GET /v1/environments/{environment}/approval-policy` reports the effective
+value.
 
 ## Unattended approval policy
 

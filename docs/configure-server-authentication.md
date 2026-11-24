@@ -226,6 +226,11 @@ Behavior:
   grants fleet management. Publish ignores channel bindings. `kind = "service"`
   sets the principal kind to service; the default remains human. Runtime
   principals still cannot call management lifecycle.
+- `debug` lets a human open a debug session on one instance
+  ([ADR 0061](decisions/0061-time-boxed-audited-debug-sessions.md)). Fleet
+  management does not imply it. A `kind = "service"` rule naming it is
+  refused, and a call with an agent in its actor chain does not hold it.
+  `GET /v1/auth/me` lists it only when the caller holds it.
 - The principal is `<sub>@<iss>` in audit records.
 - `GET /v1/auth/oidc` is unauthenticated and returns only `issuer`,
   `audience`, `client_id`, `scopes`, and `display_name` when set; it is 404

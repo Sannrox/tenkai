@@ -2302,6 +2302,26 @@
       ],
       "type": "string"
     },
+    "DebugSessions": {
+      "description": "Debug sessions an environment allows (ADR 0061 §3).",
+      "oneOf": [
+        {
+          "const": "forbid",
+          "description": "No session opens.",
+          "type": "string"
+        },
+        {
+          "const": "read",
+          "description": "Read-only sessions.",
+          "type": "string"
+        },
+        {
+          "const": "elevate",
+          "description": "Read-only sessions, and write after a `debug_elevate` quorum.",
+          "type": "string"
+        }
+      ]
+    },
     "DeclaredCriticality": {
       "description": "Operator-declared criticality, with who set it and why.",
       "properties": {
@@ -3076,6 +3096,11 @@
         },
         "configured": {
           "type": "boolean"
+        },
+        "debug_sessions": {
+          "$ref": "#/$defs/DebugSessions",
+          "default": "forbid",
+          "description": "`forbid` when no policy is configured or the policy omits it."
         },
         "digest": {
           "type": "string"
@@ -7863,7 +7888,8 @@
         "execute_plan",
         "rollback",
         "skip_gates",
-        "downgrade"
+        "downgrade",
+        "debug_elevate"
       ],
       "type": "string"
     },
