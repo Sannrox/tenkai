@@ -449,3 +449,69 @@ async fn rows_this_release_cannot_apply_are_listed_and_removable() {
     let (_, health) = call(&hub.app, "GET", "/healthz", None, None).await;
     assert_eq!(health["stored_grant_rules_withheld"], 1);
 }
+
+/// ADR 0061 §2 and §5: a stored rule grants `debug` to a human acting
+/// directly. The management token, a call through an agent, and a service
+/// rule never hold it.
+#[tokio::test]
+async fn debug_is_granted_only_to_a_human_acting_directly() {
+    let signer = Signer::new("k1");
+    let hub = hub(&signer);
+    let (_, list) = call(
+        &hub.app,
+        "GET",
+        "/v1/grant-rules",
+        Some("management-secret"),
+        None,
+    )
+    .await;
+    let create = |rule: serde_json::Value, generation: &serde_json::Value| serde_json::json!({"rule": rule, "reason": "debug access", "generation": generation});
+    let (code, refused) = call(
+        &hub.app,
+        "POST",
+        "/v1/grant-rules",
+        Some("management-secret"),
+        Some(create(
+            serde_json::json!({"value": "ci", "capabilities": ["debug"], "kind": "service"}),
+            &list["generation"],
+        )),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{refused}");
+    let (code, created) = call(
+        &hub.app,
+        "POST",
+        "/v1/grant-rules",
+        Some("management-secret"),
+        Some(create(
+            serde_json::json!({"value": "debuggers", "capabilities": ["read", "debug"]}),
+            &list["generation"],
+        )),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED, "{created}");
+
+    let me = |bearer: String| {
+        let app = hub.app.clone();
+        async move {
+            let (code, session) = call(&app, "GET", "/v1/auth/me", Some(&bearer), None).await;
+            assert_eq!(code, StatusCode::OK, "{session}");
+            session["capabilities"].clone()
+        }
+    };
+    assert_eq!(
+        me(token(&signer, &["debuggers"])).await,
+        serde_json::json!(["read", "debug"])
+    );
+    assert_eq!(
+        me("management-secret".into()).await,
+        serde_json::json!(["read", "publish", "management"])
+    );
+    let now = tenkai::assertion_verifier::now_unix_secs();
+    let through_agent = String::from_utf8(signer.sign(&serde_json::json!({
+        "iss": ISSUER, "sub": "user-1", "aud": "tenkai",
+        "exp": now + 300, "groups": ["debuggers"], "act": "assistant-7",
+    })))
+    .unwrap();
+    assert_eq!(me(through_agent).await, serde_json::json!(["read"]));
+}

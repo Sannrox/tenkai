@@ -351,6 +351,9 @@ pub(crate) fn parse_delivery_capabilities(
             "management" => {
                 capabilities.insert(DeliveryCapability::Management);
             }
+            "debug" => {
+                capabilities.insert(DeliveryCapability::Debug);
+            }
             other => {
                 return Err(AuthError::Unauthorized(format!(
                     "unsupported tenkai_capabilities value {other:?}"

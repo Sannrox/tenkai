@@ -1,6 +1,7 @@
 use super::lifecycle_support::lifecycle_router;
 use super::*;
 use crate::RemoteFailure;
+use tenkai::approval_policy::{DebugSessions, QuorumPurpose};
 
 #[tokio::test]
 async fn approval_policy_read_requires_auth_and_environment_grant() {
@@ -112,6 +113,7 @@ async fn remote_approval_policy_round_trip_reports_configured_auto_view() {
     let unconfigured = client.environment_approval_policy("stage").await.unwrap();
     assert!(!unconfigured.configured);
     assert_eq!(unconfigured.mode, "manual");
+    assert_eq!(unconfigured.debug_sessions, DebugSessions::Forbid);
 
     let key = root.join("auto-approver.ed25519");
     #[cfg(unix)]
@@ -158,6 +160,17 @@ async fn remote_approval_policy_round_trip_reports_configured_auto_view() {
     assert!(view.digest.is_some());
     let encoded = serde_json::to_string(&view).unwrap();
     assert!(!encoded.contains(&key.display().to_string()), "{encoded}");
+    // A policy written before ADR 0061 forbids debug sessions.
+    assert_eq!(view.debug_sessions, DebugSessions::Forbid);
+
+    std::fs::write(
+        &policy,
+        "version = 1\nmode = \"manual\"\nttl_ms = 60000\ndebug_sessions = \"elevate\"\n\n[[quorum]]\npurpose = \"debug_elevate\"\nn = 2\nexclude_requester = true\n",
+    )
+    .unwrap();
+    let view = client.environment_approval_policy("stage").await.unwrap();
+    assert_eq!(view.debug_sessions, DebugSessions::Elevate);
+    assert_eq!(view.quorums[0].purpose, QuorumPurpose::DebugElevate);
 
     std::fs::write(
         &policy,
