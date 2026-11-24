@@ -12,7 +12,7 @@ use anyhow::{Result, bail};
 
 use crate::client::Ctx;
 use crate::environment;
-use crate::fleet_workload::{self, WORKLOAD_SIZE, WorkloadPlan, WorkloadPosture, WorkloadSpec};
+use crate::fleet_workload::{self, WorkloadPlan, WorkloadPosture, WorkloadSpec};
 use crate::plan;
 use crate::providers::{self, PolicyProvider as _, ProviderError};
 use crate::reconciler::{EnvironmentStatus, Reconciler, TickReport};
@@ -197,7 +197,7 @@ pub async fn observe(
         .values()
         .copied()
         .sum::<u32>() as usize;
-    if live != WORKLOAD_SIZE as usize {
+    if live != spec.environments as usize {
         bail!("live fleet lost synthetic environments after a failed restore attempt");
     }
     reopen(database).map_err(|error| {
@@ -214,9 +214,10 @@ pub async fn observe(
             .values()
             .copied()
             .sum::<u32>() as usize;
-    if backup_environments != WORKLOAD_SIZE as usize {
+    if backup_environments != spec.environments as usize {
         bail!(
-            "backup recovered {backup_environments} synthetic environments, expected {WORKLOAD_SIZE}"
+            "backup recovered {backup_environments} synthetic environments, expected {}",
+            spec.environments
         );
     }
 
@@ -507,6 +508,7 @@ fn failed_restore_is_explicit(
 mod tests {
     use super::*;
     use crate::client::Ctx;
+    use crate::fleet_workload::WORKLOAD_SIZE;
 
     fn spec() -> WorkloadSpec {
         WorkloadSpec {
@@ -515,6 +517,7 @@ mod tests {
             channel: "stable".into(),
             current_version: "1.1.0".into(),
             behind_version: "1.0.0".into(),
+            environments: WORKLOAD_SIZE,
         }
     }
 

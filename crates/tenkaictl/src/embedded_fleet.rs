@@ -35,6 +35,7 @@ pub(crate) async fn run(
                 channel,
                 current_version,
                 behind_version,
+                environments: fleet_workload::WORKLOAD_SIZE,
             };
             let record = fleet_workload::materialize(ctx, &spec).await?;
             println!("{}", fleet_workload::format_workload(&record));
@@ -52,9 +53,15 @@ pub(crate) async fn run(
                 channel,
                 current_version,
                 behind_version,
+                environments: fleet_workload::WORKLOAD_SIZE,
             };
-            let budget = fleet_budget::ResourceBudget::ci_embedded_sqlite();
-            let (plan, report) = fleet_budget::measure(ctx, &spec, database, &budget).await?;
+            let (plan, report) = fleet_budget::measure(
+                ctx,
+                &spec,
+                fleet_budget::Profile::CiEmbeddedSqlite,
+                &fleet_budget::SqliteFile(database),
+            )
+            .await?;
             println!("{}", fleet_workload::format_workload(&plan));
             println!("{}", fleet_budget::format_report(&report));
         }
@@ -72,6 +79,7 @@ pub(crate) async fn run(
                 channel,
                 current_version,
                 behind_version,
+                environments: fleet_workload::WORKLOAD_SIZE,
             };
             let (plan, report) = fleet_fairness::observe(
                 ctx,

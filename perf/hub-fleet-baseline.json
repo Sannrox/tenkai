@@ -1,0 +1,7 @@
+{
+  "profile": "ci-hub-postgres",
+  "regression_ratio": 1.2,
+  "tick_ms": {
+    "100": 9500
+  }
+}

@@ -1,21 +1,55 @@
-//! Named-profile budget harness for the thousand-environment workload (#300).
+//! Named-profile budget harness for the synthetic environment workload (#300).
 //!
 //! Measurement never skips signing, approval, or gates. A budget miss fails
-//! closed and does not widen support claims.
+//! closed and does not widen support claims. A profile names the store the
+//! fleet runs on; the host passes a [`StoreProbe`] for that store, so the
+//! embedded SQLite file and the Postgres hub (#1084) share one harness.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
 use crate::fleet_workload::{self, WorkloadPlan, WorkloadSpec};
 use crate::reconciler::{self, Reconciler};
 
-pub const PROFILE: &str = "ci-embedded-sqlite";
 pub const SAMPLE_COUNT: usize = 2;
 pub const COMMAND: &str = "tenkaictl fleet measure";
+
+/// A named measurement profile: the store under test and its budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    /// Embedded SQLite file, as `tenkaictl fleet measure` runs it.
+    CiEmbeddedSqlite,
+    /// One tenant schema on the Postgres hub store, on the CI Postgres 17
+    /// service. Measurement evidence, not a support or HA claim.
+    CiHubPostgres,
+}
+
+impl Profile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::CiEmbeddedSqlite => "ci-embedded-sqlite",
+            Self::CiHubPostgres => "ci-hub-postgres",
+        }
+    }
+
+    /// The hub copies the SQLite budget until measured hub numbers replace
+    /// it (#1084 decision).
+    pub fn budget(self) -> ResourceBudget {
+        match self {
+            Self::CiEmbeddedSqlite | Self::CiHubPostgres => ResourceBudget {
+                wall_ms: 180_000,
+                cpu_ms: 180_000,
+                memory_bytes: 2 * 1024 * 1024 * 1024,
+                storage_bytes: 512 * 1024 * 1024,
+            },
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceBudget {
@@ -26,15 +60,6 @@ pub struct ResourceBudget {
 }
 
 impl ResourceBudget {
-    pub fn ci_embedded_sqlite() -> Self {
-        Self {
-            wall_ms: 180_000,
-            cpu_ms: 180_000,
-            memory_bytes: 2 * 1024 * 1024 * 1024,
-            storage_bytes: 512 * 1024 * 1024,
-        }
-    }
-
     pub fn validate(&self) -> Result<()> {
         if self.wall_ms == 0
             || self.cpu_ms == 0
@@ -44,6 +69,49 @@ impl ResourceBudget {
             bail!("resource budgets must be greater than zero");
         }
         Ok(())
+    }
+}
+
+/// Reads the store a profile measures. Called between ticks, never during one.
+pub trait StoreProbe {
+    /// Bytes the fleet occupies in the store.
+    fn storage_bytes(&self) -> Result<u64>;
+
+    /// Cumulative database-server counters; `None` for a store without a
+    /// server, such as an embedded file.
+    fn database_load(&self) -> Result<Option<DatabaseLoad>> {
+        Ok(None)
+    }
+}
+
+/// The embedded profile's store: one SQLite file.
+pub struct SqliteFile<'a>(pub &'a Path);
+
+impl StoreProbe for SqliteFile<'_> {
+    fn storage_bytes(&self) -> Result<u64> {
+        Ok(std::fs::metadata(self.0)?.len())
+    }
+}
+
+/// Database-server work, as counters or as the difference of two readings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseLoad {
+    pub transactions: u64,
+    pub rows_read: u64,
+    pub rows_written: u64,
+    pub blocks_read: u64,
+    pub blocks_hit: u64,
+}
+
+impl DatabaseLoad {
+    fn since(self, before: Self) -> Self {
+        Self {
+            transactions: self.transactions.saturating_sub(before.transactions),
+            rows_read: self.rows_read.saturating_sub(before.rows_read),
+            rows_written: self.rows_written.saturating_sub(before.rows_written),
+            blocks_read: self.blocks_read.saturating_sub(before.blocks_read),
+            blocks_hit: self.blocks_hit.saturating_sub(before.blocks_hit),
+        }
     }
 }
 
@@ -67,6 +135,9 @@ pub struct BudgetReport {
     pub wall_ms_variance: u64,
     pub passed: bool,
     pub limiting_resource: Option<String>,
+    /// Server work across all samples; absent for an embedded store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_load: Option<DatabaseLoad>,
 }
 
 pub fn format_report(report: &BudgetReport) -> String {
@@ -95,15 +166,24 @@ pub fn format_report(report: &BudgetReport) -> String {
         report.wall_ms_variance,
         report.limiting_resource.as_deref().unwrap_or("none")
     ));
+    if let Some(load) = report.database_load {
+        lines.push(format!(
+            "  database_load transactions={} rows_read={} rows_written={} blocks_read={} blocks_hit={}",
+            load.transactions, load.rows_read, load.rows_written, load.blocks_read, load.blocks_hit
+        ));
+    }
     lines.join("\n")
 }
 
+/// Materialize `spec` and time [`SAMPLE_COUNT`] reconcile ticks against the
+/// profile budget, with gates enabled. A budget miss is an error.
 pub async fn measure(
     ctx: &mut Ctx,
     spec: &WorkloadSpec,
-    database: &Path,
-    budget: &ResourceBudget,
+    profile: Profile,
+    store: &impl StoreProbe,
 ) -> Result<(WorkloadPlan, BudgetReport)> {
+    let budget = profile.budget();
     budget.validate()?;
     let plan = fleet_workload::materialize(ctx, spec).await?;
     let reconciler = Reconciler::new(
@@ -115,10 +195,15 @@ pub async fn measure(
             ..reconciler::Config::default()
         },
     )?;
+    let load_before = store.database_load()?;
     let mut samples = Vec::new();
     for _ in 0..SAMPLE_COUNT {
-        samples.push(sample_tick(&reconciler, database).await?);
+        samples.push(sample_tick(&reconciler, store).await?);
     }
+    let database_load = match (load_before, store.database_load()?) {
+        (Some(before), Some(after)) => Some(after.since(before)),
+        _ => None,
+    };
     let wall_ms_variance = samples
         .iter()
         .map(|sample| sample.wall_ms)
@@ -131,9 +216,9 @@ pub async fn measure(
                 .min()
                 .unwrap_or(0),
         );
-    let limiting = limiting_resource(&samples, budget).map(String::from);
+    let limiting = limiting_resource(&samples, &budget).map(String::from);
     let report = BudgetReport {
-        profile: PROFILE.into(),
+        profile: profile.name().into(),
         command: COMMAND.into(),
         seed_digest: plan.seed_digest.clone(),
         skip_gates: false,
@@ -141,14 +226,47 @@ pub async fn measure(
         wall_ms_variance,
         passed: limiting.is_none(),
         limiting_resource: limiting.clone(),
+        database_load,
     };
     if !report.passed {
         bail!(
-            "budget breach on profile {PROFILE}: limiting {}",
+            "budget breach on profile {}: limiting {}",
+            profile.name(),
             limiting.unwrap_or_else(|| "unknown".into())
         );
     }
     Ok((plan, report))
+}
+
+/// Register the ontology, publish `spec`'s behind and current versions
+/// signed, and promote current onto the channel: what `measure` needs
+/// before it can materialize. Signing material is written under `root`.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn seed_signed_channel(ctx: &mut Ctx, root: &Path, spec: &WorkloadSpec) -> Result<()> {
+    use crate::auth_context::{
+        AuthenticatedRequestContextBuilder, PrincipalIdentity, PrincipalKind,
+    };
+    crate::ontology::register(ctx).await?;
+    for version in [&spec.behind_version, &spec.current_version] {
+        crate::dev_sign::publish_signed_product(ctx, root, version, &spec.product).await?;
+    }
+    let actor = AuthenticatedRequestContextBuilder::new(
+        "fleet-budget-seed",
+        PrincipalIdentity {
+            id: "management".into(),
+            kind: PrincipalKind::Management,
+        },
+        "fleet-budget",
+    )
+    .build()?;
+    crate::catalog::promote(
+        ctx,
+        &actor,
+        &format!("{}@{}", spec.product, spec.current_version),
+        &spec.channel,
+    )
+    .await?;
+    Ok(())
 }
 
 /// The resource a sample exceeds, from the last sample that exceeds any;
@@ -169,16 +287,71 @@ fn limiting_resource(samples: &[BudgetSample], budget: &ResourceBudget) -> Optio
     })
 }
 
+/// Committed per-tick wall-time baseline for a profile, keyed by fleet size
+/// (`perf/hub-fleet-baseline.json`), measured on the CI runner class. The
+/// scheduled job (`TENKAI_ROLLOUT_GATE=regression`) fails when a tick is more
+/// than `regression_ratio` over its stored time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetBaseline {
+    pub profile: String,
+    pub regression_ratio: f64,
+    pub tick_ms: BTreeMap<String, u64>,
+}
+
+pub fn load_baseline(path: &Path) -> Result<FleetBaseline> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading fleet baseline {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parsing fleet baseline {}", path.display()))
+}
+
+/// Compare every sample tick to the stored baseline for its fleet size. A
+/// size with no stored time, or a baseline for another profile, fails closed.
+pub fn check_baseline(report: &BudgetReport, baseline: &FleetBaseline) -> Result<()> {
+    if baseline.profile != report.profile {
+        bail!(
+            "fleet baseline is for profile {}, report is {}",
+            baseline.profile,
+            report.profile
+        );
+    }
+    if baseline.regression_ratio < 1.0 {
+        bail!("fleet baseline regression_ratio must be at least 1.0");
+    }
+    let mut failures = Vec::new();
+    for sample in &report.samples {
+        let size = sample.environments.to_string();
+        let Some(stored) = baseline.tick_ms.get(&size) else {
+            bail!("fleet baseline has no tick time for {size} environments");
+        };
+        let limit = ((*stored as f64) * baseline.regression_ratio).ceil() as u64;
+        if sample.wall_ms > limit {
+            failures.push(format!(
+                "tick at {size} environments took {} ms (limit {limit} ms from baseline {stored} ms)",
+                sample.wall_ms
+            ));
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "fleet regression on profile {}: {}",
+            report.profile,
+            failures.join("; ")
+        );
+    }
+    Ok(())
+}
+
 /// One tick's resources. CPU and peak memory are this process's, so the
 /// sample means the tick's own cost only when nothing else runs in the
 /// process, as in `tenkaictl fleet measure` (#1235).
-async fn sample_tick(reconciler: &Reconciler, database: &Path) -> Result<BudgetSample> {
+async fn sample_tick(reconciler: &Reconciler, store: &impl StoreProbe) -> Result<BudgetSample> {
     let before = resource_usage()?;
     let started = Instant::now();
     let tick = reconciler.run_once().await?;
     let wall_ms = started.elapsed().as_millis() as u64;
     let after = resource_usage()?;
-    let storage_bytes = std::fs::metadata(database)?.len();
+    let storage_bytes = store.storage_bytes()?;
     Ok(BudgetSample {
         wall_ms,
         cpu_ms: after.0.saturating_sub(before.0),
@@ -217,7 +390,6 @@ fn timeval_ms(time: &libc::timeval) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::Ctx;
     use crate::fleet_workload::WORKLOAD_SIZE;
 
     fn spec() -> WorkloadSpec {
@@ -227,13 +399,8 @@ mod tests {
             channel: "stable".into(),
             current_version: "1.1.0".into(),
             behind_version: "1.0.0".into(),
+            environments: WORKLOAD_SIZE,
         }
-    }
-
-    async fn publish_signed(ctx: &mut Ctx, root: &std::path::Path, version: &str) {
-        crate::dev_sign::publish_signed_product(ctx, root, version, "scale-app")
-            .await
-            .unwrap();
     }
 
     #[test]
@@ -252,7 +419,7 @@ mod tests {
 
     #[test]
     fn a_sample_over_budget_names_the_limiting_resource() {
-        let budget = ResourceBudget::ci_embedded_sqlite();
+        let budget = Profile::CiEmbeddedSqlite.budget();
         let within = BudgetSample {
             wall_ms: 1,
             cpu_ms: 1,
@@ -278,6 +445,75 @@ mod tests {
             ..within
         };
         assert_eq!(limiting_resource(&[over_memory], &budget), Some("memory"));
+    }
+
+    #[test]
+    fn baseline_gate_fails_closed_on_regression_unknown_size_or_profile() {
+        let sample = BudgetSample {
+            wall_ms: 130,
+            cpu_ms: 1,
+            memory_bytes: 1,
+            storage_bytes: 1,
+            environments: 100,
+            tick_failures: 0,
+        };
+        let report = BudgetReport {
+            profile: Profile::CiHubPostgres.name().into(),
+            command: COMMAND.into(),
+            seed_digest: "sha256:seed".into(),
+            skip_gates: false,
+            samples: vec![sample.clone()],
+            wall_ms_variance: 0,
+            passed: true,
+            limiting_resource: None,
+            database_load: None,
+        };
+        let baseline = FleetBaseline {
+            profile: Profile::CiHubPostgres.name().into(),
+            regression_ratio: 1.2,
+            tick_ms: BTreeMap::from([("100".to_string(), 100)]),
+        };
+        let err = check_baseline(&report, &baseline).unwrap_err().to_string();
+        assert!(err.contains("130 ms (limit 120 ms"), "{err}");
+
+        let within = BudgetReport {
+            samples: vec![BudgetSample {
+                wall_ms: 120,
+                ..sample.clone()
+            }],
+            ..report.clone()
+        };
+        check_baseline(&within, &baseline).unwrap();
+
+        let unknown_size = BudgetReport {
+            samples: vec![BudgetSample {
+                environments: 5,
+                ..sample
+            }],
+            ..report.clone()
+        };
+        let err = check_baseline(&unknown_size, &baseline)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no tick time for 5"), "{err}");
+
+        let other_profile = BudgetReport {
+            profile: Profile::CiEmbeddedSqlite.name().into(),
+            ..within
+        };
+        let err = check_baseline(&other_profile, &baseline)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is for profile ci-hub-postgres"), "{err}");
+    }
+
+    #[test]
+    fn committed_hub_baseline_parses_for_its_profile() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("perf/hub-fleet-baseline.json");
+        let baseline = load_baseline(&path).unwrap();
+        assert_eq!(baseline.profile, Profile::CiHubPostgres.name());
+        assert!(baseline.regression_ratio >= 1.0);
     }
 
     const MEASURE_ALONE: &str = "fleet_budget::tests::budget_measurement_in_its_own_process";
@@ -310,21 +546,20 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let database = root.join("tenkai.db");
         let mut ctx = Ctx::embedded(&database).unwrap();
-        crate::ontology::register(&mut ctx).await.unwrap();
-        publish_signed(&mut ctx, &root, "1.0.0").await;
-        publish_signed(&mut ctx, &root, "1.1.0").await;
-        let actor = crate::auth_context::test_management_context("budget");
-        crate::catalog::promote(&mut ctx, &actor, "scale-app@1.1.0", "stable")
-            .await
-            .unwrap();
-        let budget = ResourceBudget::ci_embedded_sqlite();
-        let (plan, report) = measure(&mut ctx, &spec(), &database, &budget)
-            .await
-            .unwrap();
+        seed_signed_channel(&mut ctx, &root, &spec()).await.unwrap();
+        let (plan, report) = measure(
+            &mut ctx,
+            &spec(),
+            Profile::CiEmbeddedSqlite,
+            &SqliteFile(&database),
+        )
+        .await
+        .unwrap();
         assert_eq!(plan.members.len(), WORKLOAD_SIZE as usize);
         assert_eq!(report.samples.len(), SAMPLE_COUNT);
         assert!(!report.skip_gates);
-        assert_eq!(report.profile, PROFILE);
+        assert_eq!(report.profile, Profile::CiEmbeddedSqlite.name());
+        assert_eq!(report.database_load, None);
         assert!(report.passed);
         assert!(
             report

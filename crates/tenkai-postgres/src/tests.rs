@@ -393,6 +393,8 @@ mod live_grant_rules;
 #[cfg(feature = "postgres")]
 mod live_ha_qualification_drill;
 #[cfg(feature = "postgres")]
+mod live_hub_fleet;
+#[cfg(feature = "postgres")]
 mod live_isolation;
 #[cfg(feature = "postgres")]
 mod live_outcome_due;

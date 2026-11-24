@@ -21,6 +21,8 @@
 mod capabilities;
 mod catalog_graph;
 mod config;
+#[cfg(feature = "postgres")]
+mod fleet_probe;
 mod partition;
 #[cfg(feature = "postgres")]
 mod partition_store;
@@ -43,6 +45,8 @@ pub use config::{
     require_hub_tenant_mode, resolve_enterprise_hub, resolve_fenced_enterprise_hub,
     resolve_server_tenant_store, tenant_schema_name,
 };
+#[cfg(feature = "postgres")]
+pub use fleet_probe::HubTenantProbe;
 pub use partition::PostgresTenantPartition;
 pub use store::PostgresTenantOperationalStore;
 #[cfg(feature = "postgres")]
