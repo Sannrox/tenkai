@@ -1,6 +1,8 @@
 name: Rollout-time budget
 
-# Live Docker and kind apply times against perf/rollout-baseline.json (#596).
+# Live Docker and kind apply times against perf/rollout-baseline.json (#596),
+# and the ci-hub-postgres fleet profile against perf/hub-fleet-baseline.json
+# (#1084).
 # Weekly and on demand only: a pull request diff rarely moves these budgets,
 # and the regression gate needs a live daemon and cluster.
 on:
@@ -18,6 +20,26 @@ jobs:
   rollout-time:
     name: Rollout-time budget
     runs-on: ubuntu-latest
+    # An ephemeral PostgreSQL for the hub fleet profile. The password is a
+    # local test value; the database never leaves the runner.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: tenkai
+          POSTGRES_PASSWORD: local-test-only
+          POSTGRES_DB: tenkai_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tenkai -d tenkai_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      TENKAI_POSTGRES_URL: postgresql://tenkai:local-test-only@127.0.0.1:5432/tenkai_test?sslmode=disable
+      # A reduced fleet with the same metric set; the full 1,000 runs by hand.
+      TENKAI_HUB_FLEET_ENVIRONMENTS: "100"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

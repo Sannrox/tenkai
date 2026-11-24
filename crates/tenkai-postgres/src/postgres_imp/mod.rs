@@ -188,6 +188,7 @@ mod channels;
 mod connect;
 mod fixtures;
 mod fixtures_reset;
+mod fleet_probe;
 mod grant_rules;
 mod leases;
 mod plans;

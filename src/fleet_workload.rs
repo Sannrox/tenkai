@@ -15,6 +15,8 @@ use crate::environment;
 use crate::ontology::{channel_id, validate_identifier};
 
 pub const WORKLOAD_SIZE: u32 = 1_000;
+/// Postures in the mix; a fleet size is a multiple of this.
+const POSTURE_COUNT: u32 = 5;
 pub const POSTURE_CURRENT: &str = "current";
 pub const POSTURE_BEHIND: &str = "behind";
 pub const POSTURE_UNHEALTHY: &str = "unhealthy";
@@ -62,6 +64,9 @@ pub struct WorkloadSpec {
     pub channel: String,
     pub current_version: String,
     pub behind_version: String,
+    /// Fleet size: [`WORKLOAD_SIZE`] for the full workload, or a smaller
+    /// multiple of five that keeps the same posture mix (#1084).
+    pub environments: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +94,15 @@ impl WorkloadSpec {
         validate_identifier("behind version", &self.behind_version)?;
         if self.current_version == self.behind_version {
             bail!("current and behind versions must differ");
+        }
+        if self.environments == 0
+            || self.environments > WORKLOAD_SIZE
+            || !self.environments.is_multiple_of(POSTURE_COUNT)
+        {
+            bail!(
+                "workload size must be a multiple of {POSTURE_COUNT} up to {WORKLOAD_SIZE}, got {}",
+                self.environments
+            );
         }
         Ok(())
     }
@@ -124,14 +138,14 @@ pub fn plan_workload(spec: &WorkloadSpec) -> Result<WorkloadPlan> {
         .chars()
         .take(8)
         .collect::<String>();
-    let postures = default_mix();
-    let mut members = Vec::with_capacity(WORKLOAD_SIZE as usize);
+    let postures = default_mix(spec.environments);
+    let mut members = Vec::with_capacity(spec.environments as usize);
     for (index, posture) in postures.into_iter().enumerate() {
         let name = format!("syn{prefix}{index:04}");
         validate_identifier("environment", &name)?;
         members.push(WorkloadMember { name, posture });
     }
-    validate_members(&members)?;
+    validate_members(&members, spec.environments)?;
     Ok(WorkloadPlan {
         seed_digest: digest,
         product: spec.product.clone(),
@@ -142,16 +156,16 @@ pub fn plan_workload(spec: &WorkloadSpec) -> Result<WorkloadPlan> {
     })
 }
 
-fn validate_members(members: &[WorkloadMember]) -> Result<()> {
+fn validate_members(members: &[WorkloadMember], expected: u32) -> Result<()> {
     let mut names = BTreeSet::new();
     for member in members {
         if !names.insert(member.name.as_str()) {
             bail!("duplicate environment identity {}", member.name);
         }
     }
-    if members.len() as u32 != WORKLOAD_SIZE {
+    if members.len() as u32 != expected {
         bail!(
-            "workload must contain {WORKLOAD_SIZE} environments, got {}",
+            "workload must contain {expected} environments, got {}",
             members.len()
         );
     }
@@ -165,7 +179,7 @@ fn validate_members(members: &[WorkloadMember]) -> Result<()> {
     Ok(())
 }
 
-fn default_mix() -> Vec<WorkloadPosture> {
+fn default_mix(environments: u32) -> Vec<WorkloadPosture> {
     let cycle = [
         WorkloadPosture::Current,
         WorkloadPosture::Behind,
@@ -173,7 +187,7 @@ fn default_mix() -> Vec<WorkloadPosture> {
         WorkloadPosture::Blocked,
         WorkloadPosture::Disconnected,
     ];
-    (0..WORKLOAD_SIZE)
+    (0..environments)
         .map(|index| cycle[(index as usize) % cycle.len()])
         .collect()
 }
@@ -210,17 +224,18 @@ pub async fn materialize(ctx: &mut Ctx, spec: &WorkloadSpec) -> Result<WorkloadP
             plan.channel
         );
     }
+    let expected = spec.environments;
     let mut planted = 0u32;
     for member in &plan.members {
         match plant_member(ctx, &plan, member).await {
             Ok(()) => planted += 1,
             Err(error) => {
-                bail!("partial materialization is incomplete ({planted}/{WORKLOAD_SIZE}): {error}");
+                bail!("partial materialization is incomplete ({planted}/{expected}): {error}");
             }
         }
     }
-    if planted != WORKLOAD_SIZE {
-        bail!("partial materialization is incomplete ({planted}/{WORKLOAD_SIZE})");
+    if planted != expected {
+        bail!("partial materialization is incomplete ({planted}/{expected})");
     }
     Ok(plan)
 }
@@ -334,6 +349,27 @@ mod tests {
             channel: "stable".into(),
             current_version: "1.1.0".into(),
             behind_version: "1.0.0".into(),
+            environments: WORKLOAD_SIZE,
+        }
+    }
+
+    #[test]
+    fn reduced_fleet_keeps_the_posture_mix_and_refuses_uneven_sizes() {
+        let reduced = WorkloadSpec {
+            environments: 100,
+            ..spec("demo-seed")
+        };
+        let plan = plan_workload(&reduced).unwrap();
+        assert_eq!(plan.members.len(), 100);
+        assert!(posture_counts(&plan).values().all(|count| *count == 20));
+        for environments in [0, 7, WORKLOAD_SIZE + 5] {
+            let err = plan_workload(&WorkloadSpec {
+                environments,
+                ..spec("demo-seed")
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("multiple of 5"), "{err}");
         }
     }
 
@@ -370,11 +406,15 @@ mod tests {
                 posture: WorkloadPosture::Current,
             })
             .collect::<Vec<_>>();
-        let err = validate_members(&all_current).unwrap_err().to_string();
+        let err = validate_members(&all_current, WORKLOAD_SIZE)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("all-healthy"), "{err}");
         let mut duplicated = plan_workload(&spec("demo-seed")).unwrap().members;
         duplicated[1].name = duplicated[0].name.clone();
-        let err = validate_members(&duplicated).unwrap_err().to_string();
+        let err = validate_members(&duplicated, WORKLOAD_SIZE)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("duplicate environment identity"), "{err}");
     }
 

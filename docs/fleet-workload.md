@@ -1,7 +1,8 @@
 # Synthetic thousand-environment workload
 
 Tenkai can materialize a **deterministic** fleet of one thousand environments
-for scale evidence (#299). This is not a support claim and does not skip
+for scale evidence (#299). The hub profile below also runs a smaller fleet
+with the same posture mix. This is not a support claim and does not skip
 signing, approval, gates, leases, receipts, or recovery.
 
 ```bash
@@ -41,6 +42,38 @@ tenkaictl fleet measure \
   --current-version 1.1.0 \
   --behind-version 1.0.0
 ```
+
+### Hub profile (`ci-hub-postgres`)
+
+The same harness measures the workload on the Postgres hub store (#1084):
+one tenant schema, with signing, approval, gates, leases, and receipts
+still enabled. The report adds `storage_bytes` for that tenant schema and a
+`database_load` line (transactions, rows read and written, blocks read and
+hit) taken from the database's statistics across both ticks. Resource
+budgets are the embedded profile's.
+
+`tenkaictl` does not open a hub store, so the hub profile runs as a live
+test against `TENKAI_POSTGRES_URL`, alone in its process because CPU and
+peak memory are read for the whole process:
+
+```bash
+TENKAI_POSTGRES_URL=postgresql://... \
+TENKAI_HUB_FLEET_ENVIRONMENTS=1000 \
+cargo test --locked -p tenkai-postgres --features postgres --lib -- \
+  --ignored --exact tests::live_hub_fleet::live_hub_fleet_measure --nocapture
+```
+
+`TENKAI_HUB_FLEET_ENVIRONMENTS` takes a multiple of five up to 1,000 and
+keeps the same posture mix; it defaults to 1,000. A run always enforces
+the resource budget. The weekly rollout-time job
+(`scripts/check-rollout-time.sh`) runs a 100-environment fleet on the CI
+PostgreSQL 17 service with `TENKAI_ROLLOUT_GATE=regression`, which also
+compares every tick to `perf/hub-fleet-baseline.json` for its fleet size:
+more than `regression_ratio` over the stored time fails, and so does a size
+the baseline does not list. The stored times are from that runner class.
+
+These numbers are measurement evidence for one runner class, not a support
+target and not a high-availability claim.
 
 Fairness under planted unhealthy/blocked targets (#301):
 
