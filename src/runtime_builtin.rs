@@ -1569,6 +1569,79 @@ impl BuiltinConfig {
             .filter(|command| !command.is_empty())?;
         Some((command, workdir))
     }
+
+    /// The executor and request a debug session on `instance` reads
+    /// (#1559): the release placed for `target`, checked against the
+    /// verified manifest as the health probe checks it. `Err` is the reason
+    /// the operator sees when the session cannot attach.
+    pub(crate) fn debug_target(
+        &self,
+        environment: &str,
+        instance: &str,
+        target: &crate::runtime_delivery::RuntimeDebugTarget,
+    ) -> std::result::Result<DebugTarget, String> {
+        let unplaced = || "this runtime has not placed the instance's deployed release".to_owned();
+        crate::ontology::validate_identifier("environment", environment)
+            .and_then(|()| crate::ontology::validate_identifier("product", &target.product))
+            .map_err(|_| unplaced())?;
+        if !is_hex_digest(&target.artifact_digest) || !is_hex_digest(&target.release_digest) {
+            return Err(unplaced());
+        }
+        let workdir = self
+            .work_root
+            .join(environment)
+            .join(&target.product)
+            .join(&target.artifact_digest);
+        let raw = std::fs::read_to_string(self.verified_manifest_path(
+            environment,
+            &target.product,
+            &target.release_digest,
+        ))
+        .map_err(|_| unplaced())?;
+        let placed = std::fs::read_to_string(self.verified_artifact_digest_path(
+            environment,
+            &target.product,
+            &target.release_digest,
+        ))
+        .map_err(|_| unplaced())?;
+        if !workdir.is_dir()
+            || crate::manifest::digest(&raw) != target.release_digest
+            || placed != target.artifact_digest
+        {
+            return Err(unplaced());
+        }
+        let manifest = crate::manifest::parse_raw(&raw).map_err(|_| unplaced())?;
+        if manifest.deploy.executor == Some(SoftwareExecutorKind::Host) {
+            return Err("host releases keep no running instance the runtime can read".into());
+        }
+        let executor = match self.executors.resolve(manifest.deploy.executor) {
+            Ok(Some(executor)) if !executor.debug_commands().is_empty() => executor,
+            Ok(_) => return Err(crate::debug_stream::UNSUPPORTED_MESSAGE.into()),
+            Err(error) => return Err(format!("{error:#}")),
+        };
+        let mut request = crate::software_executor::request_from_parts(
+            &manifest.product.name,
+            &manifest.product.version,
+            environment,
+            &workdir,
+            format!(
+                "tenkai:release:{}@{}",
+                manifest.product.name, manifest.product.version
+            ),
+        );
+        request.instance = instance.to_owned();
+        request.cluster_namespace = target.cluster_namespace.clone();
+        request.cluster_config_path = self.cluster_config.clone();
+        request.secret_dir_path = self.secret_dir.clone();
+        Ok(DebugTarget { executor, request })
+    }
+}
+
+/// What a debug session reads: the instance's executor and a request naming
+/// the instance, never one that applies anything.
+pub(crate) struct DebugTarget {
+    pub executor: Arc<dyn SoftwareExecutor>,
+    pub request: SoftwareApplyRequest,
 }
 
 #[derive(Debug)]
@@ -2542,6 +2615,108 @@ mod tests {
                 .local_health_probe(ENVIRONMENT, "api", &case.step.artifact_digest, &wrong)
                 .is_none()
         );
+    }
+
+    /// An adapter that offers one read command and runs nothing.
+    struct Reads;
+
+    impl crate::software_executor::SoftwareExecutor for Reads {
+        fn apply(&self, _: &crate::software_executor::SoftwareApplyRequest) -> Result<()> {
+            unreachable!("a debug target applies nothing")
+        }
+        fn remove(&self, _: &crate::software_executor::SoftwareApplyRequest) -> Result<()> {
+            unreachable!("a debug target removes nothing")
+        }
+        fn observe(
+            &self,
+            _: &crate::software_executor::SoftwareApplyRequest,
+        ) -> Result<crate::software_executor::SoftwareObserveStatus> {
+            unreachable!("a debug target observes nothing")
+        }
+        fn debug_commands(&self) -> &'static [&'static str] {
+            &["get"]
+        }
+    }
+
+    #[test]
+    fn a_debug_target_is_the_placed_release_and_its_reading_executor() {
+        let mut case = case("");
+        case.config
+            .verify(
+                case.release.clone(),
+                ENVIRONMENT,
+                &Expected::target(&case.step),
+            )
+            .unwrap();
+        let target = crate::runtime_delivery::RuntimeDebugTarget {
+            product: "api".into(),
+            artifact_digest: case.step.artifact_digest.clone(),
+            release_digest: case.step.release_digest.clone(),
+            cluster_namespace: "team".into(),
+        };
+        // The shell `deploy.install` path has no executor to read through.
+        let refused = case
+            .config
+            .debug_target(ENVIRONMENT, "api-a", &target)
+            .err();
+        assert_eq!(
+            refused.as_deref(),
+            Some(crate::debug_stream::UNSUPPORTED_MESSAGE)
+        );
+
+        case.config.executors = SoftwareExecutors::with_default(std::sync::Arc::new(Reads));
+        let found = case
+            .config
+            .debug_target(ENVIRONMENT, "api-a", &target)
+            .unwrap();
+        assert_eq!(found.executor.debug_commands(), ["get"]);
+        assert_eq!(found.request.instance_name(), "api-a");
+        assert_eq!(found.request.target_namespace(), "team");
+        assert_eq!(
+            found.request.workdir,
+            case.config
+                .work_root
+                .join(ENVIRONMENT)
+                .join("api")
+                .join(&case.step.artifact_digest)
+        );
+
+        let mut unplaced = target.clone();
+        unplaced.release_digest.replace_range(..2, "ff");
+        let mut escape = target.clone();
+        escape.product = "../escape".into();
+        for target in [unplaced, escape] {
+            let error = case
+                .config
+                .debug_target(ENVIRONMENT, "api-a", &target)
+                .err();
+            assert!(error.unwrap().contains("has not placed"));
+        }
+
+        let host = case
+            .release
+            .manifest
+            .replace("[deploy]\n", "[deploy]\nexecutor = \"host\"\n");
+        let mut host_target = target.clone();
+        host_target.release_digest = manifest::digest(&host);
+        case.config
+            .persist_verified_manifest(
+                ENVIRONMENT,
+                "api",
+                &host_target.release_digest,
+                &target.artifact_digest,
+                &host,
+            )
+            .unwrap();
+        let error = case
+            .config
+            .debug_target(ENVIRONMENT, "api-a", &host_target)
+            .err();
+        assert_eq!(
+            error.as_deref(),
+            Some("host releases keep no running instance the runtime can read")
+        );
+        let _ = std::fs::remove_dir_all(&case.root);
     }
 
     #[test]

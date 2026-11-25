@@ -115,7 +115,41 @@ impl HelmSoftwareExecutor {
     }
 }
 
+/// Helm's read commands: the release's status and history. Not `get values`
+/// or `get manifest`, which can carry secret material.
+const HELM_DEBUG_COMMANDS: &[&str] = &["status", "history"];
+
 impl SoftwareExecutor for HelmSoftwareExecutor {
+    fn debug_commands(&self) -> &'static [&'static str] {
+        HELM_DEBUG_COMMANDS
+    }
+
+    fn debug_access(&self, argv: &[String]) -> tenkai::debug_command::DebugAccess {
+        match argv {
+            [verb] if HELM_DEBUG_COMMANDS.contains(&verb.as_str()) => {
+                tenkai::debug_command::DebugAccess::Read
+            }
+            _ => tenkai::debug_command::DebugAccess::Write,
+        }
+    }
+
+    fn debug_read(
+        &self,
+        request: &SoftwareApplyRequest,
+        argv: &[String],
+    ) -> Result<tenkai::debug_command::DebugOutput> {
+        if self.debug_access(argv) != tenkai::debug_command::DebugAccess::Read {
+            bail!("only read commands run in a debug session");
+        }
+        validate_request(request)?;
+        let mut command = self.helm(request);
+        command
+            .arg(&argv[0])
+            .arg(request.instance_name())
+            .args(["--namespace", request.target_namespace()]);
+        tenkai::debug_command::run_capped(command)
+    }
+
     fn installed_identities(
         &self,
         target: &tenkai::software_executor::IdentityTarget<'_>,
@@ -485,6 +519,43 @@ mod tests {
             path.display()
         );
         let _ = std::fs::remove_file(&staging);
+    }
+
+    #[test]
+    fn debug_reads_run_status_and_history_only() {
+        use tenkai::debug_command::{DebugAccess, split_command};
+        let root = std::env::temp_dir().join(format!("tenkai-helm-debug-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = fake_helm_path(&root);
+        write_fake_helm(&script, "#!/bin/sh\necho \"$@\"\n");
+        let mut request = sample_request(&root.join("chart"));
+        request.instance = "api-a".into();
+        let executor = HelmSoftwareExecutor {
+            helm_binary: script,
+        };
+        for verb in ["status", "history"] {
+            let argv = split_command(verb).unwrap();
+            assert_eq!(executor.debug_access(&argv), DebugAccess::Read, "{verb}");
+            let ran = executor.debug_read(&request, &argv).unwrap();
+            assert_eq!(ran.exit_code, 0);
+            assert_eq!(
+                String::from_utf8(ran.output).unwrap(),
+                format!("{verb} api-a --namespace prod\n")
+            );
+        }
+        // Values and manifests can carry secrets; nothing else reads either.
+        for write in [
+            "get values",
+            "get manifest",
+            "status other",
+            "rollback 1",
+            "uninstall",
+        ] {
+            let argv = split_command(write).unwrap();
+            assert_eq!(executor.debug_access(&argv), DebugAccess::Write, "{write}");
+            assert!(executor.debug_read(&request, &argv).is_err(), "{write}");
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

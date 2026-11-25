@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::workload_stall::{Stall, StallClassifier, WorkloadEvidence};
+use tenkai::debug_command::ClusterQuery;
 
 use tenkai::software_executor::{
     LiveWorkload, PRE_PULL_LABEL, PrePullImage, PrePullReport, RolloutPhaseTimes,
@@ -209,6 +210,30 @@ pub trait ClusterApplyApi: Send + Sync {
         }
         Ok(workloads)
     }
+    /// The pods matching `selector` in `namespace`, at most
+    /// [`DEBUG_PODS`], for a read-only debug command (#1559). `None` when
+    /// this adapter cannot read them.
+    fn debug_pods(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        selector: &str,
+    ) -> Result<Option<Vec<k8s_openapi::api::core::v1::Pod>>> {
+        let _ = (cluster_config, namespace, selector);
+        Ok(None)
+    }
+    /// The last `tail` lines of `container` in pod `pod`.
+    fn debug_logs(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        pod: &str,
+        container: &str,
+        tail: u32,
+    ) -> Result<String> {
+        let _ = (cluster_config, namespace, pod, container, tail);
+        bail!("this cluster adapter cannot read logs")
+    }
 }
 
 impl<T: ClusterApplyApi + ?Sized> ClusterApplyApi for &T {
@@ -309,6 +334,26 @@ impl<T: ClusterApplyApi + ?Sized> ClusterApplyApi for &T {
     ) -> Result<Vec<tenkai::support_bundle::SupportWorkload>> {
         (**self).collect_support_workloads(cluster_config, namespace)
     }
+
+    fn debug_pods(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        selector: &str,
+    ) -> Result<Option<Vec<k8s_openapi::api::core::v1::Pod>>> {
+        (**self).debug_pods(cluster_config, namespace, selector)
+    }
+
+    fn debug_logs(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        pod: &str,
+        container: &str,
+        tail: u32,
+    ) -> Result<String> {
+        (**self).debug_logs(cluster_config, namespace, pod, container, tail)
+    }
 }
 
 #[cfg(test)]
@@ -317,6 +362,8 @@ pub struct MemoryClusterApi {
     objects: Mutex<BTreeMap<String, StoredObject>>,
     evidence: Mutex<BTreeMap<String, WorkloadEvidence>>,
     events: Mutex<BTreeMap<String, Vec<(String, i32)>>>,
+    /// Pods a debug read lists, by namespace and selector.
+    debug_pods: Mutex<BTreeMap<String, Vec<k8s_openapi::api::core::v1::Pod>>>,
 }
 
 #[cfg(test)]
@@ -395,6 +442,18 @@ impl MemoryClusterApi {
             .insert(object_key(namespace, kind, name), evidence);
     }
 
+    pub fn set_debug_pods(
+        &self,
+        namespace: &str,
+        selector: &str,
+        pods: Vec<k8s_openapi::api::core::v1::Pod>,
+    ) {
+        self.debug_pods
+            .lock()
+            .expect("pods mutex")
+            .insert(format!("{namespace}/{selector}"), pods);
+    }
+
     pub fn set_events(&self, namespace: &str, name: &str, kind: &str, events: Vec<(String, i32)>) {
         self.events
             .lock()
@@ -405,6 +464,33 @@ impl MemoryClusterApi {
 
 #[cfg(test)]
 impl ClusterApplyApi for MemoryClusterApi {
+    fn debug_pods(
+        &self,
+        _cluster_config: &Path,
+        namespace: &str,
+        selector: &str,
+    ) -> Result<Option<Vec<k8s_openapi::api::core::v1::Pod>>> {
+        Ok(Some(
+            self.debug_pods
+                .lock()
+                .expect("pods mutex")
+                .get(&format!("{namespace}/{selector}"))
+                .cloned()
+                .unwrap_or_default(),
+        ))
+    }
+
+    fn debug_logs(
+        &self,
+        _cluster_config: &Path,
+        namespace: &str,
+        pod: &str,
+        container: &str,
+        tail: u32,
+    ) -> Result<String> {
+        Ok(format!("{namespace}/{pod}/{container} tail={tail}\n"))
+    }
+
     fn apply_server_side(
         &self,
         _cluster_config: &Path,
@@ -632,11 +718,122 @@ impl ClusterApplyApi for MemoryClusterApi {
     }
 }
 
+/// The most pods one debug command reads.
+pub const DEBUG_PODS: u32 = 50;
+
+/// What `query` prints for `pods`. `describe` prints each pod's status, not
+/// its spec, whose environment can hold secret values.
+fn debug_query_output(
+    api: &impl ClusterApplyApi,
+    cluster_config: &Path,
+    namespace: &str,
+    pods: &[k8s_openapi::api::core::v1::Pod],
+    query: ClusterQuery,
+) -> Vec<u8> {
+    let mut output = String::new();
+    for pod in pods {
+        let name = pod.metadata.name.as_deref().unwrap_or_default();
+        let status = pod.status.as_ref();
+        match query {
+            ClusterQuery::Get => {
+                let phase = status.and_then(|status| status.phase.as_deref());
+                let containers = status
+                    .and_then(|status| status.container_statuses.as_deref())
+                    .unwrap_or_default();
+                let ready = containers
+                    .iter()
+                    .filter(|container| container.ready)
+                    .count();
+                let restarts: i32 = containers
+                    .iter()
+                    .map(|container| container.restart_count)
+                    .sum();
+                output.push_str(&format!(
+                    "{name}\t{}\t{ready}/{}\trestarts={restarts}\n",
+                    phase.unwrap_or("Unknown"),
+                    containers.len()
+                ));
+            }
+            ClusterQuery::Describe => {
+                output.push_str(&format!("==> {name} <==\n"));
+                let described = serde_json::to_string_pretty(&status).unwrap_or_default();
+                output.push_str(&described);
+                output.push('\n');
+            }
+            ClusterQuery::Logs { tail } => {
+                let containers = pod
+                    .spec
+                    .as_ref()
+                    .map(|spec| spec.containers.iter().map(|c| c.name.clone()).collect())
+                    .unwrap_or_else(Vec::new);
+                for container in containers {
+                    output.push_str(&format!("==> {name}/{container} <==\n"));
+                    match api.debug_logs(cluster_config, namespace, name, &container, tail) {
+                        Ok(logs) => output.push_str(&logs),
+                        Err(error) => output.push_str(&format!("[tenkai: {error:#}]\n")),
+                    }
+                }
+            }
+        }
+        if output.len() >= tenkai::debug_command::MAX_OUTPUT {
+            break;
+        }
+    }
+    let mut output = output.into_bytes();
+    output.truncate(tenkai::debug_command::MAX_OUTPUT);
+    output
+}
+
 /// Live cluster adapter. Builds a client from the environment-scoped file only.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LiveKubeApi;
 
 impl ClusterApplyApi for LiveKubeApi {
+    fn debug_pods(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        selector: &str,
+    ) -> Result<Option<Vec<k8s_openapi::api::core::v1::Pod>>> {
+        block_on(bounded(async {
+            let client = live_client(cluster_config).await?;
+            let pods = kube::Api::<k8s_openapi::api::core::v1::Pod>::namespaced(client, namespace)
+                .list(
+                    &kube::api::ListParams::default()
+                        .labels(selector)
+                        .limit(DEBUG_PODS),
+                )
+                .await
+                .with_context(|| format!("listing pods {selector} in {namespace}"))?;
+            Ok(Some(pods.items))
+        }))
+    }
+
+    fn debug_logs(
+        &self,
+        cluster_config: &Path,
+        namespace: &str,
+        pod: &str,
+        container: &str,
+        tail: u32,
+    ) -> Result<String> {
+        block_on(bounded(async {
+            let client = live_client(cluster_config).await?;
+            kube::Api::<k8s_openapi::api::core::v1::Pod>::namespaced(client, namespace)
+                .logs(
+                    pod,
+                    &kube::api::LogParams {
+                        container: Some(container.to_owned()),
+                        tail_lines: Some(i64::from(tail)),
+                        limit_bytes: Some(tenkai::debug_command::MAX_OUTPUT as i64),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .with_context(|| format!("reading the logs of {pod}/{container} in {namespace}"))
+        }))
+    }
+
     fn apply_server_side(
         &self,
         cluster_config: &Path,
@@ -1226,6 +1423,40 @@ pub(crate) fn apply_cluster_namespace_objects<A: ClusterApplyApi>(
 }
 
 impl<A: ClusterApplyApi> SoftwareExecutor for InProcessKubernetesExecutor<A> {
+    /// The cluster client reads only: the instance's labelled pods, their
+    /// status, and their logs. No exec, no write.
+    fn debug_commands(&self) -> &'static [&'static str] {
+        tenkai::debug_command::CLUSTER_COMMANDS
+    }
+
+    fn debug_access(&self, argv: &[String]) -> tenkai::debug_command::DebugAccess {
+        match ClusterQuery::parse(argv) {
+            Some(_) => tenkai::debug_command::DebugAccess::Read,
+            None => tenkai::debug_command::DebugAccess::Write,
+        }
+    }
+
+    fn debug_read(
+        &self,
+        request: &SoftwareApplyRequest,
+        argv: &[String],
+    ) -> Result<tenkai::debug_command::DebugOutput> {
+        let Some(query) = ClusterQuery::parse(argv) else {
+            bail!("only read commands run in a debug session");
+        };
+        let cluster_config = Self::require_cluster_config(request)?;
+        let namespace = request.target_namespace();
+        let selector = tenkai::software_executor::instance_selector(request);
+        let Some(pods) = self.api.debug_pods(cluster_config, namespace, &selector)? else {
+            bail!("this cluster adapter cannot list pods");
+        };
+        let output = debug_query_output(&self.api, cluster_config, namespace, &pods, query);
+        Ok(tenkai::debug_command::DebugOutput {
+            output,
+            exit_code: 0,
+        })
+    }
+
     /// The cluster is the target: without a readable cluster config file
     /// nothing can have been applied to it, whether the file is not there
     /// yet or the environment names none.
@@ -3196,6 +3427,66 @@ mod tests {
             identity: None,
             cluster_namespace: String::new(),
         }
+    }
+
+    #[test]
+    fn debug_reads_list_only_the_instance_pods_and_refuse_writes() {
+        use tenkai::debug_command::{DebugAccess, split_command};
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-ssa-debug-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let kubeconfig = write_deployment(&root, "1.0.0", 1);
+        let api = MemoryClusterApi::new();
+        let mut request = request(&root, &kubeconfig, "1.0.0");
+        request.instance = "edge-a".into();
+        let pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "edge-a-0"},
+            "spec": {"containers": [{"name": "app", "env": [{"name": "TOKEN", "value": "s3cret"}]}]},
+            "status": {"phase": "Running", "containerStatuses": [{
+                "name": "app", "ready": true, "restartCount": 2, "image": "app:1",
+                "imageID": "", "started": true
+            }]}
+        }))
+        .unwrap();
+        api.set_debug_pods(
+            "lab",
+            &tenkai::software_executor::instance_selector(&request),
+            vec![pod],
+        );
+        let executor = InProcessKubernetesExecutor::new(&api);
+        let read = |line: &str, request: &SoftwareApplyRequest| {
+            let argv = split_command(line).unwrap();
+            assert_eq!(executor.debug_access(&argv), DebugAccess::Read, "{line}");
+            let ran = executor.debug_read(request, &argv).unwrap();
+            assert_eq!(ran.exit_code, 0);
+            String::from_utf8(ran.output).unwrap()
+        };
+        assert_eq!(
+            read("get", &request),
+            "edge-a-0\tRunning\t1/1\trestarts=2\n"
+        );
+        let described = read("describe", &request);
+        assert!(described.contains("\"phase\": \"Running\""), "{described}");
+        assert!(
+            !described.contains("s3cret"),
+            "the spec stays out: {described}"
+        );
+        assert_eq!(
+            read("logs --tail 7", &request),
+            "==> edge-a-0/app <==\nlab/edge-a-0/app tail=7\n"
+        );
+        for write in ["delete pod edge-a-0", "exec edge-a-0 -- sh", "get secrets"] {
+            let argv = split_command(write).unwrap();
+            assert_eq!(executor.debug_access(&argv), DebugAccess::Write, "{write}");
+            assert!(executor.debug_read(&request, &argv).is_err(), "{write}");
+        }
+        // Another instance of the product lists none of these pods.
+        let mut other = request.clone();
+        other.instance = "edge-b".into();
+        assert_eq!(read("get", &other), "");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

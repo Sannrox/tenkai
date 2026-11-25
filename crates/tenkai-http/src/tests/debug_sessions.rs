@@ -440,6 +440,101 @@ async fn the_first_capable_runtime_owns_a_session_and_reports_its_close() {
     assert!(work.get("debug_sessions").is_none(), "{work}");
 }
 
+/// #1559: the owning runtime records each command before it runs, a write
+/// as refused, and its exit; only a read may start, and none once the
+/// session ends.
+#[tokio::test]
+async fn the_owning_runtime_records_each_command_in_the_session_audit() {
+    let fixture = fixture("commands").await;
+    let (app, store) = fixture.server().await;
+    let human = fixture.token(&["debuggers"], None);
+    let (code, opened) = call(
+        &app,
+        "POST",
+        "/v1/debug-sessions",
+        &human,
+        Some(open("stage", None)),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED, "{opened}");
+    let id = opened["id"].as_str().unwrap();
+    let (_, work) = runtime(&app, "GET", WORK, "first", true, None).await;
+    assert_eq!(work["debug_sessions"][0]["id"], id, "{work}");
+    // Nothing is deployed on stage yet, so there is no release to read.
+    assert!(work["debug_sessions"][0].get("target").is_none(), "{work}");
+
+    let commands = format!("/v1/runtime/environments/stage/debug-sessions/{id}/commands");
+    let record = |argv: &[&str], access: &str, outcome: &str| serde_json::json!({"argv": argv, "access": access, "outcome": outcome});
+    let started = record(&["logs", "--tail", "5"], "read", "started");
+    let (code, _) = runtime(
+        &app,
+        "POST",
+        &commands,
+        "second",
+        true,
+        Some(started.clone()),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT, "only the owner records");
+    let mut refused = record(&["delete", "pod", "x"], "write", "refused");
+    refused["reason"] = "a read session runs only read commands".into();
+    let mut completed = record(&["logs", "--tail", "5"], "read", "completed");
+    completed["exit_code"] = 0.into();
+    for body in [started.clone(), refused, completed] {
+        let (code, answer) = runtime(&app, "POST", &commands, "first", true, Some(body)).await;
+        assert_eq!(code, StatusCode::NO_CONTENT, "{answer}");
+    }
+    let write = record(&["delete", "pod", "x"], "write", "started");
+    let (code, _) = runtime(&app, "POST", &commands, "first", true, Some(write)).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "a write never starts");
+
+    let events = tenkai::storage::OperationalStore::audit_events(&*store).unwrap();
+    let of = |operation: &str| {
+        events
+            .iter()
+            .filter(|record| record.operation == operation)
+            .collect::<Vec<_>>()
+    };
+    let started = of("debug_session.command.started");
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].principal, "runtime:first");
+    assert_eq!(
+        started[0].resource,
+        format!(
+            "debug-session/{id} environment=stage instance=api access=read argv=[\"logs\",\"--tail\",\"5\"]"
+        )
+    );
+    let refused = of("debug_session.command.refused");
+    assert_eq!(refused.len(), 1);
+    assert!(
+        refused[0].resource.contains("access=write")
+            && refused[0]
+                .resource
+                .ends_with("reason=\"a read session runs only read commands\""),
+        "{}",
+        refused[0].resource
+    );
+    let completed = of("debug_session.command.completed");
+    assert_eq!(completed.len(), 1);
+    assert!(
+        completed[0].resource.ends_with(" exit=0"),
+        "{}",
+        completed[0].resource
+    );
+
+    let close = format!("/v1/runtime/environments/stage/debug-sessions/{id}/close");
+    let report = serde_json::json!({"closed_at": tenkai::now_millis()});
+    let (code, _) = runtime(&app, "POST", &close, "first", true, Some(report)).await;
+    assert_eq!(code, StatusCode::OK);
+    let late = record(&["get"], "read", "started");
+    let (code, _) = runtime(&app, "POST", &commands, "first", true, Some(late)).await;
+    assert_eq!(
+        code,
+        StatusCode::CONFLICT,
+        "no command starts after the end"
+    );
+}
+
 /// A runtime that ended a session at its bound while cut off reports it on
 /// reconnecting: the server records the session as already expired.
 #[tokio::test]

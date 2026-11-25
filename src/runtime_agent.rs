@@ -335,6 +335,10 @@ pub struct RuntimeClient {
     /// memory only: a restarted agent is a new instance that owns none, and
     /// the server ends a session nobody reports at its bound anyway.
     debug_sessions: std::sync::Arc<std::sync::Mutex<HeldDebugSessions>>,
+    /// Each listed debug session as of the last pull, for the instance and
+    /// deployed release it reads (#1559). Apart from `debug_sessions`
+    /// because stream tasks hold it.
+    debug_targets: DebugTargets,
     /// The host preflight config whose checks runner attestation carries.
     preflight: Option<PathBuf>,
     /// Local approval policy and trust roots, installed on this host
@@ -394,6 +398,7 @@ impl RuntimeClient {
             server_debug_sessions: Default::default(),
             server_debug_stream: Default::default(),
             debug_sessions: Default::default(),
+            debug_targets: Default::default(),
             preflight: None,
             local_policy: None,
         })
@@ -611,6 +616,14 @@ impl RuntimeClient {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .hold(&work.debug_sessions, crate::now_millis());
+        *self
+            .debug_targets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = work
+            .debug_sessions
+            .iter()
+            .map(|session| (session.id.clone(), session.clone()))
+            .collect();
         self.stream_debug_sessions();
         // Again after a pull: the pull is what tells this agent the server
         // admits close reports, so one held back while it was unreachable
@@ -1380,6 +1393,13 @@ impl RuntimeClient {
                 ),
                 token: self.token.clone(),
                 instance: self.instance_id.clone(),
+                environment: self.environment.clone(),
+                session: id.clone(),
+                targets: self.debug_targets.clone(),
+                builtin: match &self.executor {
+                    StepExecutor::Builtin(config) => Some(config.clone()),
+                    StepExecutor::Program(_) => None,
+                },
             };
             let stream = tokio::spawn(end.run()).abort_handle();
             held.streams.insert(id, stream);
@@ -1449,6 +1469,13 @@ impl RuntimeClient {
 }
 
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Each listed debug session, by id.
+type DebugTargets = std::sync::Arc<
+    std::sync::Mutex<
+        std::collections::BTreeMap<String, crate::runtime_delivery::RuntimeDebugSession>,
+    >,
+>;
 
 /// The debug sessions one runtime instance holds (#1557).
 #[derive(Debug, Default)]

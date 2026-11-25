@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
+use tenkai::debug_command::ClusterQuery;
 
 use tenkai::software_executor::{
     LiveWorkload, PRE_PULL_LABEL, PrePullImage, PrePullReport, SoftwareApplyRequest,
@@ -17,6 +18,10 @@ use tenkai::software_executor::{
     materialize_kubernetes_manifests, pre_pull_job_name, run_captured_command,
     sanitize_diagnostic_text, substitute_instance_placeholder, validate_request,
 };
+
+/// The `describe` debug read: each pod's name and status, never its spec.
+const DESCRIBE_STATUS: &str =
+    "jsonpath={range .items[*]}==> {.metadata.name} <=={\"\\n\"}{.status}{\"\\n\"}{end}";
 
 /// Native Kubernetes apply via `kubectl` (plain manifests, not Helm charts).
 ///
@@ -249,6 +254,50 @@ fn kubectl_manifest_images(
 }
 
 impl SoftwareExecutor for KubernetesSoftwareExecutor {
+    /// `kubectl` reads only: listing, describing and the logs of the
+    /// instance's labelled pods in its namespace. No exec, no write verb.
+    fn debug_commands(&self) -> &'static [&'static str] {
+        tenkai::debug_command::CLUSTER_COMMANDS
+    }
+
+    fn debug_access(&self, argv: &[String]) -> tenkai::debug_command::DebugAccess {
+        match ClusterQuery::parse(argv) {
+            Some(_) => tenkai::debug_command::DebugAccess::Read,
+            None => tenkai::debug_command::DebugAccess::Write,
+        }
+    }
+
+    fn debug_read(
+        &self,
+        request: &SoftwareApplyRequest,
+        argv: &[String],
+    ) -> Result<tenkai::debug_command::DebugOutput> {
+        let Some(query) = ClusterQuery::parse(argv) else {
+            bail!("only read commands run in a debug session");
+        };
+        let mut command = self.kubectl(request);
+        let selector = instance_selector(request);
+        let namespace = request.target_namespace();
+        match query {
+            ClusterQuery::Get => command.args([
+                "get",
+                "pods,deployments,statefulsets,daemonsets,jobs,services",
+                "--output",
+                "wide",
+            ]),
+            // Status only: `kubectl describe` prints the spec, and with it
+            // literal env values, commands, and annotations.
+            ClusterQuery::Describe => command.args(["get", "pods", "--output", DESCRIBE_STATUS]),
+            ClusterQuery::Logs { tail } => command
+                .args(["logs", "--all-containers", "--prefix", "--tail"])
+                .arg(tail.to_string()),
+        };
+        command
+            .args(["--namespace", namespace, "--selector"])
+            .arg(selector);
+        tenkai::debug_command::run_capped(command)
+    }
+
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
         let materialized = materialize_kubernetes_manifests(request)?;
@@ -1091,6 +1140,55 @@ mod tests {
             calls.lines().all(|call| call.starts_with(&expected)),
             "{calls}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn debug_reads_run_scoped_kubectl_reads_and_refuse_writes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use tenkai::debug_command::{DebugAccess, split_command};
+        let root = std::env::temp_dir().join(format!("tenkai-k8s-debug-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("fake-kubectl");
+        std::fs::write(&script, "#!/bin/sh\necho \"$@\"\nexit 4\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut request = sample_request(&root.join("release"));
+        request.instance = "api-a".into();
+        request.cluster_namespace = "team".into();
+        request.cluster_config_path = Some(root.join("cluster.yaml"));
+        let executor = KubernetesSoftwareExecutor {
+            kubectl_binary: script,
+        };
+        let scope = "--namespace team --selector tenkai.product=api,tenkai.instance=api-a";
+        let kubeconfig = format!("--kubeconfig {}", root.join("cluster.yaml").display());
+        let describe = format!("get pods --output {DESCRIBE_STATUS}");
+        for (line, verb) in [
+            (
+                "get",
+                "get pods,deployments,statefulsets,daemonsets,jobs,services --output wide",
+            ),
+            ("describe", describe.as_str()),
+            ("logs --tail 9", "logs --all-containers --prefix --tail 9"),
+        ] {
+            let argv = split_command(line).unwrap();
+            assert_eq!(executor.debug_access(&argv), DebugAccess::Read, "{line}");
+            let ran = executor.debug_read(&request, &argv).unwrap();
+            assert_eq!(ran.exit_code, 4);
+            assert_eq!(
+                String::from_utf8(ran.output).unwrap(),
+                format!("{kubeconfig} {verb} {scope}\n")
+            );
+        }
+        for write in [
+            "delete pods --all",
+            "get secrets",
+            "logs -f",
+            "exec x -- sh",
+        ] {
+            let argv = split_command(write).unwrap();
+            assert_eq!(executor.debug_access(&argv), DebugAccess::Write, "{write}");
+            assert!(executor.debug_read(&request, &argv).is_err(), "{write}");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

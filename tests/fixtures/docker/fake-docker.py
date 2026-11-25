@@ -53,6 +53,8 @@ def main() -> int:
         return handle_rename(state, state_path, rest)
     if command == "ps":
         return handle_ps(state, rest)
+    if command == "logs":
+        return handle_logs(state, rest)
     if command == "image":
         return handle_image(state, rest)
     if command == "pull":
@@ -439,6 +441,16 @@ def handle_ps(state: dict, args: list[str]) -> int:
                 sys.stdout.write(name + "\n")
             else:
                 sys.stdout.write(name + "\n")
+    return 0
+
+
+def handle_logs(state: dict, args: list[str]) -> int:
+    take_flag(args, "--tail")
+    name = args[-1] if args else ""
+    if name not in state["containers"]:
+        sys.stderr.write(f"Error: No such container: {name}\n")
+        return 1
+    sys.stdout.write(f"log line of {name}\n")
     return 0
 
 

@@ -356,6 +356,31 @@ pub(super) async fn runtime_debug_stream_error(
     }
 }
 
+/// The holding runtime records one debug command before and after running
+/// it (#1559). `204` once audited.
+pub(super) async fn runtime_debug_command(
+    State(state): State<Arc<AppState>>,
+    Path((environment, session)): Path<(String, String)>,
+    headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
+    Json(command): Json<tenkai::runtime_delivery::RuntimeDebugCommand>,
+) -> Response {
+    match state
+        .runtime_delivery
+        .record_debug_command(
+            bearer(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
+            &environment,
+            &session,
+            &command,
+        )
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => runtime_delivery_error(error),
+    }
+}
+
 /// The calling instance, the agent's version when sent (#673), and the
 /// connection's verified client certificate (#674).
 pub(super) fn runtime_caller<'a>(
