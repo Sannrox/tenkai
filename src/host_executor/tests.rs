@@ -473,3 +473,57 @@ fn sample_started(instance: &str) -> crate::host_apply::state::HostApplyStarted 
         image_digest: None,
     }
 }
+
+/// #1559: a host debug session reads the applier's record and the journal
+/// of the product's last step unit, and nothing else.
+#[test]
+fn host_debug_reads_the_record_and_the_last_step_journal() {
+    use crate::debug_command::split_command;
+    let dirs = Dirs::new("debug");
+    let argv = |line: &str| split_command(line).unwrap();
+    assert_eq!(
+        HostDebugQuery::parse(&argv("status")),
+        Some(HostDebugQuery::Status)
+    );
+    assert_eq!(
+        HostDebugQuery::parse(&argv("logs --tail 4")),
+        Some(HostDebugQuery::Logs { tail: 4 })
+    );
+    for write in ["start x", "status --all", "logs -f", "cat /etc/shadow"] {
+        assert_eq!(HostDebugQuery::parse(&argv(write)), None, "{write}");
+    }
+
+    let status = dirs
+        .executor
+        .debug_read("edge", "cluster", HostDebugQuery::Status)
+        .unwrap();
+    let shown: AppliedStateRecord = serde_json::from_slice(&status.output).unwrap();
+    assert_eq!(shown, AppliedStateRecord::empty("edge", "cluster"));
+    let logs = dirs
+        .executor
+        .debug_read("edge", "cluster", HostDebugQuery::Logs { tail: 4 })
+        .unwrap();
+    assert_eq!(logs.output, b"no host step has run for this product\n");
+
+    let journal = journal_command(&"a".repeat(64), 4);
+    let args: Vec<_> = journal
+        .get_args()
+        .map(|arg| arg.to_str().unwrap())
+        .collect();
+    assert_eq!(
+        args,
+        [
+            "--no-pager",
+            "--output",
+            "short-iso",
+            "--lines",
+            "4",
+            "--unit",
+            &unit_name(&"a".repeat(64)),
+        ]
+    );
+    assert!(
+        journal.get_envs().all(|(key, _)| key == "PATH"),
+        "only PATH reaches journalctl"
+    );
+}

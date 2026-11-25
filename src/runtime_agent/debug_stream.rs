@@ -154,7 +154,7 @@ impl StreamEnd {
                         let usage = format!(
                             "read-only debug session on {}; commands: {}\r\n",
                             attached.request.instance,
-                            attached.executor.debug_commands().join(", ")
+                            attached.reader.commands().join(", ")
                         );
                         if stream.send(Message::binary(usage)).await.is_err() {
                             return None;
@@ -231,7 +231,7 @@ impl StreamEnd {
                 Ok(()) => String::new(),
                 Err(error) => format!(" (recording the refusal failed: {error:#})"),
             };
-            let read = target.executor.debug_commands().join(", ");
+            let read = target.reader.commands().join(", ");
             let text = format!("refused: {reason}{note}; read commands: {read}\r\n");
             (text.into_bytes(), REFUSED_EXIT)
         };
@@ -244,7 +244,7 @@ impl StreamEnd {
                 return refuse(vec![kept], DebugAccess::Write, format!("{error:#}")).await;
             }
         };
-        let access = target.executor.debug_access(&argv);
+        let access = target.reader.access(&argv);
         if access == DebugAccess::Write {
             return refuse(
                 argv,
@@ -267,11 +267,10 @@ impl StreamEnd {
                 format!("not run: the session audit did not record the command: {error:#}\r\n");
             return (text.into_bytes(), REFUSED_EXIT);
         }
-        let executor = target.executor.clone();
+        let reader = target.reader.clone();
         let request = target.request.clone();
         let run_argv = argv.clone();
-        let ran =
-            tokio::task::spawn_blocking(move || executor.debug_read(&request, &run_argv)).await;
+        let ran = tokio::task::spawn_blocking(move || reader.read(&request, &run_argv)).await;
         let DebugOutput { output, exit_code } = match ran {
             Ok(Ok(output)) => output,
             Ok(Err(error)) => DebugOutput {
@@ -448,7 +447,7 @@ mod tests {
             crate::software_executor::request_from_parts("api", "1.0.0", "prod", ".", "r");
         request.instance = "api-a".into();
         let target = DebugTarget {
-            executor: counts.clone(),
+            reader: crate::debug_command::DebugReader::Executor(counts.clone()),
             request,
         };
         let outcomes = |records: &Mutex<Vec<serde_json::Value>>| {

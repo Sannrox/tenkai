@@ -153,6 +153,54 @@ impl ClusterQuery {
     }
 }
 
+/// What a debug session reads through: an executor's own reads, or the host
+/// executor's, which reads the applier's records rather than a workload.
+#[derive(Clone)]
+pub enum DebugReader {
+    Executor(std::sync::Arc<dyn crate::software_executor::SoftwareExecutor>),
+    Host(std::sync::Arc<crate::host_executor::HostExecutor>),
+}
+
+impl DebugReader {
+    /// Usage lines of the read commands; empty when there are none.
+    pub fn commands(&self) -> &'static [&'static str] {
+        match self {
+            Self::Executor(executor) => executor.debug_commands(),
+            Self::Host(_) => crate::host_executor::HOST_DEBUG_COMMANDS,
+        }
+    }
+
+    /// Whether `argv` only reads; anything not exactly a read is a write.
+    pub fn access(&self, argv: &[String]) -> DebugAccess {
+        let read = match self {
+            Self::Executor(executor) => return executor.debug_access(argv),
+            Self::Host(_) => crate::host_executor::HostDebugQuery::parse(argv).is_some(),
+        };
+        if read {
+            DebugAccess::Read
+        } else {
+            DebugAccess::Write
+        }
+    }
+
+    /// Run read `argv` against `request`'s instance.
+    pub fn read(
+        &self,
+        request: &crate::software_executor::SoftwareApplyRequest,
+        argv: &[String],
+    ) -> Result<DebugOutput> {
+        match self {
+            Self::Executor(executor) => executor.debug_read(request, argv),
+            Self::Host(host) => {
+                let Some(query) = crate::host_executor::HostDebugQuery::parse(argv) else {
+                    bail!("only read commands run in a debug session");
+                };
+                host.debug_read(&request.environment, &request.product, query)
+            }
+        }
+    }
+}
+
 /// Run `command` with no stdin, stdout and stderr together, capped at
 /// [`MAX_OUTPUT`] and killed after [`COMMAND_TIMEOUT`].
 pub fn run_capped(mut command: Command) -> Result<DebugOutput> {

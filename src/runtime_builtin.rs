@@ -17,6 +17,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
 
+use crate::debug_command::DebugReader;
 use crate::fenced_mutation::{MutationCommand, MutationFence};
 use crate::host_executor::step::{HOST_NOT_RESTORED, HostStepEnd, SpooledRelease};
 use crate::manifest::{self, Manifest};
@@ -1611,13 +1612,20 @@ impl BuiltinConfig {
             return Err(unplaced());
         }
         let manifest = crate::manifest::parse_raw(&raw).map_err(|_| unplaced())?;
-        if manifest.deploy.executor == Some(SoftwareExecutorKind::Host) {
-            return Err("host releases keep no running instance the runtime can read".into());
-        }
-        let executor = match self.executors.resolve(manifest.deploy.executor) {
-            Ok(Some(executor)) if !executor.debug_commands().is_empty() => executor,
-            Ok(_) => return Err(crate::debug_stream::UNSUPPORTED_MESSAGE.into()),
-            Err(error) => return Err(format!("{error:#}")),
+        let reader = if manifest.deploy.executor == Some(SoftwareExecutorKind::Host) {
+            let host = self
+                .executors
+                .host()
+                .map_err(|error| format!("{error:#}"))?;
+            DebugReader::Host(host.clone())
+        } else {
+            match self.executors.resolve(manifest.deploy.executor) {
+                Ok(Some(executor)) if !executor.debug_commands().is_empty() => {
+                    DebugReader::Executor(executor)
+                }
+                Ok(_) => return Err(crate::debug_stream::UNSUPPORTED_MESSAGE.into()),
+                Err(error) => return Err(format!("{error:#}")),
+            }
         };
         let mut request = crate::software_executor::request_from_parts(
             &manifest.product.name,
@@ -1633,14 +1641,14 @@ impl BuiltinConfig {
         request.cluster_namespace = target.cluster_namespace.clone();
         request.cluster_config_path = self.cluster_config.clone();
         request.secret_dir_path = self.secret_dir.clone();
-        Ok(DebugTarget { executor, request })
+        Ok(DebugTarget { reader, request })
     }
 }
 
-/// What a debug session reads: the instance's executor and a request naming
+/// What a debug session reads: the instance's reader and a request naming
 /// the instance, never one that applies anything.
 pub(crate) struct DebugTarget {
-    pub executor: Arc<dyn SoftwareExecutor>,
+    pub reader: DebugReader,
     pub request: SoftwareApplyRequest,
 }
 
@@ -2669,7 +2677,7 @@ mod tests {
             .config
             .debug_target(ENVIRONMENT, "api-a", &target)
             .unwrap();
-        assert_eq!(found.executor.debug_commands(), ["get"]);
+        assert_eq!(found.reader.commands(), ["get"]);
         assert_eq!(found.request.instance_name(), "api-a");
         assert_eq!(found.request.target_namespace(), "team");
         assert_eq!(
@@ -2712,9 +2720,25 @@ mod tests {
             .config
             .debug_target(ENVIRONMENT, "api-a", &host_target)
             .err();
+        assert!(
+            error.unwrap().contains("host executor is not available"),
+            "a host release reads only through a configured host executor"
+        );
+        let spool = case.root.join("spool");
+        std::fs::create_dir_all(&spool).unwrap();
+        let host = std::sync::Arc::new(crate::host_executor::HostExecutor::new(
+            spool,
+            case.root.join("host-state"),
+            std::sync::Arc::new(crate::host_executor::Systemctl),
+        ));
+        case.config.executors = SoftwareExecutors::default().with_host(host);
+        let found = case
+            .config
+            .debug_target(ENVIRONMENT, "api-a", &host_target)
+            .unwrap();
         assert_eq!(
-            error.as_deref(),
-            Some("host releases keep no running instance the runtime can read")
+            found.reader.commands(),
+            crate::host_executor::HOST_DEBUG_COMMANDS
         );
         let _ = std::fs::remove_dir_all(&case.root);
     }

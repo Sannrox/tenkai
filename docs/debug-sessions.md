@@ -111,7 +111,7 @@ words. Each command answers with its output as binary frames (stdout and
 stderr together, at most 1 MiB, killed after 30 seconds) and then `exit`.
 
 Every command runs through the instance's executor with that executor's own
-credentials, scoped to the instance, never to the namespace or host:
+credentials, scoped to the instance and nothing beyond it:
 
 | Executor | Read commands | Scope |
 | --- | --- | --- |
@@ -119,6 +119,7 @@ credentials, scoped to the instance, never to the namespace or host:
 | `kubernetes-inprocess` | `get`, `describe`, `logs [--tail N]` | as above, at most 50 pods |
 | `helm` | `status`, `history` | the instance's release in its namespace |
 | `docker` | `ps`, `logs [--tail N]` | containers labelled with the environment, product, and instance |
+| `host` | `status`, `logs [--tail N]` | the host applier's applied-state record of the product, and the journal of the `tenkai-host-apply@` unit that ran its last step |
 
 `--tail` is 1 to 5000 and defaults to 200. Commands that can print secrets
 are not offered: Helm values and manifests, `docker inspect`, and the pod
@@ -132,8 +133,10 @@ run and answers exit code 126. The runtime answers `unsupported` with a
 reason when it runs operator programs instead of built-in executors, when
 the instance has no deployed release or the runtime has not placed it, when
 the executor offers no read commands (shell `deploy.install` releases, the
-Apple `container` engine), and for host releases, which keep no running
-instance it can read.
+Apple `container` engine), and for a host release when the runtime has no
+host executor configured. Host `logs` reads the journal as the runtime's
+user, so that user needs journal access (for example the `systemd-journal`
+group); without it the command prints journalctl's refusal.
 
 ## Audit
 
