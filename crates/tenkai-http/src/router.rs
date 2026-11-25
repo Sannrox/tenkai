@@ -13,6 +13,7 @@ use tenkai::tenant_store::TenantOperationalStore;
 use super::auth::{import_development_fixture, reset_development_fixture};
 use super::config::ServerConfig;
 use super::debug_sessions;
+use super::debug_stream::{self, DebugRelay};
 use super::environment_config::{
     close_preview, configure_approval_policy, configure_bindings, configure_cluster_namespace,
     configure_cluster_namespace_bindings, configure_cluster_namespace_delete,
@@ -65,9 +66,9 @@ use super::runtime::{
     create_runtime_enrollment, inspect_runtime_runner, list_environment_recipients,
     list_runtime_runners, revoke_runtime_credential, revoke_runtime_credential_legacy,
     runtime_certificate, runtime_certificates, runtime_complete, runtime_debug_session_close,
-    runtime_enroll, runtime_health, runtime_heartbeat, runtime_host_records, runtime_inventory,
-    runtime_issuer_candidate, runtime_progress, runtime_release, runtime_self_release,
-    runtime_work,
+    runtime_debug_stream_error, runtime_enroll, runtime_health, runtime_heartbeat,
+    runtime_host_records, runtime_inventory, runtime_issuer_candidate, runtime_progress,
+    runtime_release, runtime_self_release, runtime_work,
 };
 
 pub(super) struct AppState {
@@ -77,6 +78,8 @@ pub(super) struct AppState {
     pub(super) tenant_store: Option<Arc<dyn TenantOperationalStore>>,
     pub(super) management: Arc<ManagementOperations>,
     pub(super) runtime_delivery: Arc<RuntimeDeliveryOperations>,
+    /// Debug session terminal streams connected to this replica (#1558).
+    pub(super) debug_relay: DebugRelay,
 }
 
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
@@ -600,6 +603,14 @@ pub fn router(
             post(runtime_debug_session_close),
         )
         .route(
+            "/v1/runtime/environments/{environment}/debug-sessions/{session}/stream",
+            get(debug_stream::runtime_stream),
+        )
+        .route(
+            "/v1/runtime/environments/{environment}/debug-sessions/{session}/stream-error",
+            post(runtime_debug_stream_error),
+        )
+        .route(
             "/v1/runtime/environments/{environment}/identity-issuer/candidate",
             post(runtime_issuer_candidate),
         )
@@ -648,6 +659,10 @@ pub fn router(
         .route(
             "/v1/debug-sessions/{session}/close",
             post(debug_sessions::close_debug_session),
+        )
+        .route(
+            "/v1/debug-sessions/{session}/stream",
+            get(debug_stream::operator_stream),
         );
     if metrics_enabled {
         router = router.route("/metrics", get(openmetrics));
@@ -672,6 +687,7 @@ pub fn router(
             reconciler,
             store,
             runtime_delivery,
+            debug_relay: DebugRelay::default(),
         })))
 }
 

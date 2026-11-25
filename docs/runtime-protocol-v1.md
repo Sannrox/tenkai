@@ -441,6 +441,21 @@ ends a session nobody reports at its bound. A server that predates this
 names no `debug_session` in `x-tenkai-server-capabilities`, and the runtime
 keeps its reports until one does.
 
+A server that relays terminal streams names `debug_stream` in
+`x-tenkai-server-capabilities`. A runtime then keeps one WebSocket open per
+held session at `GET /v1/runtime/environments/{environment}/debug-sessions/{session}/stream`,
+with subprotocol `tenkai.debug-stream.v1` and its usual credentials; the
+frames and close reasons are in [debug sessions](debug-sessions.md#stream).
+It connects again two seconds after a stream ends, unless the relay closed
+it with `bound_reached`, `session_closed`, or `replaced`,
+and stops when the session ends on its own clock. A `409` upgrade answer
+means the instance no longer holds the session. Any other answer that is
+not a `tenkai.debug-stream.v1` WebSocket is reported once by POSTing
+`{"reason": ...}` to `.../debug-sessions/{session}/stream-error` (`204`),
+which the session shows as `runtime.stream_error`, and the runtime does not
+retry the stream. The server answers the report as it answers a close: an
+instance that does not own the session gets `409`.
+
 ### OS image reboots
 
 A plan that updates the host OS image runs `stage`, `reboot`, `verify` and

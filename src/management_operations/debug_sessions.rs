@@ -327,6 +327,44 @@ impl ManagementOperations {
         Ok(session)
     }
 
+    /// Admit an operator's terminal stream on session `id` (#1558): a human
+    /// holding `debug`, in scope, on a session still open. The relay calls
+    /// it at the upgrade (`first`, which audits the attach) and again on
+    /// every recheck, so a revoked grant or an ended session ends the stream.
+    /// An ended session is [`ManagementError::Conflict`].
+    pub async fn authorize_debug_stream(
+        &self,
+        credential: &CredentialMaterial,
+        id: &str,
+        first: bool,
+    ) -> Result<DebugSession, ManagementError> {
+        let context = self.authenticate(credential)?;
+        self.refuse_agent(&context, "debug_session.stream")?;
+        if !context.has_delivery_capability(DeliveryCapability::Debug) {
+            return Err(ManagementError::Forbidden(
+                "insufficient delivery capability".into(),
+            ));
+        }
+        let mut ctx = self.catalog_ctx(&context)?;
+        let session = self
+            .scoped_debug_session(credential, &context, &mut ctx, id)
+            .await?;
+        let session = self.settle_debug_session(&mut ctx, session).await?;
+        if session.state != DebugSessionState::Open {
+            return Err(ManagementError::Conflict(
+                "the debug session has ended".into(),
+            ));
+        }
+        if first {
+            self.audit_debug(
+                &context.audit_principal(),
+                "debug_session.stream.attached",
+                format!("debug-session/{} side=operator", session.id),
+            )?;
+        }
+        Ok(session)
+    }
+
     /// Load session `id` and confine it to the caller's environment grant.
     /// Not found and out of scope answer alike.
     async fn scoped_debug_session(

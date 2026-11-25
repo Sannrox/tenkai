@@ -16,6 +16,7 @@ fn oidc_config() -> OidcConfig {
         r#"
 issuer = "{ISSUER}"
 audience = "tenkai"
+clock_skew_secs = 0
 [grants]
 claim = "groups"
 [[grants.rules]]
@@ -78,10 +79,15 @@ impl Fixture {
     }
 
     fn token(&self, groups: &[&str], act: Option<&str>) -> String {
+        self.token_for(groups, act, 300)
+    }
+
+    /// A token that expires `ttl_secs` from now.
+    fn token_for(&self, groups: &[&str], act: Option<&str>, ttl_secs: i64) -> String {
         let now = tenkai::assertion_verifier::now_unix_secs();
         let mut claims = serde_json::json!({
             "iss": ISSUER, "sub": "user-1", "aud": "tenkai",
-            "exp": now + 300, "groups": groups,
+            "exp": now + ttl_secs, "groups": groups,
         });
         if let Some(act) = act {
             claims["act"] = act.into();
@@ -471,4 +477,313 @@ async fn a_close_reported_after_the_bound_records_the_session_expired() {
     // The runtime's own close time, not when the report arrived.
     assert_eq!(expired["runtime"]["closed_at"], opened["not_after"]);
     assert_eq!(audited(&store, "debug_session.runtime_close.completed"), 1);
+}
+
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+use tokio_tungstenite::tungstenite::Message;
+
+/// Serve `app` on a loopback port; the router clone keeps sharing its relay.
+async fn serve(app: &Router) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = app.clone();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+/// Open a stream WebSocket at `path`; a runtime end names `instance`.
+async fn connect(
+    addr: std::net::SocketAddr,
+    path: &str,
+    bearer: &str,
+    instance: Option<&str>,
+) -> Result<Ws, tokio_tungstenite::tungstenite::Error> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+    let mut request = format!("ws://{addr}{path}").into_client_request().unwrap();
+    let headers = request.headers_mut();
+    headers.insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+    headers.insert(
+        "sec-websocket-protocol",
+        tenkai::debug_stream::STREAM_PROTOCOL.parse().unwrap(),
+    );
+    if let Some(instance) = instance {
+        headers.insert("x-tenkai-runtime-instance", instance.parse().unwrap());
+    }
+    tokio_tungstenite::connect_async(request)
+        .await
+        .map(|(ws, _)| ws)
+}
+
+/// The next data frame, within ten seconds.
+async fn next(ws: &mut Ws) -> Message {
+    use futures_util::StreamExt as _;
+    loop {
+        let message = tokio::time::timeout(std::time::Duration::from_secs(10), ws.next())
+            .await
+            .expect("a frame within ten seconds")
+            .expect("the stream is open")
+            .unwrap();
+        if !matches!(message, Message::Ping(_) | Message::Pong(_)) {
+            return message;
+        }
+    }
+}
+
+/// The next frame as a control message.
+async fn control(ws: &mut Ws) -> serde_json::Value {
+    match next(ws).await {
+        Message::Text(text) => serde_json::from_str(&text).unwrap(),
+        other => panic!("expected a control frame, got {other:?}"),
+    }
+}
+
+/// A session on `stage` owned by runtime instance `first`, with both ends
+/// attached.
+async fn attached(
+    fixture: &Fixture,
+    app: &Router,
+    addr: std::net::SocketAddr,
+    operator: &str,
+    duration_ms: Option<i64>,
+) -> (String, Ws, Ws) {
+    let human = fixture.token(&["debuggers"], None);
+    let (code, opened) = call(
+        app,
+        "POST",
+        "/v1/debug-sessions",
+        &human,
+        Some(open("stage", duration_ms)),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED, "{opened}");
+    let id = opened["id"].as_str().unwrap().to_owned();
+    let (_, work) = runtime(app, "GET", WORK, "first", true, None).await;
+    assert_eq!(work["debug_sessions"][0]["id"], id.as_str(), "{work}");
+    let mut runtime_end = connect(
+        addr,
+        &format!("/v1/runtime/environments/stage/debug-sessions/{id}/stream"),
+        "runtime-secret",
+        Some("first"),
+    )
+    .await
+    .unwrap();
+    let mut operator_end = connect(
+        addr,
+        &format!("/v1/debug-sessions/{id}/stream"),
+        operator,
+        None,
+    )
+    .await
+    .unwrap();
+    for end in [&mut runtime_end, &mut operator_end] {
+        assert_eq!(control(end).await["type"], "attached");
+    }
+    (id, operator_end, runtime_end)
+}
+
+/// #1558: frames pass both ways unchanged, the store keeps none of them,
+/// and a side that closes ends the other with the reason.
+#[tokio::test]
+async fn the_relay_passes_frames_both_ways_and_stores_none() {
+    use futures_util::SinkExt as _;
+    let fixture = fixture("stream").await;
+    let (app, store) = fixture.server().await;
+    let addr = serve(&app).await;
+    let human = fixture.token(&["debuggers"], None);
+    let (_, mut operator, mut runtime_end) = attached(&fixture, &app, addr, &human, None).await;
+    assert_eq!(audited(&store, "debug_session.stream.attached"), 2);
+
+    let marker = b"terminal-bytes-7f3a9c".to_vec();
+    operator
+        .send(Message::Binary(marker.clone().into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        next(&mut runtime_end).await,
+        Message::Binary(marker.clone().into())
+    );
+    let resize = r#"{"type":"resize","cols":120,"rows":40}"#;
+    operator.send(Message::text(resize)).await.unwrap();
+    assert_eq!(next(&mut runtime_end).await, Message::text(resize));
+    let output = b"\x1b[1moutput-5e2b\x1b[0m\r\n".to_vec();
+    runtime_end
+        .send(Message::Binary(output.clone().into()))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut operator).await, Message::Binary(output.into()));
+    // Frames sent just before a close still arrive ahead of it.
+    let exit = r#"{"type":"exit","code":3}"#;
+    runtime_end.send(Message::text(exit)).await.unwrap();
+    runtime_end
+        .send(Message::text(r#"{"type":"close","reason":"peer_closed"}"#))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut operator).await, Message::text(exit));
+    assert_eq!(control(&mut operator).await["reason"], "peer_closed");
+
+    let mut dirs = vec![fixture.root.clone()];
+    let mut files = Vec::new();
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    assert!(files.iter().any(|file| file.ends_with("tenkai.db")));
+    for file in files {
+        let bytes = std::fs::read(file).unwrap();
+        for payload in [&marker[..], b"output-5e2b"] {
+            assert!(
+                !bytes.windows(payload.len()).any(|window| window == payload),
+                "a frame payload reached the store"
+            );
+        }
+    }
+}
+
+/// #1558: the bound, a management close, and an expired operator grant each
+/// end both ends with the reason.
+#[tokio::test]
+async fn each_end_is_told_why_the_stream_ended() {
+    let fixture = fixture("stream-ends").await;
+    let (app, _) = fixture.server().await;
+    let addr = serve(&app).await;
+    let human = fixture.token(&["debuggers"], None);
+
+    let (_, mut operator, mut runtime_end) =
+        attached(&fixture, &app, addr, &human, Some(1_500)).await;
+    for end in [&mut operator, &mut runtime_end] {
+        assert_eq!(control(end).await["reason"], "bound_reached");
+    }
+
+    let (id, mut operator, mut runtime_end) = attached(&fixture, &app, addr, &human, None).await;
+    let (code, closed) = call(
+        &app,
+        "POST",
+        &format!("/v1/debug-sessions/{id}/close"),
+        &human,
+        Some(serde_json::json!({"reason": "done"})),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{closed}");
+    for end in [&mut operator, &mut runtime_end] {
+        assert_eq!(control(end).await["reason"], "session_closed");
+    }
+
+    // The first session above holds `first`; a closed one frees nothing,
+    // so this one goes to the same instance through the next pull.
+    let expiring = fixture.token_for(&["debuggers"], None, 3);
+    let (_, mut operator, mut runtime_end) = attached(&fixture, &app, addr, &expiring, None).await;
+    for end in [&mut operator, &mut runtime_end] {
+        assert_eq!(control(end).await["reason"], "grant_revoked");
+    }
+}
+
+/// #1558: an upgrade without valid credentials for its side is refused
+/// before any frame.
+#[tokio::test]
+async fn an_upgrade_without_valid_credentials_is_refused() {
+    let fixture = fixture("stream-refusals").await;
+    let (app, store) = fixture.server().await;
+    let addr = serve(&app).await;
+    let human = fixture.token(&["debuggers"], None);
+    let (_, opened) = call(
+        &app,
+        "POST",
+        "/v1/debug-sessions",
+        &human,
+        Some(open("stage", None)),
+    )
+    .await;
+    let id = opened["id"].as_str().unwrap();
+    let (_, work) = runtime(&app, "GET", WORK, "first", true, None).await;
+    assert_eq!(work["debug_sessions"][0]["id"], id, "{work}");
+    let operator = format!("/v1/debug-sessions/{id}/stream");
+    let runtime_path = format!("/v1/runtime/environments/stage/debug-sessions/{id}/stream");
+    let cases = [
+        (
+            operator.as_str(),
+            "wrong-token",
+            None,
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            operator.as_str(),
+            "management-secret",
+            None,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            runtime_path.as_str(),
+            "wrong-token",
+            Some("first"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            runtime_path.as_str(),
+            "runtime-secret",
+            Some("second"),
+            StatusCode::CONFLICT,
+        ),
+    ];
+    for (path, bearer, instance, expected) in cases {
+        match connect(addr, path, bearer, instance).await {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                assert_eq!(
+                    response.status().as_u16(),
+                    expected.as_u16(),
+                    "{path} {bearer}"
+                );
+            }
+            other => panic!("{path} {bearer}: expected a refusal, got {other:?}"),
+        }
+    }
+    assert_eq!(audited(&store, "debug_session.stream.attached"), 0);
+}
+
+/// #1558: the runtime agent keeps a stream for the session it holds and
+/// answers an attaching operator that its executor cannot attach yet.
+#[tokio::test]
+async fn the_runtime_agent_answers_unsupported() {
+    let fixture = fixture("stream-agent").await;
+    let (app, _) = fixture.server().await;
+    let addr = serve(&app).await;
+    let human = fixture.token(&["debuggers"], None);
+    let (code, opened) = call(
+        &app,
+        "POST",
+        "/v1/debug-sessions",
+        &human,
+        Some(open("stage", None)),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED, "{opened}");
+    let id = opened["id"].as_str().unwrap();
+    let agent = tenkai::runtime_agent::RuntimeClient::new_with_options(
+        format!("http://{addr}"),
+        "stage",
+        "runtime-secret",
+        std::path::PathBuf::from("/bin/true"),
+        false,
+    )
+    .unwrap();
+    agent.run_once().await.unwrap();
+    let mut operator = connect(
+        addr,
+        &format!("/v1/debug-sessions/{id}/stream"),
+        &human,
+        None,
+    )
+    .await
+    .unwrap();
+    // The agent's stream connects on its own task; it may land after ours.
+    assert_eq!(control(&mut operator).await["type"], "attached");
+    let close = control(&mut operator).await;
+    assert_eq!(close["reason"], "unsupported", "{close}");
+    assert_eq!(close["message"], tenkai::debug_stream::UNSUPPORTED_MESSAGE);
 }
