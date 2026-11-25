@@ -836,25 +836,49 @@ impl Inner {
     }
 }
 
+/// The object `id` names, read in the typed tables' precedence: plan,
+/// environment, release, channel, then a plain catalog object. One probe
+/// says which table holds it and carries the catalog payload, so a read
+/// costs one or two round trips, not one per table it misses (#1554).
 fn catalog_get_in(tx: &mut Transaction<'_>, id: &str) -> Result<Option<Object>> {
-    if let Some(record) = load_plan(tx, id)? {
-        let stored = load_catalog_object(tx, id)?;
+    let probe = tx
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM plans WHERE id = $1),
+                    EXISTS(SELECT 1 FROM environments WHERE id = ANY($2)),
+                    EXISTS(SELECT 1 FROM releases WHERE id = $1),
+                    EXISTS(SELECT 1 FROM channels WHERE id = $1),
+                    (SELECT payload FROM catalog_objects WHERE id = $1)",
+            &[&id, &environment_candidates(id)],
+        )
+        .map_err(pg)?;
+    let stored = probe
+        .get::<_, Option<Vec<u8>>>(4)
+        .map(|payload| decode_object(&payload))
+        .transpose()?;
+    if probe.get::<_, bool>(0)
+        && let Some(record) = load_plan(tx, id)?
+    {
         return plan_object(&record, stored).map(Some);
     }
-    if let Some(record) = load_environment(tx, id)? {
+    if probe.get::<_, bool>(1)
+        && let Some(record) = load_environment(tx, id)?
+    {
         return environment_object(&record).map(Some);
     }
-    if let Some(record) = load_release(tx, id)? {
+    if probe.get::<_, bool>(2)
+        && let Some(record) = load_release(tx, id)?
+    {
         return release_object(&record).map(Some);
     }
-    if let Some(record) = load_channel(tx, id)? {
-        let mut object = load_catalog_object(tx, id)?
-            .unwrap_or_else(|| tenkai::storage::channel_record_to_object(&record));
+    if probe.get::<_, bool>(3)
+        && let Some(record) = load_channel(tx, id)?
+    {
+        let mut object =
+            stored.unwrap_or_else(|| tenkai::storage::channel_record_to_object(&record));
         overlay_channel_head(tx, &mut object, &record)?;
         return Ok(Some(object));
     }
-    Ok(load_catalog_object(tx, id)?
-        .filter(|object| !STRICT_AUTHORITY_KINDS.contains(&object.kind.as_str())))
+    Ok(stored.filter(|object| !STRICT_AUTHORITY_KINDS.contains(&object.kind.as_str())))
 }
 
 /// A typed plan row as its catalog object: the sidecar payload with the
@@ -934,10 +958,12 @@ fn catalog_list_kind_in(tx: &mut Transaction<'_>, kind: &str) -> Result<Vec<Obje
         KIND_CHANNEL => {
             let mut objects = tx
                 .query(
-                    "SELECT c.id,c.product,c.name,c.release_id,c.revision,o.payload,r.version
-                     FROM channels c
-                     LEFT JOIN catalog_objects o ON o.id = c.id
-                     LEFT JOIN releases r ON r.id = c.release_id",
+                    // Per-channel key lookups: a join let the planner hash
+                    // every catalog object of the tenant, on each list (#1554).
+                    "SELECT c.id,c.product,c.name,c.release_id,c.revision,
+                            (SELECT o.payload FROM catalog_objects o WHERE o.id = c.id),
+                            (SELECT r.version FROM releases r WHERE r.id = c.release_id)
+                     FROM channels c",
                     &[],
                 )
                 .map_err(pg)?
@@ -1427,13 +1453,6 @@ fn upsert_plan(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {
     Ok(())
 }
 
-fn load_catalog_object(tx: &mut Transaction<'_>, id: &str) -> Result<Option<Object>> {
-    tx.query_opt("SELECT payload FROM catalog_objects WHERE id=$1", &[&id])
-        .map_err(pg)?
-        .map(|row| decode_object(&row.get::<_, Vec<u8>>(0)))
-        .transpose()
-}
-
 fn load_environment_exact(
     tx: &mut Transaction<'_>,
     id: &str,
@@ -1456,22 +1475,31 @@ fn environment_record(row: &postgres::Row) -> tenkai::storage::EnvironmentRecord
     }
 }
 
+/// Every `environments.id` that [`load_environment`] tries for `id`.
+fn environment_candidates(id: &str) -> Vec<String> {
+    let mut candidates = vec![id.to_owned()];
+    match id.strip_prefix("tenkai:env:") {
+        Some(name) => candidates.push(name.to_owned()),
+        None => candidates.push(env_id(id)),
+    }
+    candidates
+}
+
+/// The environment `id` names: the exact row first, then the other
+/// [`environment_candidates`], in one round trip.
 fn load_environment(
     tx: &mut Transaction<'_>,
     id: &str,
 ) -> Result<Option<tenkai::storage::EnvironmentRecord>> {
-    if let Some(record) = load_environment_exact(tx, id)? {
-        return Ok(Some(record));
-    }
-    if let Some(name) = id.strip_prefix("tenkai:env:")
-        && let Some(record) = load_environment_exact(tx, name)?
-    {
-        return Ok(Some(record));
-    }
-    if !id.starts_with("tenkai:env:") {
-        return load_environment_exact(tx, &env_id(id));
-    }
-    Ok(None)
+    Ok(tx
+        .query_opt(
+            "SELECT id, revision, configuration_json FROM environments
+              WHERE id = ANY($1) ORDER BY array_position($1, id) LIMIT 1",
+            &[&environment_candidates(id)],
+        )
+        .map_err(pg)?
+        .as_ref()
+        .map(environment_record))
 }
 
 fn environment_row_id(tx: &mut Transaction<'_>, object: &Object) -> Result<String> {
@@ -1915,14 +1943,22 @@ fn refresh_leases_locked_in(
     Ok(leases)
 }
 
-fn prune_execution_claim_history_in(tx: &mut Transaction<'_>, now: i64) -> Result<()> {
+/// Delete the written execution claim's change rows older than retention.
+/// Scoped to that one claim through `catalog_changes_object`, so a write
+/// costs the same at any fleet size; a fleet-wide sweep here scanned every
+/// change row on every write (#1554).
+fn prune_execution_claim_history_in(
+    tx: &mut Transaction<'_>,
+    claim: &Object,
+    now: i64,
+) -> Result<()> {
+    if claim.kind != tenkai::ontology::KIND_ENVIRONMENT_EXECUTION {
+        return Ok(());
+    }
     let cutoff = now.saturating_sub(CATALOG_HISTORY_RETENTION_MS);
-    let kind = tenkai::ontology::KIND_ENVIRONMENT_EXECUTION;
     tx.execute(
-        "DELETE FROM catalog_changes
-         WHERE timestamp < $1
-           AND object_id IN (SELECT id FROM catalog_objects WHERE kind = $2)",
-        &[&cutoff, &kind],
+        "DELETE FROM catalog_changes WHERE object_id = $1 AND timestamp < $2",
+        &[&claim.id, &cutoff],
     )
     .map_err(pg)?;
     Ok(())
@@ -1966,7 +2002,7 @@ fn record_decision_in(
 
 fn record_changes_in(tx: &mut Transaction<'_>, previous: &Object, next: &Object) -> Result<()> {
     let timestamp = tenkai::now_millis();
-    prune_execution_claim_history_in(tx, timestamp)?;
+    prune_execution_claim_history_in(tx, next, timestamp)?;
     if skip_execution_claim_heartbeat(previous, next) {
         return Ok(());
     }

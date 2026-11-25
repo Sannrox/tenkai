@@ -57,9 +57,10 @@ before a rollback, can add a kind without failing older readers' pages
 (#775).
 
 An environment execution claim whose only property diff is `expires_at` is a
-lease heartbeat and does not append a change row. Older heartbeat rows for
-those claims are deleted after seven days (`CATALOG_HISTORY_RETENTION_MS`)
-using the `timestamp` indexes. Decision rows and other object change history
+lease heartbeat and does not append a change row. When a claim is written,
+its own change rows older than seven days (`CATALOG_HISTORY_RETENTION_MS`)
+are deleted through the `(object_id, timestamp)` index, so a write costs the
+same at any fleet size (#1554). Decision rows and other object change history
 are kept: governed maintenance still reads the configuration's correlation
 change and matching authorization decision (#874).
 

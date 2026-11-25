@@ -1558,20 +1558,17 @@ fn require_memory_lease(
     Ok(lease)
 }
 
-fn prune_memory_execution_claim_history(partition: &mut Partition, now: i64) {
+/// Drop the written execution claim's change rows older than retention,
+/// scoped to that claim as the SQL stores do (#1554).
+fn prune_memory_execution_claim_history(partition: &mut Partition, claim: &Object, now: i64) {
+    if claim.kind != KIND_ENVIRONMENT_EXECUTION {
+        return;
+    }
     let cutoff = now.saturating_sub(CATALOG_HISTORY_RETENTION_MS);
-    let claim_ids: Vec<String> = partition
-        .objects
-        .values()
-        .filter(|object| object.kind == KIND_ENVIRONMENT_EXECUTION)
-        .map(|object| object.id.clone())
-        .collect();
-    for id in claim_ids {
-        if let Some(changes) = partition.changes.get_mut(&id) {
-            changes.retain(|change| change.timestamp >= cutoff);
-            if changes.is_empty() {
-                partition.changes.remove(&id);
-            }
+    if let Some(changes) = partition.changes.get_mut(&claim.id) {
+        changes.retain(|change| change.timestamp >= cutoff);
+        if changes.is_empty() {
+            partition.changes.remove(&claim.id);
         }
     }
 }
@@ -1595,7 +1592,7 @@ fn record_memory_changes(
     principal: &str,
 ) {
     let timestamp = crate::now_millis();
-    prune_memory_execution_claim_history(partition, timestamp);
+    prune_memory_execution_claim_history(partition, next, timestamp);
     if skip_execution_claim_heartbeat(previous, next) {
         return;
     }

@@ -161,15 +161,20 @@ fn insert_decision_in(
     Ok(())
 }
 
-fn prune_execution_claim_history_in(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<()> {
+/// Delete the written execution claim's change rows older than retention,
+/// scoped to that claim as on the Postgres hub (#1554).
+fn prune_execution_claim_history_in(
+    tx: &Transaction<'_>,
+    claim: &Object,
+    now: i64,
+) -> rusqlite::Result<()> {
+    if claim.kind != tenkai::ontology::KIND_ENVIRONMENT_EXECUTION {
+        return Ok(());
+    }
     let cutoff = now.saturating_sub(tenkai::storage::CATALOG_HISTORY_RETENTION_MS);
     tx.execute(
-        "DELETE FROM catalog_changes
-         WHERE timestamp < ?1
-           AND object_id IN (
-               SELECT id FROM catalog_objects WHERE kind = ?2
-           )",
-        params![cutoff, tenkai::ontology::KIND_ENVIRONMENT_EXECUTION],
+        "DELETE FROM catalog_changes WHERE object_id = ?1 AND timestamp < ?2",
+        params![claim.id, cutoff],
     )?;
     Ok(())
 }
@@ -181,7 +186,7 @@ pub(super) fn record_changes(
     principal: &str,
 ) -> AnyResult<()> {
     let timestamp = tenkai::now_millis();
-    prune_execution_claim_history_in(tx, timestamp)?;
+    prune_execution_claim_history_in(tx, next, timestamp)?;
     if tenkai::storage::skip_execution_claim_heartbeat(previous, next) {
         return Ok(());
     }
