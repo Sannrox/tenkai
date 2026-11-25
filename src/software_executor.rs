@@ -448,6 +448,31 @@ pub trait SoftwareExecutor: Send + Sync {
     fn advertise_readiness(&self) -> bool {
         true
     }
+    /// The read-only debug commands this adapter offers, one usage line each
+    /// (ADR 0061 §4, #1559). Empty means it has no read-only debug attach,
+    /// and a debug session on its instances is refused.
+    fn debug_commands(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// Whether debug command `argv` only reads the instance. Only argv shaped
+    /// exactly as one of [`Self::debug_commands`] is `Read`; anything else,
+    /// including a command this adapter does not know, is `Write`.
+    fn debug_access(&self, argv: &[String]) -> crate::debug_command::DebugAccess {
+        let _ = argv;
+        crate::debug_command::DebugAccess::Write
+    }
+    /// Run read command `argv` against `request`'s instance with this
+    /// adapter's credentials and scoping. Called only after
+    /// [`Self::debug_access`] answered `Read`; it checks again and refuses
+    /// anything else.
+    fn debug_read(
+        &self,
+        request: &SoftwareApplyRequest,
+        argv: &[String],
+    ) -> Result<crate::debug_command::DebugOutput> {
+        let _ = (request, argv);
+        bail!("this executor has no read-only debug attach")
+    }
     /// Bounded, allowlisted live workload facts for a support bundle (#1017).
     /// Default is none: this adapter does not talk to a cluster.
     fn support_workloads(

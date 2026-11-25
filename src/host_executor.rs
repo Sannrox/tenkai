@@ -650,6 +650,78 @@ impl HostExecutor {
     }
 }
 
+/// Usage lines of the host debug reads (#1559).
+pub const HOST_DEBUG_COMMANDS: &[&str] = &["status", "logs [--tail N]"];
+
+/// A host debug read: the product's applied-state record, or the journal of
+/// its last host step's unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostDebugQuery {
+    Status,
+    Logs { tail: u32 },
+}
+
+impl HostDebugQuery {
+    /// The read `argv` names, when it is exactly one of [`HOST_DEBUG_COMMANDS`].
+    pub fn parse(argv: &[String]) -> Option<Self> {
+        let (verb, rest) = argv.split_first()?;
+        match (verb.as_str(), rest) {
+            ("status", []) => Some(Self::Status),
+            ("logs", rest) => crate::debug_command::logs_tail(rest).map(|tail| Self::Logs { tail }),
+            _ => None,
+        }
+    }
+}
+
+/// `journalctl` reading the last `tail` lines of host step unit `instance`,
+/// with none of this process's environment.
+fn journal_command(instance: &str, tail: u32) -> std::process::Command {
+    let mut command = std::process::Command::new("journalctl");
+    command
+        .args(["--no-pager", "--output", "short-iso", "--lines"])
+        .arg(tail.to_string())
+        .arg("--unit")
+        .arg(unit_name(instance))
+        .env_clear()
+        .env("PATH", SYSTEMCTL_PATH);
+    command
+}
+
+impl HostExecutor {
+    /// Run host debug read `query` for `product` of `environment`. Reads
+    /// only: the applier's record, which this side already reads, and the
+    /// journal of the unit that ran the product's last step.
+    pub fn debug_read(
+        &self,
+        environment: &str,
+        product: &str,
+        query: HostDebugQuery,
+    ) -> Result<crate::debug_command::DebugOutput> {
+        let record = self.applied_state(environment, product)?;
+        let output = match query {
+            HostDebugQuery::Status => {
+                let mut text = serde_json::to_string_pretty(&record)?;
+                text.push('\n');
+                text.into_bytes()
+            }
+            HostDebugQuery::Logs { tail } => match &record.last_started {
+                Some(started) => {
+                    validate_instance_name(&started.instance)?;
+                    return crate::debug_command::run_capped(journal_command(
+                        &started.instance,
+                        tail,
+                    ));
+                }
+                None => b"no host step has run for this product\n".to_vec(),
+            },
+        };
+        Ok(crate::debug_command::DebugOutput {
+            output,
+            exit_code: 0,
+        })
+    }
+}
+
 /// Read one record of at most `MAX_RECORD_BYTES`; `None` when it does not
 /// exist.
 fn read_record(path: &Path) -> Result<Option<Vec<u8>>> {

@@ -1,12 +1,17 @@
 //! The runtime end of a debug session's terminal stream (#1558).
 //!
 //! For each session it holds, the agent keeps one WebSocket to the relay
-//! open. No executor attaches a terminal yet: when an operator attaches, the
-//! agent answers [`CloseReason::Unsupported`] and connects again for the
-//! next one. An upgrade the server or a proxy in front of it refuses is
-//! reported once, so the session shows why it cannot attach, and never
-//! retried over another transport.
+//! open. When an operator attaches, a built-in runtime finds the instance's
+//! deployed release and its executor and runs the operator's read commands
+//! through it (#1559). Each command is recorded before it runs, and one the
+//! server does not record never runs. A command the executor does not name
+//! as read is refused and recorded as refused. A runtime that cannot read the
+//! instance answers [`CloseReason::Unsupported`] with the reason and connects
+//! again for the next attach. An upgrade the server or a proxy in front of it
+//! refuses is reported once, so the session shows why it cannot attach, and
+//! never retried over another transport.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -21,12 +26,19 @@ use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 
+use crate::debug_command::{DebugAccess, DebugOutput, MAX_LINE, split_command};
 use crate::debug_stream::{CloseReason, Control, STREAM_PROTOCOL, UNSUPPORTED_MESSAGE};
+use crate::runtime_builtin::{BuiltinConfig, DebugTarget};
+use crate::runtime_delivery::{RuntimeDebugCommand, RuntimeDebugCommandOutcome};
 
 /// The wait before connecting again after a stream ended or failed.
 const RECONNECT: Duration = Duration::from_secs(2);
 /// The largest frame the relay sends.
 const MAX_FRAME: usize = 64 * 1024;
+/// The largest output frame this end sends.
+const OUTPUT_FRAME: usize = 32 * 1024;
+/// The exit code of a command this end refused or could not record.
+const REFUSED_EXIT: i32 = 126;
 
 /// One held session's stream: where it connects and as whom.
 pub(super) struct StreamEnd {
@@ -35,6 +47,12 @@ pub(super) struct StreamEnd {
     pub(super) session_url: String,
     pub(super) token: String,
     pub(super) instance: String,
+    pub(super) environment: String,
+    pub(super) session: String,
+    /// Each listed session, as of the last pull.
+    pub(super) targets: super::DebugTargets,
+    /// Present in built-in mode, the only mode that reads an instance.
+    pub(super) builtin: Option<Arc<BuiltinConfig>>,
 }
 
 enum Connected {
@@ -52,7 +70,7 @@ impl StreamEnd {
         loop {
             match self.connect().await {
                 Ok(Connected::Stream(stream)) => {
-                    if let Some(reason) = serve(stream).await
+                    if let Some(reason) = self.serve(stream).await
                         && final_reason(reason)
                     {
                         return;
@@ -116,6 +134,201 @@ impl StreamEnd {
         )))
     }
 
+    /// Answer the relay until the stream ends; the close reason the relay
+    /// sent, if any.
+    async fn serve(
+        &self,
+        mut stream: Box<WebSocketStream<reqwest::Upgraded>>,
+    ) -> Option<CloseReason> {
+        let mut target = None;
+        while let Some(Ok(message)) = stream.next().await {
+            let Message::Text(text) = message else {
+                if matches!(message, Message::Close(_)) {
+                    return None;
+                }
+                continue;
+            };
+            match serde_json::from_str::<Control>(&text) {
+                Ok(Control::Attached) => match self.target() {
+                    Ok(attached) => {
+                        let usage = format!(
+                            "read-only debug session on {}; commands: {}\r\n",
+                            attached.request.instance,
+                            attached.reader.commands().join(", ")
+                        );
+                        if stream.send(Message::binary(usage)).await.is_err() {
+                            return None;
+                        }
+                        target = Some(attached);
+                    }
+                    Err(reason) => {
+                        let unsupported = Control::Close {
+                            reason: CloseReason::Unsupported,
+                            message: Some(reason),
+                        };
+                        if let Ok(json) = serde_json::to_string(&unsupported) {
+                            let _ = stream.send(Message::text(json)).await;
+                        }
+                        let _ = WebSocketStream::close(&mut stream, None).await;
+                        return None;
+                    }
+                },
+                Ok(Control::Command { command }) => {
+                    let Some(target) = &target else { continue };
+                    let (output, code) = self.command(target, &command).await;
+                    for chunk in output.chunks(OUTPUT_FRAME) {
+                        if stream.send(Message::binary(chunk.to_vec())).await.is_err() {
+                            return None;
+                        }
+                    }
+                    let Ok(exit) = serde_json::to_string(&Control::Exit { code }) else {
+                        return None;
+                    };
+                    if stream.send(Message::text(exit)).await.is_err() {
+                        return None;
+                    }
+                }
+                Ok(Control::Close { reason, .. }) => return Some(reason),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The executor and request this session reads, or why it cannot.
+    fn target(&self) -> Result<DebugTarget, String> {
+        let Some(builtin) = &self.builtin else {
+            return Err(UNSUPPORTED_MESSAGE.into());
+        };
+        let session = self
+            .targets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&self.session)
+            .cloned();
+        let Some(session) = session else {
+            return Err("the session is no longer listed".into());
+        };
+        let Some(target) = &session.target else {
+            return Err("the instance has no deployed release to read".into());
+        };
+        builtin.debug_target(&self.environment, &session.instance, target)
+    }
+
+    /// Run one command line: what to send the operator, and the exit code.
+    async fn command(&self, target: &DebugTarget, line: &str) -> (Vec<u8>, i32) {
+        let refuse = async |argv: Vec<String>, access, reason: String| {
+            let note = match self
+                .record(
+                    argv,
+                    access,
+                    RuntimeDebugCommandOutcome::Refused,
+                    None,
+                    Some(reason.clone()),
+                )
+                .await
+            {
+                Ok(()) => String::new(),
+                Err(error) => format!(" (recording the refusal failed: {error:#})"),
+            };
+            let read = target.reader.commands().join(", ");
+            let text = format!("refused: {reason}{note}; read commands: {read}\r\n");
+            (text.into_bytes(), REFUSED_EXIT)
+        };
+        let argv = match split_command(line) {
+            Ok(argv) if argv.is_empty() => return (Vec::new(), 0),
+            Ok(argv) => argv,
+            Err(error) => {
+                let mut kept = line.to_owned();
+                kept.truncate(kept.floor_char_boundary(MAX_LINE));
+                return refuse(vec![kept], DebugAccess::Write, format!("{error:#}")).await;
+            }
+        };
+        let access = target.reader.access(&argv);
+        if access == DebugAccess::Write {
+            return refuse(
+                argv,
+                access,
+                "a read session runs only read commands".into(),
+            )
+            .await;
+        }
+        if let Err(error) = self
+            .record(
+                argv.clone(),
+                access,
+                RuntimeDebugCommandOutcome::Started,
+                None,
+                None,
+            )
+            .await
+        {
+            let text =
+                format!("not run: the session audit did not record the command: {error:#}\r\n");
+            return (text.into_bytes(), REFUSED_EXIT);
+        }
+        let reader = target.reader.clone();
+        let request = target.request.clone();
+        let run_argv = argv.clone();
+        let ran = tokio::task::spawn_blocking(move || reader.read(&request, &run_argv)).await;
+        let DebugOutput { output, exit_code } = match ran {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => DebugOutput {
+                output: format!("tenkai: {error:#}\r\n").into_bytes(),
+                exit_code: -1,
+            },
+            Err(error) => DebugOutput {
+                output: format!("tenkai: the command failed: {error}\r\n").into_bytes(),
+                exit_code: -1,
+            },
+        };
+        if let Err(error) = self
+            .record(
+                argv,
+                access,
+                RuntimeDebugCommandOutcome::Completed,
+                Some(exit_code),
+                None,
+            )
+            .await
+        {
+            eprintln!("recording a debug command's exit failed: {error:#}");
+        }
+        (output, exit_code)
+    }
+
+    /// Record one command in the session's audit.
+    async fn record(
+        &self,
+        argv: Vec<String>,
+        access: DebugAccess,
+        outcome: RuntimeDebugCommandOutcome,
+        exit_code: Option<i32>,
+        reason: Option<String>,
+    ) -> anyhow::Result<()> {
+        let response = self
+            .client
+            .post(format!("{}/commands", self.session_url))
+            .bearer_auth(&self.token)
+            .header("x-tenkai-runtime-instance", &self.instance)
+            .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
+            .json(&RuntimeDebugCommand {
+                argv,
+                access,
+                outcome,
+                exit_code,
+                reason,
+            })
+            .send()
+            .await?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "the server answered {}",
+            response.status()
+        );
+        Ok(())
+    }
+
     async fn report(&self, reason: &str) -> anyhow::Result<()> {
         let response = self
             .client
@@ -137,35 +350,6 @@ impl StreamEnd {
     }
 }
 
-/// Answer the relay until the stream ends; the close reason the relay sent,
-/// if any.
-async fn serve(mut stream: Box<WebSocketStream<reqwest::Upgraded>>) -> Option<CloseReason> {
-    while let Some(Ok(message)) = stream.next().await {
-        let Message::Text(text) = message else {
-            if matches!(message, Message::Close(_)) {
-                return None;
-            }
-            continue;
-        };
-        match serde_json::from_str::<Control>(&text) {
-            Ok(Control::Attached) => {
-                let unsupported = Control::Close {
-                    reason: CloseReason::Unsupported,
-                    message: Some(UNSUPPORTED_MESSAGE.into()),
-                };
-                if let Ok(json) = serde_json::to_string(&unsupported) {
-                    let _ = stream.send(Message::text(json)).await;
-                }
-                let _ = WebSocketStream::close(&mut stream, None).await;
-                return None;
-            }
-            Ok(Control::Close { reason, .. }) => return Some(reason),
-            _ => {}
-        }
-    }
-    None
-}
-
 /// Whether a relay close ends this session's stream for good. Not
 /// `grant_revoked`: it may be the operator's grant that lapsed, and the
 /// next upgrade checks this runtime's own.
@@ -174,4 +358,133 @@ fn final_reason(reason: CloseReason) -> bool {
         reason,
         CloseReason::BoundReached | CloseReason::SessionClosed | CloseReason::Replaced
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::software_executor::{SoftwareApplyRequest, SoftwareExecutor, SoftwareObserveStatus};
+
+    /// Reads `get` and counts the commands it ran.
+    #[derive(Default)]
+    struct Counts(AtomicUsize);
+
+    impl SoftwareExecutor for Counts {
+        fn apply(&self, _: &SoftwareApplyRequest) -> anyhow::Result<()> {
+            unreachable!("a debug session applies nothing")
+        }
+        fn remove(&self, _: &SoftwareApplyRequest) -> anyhow::Result<()> {
+            unreachable!("a debug session removes nothing")
+        }
+        fn observe(&self, _: &SoftwareApplyRequest) -> anyhow::Result<SoftwareObserveStatus> {
+            unreachable!("a debug session observes nothing")
+        }
+        fn debug_commands(&self) -> &'static [&'static str] {
+            &["get"]
+        }
+        fn debug_access(&self, argv: &[String]) -> DebugAccess {
+            if argv == ["get"] {
+                DebugAccess::Read
+            } else {
+                DebugAccess::Write
+            }
+        }
+        fn debug_read(
+            &self,
+            _: &SoftwareApplyRequest,
+            _: &[String],
+        ) -> anyhow::Result<DebugOutput> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(DebugOutput {
+                output: b"pods\n".to_vec(),
+                exit_code: 3,
+            })
+        }
+    }
+
+    /// A read is recorded before it runs and after it exits; a write is
+    /// recorded as refused and never runs; a read the server does not
+    /// record never runs.
+    #[tokio::test]
+    async fn a_command_runs_only_after_the_audit_records_it() {
+        use axum::response::IntoResponse as _;
+        let down = Arc::new(AtomicBool::new(false));
+        let records = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let app = {
+            let (down, records) = (down.clone(), records.clone());
+            axum::Router::new().route(
+                "/v1/runtime/environments/prod/debug-sessions/s1/commands",
+                axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let (down, records) = (down.clone(), records.clone());
+                    async move {
+                        if down.load(Ordering::SeqCst) {
+                            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        }
+                        records.lock().unwrap().push(body);
+                        StatusCode::NO_CONTENT.into_response()
+                    }
+                }),
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let end = StreamEnd {
+            client: reqwest::Client::new(),
+            session_url: format!("http://{address}/v1/runtime/environments/prod/debug-sessions/s1"),
+            token: "tkc_bearer".into(),
+            instance: "runtime-1".into(),
+            environment: "prod".into(),
+            session: "s1".into(),
+            targets: Default::default(),
+            builtin: None,
+        };
+        let counts = Arc::new(Counts::default());
+        let mut request =
+            crate::software_executor::request_from_parts("api", "1.0.0", "prod", ".", "r");
+        request.instance = "api-a".into();
+        let target = DebugTarget {
+            reader: crate::debug_command::DebugReader::Executor(counts.clone()),
+            request,
+        };
+        let outcomes = |records: &Mutex<Vec<serde_json::Value>>| {
+            let records = records.lock().unwrap();
+            records
+                .iter()
+                .map(|record| record["outcome"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(end.command(&target, "get").await, (b"pods\n".to_vec(), 3));
+        assert_eq!(outcomes(&records), ["started", "completed"]);
+        assert_eq!(records.lock().unwrap()[1]["exit_code"], 3);
+
+        let (output, code) = end.command(&target, "delete pod x").await;
+        assert_eq!(code, REFUSED_EXIT);
+        assert!(String::from_utf8_lossy(&output).starts_with("refused: "));
+        let (_, code) = end.command(&target, "'open").await;
+        assert_eq!(code, REFUSED_EXIT);
+        assert_eq!(
+            outcomes(&records),
+            ["started", "completed", "refused", "refused"]
+        );
+        assert_eq!(
+            records.lock().unwrap()[2]["argv"],
+            serde_json::json!(["delete", "pod", "x"])
+        );
+        assert_eq!(counts.0.load(Ordering::SeqCst), 1);
+
+        down.store(true, Ordering::SeqCst);
+        let (output, code) = end.command(&target, "get").await;
+        assert_eq!(code, REFUSED_EXIT);
+        assert!(String::from_utf8_lossy(&output).starts_with("not run: "));
+        assert_eq!(
+            counts.0.load(Ordering::SeqCst),
+            1,
+            "an unrecorded read never runs"
+        );
+    }
 }

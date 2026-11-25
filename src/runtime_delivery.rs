@@ -862,6 +862,50 @@ fn idle_work(environment: &str) -> RuntimeWork {
     }
 }
 
+/// The release `environment` has deployed for `instance`, as a debug
+/// session's target.
+async fn debug_target(
+    ctx: &mut Ctx,
+    environment: &str,
+    instance: &str,
+) -> anyhow::Result<Option<RuntimeDebugTarget>> {
+    let env_obj = crate::environment::environment(ctx, environment).await?;
+    let Some(release_id) = env_obj
+        .properties
+        .get(&format!("deployed_release.{instance}"))
+    else {
+        return Ok(None);
+    };
+    let Some(object) = ctx.get(release_id).await? else {
+        return Ok(None);
+    };
+    let property = |name: &str| {
+        object
+            .properties
+            .get(name)
+            .filter(|value| !value.is_empty())
+            .cloned()
+    };
+    let (Some(raw), Some(product), Some(artifact_digest)) = (
+        property("manifest"),
+        property("product"),
+        property("artifact_digest"),
+    ) else {
+        return Ok(None);
+    };
+    let namespace = crate::cluster_namespace::instance_namespace(&env_obj, instance)?;
+    Ok(Some(RuntimeDebugTarget {
+        product,
+        artifact_digest,
+        release_digest: crate::manifest::digest(&raw),
+        cluster_namespace: if namespace == environment {
+            String::new()
+        } else {
+            namespace
+        },
+    }))
+}
+
 async fn health_duties_from_env(
     ctx: &mut Ctx,
     environment: &str,
@@ -1156,6 +1200,59 @@ pub struct RuntimeDebugSession {
     pub instance: String,
     pub mode: crate::debug_session::DebugSessionMode,
     pub not_after: i64,
+    /// The release the environment has deployed for `instance`, so the
+    /// runtime finds the executor and workload it reads (#1559). Absent when
+    /// the instance has no deployed release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<RuntimeDebugTarget>,
+}
+
+/// The deployed release a debug session reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDebugTarget {
+    pub product: String,
+    pub artifact_digest: String,
+    pub release_digest: String,
+    /// Cluster namespace of the instance. Empty means the environment.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cluster_namespace: String,
+}
+
+/// One debug command, as the runtime that runs it records it (#1559).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDebugCommand {
+    pub argv: Vec<String>,
+    pub access: crate::debug_command::DebugAccess,
+    pub outcome: RuntimeDebugCommandOutcome,
+    /// The command's exit code, for `completed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Why it was refused, for `refused`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Where a debug command is when the runtime records it. `started` is
+/// recorded before the command runs, and a command whose `started` the
+/// server does not accept never runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeDebugCommandOutcome {
+    Started,
+    Refused,
+    Completed,
+}
+
+impl RuntimeDebugCommandOutcome {
+    fn operation(self) -> &'static str {
+        match self {
+            Self::Started => "debug_session.command.started",
+            Self::Refused => "debug_session.command.refused",
+            Self::Completed => "debug_session.command.completed",
+        }
+    }
 }
 
 /// A runtime's report that it closed a debug session, sent when it next
@@ -1510,11 +1607,13 @@ impl RuntimeDeliveryOperations {
                     }
                 };
                 if owner == instance {
+                    let target = debug_target(&mut ctx, environment, &session.instance).await?;
                     owned.push(RuntimeDebugSession {
                         id: session.id,
                         instance: session.instance,
                         mode: session.mode,
                         not_after: session.not_after,
+                        target,
                     });
                 }
             }
@@ -1693,6 +1792,79 @@ impl RuntimeDeliveryOperations {
         )
         .await
         .map_err(|error| RuntimeDeliveryError::Unavailable(format!("{error:#}")))
+    }
+
+    /// Audit one debug command of the runtime owning session `id` (#1559).
+    /// A `started` record is refused once the session has ended, so the
+    /// runtime does not run the command.
+    pub async fn record_debug_command(
+        &self,
+        token: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
+        environment: &str,
+        id: &str,
+        command: &RuntimeDebugCommand,
+    ) -> Result<(), RuntimeDeliveryError> {
+        let caller = caller.into();
+        let identity = self.admit_work(token, &caller, environment).await?;
+        let session = self.owned_debug_session(&identity, environment, id).await?;
+        let line: usize = command.argv.iter().map(String::len).sum();
+        if command.argv.len() > crate::debug_command::MAX_ARGS
+            || line > crate::debug_command::MAX_LINE
+            || command
+                .reason
+                .as_ref()
+                .is_some_and(|reason| reason.len() > crate::debug_session::MAX_STREAM_ERROR)
+        {
+            return Err(RuntimeDeliveryError::InvalidRequest(
+                "the debug command record is too long".into(),
+            ));
+        }
+        // Sessions read only until elevation exists (ADR 0061 §5, #1560).
+        if command.outcome == RuntimeDebugCommandOutcome::Started
+            && command.access == crate::debug_command::DebugAccess::Write
+        {
+            return Err(RuntimeDeliveryError::InvalidRequest(
+                "a debug session runs only read commands".into(),
+            ));
+        }
+        if command.outcome == RuntimeDebugCommandOutcome::Started
+            && (session.state != crate::debug_session::DebugSessionState::Open
+                || session.is_due(crate::now_millis())
+                || session
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.closed_at.is_some()))
+        {
+            return Err(RuntimeDeliveryError::Conflict(
+                "the debug session has ended".into(),
+            ));
+        }
+        let argv = serde_json::to_string(&command.argv)
+            .map_err(|error| RuntimeDeliveryError::Internal(error.to_string()))?;
+        let mut resource = format!(
+            "debug-session/{} environment={} instance={} access={} argv={argv}",
+            session.id,
+            session.environment,
+            session.instance,
+            command.access.as_str()
+        );
+        if let Some(code) = command.exit_code {
+            resource.push_str(&format!(" exit={code}"));
+        }
+        if let Some(reason) = &command.reason {
+            resource.push_str(&format!(" reason={reason:?}"));
+        }
+        self.store
+            .append_audit(&crate::storage::AuditRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                occurred_at: crate::now_millis(),
+                principal: format!("runtime:{}", identity.instance),
+                operation: command.outcome.operation().into(),
+                resource,
+                outcome: "completed".into(),
+            })
+            .map_err(|error| RuntimeDeliveryError::Unavailable(format!("{error:#}")))
     }
 
     /// Session `id` of `environment`, when the calling instance owns it.

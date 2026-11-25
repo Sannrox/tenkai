@@ -772,7 +772,99 @@ fn image_repository(name: &str) -> String {
     }
 }
 
+/// Docker's read commands: the instance's containers and their logs. Not
+/// `inspect`, which prints each container's environment, env-file secrets
+/// included.
+const DOCKER_DEBUG_COMMANDS: &[&str] = &["ps", "logs [--tail N]"];
+
+/// The `--filter` arguments naming exactly `request`'s containers.
+fn instance_filters(request: &SoftwareApplyRequest) -> Vec<String> {
+    [
+        format!("label=tenkai.environment={}", request.environment),
+        format!("label=tenkai.product={}", request.product),
+        format!("label=tenkai.instance={}", request.instance_name()),
+    ]
+    .into_iter()
+    .flat_map(|filter| ["--filter".to_string(), filter])
+    .collect()
+}
+
 impl SoftwareExecutor for DockerHostExecutor {
+    /// Docker only; the Apple `container` CLI has no label filter, so it
+    /// offers none.
+    fn debug_commands(&self) -> &'static [&'static str] {
+        if self.is_apple() {
+            &[]
+        } else {
+            DOCKER_DEBUG_COMMANDS
+        }
+    }
+
+    fn debug_access(&self, argv: &[String]) -> tenkai::debug_command::DebugAccess {
+        let read = !self.is_apple()
+            && match argv.split_first() {
+                Some((verb, [])) if verb == "ps" => true,
+                Some((verb, rest)) if verb == "logs" => {
+                    tenkai::debug_command::logs_tail(rest).is_some()
+                }
+                _ => false,
+            };
+        if read {
+            tenkai::debug_command::DebugAccess::Read
+        } else {
+            tenkai::debug_command::DebugAccess::Write
+        }
+    }
+
+    fn debug_read(
+        &self,
+        request: &SoftwareApplyRequest,
+        argv: &[String],
+    ) -> Result<tenkai::debug_command::DebugOutput> {
+        if self.debug_access(argv) != tenkai::debug_command::DebugAccess::Read {
+            bail!("only read commands run in a debug session");
+        }
+        let filters = instance_filters(request);
+        if argv[0] == "ps" {
+            let mut command = self.docker_command();
+            command
+                .args(["ps", "-a"])
+                .args(&filters)
+                .args(["--format", "table {{.Names}}\t{{.Image}}\t{{.Status}}"]);
+            return tenkai::debug_command::run_capped(command);
+        }
+        let tail = tenkai::debug_command::logs_tail(&argv[1..])
+            .unwrap_or(tenkai::debug_command::DEFAULT_TAIL)
+            .to_string();
+        let mut list = vec!["ps", "-a", "--format", "{{.Names}}"];
+        list.extend(filters.iter().map(String::as_str));
+        let listed = docker_output(self, &list)?;
+        if !listed.status.success() {
+            bail!(
+                "listing the instance's containers failed: {}",
+                String::from_utf8_lossy(&listed.stderr).trim()
+            );
+        }
+        let mut output = Vec::new();
+        let mut exit_code = 0;
+        for name in String::from_utf8_lossy(&listed.stdout).lines() {
+            let name = name.trim();
+            if name.is_empty() || output.len() >= tenkai::debug_command::MAX_OUTPUT {
+                continue;
+            }
+            output.extend_from_slice(format!("==> {name} <==\n").as_bytes());
+            let mut command = self.docker_command();
+            command.args(["logs", "--tail", &tail, name]);
+            let ran = tenkai::debug_command::run_capped(command)?;
+            output.extend_from_slice(&ran.output);
+            if exit_code == 0 {
+                exit_code = ran.exit_code;
+            }
+        }
+        output.truncate(tenkai::debug_command::MAX_OUTPUT);
+        Ok(tenkai::debug_command::DebugOutput { output, exit_code })
+    }
+
     fn require_target(&self, request: &SoftwareApplyRequest) -> Result<(), TargetUnavailable> {
         let _ = request;
         if self.is_apple() && !self.engine_services_answer() {
@@ -3860,6 +3952,61 @@ inputs = ["docker"]
             images.iter().any(|value| value.as_str() == Some(DIGEST_A))
                 && images.iter().any(|value| value.as_str() == Some(DIGEST_B)),
             "{images:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn debug_reads_list_and_tail_only_the_instance_containers() {
+        use tenkai::debug_command::{DebugAccess, split_command};
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-docker-debug-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (script, state) = fake_docker(&root);
+        let executor = executor_for(&script, &state, &[]);
+        write_release(&root, "1.0.0", DIGEST_B);
+        std::fs::write(root.join("api.env"), format!("TOKEN={SECRET}\n")).unwrap();
+        let request = request_for(&root, &root, "1.0.0");
+        executor.apply(&request).unwrap();
+        let read = |line: &str, request: &SoftwareApplyRequest| {
+            let argv = split_command(line).unwrap();
+            assert_eq!(executor.debug_access(&argv), DebugAccess::Read, "{line}");
+            let ran = executor.debug_read(request, &argv).unwrap();
+            assert_eq!(ran.exit_code, 0, "{line}");
+            String::from_utf8(ran.output).unwrap()
+        };
+        let listed = read("ps", &request);
+        assert!(!listed.trim().is_empty(), "{listed}");
+        let logs = read("logs --tail 3", &request);
+        for name in listed.lines() {
+            assert!(
+                logs.contains(&format!("==> {name} <==\nlog line of {name}\n")),
+                "{logs}"
+            );
+        }
+        let mut other = request.clone();
+        other.instance = "elsewhere".into();
+        assert_eq!(read("ps", &other), "");
+        // `inspect` prints container env, and with it env-file secrets.
+        for write in [
+            "inspect db",
+            "exec db sh",
+            "rm -f db",
+            "logs -f",
+            "ps --all",
+        ] {
+            let argv = split_command(write).unwrap();
+            assert_eq!(executor.debug_access(&argv), DebugAccess::Write, "{write}");
+            assert!(executor.debug_read(&request, &argv).is_err(), "{write}");
+        }
+        let apple = DockerHostExecutor::apple_for_fake_cli(&script, &state);
+        assert!(apple.debug_commands().is_empty());
+        assert_eq!(
+            apple.debug_access(&split_command("ps").unwrap()),
+            DebugAccess::Write
         );
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -16,6 +16,7 @@ There is no served gRPC `RuntimeService`.
 | `POST /v1/runtime/environments/{environment}/certificates` | JSON `RuntimeCertificatesReport` (`certificates`: each workload certificate its targets hold, with the last renewal attempt) | JSON `RuntimeCertificatesResponse` (`stored`: instances whose report was new) ([below](#workload-certificates)) |
 | `POST /v1/runtime/environments/{environment}/health` | JSON `RuntimeHealthReport` (`observations`: each instance's latest `deploy.health` probe) | JSON `RuntimeHealthResponse` (`stored`: instances whose observation was newer) ([below](#instance-health)) |
 | `POST /v1/runtime/environments/{environment}/debug-sessions/{session}/close` | JSON `RuntimeDebugSessionClose` (`closed_at`: when the runtime closed it, on its clock) | JSON `RuntimeDebugSessionCloseResponse` (`recorded`: false when already recorded) ([below](#debug-sessions)) |
+| `POST /v1/runtime/environments/{environment}/debug-sessions/{session}/commands` | JSON `RuntimeDebugCommand` (`argv`, `access`: `read` or `write`, `outcome`: `started`, `refused` or `completed`; optional `exit_code`, `reason`) | `204` ([below](#debug-sessions)) |
 | `POST /v1/runtime/environments/{environment}/inventory` | JSON `RuntimeInventoryReport` (`facts`, `source`) | JSON `RuntimeInventoryResponse` |
 | `POST /v1/runtime/environments/{environment}/enroll` | No bearer. JSON `RuntimeEnrollRequest` (`token`: a single-use enrollment token; optional `csr`; optional `attestation`; optional `sealing_public_key`) | `201`, JSON `RuntimeEnrolled` (`environment`, `credential`, `credential_id`); `403` for an unknown, spent, expired or foreign token |
 | `POST /v1/runtime/environments/{environment}/certificate` | Runner certificate (or, once it expired, the enrolled bearer) and `x-tenkai-runtime-instance`. JSON `RuntimeCertificateRequest` (`csr`; optional `attestation`; optional `sealing_public_key`) | JSON `RuntimeCertificate` (`certificate`, `ca`) ([runner certificates](run-tenkai-server.md#runner-certificates)) |
@@ -416,8 +417,11 @@ older server answers `404`; the runtime logs it and continues with apply-time he
 A runtime that names `debug_session` in `x-tenkai-runtime-capabilities`
 receives, on idle and claimed work, optional `debug_sessions`: the open
 [debug sessions](debug-sessions.md) of its environment that this runtime
-instance owns, each with `id`, `instance`, `mode`, and `not_after` (Unix
-ms). The first capable instance to pull an unowned session owns it; the
+instance owns, each with `id`, `instance`, `mode`, `not_after` (Unix
+ms), and optional `target`: the release the environment has deployed for
+the instance (`product`, `artifact_digest`, `release_digest`, and
+`cluster_namespace` when it is not the environment), absent when it has
+none. The first capable instance to pull an unowned session owns it; the
 attachment is written once, so two instances never both hold it. A session
 past `not_after` is never handed out. A runtime that does not name the
 capability is never assigned a session, which stays unattached.
@@ -455,6 +459,17 @@ not a `tenkai.debug-stream.v1` WebSocket is reported once by POSTing
 which the session shows as `runtime.stream_error`, and the runtime does not
 retry the stream. The server answers the report as it answers a close: an
 instance that does not own the session gets `409`.
+
+A built-in runtime reads `target` from its own placed, verified copy of
+that release and runs an operator's read commands through its executor
+([commands](debug-sessions.md#commands)). It POSTs a `RuntimeDebugCommand`
+to `.../debug-sessions/{session}/commands` with outcome `started` before a
+command runs, `refused` for one it refuses, and `completed` with
+`exit_code` after; the server audits each as
+`debug_session.command.<outcome>`. A `started` record with access `write`
+is `400`, one for a session that has ended is `409`, and the runtime runs
+no command whose `started` record was not answered `204`. An instance that
+does not own the session gets `409`.
 
 ### OS image reboots
 
