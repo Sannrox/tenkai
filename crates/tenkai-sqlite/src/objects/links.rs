@@ -2,19 +2,8 @@ use super::*;
 
 impl SqliteStore {
     pub fn create_link(&self, link: Link, fail_if_exists: bool) -> Result<()> {
-        let connection = self.connection()?;
-        let changed = connection.execute(
-            "INSERT OR IGNORE INTO catalog_links(id,from_id,to_id,relation,payload)
-                 VALUES(?1,?2,?3,?4,?5)",
-            params![
-                link.id,
-                link.from_id,
-                link.to_id,
-                link.relation,
-                link.encode_to_vec()
-            ],
-        )?;
-        if fail_if_exists && changed == 0 {
+        let changed = insert_link_in(&*self.connection()?, &link)?;
+        if fail_if_exists && !changed {
             return Err((StoreError::already_exists("link", link.id)).into());
         }
         Ok(())
@@ -153,4 +142,20 @@ impl SqliteStore {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         decode_many(payloads, "object")
     }
+}
+
+/// Insert `link` unless its id exists. True when a row was written.
+pub(super) fn insert_link_in(connection: &Connection, link: &Link) -> rusqlite::Result<bool> {
+    let changed = connection.execute(
+        "INSERT OR IGNORE INTO catalog_links(id,from_id,to_id,relation,payload)
+             VALUES(?1,?2,?3,?4,?5)",
+        params![
+            link.id,
+            link.from_id,
+            link.to_id,
+            link.relation,
+            link.encode_to_vec()
+        ],
+    )?;
+    Ok(changed > 0)
 }

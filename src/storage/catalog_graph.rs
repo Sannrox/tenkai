@@ -256,6 +256,9 @@ pub trait CatalogGraph: Send + Sync {
     fn register_schema(&self, tenant: Option<&str>, schema: ObjectType) -> Result<()>;
     fn schemas(&self, tenant: Option<&str>) -> AnyResult<Vec<ObjectType>>;
     fn register_action(&self, tenant: Option<&str>, action: ActionTypeDef) -> Result<()>;
+    /// Run a registered action on target parameter `id`. Every parameter is
+    /// checked before any write; links, properties and the decision then
+    /// commit together or not at all (#1304).
     fn execute_action(
         &self,
         tenant: Option<&str>,
@@ -966,55 +969,46 @@ impl CatalogGraph for MemoryCatalogGraph {
                     format!("embedded action {action_name} is not registered; run `tenkaictl init`")
                 })?
         };
-        let target_id = params.get("id").with_context(|| {
-            format!("embedded action {action_name} requires target parameter id")
-        })?;
-        let mut target = self
-            .get(tenant, target_id)?
-            .with_context(|| format!("embedded action target {target_id} does not exist"))?;
+        let writes = super::ActionWrites::plan("embedded", action_name, &action, &params)?;
+        let target_id = &writes.target_id;
         let planned_ops = action
             .ops
             .iter()
             .map(|op| op.op.clone())
             .collect::<Vec<_>>();
+        // One guard covers the read and every write, so the action is atomic.
+        let mut partitions = self.lock()?;
+        let partition = partitions.entry(Self::key(tenant)).or_default();
+        let previous = partition
+            .objects
+            .get(target_id)
+            .cloned()
+            .with_context(|| format!("embedded action target {target_id} does not exist"))?;
         if !dry_run {
-            for op in &action.ops {
-                match op.op.as_str() {
-                    "set_property" => {
-                        let value = params.get(&op.value_from).with_context(|| {
-                            format!("embedded action {action_name} requires {}", op.value_from)
-                        })?;
-                        target.properties.insert(op.property.clone(), value.clone());
+            let mut target = previous.clone();
+            writes.apply_properties(&mut target);
+            // The only fallible write goes first; the map updates below cannot fail.
+            persist_memory_object(partition, target, &self.principal, Some(&previous))?;
+            for write in &writes.writes {
+                match write {
+                    super::ActionWrite::SetProperty { .. } => {}
+                    super::ActionWrite::CreateLink(link) => {
+                        partition
+                            .links
+                            .entry(link.id.clone())
+                            .or_insert_with(|| link.clone());
                     }
-                    "create_link" => {
-                        let to_id = params.get(&op.property).with_context(|| {
-                            format!("embedded action {action_name} requires {}", op.property)
-                        })?;
-                        self.create_link(
-                            tenant,
-                            Link {
-                                id: format!("{target_id}--{}--{to_id}", op.relation),
-                                from_id: target_id.clone(),
-                                to_id: to_id.clone(),
-                                relation: op.relation.clone(),
-                                created: crate::now_millis(),
-                            },
-                            false,
-                        )
-                        .map_err(anyhow::Error::from)?;
+                    super::ActionWrite::DeleteLink(id) => {
+                        partition.links.remove(id);
                     }
-                    "delete_link" => {
-                        let link_id = params.get(&op.value_from).with_context(|| {
-                            format!("embedded action {action_name} requires {}", op.value_from)
-                        })?;
-                        self.unlink(tenant, link_id)?;
-                    }
-                    other => bail!("unsupported embedded action operation {other:?}"),
                 }
             }
-            target.updated = crate::now_millis();
-            self.put(tenant, target)?;
-            self.record_decision(tenant, action_name, target_id, "allow", &params)?;
+            partition.decisions.push(action_decision(
+                &self.principal,
+                action_name,
+                target_id,
+                &params,
+            ));
         }
         Ok(ActionResult {
             action: action_name.into(),
@@ -1142,32 +1136,26 @@ impl MemoryCatalogGraph {
             })
             .unwrap_or_default())
     }
+}
 
-    fn record_decision(
-        &self,
-        tenant: Option<&str>,
-        action: &str,
-        target_id: &str,
-        outcome: &str,
-        params: &HashMap<String, String>,
-    ) -> AnyResult<()> {
-        let timestamp = crate::now_millis();
-        let mut evidence = params.clone();
-        evidence.insert("decision".into(), outcome.into());
-        let decision = Decision {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp,
-            actor: self.principal.clone(),
-            action: action.into(),
-            reason: "execute_action".into(),
-            evidence,
-            target_id: target_id.into(),
-            outcome: outcome.into(),
-        };
-        let mut partitions = self.lock()?;
-        let partition = partitions.entry(Self::key(tenant)).or_default();
-        partition.decisions.push(decision);
-        Ok(())
+/// The allow decision an executed embedded action records.
+fn action_decision(
+    principal: &str,
+    action: &str,
+    target_id: &str,
+    params: &HashMap<String, String>,
+) -> Decision {
+    let mut evidence = params.clone();
+    evidence.insert("decision".into(), "allow".into());
+    Decision {
+        id: uuid::Uuid::new_v4().to_string(),
+        timestamp: crate::now_millis(),
+        actor: principal.into(),
+        action: action.into(),
+        reason: "execute_action".into(),
+        evidence,
+        target_id: target_id.into(),
+        outcome: "allow".into(),
     }
 }
 

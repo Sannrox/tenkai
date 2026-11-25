@@ -780,3 +780,53 @@ fn a_plan_page_skips_catalog_leftovers_before_paging() {
         vec![&plan.id]
     );
 }
+
+#[test]
+fn an_action_missing_a_later_parameter_persists_nothing() {
+    use tenkai::pb::graph_action::ActionOp;
+    let store = SqliteStore::open_in_memory().unwrap();
+    let target = Object {
+        id: "tenkai:conformance:action-target".into(),
+        kind: "tenkai.conformance".into(),
+        ..Object::default()
+    };
+    store.create(target.clone()).unwrap();
+    store
+        .register_action(ActionTypeDef {
+            name: "conformance.link_then_set".into(),
+            ops: vec![
+                ActionOp {
+                    op: "create_link".into(),
+                    property: "to".into(),
+                    value_from: String::new(),
+                    relation: "conformance_to".into(),
+                },
+                ActionOp {
+                    op: "set_property".into(),
+                    property: "state".into(),
+                    value_from: "state".into(),
+                    relation: String::new(),
+                },
+            ],
+            ..ActionTypeDef::default()
+        })
+        .unwrap();
+    let params = HashMap::from([
+        ("id".to_string(), target.id.clone()),
+        ("to".to_string(), "tenkai:conformance:other".to_string()),
+    ]);
+
+    let error = store
+        .execute_action("conformance.link_then_set", params, false)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("requires state"), "{error}");
+    assert!(
+        store
+            .links(&target.id, "conformance_to", "out")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.get_object(&target.id).unwrap(), Some(target));
+    assert!(store.decisions("", "", 0).unwrap().is_empty());
+}

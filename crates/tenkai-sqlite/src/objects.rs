@@ -23,8 +23,8 @@ use tenkai::pb::graph_action::{ActionResult, ActionTypeDef};
 use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use tenkai::plan::{Plan, PlanState};
 use tenkai::storage::{
-    ChannelRecord, EnvironmentRecord, PlanRecord, PlanStatus, ProviderEventRecord, ReleaseRecord,
-    StoreError,
+    ActionWrite, ActionWrites, ChannelRecord, EnvironmentRecord, PlanRecord, PlanStatus,
+    ProviderEventRecord, ReleaseRecord, StoreError,
 };
 
 use crate::Result;
