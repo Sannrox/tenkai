@@ -17,7 +17,7 @@ use rusqlite::{
 
 use crate::{enqueue_provider_event_in, immediate_transactions};
 use tenkai::embedded::PropertyIndexQuery;
-use tenkai::pb::graph_action::{ActionResult, ActionTypeDef};
+use tenkai::pb::graph_action::ActionTypeDef;
 use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use tenkai::storage::{ProviderEventRecord, StoreError};
 
@@ -151,9 +151,18 @@ impl EmbeddedStore {
     }
 
     pub fn put(&self, object: Object) -> Result<Object> {
-        let previous = self.get(&object.id)?;
         let mut connection = self.connection()?;
-        let tx = connection.transaction()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Read inside the write transaction so the change diff matches what is replaced.
+        let previous = decode_optional(
+            tx.query_row(
+                "SELECT payload FROM embedded_objects WHERE id=?1",
+                [&object.id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?,
+            "object",
+        )?;
         tx.execute(
             "INSERT INTO embedded_objects(id,kind,payload) VALUES(?1,?2,?3)
              ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,payload=excluded.payload",
@@ -600,83 +609,6 @@ impl EmbeddedStore {
         )
     }
 
-    pub fn execute_action(
-        &self,
-        action_name: &str,
-        params: std::collections::HashMap<String, String>,
-        dry_run: bool,
-    ) -> Result<ActionResult> {
-        let payload = self
-            .connection()?
-            .query_row(
-                "SELECT payload FROM embedded_action_types WHERE name=?1",
-                [action_name],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()?
-            .with_context(|| {
-                format!("embedded action {action_name} is not registered; run `tenkaictl init`")
-            })?;
-        let action = ActionTypeDef::decode(payload.as_slice())?;
-        let target_id = params.get("id").with_context(|| {
-            format!("embedded action {action_name} requires target parameter id")
-        })?;
-        let mut target = self
-            .get(target_id)?
-            .with_context(|| format!("embedded action target {target_id} does not exist"))?;
-        let planned_ops = action
-            .ops
-            .iter()
-            .map(|op| op.op.clone())
-            .collect::<Vec<_>>();
-        if !dry_run {
-            for op in &action.ops {
-                match op.op.as_str() {
-                    "set_property" => {
-                        let value = params.get(&op.value_from).with_context(|| {
-                            format!("embedded action {action_name} requires {}", op.value_from)
-                        })?;
-                        target.properties.insert(op.property.clone(), value.clone());
-                    }
-                    "create_link" => {
-                        let to_id = params.get(&op.property).with_context(|| {
-                            format!("embedded action {action_name} requires {}", op.property)
-                        })?;
-                        self.create_link(
-                            Link {
-                                id: format!("{target_id}--{}--{to_id}", op.relation),
-                                from_id: target_id.clone(),
-                                to_id: to_id.clone(),
-                                relation: op.relation.clone(),
-                                created: tenkai::now_millis(),
-                            },
-                            false,
-                        )
-                        .map_err(anyhow::Error::from)?;
-                    }
-                    "delete_link" => {
-                        let link_id = params.get(&op.value_from).with_context(|| {
-                            format!("embedded action {action_name} requires {}", op.value_from)
-                        })?;
-                        self.unlink(link_id)?;
-                    }
-                    other => bail!("unsupported embedded action operation {other:?}"),
-                }
-            }
-            target.updated = tenkai::now_millis();
-            self.put(target)?;
-            self.record_decision(action_name, target_id, "allow", &params)?;
-        }
-        Ok(ActionResult {
-            action: action_name.into(),
-            message: "allowed by embedded host policy".into(),
-            dry_run,
-            planned_ops,
-            decision: "allow".into(),
-            approval_id: String::new(),
-        })
-    }
-
     pub fn decisions(&self, actor: &str, action: &str, after: i64) -> Result<Vec<Decision>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
@@ -840,40 +772,6 @@ impl EmbeddedStore {
         save_lease_in(&tx, &lease)?;
         tx.commit()?;
         Ok(lease)
-    }
-
-    fn record_decision(
-        &self,
-        action: &str,
-        target_id: &str,
-        outcome: &str,
-        params: &std::collections::HashMap<String, String>,
-    ) -> Result<()> {
-        let timestamp = tenkai::now_millis();
-        let mut evidence = params.clone();
-        evidence.insert("decision".into(), outcome.into());
-        let decision = Decision {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp,
-            actor: self.principal.clone(),
-            action: action.into(),
-            reason: "execute_action".into(),
-            evidence,
-            target_id: target_id.into(),
-            outcome: outcome.into(),
-        };
-        self.connection()?.execute(
-            "INSERT INTO embedded_decisions(id,timestamp,actor,action,payload)
-             VALUES(?1,?2,?3,?4,?5)",
-            params![
-                decision.id,
-                decision.timestamp,
-                decision.actor,
-                decision.action,
-                decision.encode_to_vec()
-            ],
-        )?;
-        Ok(())
     }
 }
 

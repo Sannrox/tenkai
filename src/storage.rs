@@ -11,12 +11,14 @@ pub const SCHEMA_VERSION: u32 = 14;
 /// Retention cutoff for environment-execution claim change rows (#874).
 pub const CATALOG_HISTORY_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
+mod action_writes;
 mod catalog_graph;
 mod error;
 mod object_codec;
 mod operational_store;
 mod records;
 
+pub use action_writes::{ActionPlanError, ActionWrite, ActionWrites};
 pub use catalog_graph::{
     CatalogGraph, LeaseRefresh, MemoryCatalogGraph, skip_execution_claim_heartbeat,
     stamp_claim_expiry,

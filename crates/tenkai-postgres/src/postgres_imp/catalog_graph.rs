@@ -684,10 +684,13 @@ impl Inner {
                     detail: error.to_string(),
                 }
             })?;
-            let target_id = params.get("id").ok_or_else(|| StoreError::InvalidData {
-                kind: "action",
-                detail: format!("embedded action {action_name} requires target parameter id"),
-            })?;
+            let writes =
+                tenkai::storage::ActionWrites::plan("embedded", &action_name, &action, &params)
+                    .map_err(|error| StoreError::InvalidData {
+                        kind: "action",
+                        detail: error.to_string(),
+                    })?;
+            let target_id = &writes.target_id;
             if let Some(record) = load_environment(tx, target_id)? {
                 lock_lease(tx, &record.id)?;
                 lock_catalog_apply_leases(tx, &record.id)?;
@@ -696,49 +699,20 @@ impl Inner {
                 lock_catalog_apply_leases(tx, &plan.environment_id)?;
             }
             lock_catalog_object(tx, target_id)?;
-            let mut target =
-                catalog_get_in(tx, target_id)?.ok_or_else(|| StoreError::NotFound {
-                    kind: "object",
-                    id: target_id.clone(),
-                })?;
-            let previous = target.clone();
+            let previous = catalog_get_in(tx, target_id)?.ok_or_else(|| StoreError::NotFound {
+                kind: "object",
+                id: target_id.clone(),
+            })?;
             let planned_ops = action
                 .ops
                 .iter()
                 .map(|op| op.op.clone())
                 .collect::<Vec<_>>();
             if !dry_run {
-                for op in &action.ops {
-                    match op.op.as_str() {
-                        "set_property" => {
-                            let value = params.get(&op.value_from).ok_or_else(|| {
-                                StoreError::InvalidData {
-                                    kind: "action",
-                                    detail: format!(
-                                        "embedded action {action_name} requires {}",
-                                        op.value_from
-                                    ),
-                                }
-                            })?;
-                            target.properties.insert(op.property.clone(), value.clone());
-                        }
-                        "create_link" => {
-                            let to_id = params.get(&op.property).ok_or_else(|| {
-                                StoreError::InvalidData {
-                                    kind: "action",
-                                    detail: format!(
-                                        "embedded action {action_name} requires {}",
-                                        op.property
-                                    ),
-                                }
-                            })?;
-                            let link = Link {
-                                id: format!("{target_id}--{}--{to_id}", op.relation),
-                                from_id: target_id.clone(),
-                                to_id: to_id.clone(),
-                                relation: op.relation.clone(),
-                                created: tenkai::now_millis(),
-                            };
+                for write in &writes.writes {
+                    match write {
+                        tenkai::storage::ActionWrite::SetProperty { .. } => {}
+                        tenkai::storage::ActionWrite::CreateLink(link) => {
                             let payload = link.encode_to_vec();
                             tx.execute(
                                 "INSERT INTO catalog_links(id,from_id,to_id,relation,payload)
@@ -754,28 +728,14 @@ impl Inner {
                             )
                             .map_err(pg)?;
                         }
-                        "delete_link" => {
-                            let link_id = params.get(&op.value_from).ok_or_else(|| {
-                                StoreError::InvalidData {
-                                    kind: "action",
-                                    detail: format!(
-                                        "embedded action {action_name} requires {}",
-                                        op.value_from
-                                    ),
-                                }
-                            })?;
+                        tenkai::storage::ActionWrite::DeleteLink(link_id) => {
                             tx.execute("DELETE FROM catalog_links WHERE id=$1", &[link_id])
                                 .map_err(pg)?;
                         }
-                        other => {
-                            return Err(StoreError::InvalidData {
-                                kind: "action",
-                                detail: format!("unsupported embedded action operation {other:?}"),
-                            });
-                        }
                     }
                 }
-                target.updated = tenkai::now_millis();
+                let mut target = previous.clone();
+                writes.apply_properties(&mut target);
                 catalog_put_in(tx, &target)?;
                 record_changes_in(tx, &previous, &target)?;
                 record_decision_in(tx, &action_name, target_id, "allow", &params)?;

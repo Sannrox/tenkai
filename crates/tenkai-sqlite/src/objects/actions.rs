@@ -1,3 +1,5 @@
+use super::links::insert_link_in;
+use super::object_writes::object_in;
 use super::*;
 
 impl SqliteStore {
@@ -44,54 +46,48 @@ impl SqliteStore {
                 format!("embedded action {action_name} is not registered; run `tenkaictl init`")
             })?;
         let action = ActionTypeDef::decode(payload.as_slice())?;
-        let target_id = params_map.get("id").with_context(|| {
-            format!("embedded action {action_name} requires target parameter id")
-        })?;
-        let mut target = self
-            .get_object(target_id)?
-            .with_context(|| format!("embedded action target {target_id} does not exist"))?;
+        let writes = ActionWrites::plan("embedded", action_name, &action, &params_map)?;
+        let target_id = &writes.target_id;
         let planned_ops = action
             .ops
             .iter()
             .map(|op| op.op.clone())
             .collect::<Vec<_>>();
+        let mut connection = self.connection()?;
+        // A dry run only reads; a real run holds the write lock from the read on.
+        let behavior = if dry_run {
+            rusqlite::TransactionBehavior::Deferred
+        } else {
+            rusqlite::TransactionBehavior::Immediate
+        };
+        let tx = connection.transaction_with_behavior(behavior)?;
+        let previous = object_in(&tx, target_id)?
+            .with_context(|| format!("embedded action target {target_id} does not exist"))?;
         if !dry_run {
-            for op in &action.ops {
-                match op.op.as_str() {
-                    "set_property" => {
-                        let value = params_map.get(&op.value_from).with_context(|| {
-                            format!("embedded action {action_name} requires {}", op.value_from)
-                        })?;
-                        target.properties.insert(op.property.clone(), value.clone());
+            for write in &writes.writes {
+                match write {
+                    ActionWrite::SetProperty { .. } => {}
+                    ActionWrite::CreateLink(link) => {
+                        insert_link_in(&tx, link)?;
                     }
-                    "create_link" => {
-                        let to_id = params_map.get(&op.property).with_context(|| {
-                            format!("embedded action {action_name} requires {}", op.property)
-                        })?;
-                        self.create_link(
-                            Link {
-                                id: format!("{target_id}--{}--{to_id}", op.relation),
-                                from_id: target_id.clone(),
-                                to_id: to_id.clone(),
-                                relation: op.relation.clone(),
-                                created: tenkai::now_millis(),
-                            },
-                            false,
-                        )
-                        .map_err(anyhow::Error::from)?;
+                    ActionWrite::DeleteLink(id) => {
+                        tx.execute("DELETE FROM catalog_links WHERE id=?1", [id])?;
                     }
-                    "delete_link" => {
-                        let link_id = params_map.get(&op.value_from).with_context(|| {
-                            format!("embedded action {action_name} requires {}", op.value_from)
-                        })?;
-                        self.unlink(link_id)?;
-                    }
-                    other => bail!("unsupported embedded action operation {other:?}"),
                 }
             }
-            target.updated = tenkai::now_millis();
-            self.put_object(target)?;
-            self.record_decision(action_name, target_id, "allow", &params_map)?;
+            let mut target = previous.clone();
+            writes.apply_properties(&mut target);
+            upsert_object_in(&tx, &target, &self.principal)?;
+            record_changes(&tx, &previous, &target, &self.principal)?;
+            insert_decision_in(
+                &tx,
+                &self.principal,
+                action_name,
+                target_id,
+                "allow",
+                &params_map,
+            )?;
+            tx.commit()?;
         }
         Ok(ActionResult {
             action: action_name.into(),
@@ -128,40 +124,41 @@ impl SqliteStore {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         decode_many(payloads, "object change")
     }
+}
 
-    pub(super) fn record_decision(
-        &self,
-        action: &str,
-        target_id: &str,
-        outcome: &str,
-        params_map: &std::collections::HashMap<String, String>,
-    ) -> AnyResult<()> {
-        let timestamp = tenkai::now_millis();
-        let mut evidence = params_map.clone();
-        evidence.insert("decision".into(), outcome.into());
-        let decision = Decision {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp,
-            actor: self.principal.clone(),
-            action: action.into(),
-            reason: "execute_action".into(),
-            evidence,
-            target_id: target_id.into(),
-            outcome: outcome.into(),
-        };
-        self.connection()?.execute(
-            "INSERT INTO catalog_decisions(id,timestamp,actor,action,payload)
-             VALUES(?1,?2,?3,?4,?5)",
-            params![
-                decision.id,
-                decision.timestamp,
-                decision.actor,
-                decision.action,
-                decision.encode_to_vec()
-            ],
-        )?;
-        Ok(())
-    }
+/// Record the allow decision of one executed action inside its transaction.
+fn insert_decision_in(
+    tx: &Transaction<'_>,
+    principal: &str,
+    action: &str,
+    target_id: &str,
+    outcome: &str,
+    params_map: &std::collections::HashMap<String, String>,
+) -> AnyResult<()> {
+    let mut evidence = params_map.clone();
+    evidence.insert("decision".into(), outcome.into());
+    let decision = Decision {
+        id: uuid::Uuid::new_v4().to_string(),
+        timestamp: tenkai::now_millis(),
+        actor: principal.into(),
+        action: action.into(),
+        reason: "execute_action".into(),
+        evidence,
+        target_id: target_id.into(),
+        outcome: outcome.into(),
+    };
+    tx.execute(
+        "INSERT INTO catalog_decisions(id,timestamp,actor,action,payload)
+         VALUES(?1,?2,?3,?4,?5)",
+        params![
+            decision.id,
+            decision.timestamp,
+            decision.actor,
+            decision.action,
+            decision.encode_to_vec()
+        ],
+    )?;
+    Ok(())
 }
 
 fn prune_execution_claim_history_in(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<()> {

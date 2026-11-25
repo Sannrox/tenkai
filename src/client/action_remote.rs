@@ -9,9 +9,10 @@ use crate::pb::graph_action::ActionTypeDef;
 use crate::pb::sekai::{
     CreateLinkRequest, CreateLinkResponse, Decision, DeleteLinkRequest, DeleteLinkResponse,
     GetGovernedActionTypeRequest, GetGovernedActionTypeResponse, GetObjectRequest,
-    GetObjectResponse, Link, ListActionPoliciesRequest, ListActionPoliciesResponse, Object,
+    GetObjectResponse, ListActionPoliciesRequest, ListActionPoliciesResponse, Object,
     RecordDecisionRequest, RecordDecisionResponse, UpdateObjectRequest, UpdateObjectResponse,
 };
+use crate::storage::ActionWrite;
 
 pub(super) async fn ensure_remote_type_enabled(client: &RemoteClient, action: &str) -> Result<()> {
     let response: GetGovernedActionTypeResponse = remote_unary(
@@ -99,37 +100,21 @@ pub(super) async fn apply_remote_ops(
     action: &ActionTypeDef,
     params: &HashMap<String, String>,
 ) -> Result<()> {
-    let target_id = params
-        .get("id")
-        .with_context(|| format!("remote action {action_name} requires target parameter id"))?;
+    let writes = crate::storage::ActionWrites::plan("remote", action_name, action, params)?;
+    let target_id = &writes.target_id;
     let mut target = remote_get_object(client, target_id)
         .await?
         .with_context(|| format!("remote action target {target_id} does not exist"))?;
-    for op in &action.ops {
-        match op.op.as_str() {
-            "set_property" => {
-                let value = params.get(&op.value_from).with_context(|| {
-                    format!("remote action {action_name} requires {}", op.value_from)
-                })?;
-                target.properties.insert(op.property.clone(), value.clone());
-            }
-            "create_link" => {
-                let to_id = params.get(&op.property).with_context(|| {
-                    format!("remote action {action_name} requires {}", op.property)
-                })?;
-                let link = Link {
-                    id: format!("{target_id}--{}--{to_id}", op.relation),
-                    from_id: target_id.clone(),
-                    to_id: to_id.clone(),
-                    relation: op.relation.clone(),
-                    created: crate::now_millis(),
-                };
+    for write in &writes.writes {
+        match write {
+            ActionWrite::SetProperty { .. } => {}
+            ActionWrite::CreateLink(link) => {
                 let response: std::result::Result<CreateLinkResponse, tonic::Status> =
                     remote_unary(
                         client,
                         "/sekai.SekaiService/CreateLink",
                         CreateLinkRequest {
-                            link: Some(link),
+                            link: Some(link.clone()),
                             fail_if_exists: true,
                         },
                     )
@@ -140,10 +125,7 @@ pub(super) async fn apply_remote_ops(
                     Err(status) => return Err(status.into()),
                 }
             }
-            "delete_link" => {
-                let link_id = params.get(&op.value_from).with_context(|| {
-                    format!("remote action {action_name} requires {}", op.value_from)
-                })?;
+            ActionWrite::DeleteLink(link_id) => {
                 let response: std::result::Result<DeleteLinkResponse, tonic::Status> =
                     remote_unary(
                         client,
@@ -159,10 +141,9 @@ pub(super) async fn apply_remote_ops(
                     Err(status) => return Err(status.into()),
                 }
             }
-            other => bail!("unsupported remote action operation {other:?}"),
         }
     }
-    target.updated = crate::now_millis();
+    writes.apply_properties(&mut target);
     let _: UpdateObjectResponse = remote_unary(
         client,
         "/sekai.SekaiService/UpdateObject",
