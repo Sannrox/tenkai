@@ -176,9 +176,33 @@ fn catalog_history_older_than_retention_is_pruned() {
             rusqlite::params!["old-decision", old_ts, "tenkai", "x", vec![0_u8]],
         )
         .unwrap();
+    // Another claim's history waits for that claim's own next write.
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO catalog_changes(id,object_id,timestamp,payload) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![
+                "old-idle-claim-change",
+                "tenkai:env:idle:execution:v2",
+                old_ts,
+                vec![0_u8]
+            ],
+        )
+        .unwrap();
     let mut heartbeat = claim;
     heartbeat.properties.insert("expires_at".into(), "2".into());
     store.put(heartbeat).unwrap();
+    let leftover_idle: i64 = store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM catalog_changes WHERE id='old-idle-claim-change'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftover_idle, 1, "a write prunes only its own claim");
     let leftover_claim: i64 = store
         .connection()
         .unwrap()

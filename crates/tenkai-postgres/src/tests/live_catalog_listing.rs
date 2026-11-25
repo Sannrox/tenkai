@@ -7,7 +7,8 @@ use tenkai::storage::CatalogGraph;
 
 /// #869 drill: set-based kind listings return exactly what a per-id `get`
 /// returns, for typed rows with and without a sidecar payload and for
-/// catalog-only channels; id listings match them; and a plan property lookup
+/// catalog-only channels; an environment also resolves by its bare name; id
+/// listings match them; and a plan property lookup
 /// returns each plan of the environment once. Requires feature `postgres` and
 /// `TENKAI_POSTGRES_URL`.
 #[test]
@@ -117,6 +118,11 @@ fn live_kind_listing_matches_per_id_reads() {
         };
         for object in listed {
             let read = store.get(tenant, &object.id).unwrap().map(settled);
+            // An environment also resolves by its bare name.
+            if let Some(name) = object.id.strip_prefix("tenkai:env:") {
+                let by_name = store.get(tenant, name).unwrap().map(settled);
+                assert_eq!(by_name, read, "{kind} by name {name}");
+            }
             assert_eq!(read, Some(settled(object)), "{kind}");
         }
     }
