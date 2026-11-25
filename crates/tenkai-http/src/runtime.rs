@@ -307,6 +307,30 @@ pub(super) async fn runtime_health(
     }
 }
 
+/// The runtime that holds a debug session reports closing it (#1557).
+pub(super) async fn runtime_debug_session_close(
+    State(state): State<Arc<AppState>>,
+    Path((environment, session)): Path<(String, String)>,
+    headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
+    Json(report): Json<tenkai::runtime_delivery::RuntimeDebugSessionClose>,
+) -> Response {
+    match state
+        .runtime_delivery
+        .report_debug_session_close(
+            bearer(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
+            &environment,
+            &session,
+            &report,
+        )
+        .await
+    {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => runtime_delivery_error(error),
+    }
+}
+
 /// The calling instance, the agent's version when sent (#673), and the
 /// connection's verified client certificate (#674).
 fn runtime_caller<'a>(
@@ -341,6 +365,10 @@ fn runtime_caller<'a>(
             tenkai::runtime_delivery::INSTANCE_HEALTH_CAPABILITY,
         ),
         os_image: names_capability(headers, tenkai::runtime_delivery::OS_IMAGE_CAPABILITY),
+        debug_session: names_capability(
+            headers,
+            tenkai::runtime_delivery::DEBUG_SESSION_CAPABILITY,
+        ),
         executors: headers
             .get(tenkai::runtime_delivery::EXECUTORS_HEADER)
             .and_then(|value| value.to_str().ok()),

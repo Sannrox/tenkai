@@ -27,6 +27,7 @@ async fn live_debug_session_outlives_its_store_connection() {
         closed_at: None,
         closed_by: None,
         close_reason: None,
+        runtime: None,
     };
     {
         let mut ctx =

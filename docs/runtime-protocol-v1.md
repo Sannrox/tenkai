@@ -6,7 +6,7 @@ There is no served gRPC `RuntimeService`.
 
 | HTTP | Request | Result |
 | --- | --- | --- |
-| `GET /v1/runtime/environments/{environment}/work` | Bearer token and `x-tenkai-runtime-instance`; optional `x-tenkai-runtime-capabilities`, `x-tenkai-runtime-executors`, and `x-tenkai-runtime-engines`. No body. | JSON `RuntimeWork` (`environment`, optional `plan`, optional `claim`, optional `approvals`, optional `issuer_candidate`, optional `health_observations`) |
+| `GET /v1/runtime/environments/{environment}/work` | Bearer token and `x-tenkai-runtime-instance`; optional `x-tenkai-runtime-capabilities`, `x-tenkai-runtime-executors`, and `x-tenkai-runtime-engines`. No body. | JSON `RuntimeWork` (`environment`, optional `plan`, optional `claim`, optional `approvals`, optional `issuer_candidate`, optional `health_observations`, optional `debug_sessions`) |
 | `POST /v1/runtime/environments/{environment}/identity-issuer/candidate` | JSON `IssuerKey` (`generation`, `fingerprint`, `certificate`, `sealed_key`) | JSON `IssuerKey`: the candidate the server keeps ([below](#identity-issuer)); `409` when none was asked for |
 | `POST /v1/runtime/environments/{environment}/complete` | JSON `RuntimeCompletion` (`plan_id`, `generation`, `succeeded`, `detail`, `receipts`) | `204` |
 | `POST /v1/runtime/environments/{environment}/progress` | `x-tenkai-runtime-capabilities` naming `os_image`. JSON `RuntimeProgressReport` (`plan_id`, `generation`, `awaiting_boot`, `receipts`) | `204` ([below](#os-image-reboots)); `409` when the claim is not live or another runner recorded it |
@@ -15,6 +15,7 @@ There is no served gRPC `RuntimeService`.
 | `POST /v1/runtime/environments/{environment}/host-records` | JSON `RuntimeHostRecordsReport` (`records`: the host applier's applied-state records for the environment) | JSON `RuntimeHostRecordsResponse` (`stored`: products whose record was new) ([below](#host-records)) |
 | `POST /v1/runtime/environments/{environment}/certificates` | JSON `RuntimeCertificatesReport` (`certificates`: each workload certificate its targets hold, with the last renewal attempt) | JSON `RuntimeCertificatesResponse` (`stored`: instances whose report was new) ([below](#workload-certificates)) |
 | `POST /v1/runtime/environments/{environment}/health` | JSON `RuntimeHealthReport` (`observations`: each instance's latest `deploy.health` probe) | JSON `RuntimeHealthResponse` (`stored`: instances whose observation was newer) ([below](#instance-health)) |
+| `POST /v1/runtime/environments/{environment}/debug-sessions/{session}/close` | JSON `RuntimeDebugSessionClose` (`closed_at`: when the runtime closed it, on its clock) | JSON `RuntimeDebugSessionCloseResponse` (`recorded`: false when already recorded) ([below](#debug-sessions)) |
 | `POST /v1/runtime/environments/{environment}/inventory` | JSON `RuntimeInventoryReport` (`facts`, `source`) | JSON `RuntimeInventoryResponse` |
 | `POST /v1/runtime/environments/{environment}/enroll` | No bearer. JSON `RuntimeEnrollRequest` (`token`: a single-use enrollment token; optional `csr`; optional `attestation`; optional `sealing_public_key`) | `201`, JSON `RuntimeEnrolled` (`environment`, `credential`, `credential_id`); `403` for an unknown, spent, expired or foreign token |
 | `POST /v1/runtime/environments/{environment}/certificate` | Runner certificate (or, once it expired, the enrolled bearer) and `x-tenkai-runtime-instance`. JSON `RuntimeCertificateRequest` (`csr`; optional `attestation`; optional `sealing_public_key`) | JSON `RuntimeCertificate` (`certificate`, `ca`) ([runner certificates](run-tenkai-server.md#runner-certificates)) |
@@ -130,8 +131,9 @@ apply.
 
 Work pull does not accept supported versions and does not negotiate. The
 capabilities are `workload_identity`, `peer_grants`, `issuer_rotation`,
-`issuer_take_up`, `issuer_removal`, `instance_health`, and `os_image`, named comma-separated in `x-tenkai-runtime-capabilities`
-([below](#identity-issuer), [instance health](#instance-health), [OS image reboots](#os-image-reboots)). Completion covers the claimed plan in one request, not one proto
+`issuer_take_up`, `issuer_removal`, `instance_health`, `os_image`, and
+`debug_session`, named comma-separated in `x-tenkai-runtime-capabilities`
+([below](#identity-issuer), [instance health](#instance-health), [OS image reboots](#os-image-reboots), [debug sessions](#debug-sessions)). Completion covers the claimed plan in one request, not one proto
 `CompleteStep` per step. Inventory is an admitted facts map, not a proto
 `Observation`.
 
@@ -408,6 +410,36 @@ artifact digest still matches the deployed release. A report older than
 (`repairing`, `warning`, `failing`) of a fresh report. Reports of another
 environment, or two of one instance, refuse the report (`400`). An
 older server answers `404`; the runtime logs it and continues with apply-time health.
+
+### Debug sessions
+
+A runtime that names `debug_session` in `x-tenkai-runtime-capabilities`
+receives, on idle and claimed work, optional `debug_sessions`: the open
+[debug sessions](debug-sessions.md) of its environment that this runtime
+instance owns, each with `id`, `instance`, `mode`, and `not_after` (Unix
+ms). The first capable instance to pull an unowned session owns it; the
+attachment is written once, so two instances never both hold it. A session
+past `not_after` is never handed out. A runtime that does not name the
+capability is never assigned a session, which stays unattached.
+
+The runtime ends each session at `not_after` on its own clock, and never
+later than the longest bound (four hours) after it received it, so a clock
+behind the server's cannot stretch it. It checks first on every poll,
+before contacting the server, so a session ends while the server is
+unreachable. It reports each close by POSTing `closed_at` once the server
+answers again, and retries a failed report on the next poll. A session the
+server stops listing (closed by an operator, or expired) is ended without a
+report.
+
+The server records the first close of a session once and audits it as
+`debug_session.runtime_close.completed`. A session still open on the server
+becomes `expired` when its bound has passed, otherwise `closed` with
+`closed_by` `runtime:<instance>`. A runtime instance that does not own the
+session gets `409`, and drops the report. Held sessions live in the agent's
+memory: a restarted agent is a new instance that owns none, and the server
+ends a session nobody reports at its bound. A server that predates this
+names no `debug_session` in `x-tenkai-server-capabilities`, and the runtime
+keeps its reports until one does.
 
 ### OS image reboots
 

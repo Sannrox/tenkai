@@ -64,9 +64,10 @@ use super::package_migration::{
 use super::runtime::{
     create_runtime_enrollment, inspect_runtime_runner, list_environment_recipients,
     list_runtime_runners, revoke_runtime_credential, revoke_runtime_credential_legacy,
-    runtime_certificate, runtime_certificates, runtime_complete, runtime_enroll, runtime_health,
-    runtime_heartbeat, runtime_host_records, runtime_inventory, runtime_issuer_candidate,
-    runtime_progress, runtime_release, runtime_self_release, runtime_work,
+    runtime_certificate, runtime_certificates, runtime_complete, runtime_debug_session_close,
+    runtime_enroll, runtime_health, runtime_heartbeat, runtime_host_records, runtime_inventory,
+    runtime_issuer_candidate, runtime_progress, runtime_release, runtime_self_release,
+    runtime_work,
 };
 
 pub(super) struct AppState {
@@ -593,6 +594,10 @@ pub fn router(
         .route(
             "/v1/runtime/environments/{environment}/health",
             post(runtime_health),
+        )
+        .route(
+            "/v1/runtime/environments/{environment}/debug-sessions/{session}/close",
+            post(runtime_debug_session_close),
         )
         .route(
             "/v1/runtime/environments/{environment}/identity-issuer/candidate",

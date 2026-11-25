@@ -325,6 +325,12 @@ pub struct RuntimeClient {
     /// Next idle health duty to try, so a slow early instance cannot starve
     /// later ones across polls.
     health_duty_cursor: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// The last pull's server admits debug session close reports (#1557).
+    server_debug_sessions: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Debug sessions this instance holds, and closes not yet reported. In
+    /// memory only: a restarted agent is a new instance that owns none, and
+    /// the server ends a session nobody reports at its bound anyway.
+    debug_sessions: std::sync::Arc<std::sync::Mutex<HeldDebugSessions>>,
     /// The host preflight config whose checks runner attestation carries.
     preflight: Option<PathBuf>,
     /// Local approval policy and trust roots, installed on this host
@@ -381,6 +387,8 @@ impl RuntimeClient {
             server_observations: Default::default(),
             server_instance_health: Default::default(),
             health_duty_cursor: Default::default(),
+            server_debug_sessions: Default::default(),
+            debug_sessions: Default::default(),
             preflight: None,
             local_policy: None,
         })
@@ -575,6 +583,9 @@ impl RuntimeClient {
     }
 
     pub async fn run_once(&self) -> Result<bool> {
+        // First, and without the server: a debug session ends at its bound
+        // on this clock even while the server is unreachable (#1557).
+        self.end_due_debug_sessions().await;
         if let Err(error) = self.renew_certificate_if_due().await {
             eprintln!("runner certificate renewal failed (retrying next poll): {error:#}");
         }
@@ -591,6 +602,14 @@ impl RuntimeClient {
             return Ok(true);
         }
         let work = self.pull().await?;
+        self.debug_sessions
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .hold(&work.debug_sessions, crate::now_millis());
+        // Again after a pull: the pull is what tells this agent the server
+        // admits close reports, so one held back while it was unreachable
+        // goes out on the poll that reaches it.
+        self.end_due_debug_sessions().await;
         if let Some(request) = &work.issuer_candidate
             && let Err(error) = self.offer_issuer_candidate(request).await
         {
@@ -1044,7 +1063,10 @@ impl RuntimeClient {
             .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"));
         // A server that predates the header ignores it and offers no
         // optional work; one that knows a name offers that work only with it.
-        let mut capabilities = vec![crate::runtime_delivery::INSTANCE_HEALTH_CAPABILITY];
+        let mut capabilities = vec![
+            crate::runtime_delivery::INSTANCE_HEALTH_CAPABILITY,
+            crate::runtime_delivery::DEBUG_SESSION_CAPABILITY,
+        ];
         if self.workload_identity() {
             capabilities.extend([
                 crate::runtime_delivery::WORKLOAD_IDENTITY_CAPABILITY,
@@ -1087,6 +1109,10 @@ impl RuntimeClient {
         );
         self.server_instance_health.store(
             names_capability(crate::runtime_delivery::INSTANCE_HEALTH_CAPABILITY),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        self.server_debug_sessions.store(
+            names_capability(crate::runtime_delivery::DEBUG_SESSION_CAPABILITY),
             std::sync::atomic::Ordering::SeqCst,
         );
         decode_response(response, "pulling runtime work").await
@@ -1282,6 +1308,66 @@ impl RuntimeClient {
         }
     }
 
+    /// End the debug sessions due on this clock, then report every close
+    /// the server has not recorded yet. A report that fails stays for the
+    /// next poll; a server that does not hold the session drops it.
+    async fn end_due_debug_sessions(&self) {
+        let closed = {
+            let mut held = self
+                .debug_sessions
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            held.close_due(crate::now_millis());
+            held.closed.clone()
+        };
+        if closed.is_empty()
+            || !self
+                .server_debug_sessions
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        for (id, closed_at) in closed {
+            match self.report_debug_session_close(&id, closed_at).await {
+                Ok(()) => {
+                    self.debug_sessions
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .closed
+                        .remove(&id);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "reporting the close of debug session {id} failed (retrying): {error:#}"
+                    );
+                }
+            }
+        }
+    }
+
+    async fn report_debug_session_close(&self, id: &str, closed_at: i64) -> Result<()> {
+        let response = self
+            .client()?
+            .post(format!(
+                "{}/v1/runtime/environments/{}/debug-sessions/{id}/close",
+                self.base_url, self.environment
+            ))
+            .bearer_auth(&self.token)
+            .header("x-tenkai-runtime-instance", &self.instance_id)
+            .header("x-tenkai-runtime-version", env!("CARGO_PKG_VERSION"))
+            .json(&crate::runtime_delivery::RuntimeDebugSessionClose { closed_at })
+            .send()
+            .await?;
+        // The server no longer holds the session for this instance: nothing
+        // is left to report.
+        if response.status() == StatusCode::CONFLICT {
+            return Ok(());
+        }
+        let _: crate::runtime_delivery::RuntimeDebugSessionCloseResponse =
+            decode_response(response, "reporting a debug session close").await?;
+        Ok(())
+    }
+
     async fn report_health(
         &self,
         observations: Vec<crate::instance_health::HealthObservation>,
@@ -1322,6 +1408,49 @@ impl RuntimeClient {
 }
 
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The debug sessions one runtime instance holds (#1557).
+#[derive(Debug, Default)]
+struct HeldDebugSessions {
+    /// Open sessions and the deadline, on this clock, each ends at.
+    open: std::collections::BTreeMap<String, i64>,
+    /// Sessions closed here and when, until the server records the close.
+    closed: std::collections::BTreeMap<String, i64>,
+}
+
+impl HeldDebugSessions {
+    /// End every open session whose deadline has passed.
+    fn close_due(&mut self, now: i64) {
+        let due: Vec<String> = self
+            .open
+            .iter()
+            .filter(|(_, deadline)| now >= **deadline)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due {
+            self.open.remove(&id);
+            self.closed.insert(id, now);
+        }
+    }
+
+    /// Take the server's list: hold new sessions and end those it no longer
+    /// lists, since the server closed them. A deadline never lies further
+    /// than the longest bound from now, so a clock behind the server's
+    /// cannot stretch a session.
+    fn hold(&mut self, sessions: &[crate::runtime_delivery::RuntimeDebugSession], now: i64) {
+        self.open
+            .retain(|id, _| sessions.iter().any(|session| &session.id == id));
+        for session in sessions {
+            if self.closed.contains_key(&session.id) {
+                continue;
+            }
+            let deadline = session
+                .not_after
+                .min(now.saturating_add(crate::approval_policy::DEBUG_SESSION_BOUND_MS));
+            self.open.entry(session.id.clone()).or_insert(deadline);
+        }
+    }
+}
 
 /// Run `command` with `/bin/sh -c` from the verified workdir, cap stdout
 /// while reading (later bytes discarded), and treat a timeout or spawn
@@ -2567,5 +2696,96 @@ mod tests {
         .await;
         assert!(ok);
         assert_eq!(stdout.len(), crate::instance_health::MAX_STDOUT_BYTES + 1);
+    }
+
+    /// #1557: a held session ends at its bound on the runtime's clock while
+    /// the server is unreachable, and the close is reported on reconnect.
+    #[tokio::test]
+    async fn a_debug_session_ends_at_its_bound_while_the_server_is_down() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let down = std::sync::Arc::new(AtomicBool::new(false));
+        let closes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let not_after = crate::now_millis() + 300;
+        let app = {
+            let (down, closes) = (down.clone(), closes.clone());
+            let (down_close, closes_close) = (down.clone(), closes.clone());
+            axum::Router::new()
+                .route(
+                    "/v1/runtime/environments/prod/work",
+                    axum::routing::get(move || {
+                        let (down, closes) = (down.clone(), closes.clone());
+                        async move {
+                            if down.load(Ordering::SeqCst) {
+                                return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                            }
+                            // A real server stops listing a session past its bound.
+                            let sessions = if closes.lock().unwrap().is_empty() {
+                                serde_json::json!([{
+                                    "id": "s1", "instance": "api",
+                                    "mode": "read", "not_after": not_after,
+                                }])
+                            } else {
+                                serde_json::json!([])
+                            };
+                            let mut response = axum::Json(serde_json::json!({
+                                "environment": "prod", "plan": null, "claim": null,
+                                "debug_sessions": sessions,
+                            }))
+                            .into_response();
+                            response.headers_mut().insert(
+                                crate::runtime_delivery::SERVER_CAPABILITIES_HEADER,
+                                axum::http::HeaderValue::from_static(
+                                    crate::runtime_delivery::SERVER_RUNTIME_CAPABILITIES,
+                                ),
+                            );
+                            response
+                        }
+                    }),
+                )
+                .route(
+                    "/v1/runtime/environments/prod/debug-sessions/s1/close",
+                    axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                        let (down, closes) = (down_close.clone(), closes_close.clone());
+                        async move {
+                            if down.load(Ordering::SeqCst) {
+                                return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                            }
+                            closes.lock().unwrap().push(body);
+                            axum::Json(serde_json::json!({ "recorded": true })).into_response()
+                        }
+                    }),
+                )
+        };
+        use axum::response::IntoResponse as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let client = RuntimeClient::new_with_options(
+            format!("http://{address}"),
+            "prod",
+            "tkc_bearer",
+            PathBuf::from("/bin/true"),
+            false,
+        )
+        .unwrap();
+        let held = |client: &RuntimeClient| {
+            let held = client.debug_sessions.lock().unwrap();
+            (held.open.len(), held.closed.len())
+        };
+
+        client.run_once().await.unwrap();
+        assert_eq!(held(&client), (1, 0));
+        down.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert!(client.run_once().await.is_err(), "the server is down");
+        assert_eq!(held(&client), (0, 1), "ended without the server");
+        assert!(closes.lock().unwrap().is_empty());
+
+        down.store(false, Ordering::SeqCst);
+        client.run_once().await.unwrap();
+        assert_eq!(held(&client), (0, 0));
+        let sent = closes.lock().unwrap();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0]["closed_at"].as_i64().unwrap() >= not_after);
     }
 }

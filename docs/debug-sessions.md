@@ -2,9 +2,9 @@
 
 A debug session is time-boxed, audited access to one instance
 ([ADR 0061](decisions/0061-time-boxed-audited-debug-sessions.md)). This page
-covers the session record and its management API. Attaching a terminal
-arrives with the runtime pickup and the relay; until then a session is a
-record that no runtime acts on.
+covers the session record, its management API, and how the environment's
+runtime picks it up. Attaching a terminal arrives with the relay; until then
+a runtime holds the session and ends it at its bound.
 
 ## Who may open one
 
@@ -43,6 +43,17 @@ so it survives a restart and every replica serves it.
 - `expired`: `not_after` passed while it was open. The first read after the
   bound records the expiry; `closed_at` is `not_after`.
 
+## Runtime
+
+A runtime that names the `debug_session` capability picks up the open
+sessions of its environment with its work; the first runtime instance to do
+so owns the session, shown as `runtime.instance` and `runtime.attached_at`.
+An older runtime is never handed a session, and `runtime` stays absent. The
+runtime ends the session at `not_after` on its own clock, even while the
+server is unreachable, and reports the close when it reaches the server
+again (`runtime.closed_at`). See
+[runtime protocol](runtime-protocol-v1.md#debug-sessions).
+
 ## Audit
 
 | Operation | When |
@@ -53,3 +64,5 @@ so it survives a restart and every replica serves it.
 | `debug_session.close.completed` | a close, with its reason |
 | `debug_session.close.refused` | an agent tried to close |
 | `debug_session.expire.completed` | the first read after the bound, under principal `tenkai` |
+| `debug_session.attach.completed` | a runtime instance took the session, under principal `runtime:<instance>` |
+| `debug_session.runtime_close.completed` | the owning runtime reported closing it |

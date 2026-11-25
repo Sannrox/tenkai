@@ -843,6 +843,10 @@ pub struct RuntimeWork {
     /// names `instance_health`, so an older one keeps decoding idle work.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub health_observations: Vec<HealthObservationDuty>,
+    /// Open debug sessions this runtime instance owns (#1557). Only for a
+    /// runtime that names `debug_session`, on idle and claimed work alike.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debug_sessions: Vec<RuntimeDebugSession>,
 }
 
 fn idle_work(environment: &str) -> RuntimeWork {
@@ -854,6 +858,7 @@ fn idle_work(environment: &str) -> RuntimeWork {
         issuer_candidate: None,
         issuer_proofs: Vec::new(),
         health_observations: Vec::new(),
+        debug_sessions: Vec::new(),
     }
 }
 
@@ -945,6 +950,7 @@ async fn delivered_work(
         issuer_candidate: None,
         issuer_proofs: Vec::new(),
         health_observations: Vec::new(),
+        debug_sessions: Vec::new(),
     })
 }
 
@@ -1140,6 +1146,33 @@ pub struct RuntimeHealthResponse {
     pub stored: Vec<String>,
 }
 
+/// An open debug session handed to the runtime instance that owns it
+/// (#1557). The runtime ends it at `not_after` on its own clock, whether or
+/// not it can reach the server then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDebugSession {
+    pub id: String,
+    pub instance: String,
+    pub mode: crate::debug_session::DebugSessionMode,
+    pub not_after: i64,
+}
+
+/// A runtime's report that it closed a debug session, sent when it next
+/// reaches the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDebugSessionClose {
+    /// When the runtime closed the session, on its own clock.
+    pub closed_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RuntimeDebugSessionCloseResponse {
+    /// False when this close was already recorded.
+    pub recorded: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeDeliveryError {
     #[error("missing bearer token")]
@@ -1210,6 +1243,9 @@ pub struct RuntimeCaller<'a> {
     /// `reboot` as awaiting the boot and resumes at `verify` after it (ADR
     /// 0051 §3). Only such a runtime is handed an OS image plan.
     pub os_image: bool,
+    /// The agent named the `debug_session` capability: it holds debug
+    /// sessions, ends them at their bound and POSTs the close (#1557).
+    pub debug_session: bool,
     /// The agent's installed executor kinds from `x-tenkai-runtime-executors`
     /// (ADR 0057), comma-separated. Recorded on work pull; planning refuses
     /// a release whose executor the runtime lacks.
@@ -1247,9 +1283,13 @@ pub const INSTANCE_HEALTH_CAPABILITY: &str = "instance_health";
 /// The capability a runtime names to be handed OS image plans and to POST
 /// `/progress` (ADR 0051 §3).
 pub const OS_IMAGE_CAPABILITY: &str = "os_image";
+/// The capability a runtime names to be handed debug sessions, and a server
+/// names when it admits their close reports (#1557).
+pub const DEBUG_SESSION_CAPABILITY: &str = "debug_session";
 /// What this server admits on runtime work, comma-separated so an agent
 /// keeps to the shape an older server decodes.
-pub const SERVER_RUNTIME_CAPABILITIES: &str = "certificate_observations,instance_health";
+pub const SERVER_RUNTIME_CAPABILITIES: &str =
+    "certificate_observations,instance_health,debug_session";
 
 impl<'a> From<Option<&'a str>> for RuntimeCaller<'a> {
     fn from(instance: Option<&'a str>) -> Self {
@@ -1409,7 +1449,175 @@ impl RuntimeDeliveryOperations {
         if caller.instance_health && work.plan.is_none() {
             work.health_observations = self.health_observation_duties(environment).await;
         }
+        if caller.debug_session
+            && let Some(instance) = caller.instance
+        {
+            work.debug_sessions = self.owned_debug_sessions(environment, instance).await;
+        }
         Ok(work)
+    }
+
+    /// The open sessions of `environment` that runtime `instance` owns,
+    /// attaching each unowned one to it first. Optional: a miss is logged and
+    /// the next poll retries; a session nobody holds still ends at its bound.
+    async fn owned_debug_sessions(
+        &self,
+        environment: &str,
+        instance: &str,
+    ) -> Vec<RuntimeDebugSession> {
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Vec::new();
+        };
+        let owned = async {
+            let now = crate::now_millis();
+            let mut owned = Vec::new();
+            for session in crate::debug_session::list(&mut ctx, Some(environment)).await? {
+                // A session whose runtime already closed it is over, even if
+                // the state write after that close has not landed yet.
+                let closed_by_runtime = session
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.closed_at.is_some());
+                if session.state != crate::debug_session::DebugSessionState::Open
+                    || session.is_due(now)
+                    || closed_by_runtime
+                {
+                    continue;
+                }
+                let owner = match &session.runtime {
+                    Some(runtime) => runtime.instance.clone(),
+                    None => {
+                        let owner =
+                            crate::debug_session::attach(&mut ctx, &session, instance).await?;
+                        if owner == instance {
+                            self.audit_debug_runtime(
+                                instance,
+                                "debug_session.attach.completed",
+                                &session,
+                            )?;
+                        }
+                        owner
+                    }
+                };
+                if owner == instance {
+                    owned.push(RuntimeDebugSession {
+                        id: session.id,
+                        instance: session.instance,
+                        mode: session.mode,
+                        not_after: session.not_after,
+                    });
+                }
+            }
+            anyhow::Ok(owned)
+        }
+        .await;
+        owned.unwrap_or_else(|error| {
+            eprintln!("handing out the debug sessions of {environment} failed: {error:#}");
+            Vec::new()
+        })
+    }
+
+    /// Append one audit record of a runtime acting on a debug session.
+    fn audit_debug_runtime(
+        &self,
+        instance: &str,
+        operation: &str,
+        session: &crate::debug_session::DebugSession,
+    ) -> anyhow::Result<()> {
+        self.store.append_audit(&crate::storage::AuditRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            occurred_at: crate::now_millis(),
+            principal: format!("runtime:{instance}"),
+            operation: operation.into(),
+            resource: format!(
+                "debug-session/{} environment={} instance={}",
+                session.id, session.environment, session.instance
+            ),
+            outcome: "completed".into(),
+        })?;
+        Ok(())
+    }
+
+    /// Record that the runtime owning session `id` closed it (#1557). The
+    /// close is audited once; a session still open on the server ends with
+    /// it, as expired when its bound has passed.
+    pub async fn report_debug_session_close(
+        &self,
+        token: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
+        environment: &str,
+        id: &str,
+        report: &RuntimeDebugSessionClose,
+    ) -> Result<RuntimeDebugSessionCloseResponse, RuntimeDeliveryError> {
+        let caller = caller.into();
+        let identity = self.admit_work(token, &caller, environment).await?;
+        crate::ontology::validate_opaque_identifier("debug session", id)
+            .map_err(|error| RuntimeDeliveryError::InvalidRequest(error.to_string()))?;
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "debug sessions unavailable".into(),
+            ));
+        };
+        let unavailable =
+            |error: anyhow::Error| RuntimeDeliveryError::Unavailable(format!("{error:#}"));
+        let session = crate::debug_session::load(&mut ctx, id)
+            .await
+            .map_err(unavailable)?
+            .filter(|session| session.environment == environment);
+        let Some(mut session) = session.filter(|session| {
+            session
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.instance == identity.instance)
+        }) else {
+            return Err(RuntimeDeliveryError::Conflict(
+                "this runtime does not hold that debug session".into(),
+            ));
+        };
+        let recorded_at = session
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.closed_at);
+        let recorded = match recorded_at {
+            Some(_) => false,
+            None => {
+                // On record before the marker: a close that is not audited
+                // never counts. A retry after a failed marker write audits
+                // it again.
+                self.audit_debug_runtime(
+                    &identity.instance,
+                    "debug_session.runtime_close.completed",
+                    &session,
+                )
+                .map_err(unavailable)?;
+                let closed_at = report
+                    .closed_at
+                    .clamp(session.opened_at, crate::now_millis());
+                crate::debug_session::record_runtime_close(
+                    &mut ctx,
+                    &session,
+                    &identity.instance,
+                    closed_at,
+                )
+                .await
+                .map_err(unavailable)?
+            }
+        };
+        // Also when the close was already recorded: a save that failed after
+        // the marker is finished by the runtime's retry.
+        if session.state == crate::debug_session::DebugSessionState::Open {
+            if !session.expire_if_due(crate::now_millis()) {
+                let closed_at = recorded_at.unwrap_or(report.closed_at);
+                session.state = crate::debug_session::DebugSessionState::Closed;
+                session.closed_at = Some(closed_at.clamp(session.opened_at, crate::now_millis()));
+                session.closed_by = Some(format!("runtime:{}", identity.instance));
+                session.close_reason = Some("closed by the runtime".into());
+            }
+            crate::debug_session::save(&mut ctx, &session)
+                .await
+                .map_err(unavailable)?;
+        }
+        Ok(RuntimeDebugSessionCloseResponse { recorded })
     }
 
     /// The approved add plan of `environment`'s next issuer, while one
@@ -1716,6 +1924,7 @@ impl RuntimeDeliveryOperations {
                     issuer_candidate: None,
                     issuer_proofs: Vec::new(),
                     health_observations: Vec::new(),
+                    debug_sessions: Vec::new(),
                 }),
                 _ => Err(RuntimeDeliveryError::Unavailable(refusal.to_string())),
             };
@@ -4005,6 +4214,7 @@ health = "curl -f http://127.0.0.1:9/health"
                 issuer_removal: false,
                 instance_health: false,
                 os_image: false,
+                debug_session: false,
                 executors: None,
                 engines: None,
             };
@@ -4059,6 +4269,7 @@ health = "curl -f http://127.0.0.1:9/health"
                         issuer_removal: false,
                         instance_health: false,
                         os_image: false,
+                        debug_session: false,
                         executors: None,
                         engines: None,
                     },
@@ -4246,6 +4457,7 @@ health = "curl -f http://127.0.0.1:9/health"
                             issuer_removal: false,
                             instance_health: false,
                             os_image: false,
+                            debug_session: false,
                             executors: None,
                             engines: None,
                         },
@@ -4336,6 +4548,7 @@ health = "curl -f http://127.0.0.1:9/health"
                         issuer_removal: false,
                         instance_health: false,
                         os_image: false,
+                        debug_session: false,
                         executors: None,
                         engines: None,
                     },
@@ -5313,6 +5526,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     issuer_removal: false,
                     instance_health: false,
                     os_image: false,
+                    debug_session: false,
                     executors: None,
                     engines: None,
                 },
@@ -5435,6 +5649,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     issuer_removal: false,
                     instance_health: false,
                     os_image: false,
+                    debug_session: false,
                     executors: None,
                     engines: None,
                 },
@@ -5478,6 +5693,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     issuer_removal: false,
                     instance_health: false,
                     os_image: false,
+                    debug_session: false,
                     executors: None,
                     engines: None,
                 },
