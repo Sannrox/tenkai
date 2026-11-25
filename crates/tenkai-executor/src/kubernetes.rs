@@ -1145,13 +1145,22 @@ mod tests {
 
     #[test]
     fn debug_reads_run_scoped_kubectl_reads_and_refuse_writes() {
-        use std::os::unix::fs::PermissionsExt as _;
         use tenkai::debug_command::{DebugAccess, split_command};
         let root = std::env::temp_dir().join(format!("tenkai-k8s-debug-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
+        // Installed by install(1), so no write handle in this process can
+        // leak into a concurrent fork and make the exec fail as busy. printf,
+        // not echo: dash's echo turns the jsonpath's `\n` into a newline.
+        let staging = root.join("fake-kubectl.staging");
+        std::fs::write(&staging, "#!/bin/sh\nprintf '%s\\n' \"$*\"\nexit 4\n").unwrap();
         let script = root.join("fake-kubectl");
-        std::fs::write(&script, "#!/bin/sh\necho \"$@\"\nexit 4\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let installed = Command::new("install")
+            .args(["-m", "755"])
+            .arg(&staging)
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert!(installed.success());
         let mut request = sample_request(&root.join("release"));
         request.instance = "api-a".into();
         request.cluster_namespace = "team".into();
