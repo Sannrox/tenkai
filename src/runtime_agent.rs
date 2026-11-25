@@ -1085,6 +1085,7 @@ impl RuntimeClient {
         let mut capabilities = vec![
             crate::runtime_delivery::INSTANCE_HEALTH_CAPABILITY,
             crate::runtime_delivery::DEBUG_SESSION_CAPABILITY,
+            crate::runtime_delivery::DEBUG_ELEVATION_CAPABILITY,
         ];
         if self.workload_identity() {
             capabilities.extend([

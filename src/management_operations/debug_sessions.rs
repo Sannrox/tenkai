@@ -48,7 +48,7 @@ pub struct DebugSessionQuery {
     pub environment: Option<String>,
 }
 
-fn checked_reason(reason: &str) -> Result<&str, ManagementError> {
+pub(super) fn checked_reason(reason: &str) -> Result<&str, ManagementError> {
     let reason = reason.trim();
     if reason.is_empty() || reason.len() > MAX_DEBUG_REASON {
         return Err(ManagementError::BadRequest(format!(
@@ -61,7 +61,7 @@ fn checked_reason(reason: &str) -> Result<&str, ManagementError> {
 impl ManagementOperations {
     /// Append one debug-session audit record. The resource names the
     /// session or the request, since audit records have no other fields.
-    fn audit_debug(
+    pub(super) fn audit_debug(
         &self,
         principal: &str,
         operation: &str,
@@ -102,7 +102,7 @@ impl ManagementOperations {
     }
 
     /// Record the expiry of a session whose bound passed while it was open.
-    async fn settle_debug_session(
+    pub(super) async fn settle_debug_session(
         &self,
         ctx: &mut Ctx,
         mut session: DebugSession,
@@ -367,7 +367,7 @@ impl ManagementOperations {
 
     /// Load session `id` and confine it to the caller's environment grant.
     /// Not found and out of scope answer alike.
-    async fn scoped_debug_session(
+    pub(super) async fn scoped_debug_session(
         &self,
         credential: &CredentialMaterial,
         context: &AuthenticatedRequestContext,

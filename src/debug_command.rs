@@ -1,12 +1,14 @@
-//! Read-only debug commands on an instance (ADR 0061 §4, #1559).
+//! Debug commands on an instance: reads (ADR 0061 §4, #1559) and the writes an elevation unlocks (§5, #1560).
 //!
 //! An operator sends one command line per `command` control on a debug
 //! stream. The runtime splits it into an argv, without a shell, and asks the
 //! instance's executor whether it only reads. Each executor names the few
 //! commands it treats as read ([`crate::software_executor::SoftwareExecutor::debug_commands`]);
 //! every other argv is [`DebugAccess::Write`] and is refused in a `read`
-//! session. A command runs through the executor's own credentials and
-//! scoping, never as a shell.
+//! session. An elevated session (#1560) also runs the few write commands the
+//! executor names ([`crate::software_executor::SoftwareExecutor::debug_write_commands`]);
+//! any argv that is neither is refused in every session. A command runs
+//! through the executor's own credentials and scoping, never as a shell.
 
 use std::io::Read as _;
 use std::process::{Command, Stdio};
@@ -153,6 +155,16 @@ impl ClusterQuery {
     }
 }
 
+/// The one write command: restart the instance's running workloads in place,
+/// with the release they already run.
+pub const RESTART: &str = "restart";
+
+/// Whether `argv` is exactly a write command of `offered`. Write commands
+/// take no arguments, so the usage line is the verb.
+pub fn names_write(offered: &[&str], argv: &[String]) -> bool {
+    matches!(argv, [verb] if offered.contains(&verb.as_str()))
+}
+
 /// What a debug session reads through: an executor's own reads, or the host
 /// executor's, which reads the applier's records rather than a workload.
 #[derive(Clone)]
@@ -180,6 +192,33 @@ impl DebugReader {
             DebugAccess::Read
         } else {
             DebugAccess::Write
+        }
+    }
+
+    /// Usage lines of the write commands an elevated session may run.
+    pub fn write_commands(&self) -> &'static [&'static str] {
+        match self {
+            Self::Executor(executor) => executor.debug_write_commands(),
+            Self::Host(_) => &[],
+        }
+    }
+
+    /// Whether `argv` is exactly one of [`Self::write_commands`].
+    pub fn is_write(&self, argv: &[String]) -> bool {
+        names_write(self.write_commands(), argv)
+    }
+
+    /// Run write `argv` against `request`'s instance.
+    pub fn write(
+        &self,
+        request: &crate::software_executor::SoftwareApplyRequest,
+        argv: &[String],
+    ) -> Result<DebugOutput> {
+        match self {
+            Self::Executor(executor) if names_write(executor.debug_write_commands(), argv) => {
+                executor.debug_write(request, argv)
+            }
+            _ => bail!("not a write command of this executor"),
         }
     }
 

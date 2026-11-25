@@ -8,7 +8,7 @@ use tenkai::oidc_verifier::{
     JwksCache, KeySource, OIDC_AUTH_EXTENSION_ID, OidcAuthExtension, OidcConfig,
 };
 
-const ISSUER: &str = "https://idp.example.test/realms/ops";
+pub(super) const ISSUER: &str = "https://idp.example.test/realms/ops";
 
 /// `debuggers` hold `debug` everywhere; `prod-debuggers` only on prod.
 fn oidc_config() -> OidcConfig {
@@ -31,8 +31,8 @@ environment = "prod"
     .unwrap()
 }
 
-struct Fixture {
-    root: std::path::PathBuf,
+pub(super) struct Fixture {
+    pub(super) root: std::path::PathBuf,
     signer: Signer,
 }
 
@@ -44,12 +44,17 @@ impl Drop for Fixture {
 
 impl Fixture {
     /// A server over the fixture's database; a second call is a restart.
-    async fn server(&self) -> (Router, Arc<tenkai_sqlite::SqliteStore>) {
+    pub(super) async fn server(&self) -> (Router, Arc<tenkai_sqlite::SqliteStore>) {
         let database = self.root.join("tenkai.db");
         let ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
-        let reconciler =
-            tenkai::reconciler::Reconciler::new(ctx, tenkai::reconciler::Config::default())
-                .unwrap();
+        // Plan-approval roots, when a test wrote them; elevation approvals
+        // verify against them.
+        let roots = self.root.join("approval-roots.toml");
+        let config = tenkai::reconciler::Config {
+            approval_trust_roots: roots.exists().then_some(roots),
+            ..tenkai::reconciler::Config::default()
+        };
+        let reconciler = tenkai::reconciler::Reconciler::new(ctx, config).unwrap();
         let store = Arc::new(tenkai_sqlite::SqliteStore::open(&database).unwrap());
         let raw = jwks(&[&self.signer]);
         let source: Arc<dyn KeySource> = Arc::new(move || Ok(raw.clone()));
@@ -78,7 +83,7 @@ impl Fixture {
         (app, store)
     }
 
-    fn token(&self, groups: &[&str], act: Option<&str>) -> String {
+    pub(super) fn token(&self, groups: &[&str], act: Option<&str>) -> String {
         self.token_for(groups, act, 300)
     }
 
@@ -98,7 +103,7 @@ impl Fixture {
 
 /// `stage` and `prod` each run instance `api`; stage allows read sessions
 /// of at most an hour, prod has no approval policy.
-async fn fixture(label: &str) -> Fixture {
+pub(super) async fn fixture(label: &str) -> Fixture {
     let root = std::env::temp_dir().join(format!(
         "tenkai-debug-sessions-{label}-{}-{}",
         std::process::id(),
@@ -148,7 +153,7 @@ async fn fixture(label: &str) -> Fixture {
     fixture
 }
 
-async fn call(
+pub(super) async fn call(
     app: &Router,
     method: &str,
     path: &str,
@@ -179,8 +184,8 @@ async fn call(
 }
 
 /// A runtime request on `stage` from runtime instance `instance`, naming
-/// the `debug_session` capability when `capable`.
-async fn runtime(
+/// the `debug_session` and `debug_elevation` capabilities when `capable`.
+pub(super) async fn runtime(
     app: &Router,
     method: &str,
     path: &str,
@@ -197,7 +202,7 @@ async fn runtime(
     if capable {
         request = request.header(
             "x-tenkai-runtime-capabilities",
-            "instance_health,debug_session",
+            "instance_health,debug_session,debug_elevation",
         );
     }
     let response = app
@@ -219,9 +224,9 @@ async fn runtime(
     )
 }
 
-const WORK: &str = "/v1/runtime/environments/stage/work";
+pub(super) const WORK: &str = "/v1/runtime/environments/stage/work";
 
-fn open(environment: &str, duration_ms: Option<i64>) -> serde_json::Value {
+pub(super) fn open(environment: &str, duration_ms: Option<i64>) -> serde_json::Value {
     let mut body = serde_json::json!({
         "environment": environment, "instance": "api", "reason": "pod restarts",
     });
@@ -231,7 +236,7 @@ fn open(environment: &str, duration_ms: Option<i64>) -> serde_json::Value {
     body
 }
 
-fn audited(store: &tenkai_sqlite::SqliteStore, operation: &str) -> usize {
+pub(super) fn audited(store: &tenkai_sqlite::SqliteStore, operation: &str) -> usize {
     tenkai::storage::OperationalStore::audit_events(store)
         .unwrap()
         .iter()
@@ -484,9 +489,9 @@ async fn the_owning_runtime_records_each_command_in_the_session_audit() {
         let (code, answer) = runtime(&app, "POST", &commands, "first", true, Some(body)).await;
         assert_eq!(code, StatusCode::NO_CONTENT, "{answer}");
     }
-    let write = record(&["delete", "pod", "x"], "write", "started");
+    let write = record(&["restart"], "write", "started");
     let (code, _) = runtime(&app, "POST", &commands, "first", true, Some(write)).await;
-    assert_eq!(code, StatusCode::BAD_REQUEST, "a write never starts");
+    assert_eq!(code, StatusCode::CONFLICT, "no write starts unelevated");
 
     let events = tenkai::storage::OperationalStore::audit_events(&*store).unwrap();
     let of = |operation: &str| {

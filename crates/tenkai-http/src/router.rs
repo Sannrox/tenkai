@@ -665,6 +665,19 @@ pub fn router(
             post(debug_sessions::close_debug_session),
         )
         .route(
+            "/v1/debug-sessions/{session}/elevations",
+            get(debug_sessions::list_debug_elevations)
+                .post(debug_sessions::request_debug_elevation),
+        )
+        .route(
+            "/v1/debug-sessions/{session}/elevations/{elevation}/approvals",
+            post(debug_sessions::approve_debug_elevation),
+        )
+        .route(
+            "/v1/debug-sessions/{session}/elevations/{elevation}/revoke",
+            post(debug_sessions::revoke_debug_elevation),
+        )
+        .route(
             "/v1/debug-sessions/{session}/stream",
             get(debug_stream::operator_stream),
         );

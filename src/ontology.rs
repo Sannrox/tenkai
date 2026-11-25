@@ -56,6 +56,9 @@ pub const KIND_DEBUG_SESSION: &str = "tenkai.debug_session";
 /// What a runtime did with a debug session: attached it or closed it.
 /// Created once, so the first runtime wins and its close is recorded once.
 pub const KIND_DEBUG_SESSION_RUNTIME: &str = "tenkai.debug_session_runtime";
+/// One fact of a debug session's elevation: its request, an approval, its
+/// activation or its revocation (#1560). Each is created once.
+pub const KIND_DEBUG_ELEVATION: &str = "tenkai.debug_elevation";
 
 pub const REL_RELEASE_OF: &str = "release_of";
 pub const REL_HAS_RELEASE_VERIFICATION: &str = "has_release_verification";

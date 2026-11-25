@@ -298,6 +298,28 @@ impl SoftwareExecutor for KubernetesSoftwareExecutor {
         tenkai::debug_command::run_capped(command)
     }
 
+    /// `restart`: a rolling restart of the instance's labelled workloads, with
+    /// the pod template they already have. It never re-applies the release.
+    fn debug_write_commands(&self) -> &'static [&'static str] {
+        &[tenkai::debug_command::RESTART]
+    }
+
+    fn debug_write(
+        &self,
+        request: &SoftwareApplyRequest,
+        argv: &[String],
+    ) -> Result<tenkai::debug_command::DebugOutput> {
+        if !tenkai::debug_command::names_write(self.debug_write_commands(), argv) {
+            bail!("not a write command of this executor");
+        }
+        let mut command = self.kubectl(request);
+        command
+            .args(["rollout", "restart", "deployments,statefulsets,daemonsets"])
+            .args(["--namespace", request.target_namespace(), "--selector"])
+            .arg(instance_selector(request));
+        tenkai::debug_command::run_capped(command)
+    }
+
     fn apply(&self, request: &SoftwareApplyRequest) -> Result<()> {
         validate_request(request)?;
         let materialized = materialize_kubernetes_manifests(request)?;
@@ -1144,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_reads_run_scoped_kubectl_reads_and_refuse_writes() {
+    fn debug_commands_run_scoped_kubectl_reads_and_only_the_restart_write() {
         use tenkai::debug_command::{DebugAccess, split_command};
         let root = std::env::temp_dir().join(format!("tenkai-k8s-debug-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -1197,7 +1219,15 @@ mod tests {
             let argv = split_command(write).unwrap();
             assert_eq!(executor.debug_access(&argv), DebugAccess::Write, "{write}");
             assert!(executor.debug_read(&request, &argv).is_err(), "{write}");
+            assert!(executor.debug_write(&request, &argv).is_err(), "{write}");
         }
+        // The one write: a rolling restart of the instance's own workloads.
+        let restart = split_command("restart").unwrap();
+        let ran = executor.debug_write(&request, &restart).unwrap();
+        assert_eq!(
+            String::from_utf8(ran.output).unwrap(),
+            format!("{kubeconfig} rollout restart deployments,statefulsets,daemonsets {scope}\n")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

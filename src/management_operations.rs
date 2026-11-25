@@ -6,11 +6,16 @@
 
 use std::sync::Arc;
 
+mod debug_elevations;
 mod debug_sessions;
 mod exports;
 mod grant_rules;
 mod identity_issuer;
 mod runtime_enrollment;
+pub use debug_elevations::{
+    DebugElevationApproveRequest, DebugElevationList, DebugElevationOpenRequest,
+    DebugElevationRevokeRequest,
+};
 pub use debug_sessions::{
     DebugSessionCloseRequest, DebugSessionList, DebugSessionOpenRequest, DebugSessionQuery,
 };

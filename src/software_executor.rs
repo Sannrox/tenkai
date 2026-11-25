@@ -473,6 +473,24 @@ pub trait SoftwareExecutor: Send + Sync {
         let _ = (request, argv);
         bail!("this executor has no read-only debug attach")
     }
+    /// The write debug commands this adapter offers under an elevated
+    /// session (ADR 0061 §5, #1560), one usage line each. Empty means a
+    /// session on its instances never writes. A write never re-applies a
+    /// release or touches the apply lease.
+    fn debug_write_commands(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// Run write command `argv`, exactly one of [`Self::debug_write_commands`],
+    /// against `request`'s instance. Called only under a live elevation; it
+    /// refuses anything it does not offer.
+    fn debug_write(
+        &self,
+        request: &SoftwareApplyRequest,
+        argv: &[String],
+    ) -> Result<crate::debug_command::DebugOutput> {
+        let _ = (request, argv);
+        bail!("this executor has no debug write commands")
+    }
     /// Bounded, allowlisted live workload facts for a support bundle (#1017).
     /// Default is none: this adapter does not talk to a cluster.
     fn support_workloads(
