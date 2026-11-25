@@ -53,6 +53,9 @@ pub const KIND_PACKAGE_MIGRATION: &str = "tenkai.package_migration";
 pub const KIND_PACKAGE_MIGRATION_LOCK: &str = "tenkai.package_migration_lock";
 /// A debug session on one instance (ADR 0061).
 pub const KIND_DEBUG_SESSION: &str = "tenkai.debug_session";
+/// What a runtime did with a debug session: attached it or closed it.
+/// Created once, so the first runtime wins and its close is recorded once.
+pub const KIND_DEBUG_SESSION_RUNTIME: &str = "tenkai.debug_session_runtime";
 
 pub const REL_RELEASE_OF: &str = "release_of";
 pub const REL_HAS_RELEASE_VERIFICATION: &str = "has_release_verification";

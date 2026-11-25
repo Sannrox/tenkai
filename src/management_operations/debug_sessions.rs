@@ -239,6 +239,7 @@ impl ManagementOperations {
             closed_at: None,
             closed_by: None,
             close_reason: None,
+            runtime: None,
         };
         Ok((ctx, session))
     }

@@ -9,6 +9,12 @@
 //! The server never extends a session past `not_after`. A session still
 //! `open` once its bound has passed is reported `expired`; the first read
 //! that sees it records the expiry (see [`DebugSession::expire_if_due`]).
+//!
+//! A runtime that names the `debug_session` capability picks an open session
+//! up with its work (#1557). The first runtime instance to do so owns it:
+//! the attachment, and later that runtime's close report, are create-once
+//! objects of kind [`crate::ontology::KIND_DEBUG_SESSION_RUNTIME`], joined
+//! into [`DebugSession::runtime`] on read and never stored in the record.
 
 use std::collections::HashMap;
 
@@ -16,7 +22,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
-use crate::ontology::{KIND_DEBUG_SESSION, NS};
+use crate::ontology::{KIND_DEBUG_SESSION, KIND_DEBUG_SESSION_RUNTIME, NS};
 use crate::pb::sekai::Object;
 
 /// Record format written into property `record`.
@@ -73,6 +79,37 @@ pub struct DebugSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub close_reason: Option<String>,
+    /// The runtime holding the session; absent until one picks it up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub runtime: Option<DebugSessionRuntime>,
+}
+
+/// The runtime instance a session reached, and when it closed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DebugSessionRuntime {
+    pub instance: String,
+    pub attached_at: i64,
+    /// When the runtime reported closing the session on its own clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub closed_at: Option<i64>,
+}
+
+/// What a runtime did with a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeEvent {
+    Attached,
+    Closed,
+}
+
+impl RuntimeEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Attached => "attached",
+            Self::Closed => "closed",
+        }
+    }
 }
 
 /// Stored envelope around [`DebugSession`]; a newer format is refused.
@@ -106,9 +143,14 @@ impl DebugSession {
     }
 
     fn to_object(&self) -> Result<Object> {
+        // The runtime view lives in its own objects; the record never holds it.
+        let session = DebugSession {
+            runtime: None,
+            ..self.clone()
+        };
         let record = serde_json::to_string(&Record {
             format: RECORD_FORMAT,
-            session: self.clone(),
+            session,
         })
         .context("encoding debug session")?;
         Ok(Object {
@@ -158,26 +200,124 @@ pub async fn save(ctx: &mut Ctx, session: &DebugSession) -> Result<()> {
     ctx.put(session.to_object()?).await.map(|_| ())
 }
 
+/// Session `id` with its runtime view, if it exists.
 pub async fn load(ctx: &mut Ctx, id: &str) -> Result<Option<DebugSession>> {
-    ctx.get(&object_id(id))
-        .await?
-        .map(|object| DebugSession::from_object(&object))
-        .transpose()
+    let Some(object) = ctx.get(&object_id(id)).await? else {
+        return Ok(None);
+    };
+    let mut session = DebugSession::from_object(&object)?;
+    let mut markers = Vec::new();
+    for event in [RuntimeEvent::Attached, RuntimeEvent::Closed] {
+        markers.extend(ctx.get(&marker_id(id, event)).await?);
+    }
+    join_runtime(std::slice::from_mut(&mut session), &markers);
+    Ok(Some(session))
 }
 
 /// Sessions of `environment`, or of every environment, newest first.
 pub async fn list(ctx: &mut Ctx, environment: Option<&str>) -> Result<Vec<DebugSession>> {
-    let objects = match environment {
-        Some(environment) => {
+    let (objects, markers) = match environment {
+        Some(environment) => (
             ctx.find_by_property(KIND_DEBUG_SESSION, "environment", environment)
-                .await?
-        }
-        None => ctx.list_kind(KIND_DEBUG_SESSION).await?,
+                .await?,
+            ctx.find_by_property(KIND_DEBUG_SESSION_RUNTIME, "environment", environment)
+                .await?,
+        ),
+        None => (
+            ctx.list_kind(KIND_DEBUG_SESSION).await?,
+            ctx.list_kind(KIND_DEBUG_SESSION_RUNTIME).await?,
+        ),
     };
     let mut sessions = objects
         .iter()
         .map(DebugSession::from_object)
         .collect::<Result<Vec<_>>>()?;
+    join_runtime(&mut sessions, &markers);
     sessions.sort_by(|a, b| b.opened_at.cmp(&a.opened_at).then(a.id.cmp(&b.id)));
     Ok(sessions)
+}
+
+/// Attach `session` to runtime `instance` unless another instance attached
+/// it first. Returns the instance that owns the session.
+pub async fn attach(ctx: &mut Ctx, session: &DebugSession, instance: &str) -> Result<String> {
+    let marker = runtime_marker(
+        session,
+        RuntimeEvent::Attached,
+        instance,
+        crate::now_millis(),
+    );
+    match ctx.create_once(marker).await {
+        Ok(_) => Ok(instance.to_owned()),
+        Err(error) if crate::client::is_unique_conflict(&error) => {
+            let owner = ctx
+                .get(&marker_id(&session.id, RuntimeEvent::Attached))
+                .await?
+                .and_then(|object| object.properties.get("runtime_instance").cloned())
+                .with_context(|| format!("debug session {} lost its attachment", session.id))?;
+            Ok(owner)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Record that runtime `instance` closed `session` at `closed_at` on its
+/// clock. Returns false when a close was already recorded.
+pub async fn record_runtime_close(
+    ctx: &mut Ctx,
+    session: &DebugSession,
+    instance: &str,
+    closed_at: i64,
+) -> Result<bool> {
+    let marker = runtime_marker(session, RuntimeEvent::Closed, instance, closed_at);
+    match ctx.create_once(marker).await {
+        Ok(_) => Ok(true),
+        Err(error) if crate::client::is_unique_conflict(&error) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn marker_id(id: &str, event: RuntimeEvent) -> String {
+    format!("{}:{}", object_id(id), event.as_str())
+}
+
+/// The marker of `event`; `at` is when it happened, on the clock of
+/// whoever saw it (the runtime's, for a close).
+fn runtime_marker(session: &DebugSession, event: RuntimeEvent, instance: &str, at: i64) -> Object {
+    let now = crate::now_millis();
+    Object {
+        id: marker_id(&session.id, event),
+        kind: KIND_DEBUG_SESSION_RUNTIME.into(),
+        name: format!("debug session {} {}", session.id, event.as_str()),
+        namespace: NS.into(),
+        external_id: String::new(),
+        properties: HashMap::from([
+            ("session".into(), session.id.clone()),
+            ("environment".into(), session.environment.clone()),
+            ("event".into(), event.as_str().into()),
+            ("runtime_instance".into(), instance.into()),
+            ("at".into(), at.to_string()),
+        ]),
+        created: now,
+        updated: now,
+    }
+}
+
+/// Fill each session's runtime view from its markers. A close marker
+/// without an attachment cannot be written, so it is ignored.
+fn join_runtime(sessions: &mut [DebugSession], markers: &[Object]) {
+    let field = |object: &Object, name: &str| object.properties.get(name).cloned();
+    for session in sessions {
+        let event_of = |event: RuntimeEvent| {
+            markers.iter().find(|object| {
+                field(object, "session").as_deref() == Some(session.id.as_str())
+                    && field(object, "event").as_deref() == Some(event.as_str())
+            })
+        };
+        let at = |object: &Object| field(object, "at").and_then(|at| at.parse().ok());
+        session.runtime = event_of(RuntimeEvent::Attached).map(|attached| DebugSessionRuntime {
+            instance: field(attached, "runtime_instance").unwrap_or_default(),
+            attached_at: at(attached).unwrap_or(attached.created),
+            closed_at: event_of(RuntimeEvent::Closed).and_then(at),
+        });
+    }
 }

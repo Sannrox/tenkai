@@ -59,7 +59,10 @@ impl Fixture {
             false,
         )
         .unwrap();
-        let mut config = ServerConfig::community("management-secret", HashMap::new());
+        let mut config = ServerConfig::community(
+            "management-secret",
+            HashMap::from([("runtime-secret".into(), "stage".into())]),
+        );
         config.release_trust_roots = Some(self.root.join("trust-roots.toml"));
         config.capabilities = tenkai::runtime_capabilities::community_sqlite_profile(
             tenkai::runtime_capabilities::enterprise_auth_capabilities(),
@@ -168,6 +171,49 @@ async fn call(
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
     )
 }
+
+/// A runtime request on `stage` from runtime instance `instance`, naming
+/// the `debug_session` capability when `capable`.
+async fn runtime(
+    app: &Router,
+    method: &str,
+    path: &str,
+    instance: &str,
+    capable: bool,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer runtime-secret")
+        .header("x-tenkai-runtime-instance", instance);
+    if capable {
+        request = request.header(
+            "x-tenkai-runtime-capabilities",
+            "instance_health,debug_session",
+        );
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            request
+                .body(Body::from(body.map(|b| b.to_string()).unwrap_or_default()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+const WORK: &str = "/v1/runtime/environments/stage/work";
 
 fn open(environment: &str, duration_ms: Option<i64>) -> serde_json::Value {
     let mut body = serde_json::json!({
@@ -334,4 +380,95 @@ async fn a_session_past_its_bound_is_expired() {
         assert_eq!(read["closed_at"], opened["not_after"]);
     }
     assert_eq!(audited(&store, "debug_session.expire.completed"), 1);
+}
+
+/// #1557: only a runtime naming `debug_session` is handed a session, the
+/// first such instance owns it, and its close is recorded and audited once.
+#[tokio::test]
+async fn the_first_capable_runtime_owns_a_session_and_reports_its_close() {
+    let fixture = fixture("runtime").await;
+    let (app, store) = fixture.server().await;
+    let human = fixture.token(&["debuggers"], None);
+    let (code, opened) = call(
+        &app,
+        "POST",
+        "/v1/debug-sessions",
+        &human,
+        Some(open("stage", None)),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED, "{opened}");
+    let id = opened["id"].as_str().unwrap();
+    let inspect = format!("/v1/debug-sessions/{id}");
+
+    let (code, work) = runtime(&app, "GET", WORK, "older", false, None).await;
+    assert_eq!(code, StatusCode::OK, "{work}");
+    assert!(work.get("debug_sessions").is_none(), "{work}");
+    let (_, unattached) = call(&app, "GET", &inspect, &human, None).await;
+    assert!(unattached.get("runtime").is_none(), "{unattached}");
+
+    let (_, work) = runtime(&app, "GET", WORK, "first", true, None).await;
+    assert_eq!(work["debug_sessions"][0]["id"], id, "{work}");
+    assert_eq!(work["debug_sessions"][0]["not_after"], opened["not_after"]);
+    let (_, work) = runtime(&app, "GET", WORK, "second", true, None).await;
+    assert!(work.get("debug_sessions").is_none(), "{work}");
+    let (_, attached) = call(&app, "GET", &inspect, &human, None).await;
+    assert_eq!(attached["runtime"]["instance"], "first", "{attached}");
+    assert_eq!(audited(&store, "debug_session.attach.completed"), 1);
+
+    let close = format!("/v1/runtime/environments/stage/debug-sessions/{id}/close");
+    let report = serde_json::json!({"closed_at": tenkai::now_millis()});
+    let (code, _) = runtime(&app, "POST", &close, "second", true, Some(report.clone())).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    for recorded in [true, false] {
+        let (code, body) = runtime(&app, "POST", &close, "first", true, Some(report.clone())).await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(body["recorded"], recorded);
+    }
+    let (_, closed) = call(&app, "GET", &inspect, &human, None).await;
+    assert_eq!(closed["state"], "closed", "{closed}");
+    assert_eq!(closed["closed_by"], "runtime:first");
+    assert!(closed["runtime"]["closed_at"].is_i64(), "{closed}");
+    assert_eq!(audited(&store, "debug_session.runtime_close.completed"), 1);
+    let (_, work) = runtime(&app, "GET", WORK, "first", true, None).await;
+    assert!(work.get("debug_sessions").is_none(), "{work}");
+}
+
+/// A runtime that ended a session at its bound while cut off reports it on
+/// reconnecting: the server records the session as already expired.
+#[tokio::test]
+async fn a_close_reported_after_the_bound_records_the_session_expired() {
+    let fixture = fixture("late-close").await;
+    let (app, store) = fixture.server().await;
+    let human = fixture.token(&["debuggers"], None);
+    let (code, opened) = call(
+        &app,
+        "POST",
+        "/v1/debug-sessions",
+        &human,
+        Some(open("stage", Some(200))),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED, "{opened}");
+    let id = opened["id"].as_str().unwrap();
+    let (_, work) = runtime(&app, "GET", WORK, "first", true, None).await;
+    assert_eq!(work["debug_sessions"][0]["id"], id, "{work}");
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let close = format!("/v1/runtime/environments/stage/debug-sessions/{id}/close");
+    let report = serde_json::json!({"closed_at": opened["not_after"]});
+    let (code, body) = runtime(&app, "POST", &close, "first", true, Some(report)).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let (_, expired) = call(
+        &app,
+        "GET",
+        &format!("/v1/debug-sessions/{id}"),
+        &human,
+        None,
+    )
+    .await;
+    assert_eq!(expired["state"], "expired", "{expired}");
+    assert_eq!(expired["closed_at"], opened["not_after"]);
+    // The runtime's own close time, not when the report arrived.
+    assert_eq!(expired["runtime"]["closed_at"], opened["not_after"]);
+    assert_eq!(audited(&store, "debug_session.runtime_close.completed"), 1);
 }

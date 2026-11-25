@@ -2343,6 +2343,10 @@
         "reason": {
           "type": "string"
         },
+        "runtime": {
+          "$ref": "#/$defs/DebugSessionRuntime",
+          "description": "The runtime holding the session; absent until one picks it up."
+        },
         "state": {
           "$ref": "#/$defs/DebugSessionState"
         },
@@ -2427,6 +2431,28 @@
         "environment",
         "instance",
         "reason"
+      ],
+      "type": "object"
+    },
+    "DebugSessionRuntime": {
+      "description": "The runtime instance a session reached, and when it closed it.",
+      "properties": {
+        "attached_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "closed_at": {
+          "description": "When the runtime reported closing the session on its own clock.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "instance": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "instance",
+        "attached_at"
       ],
       "type": "object"
     },
