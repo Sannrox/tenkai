@@ -152,9 +152,9 @@ impl StreamEnd {
                 Ok(Control::Attached) => match self.target() {
                     Ok(attached) => {
                         let usage = format!(
-                            "read-only debug session on {}; commands: {}\r\n",
+                            "debug session on {}; {}\r\n",
                             attached.request.instance,
-                            attached.reader.commands().join(", ")
+                            usage(&attached)
                         );
                         if stream.send(Message::binary(usage)).await.is_err() {
                             return None;
@@ -195,6 +195,16 @@ impl StreamEnd {
         None
     }
 
+    /// Whether the session's last handed-out elevation holds at `now`.
+    fn elevated(&self, now: i64) -> bool {
+        self.targets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&self.session)
+            .and_then(|session| session.elevated_until)
+            .is_some_and(|until| now < until)
+    }
+
     /// The executor and request this session reads, or why it cannot.
     fn target(&self) -> Result<DebugTarget, String> {
         let Some(builtin) = &self.builtin else {
@@ -231,8 +241,7 @@ impl StreamEnd {
                 Ok(()) => String::new(),
                 Err(error) => format!(" (recording the refusal failed: {error:#})"),
             };
-            let read = target.reader.commands().join(", ");
-            let text = format!("refused: {reason}{note}; read commands: {read}\r\n");
+            let text = format!("refused: {reason}{note}; {}\r\n", usage(target));
             (text.into_bytes(), REFUSED_EXIT)
         };
         let argv = match split_command(line) {
@@ -246,12 +255,19 @@ impl StreamEnd {
         };
         let access = target.reader.access(&argv);
         if access == DebugAccess::Write {
-            return refuse(
-                argv,
-                access,
-                "a read session runs only read commands".into(),
-            )
-            .await;
+            // An unknown argv is refused in every session; a known write
+            // only while the session's elevation holds on this clock too.
+            if !target.reader.is_write(&argv) {
+                return refuse(argv, access, "not a debug command".into()).await;
+            }
+            if !self.elevated(crate::now_millis()) {
+                return refuse(
+                    argv,
+                    access,
+                    "the session is not elevated; write commands need an approved elevation".into(),
+                )
+                .await;
+            }
         }
         if let Err(error) = self
             .record(
@@ -270,7 +286,11 @@ impl StreamEnd {
         let reader = target.reader.clone();
         let request = target.request.clone();
         let run_argv = argv.clone();
-        let ran = tokio::task::spawn_blocking(move || reader.read(&request, &run_argv)).await;
+        let ran = tokio::task::spawn_blocking(move || match access {
+            DebugAccess::Read => reader.read(&request, &run_argv),
+            DebugAccess::Write => reader.write(&request, &run_argv),
+        })
+        .await;
         let DebugOutput { output, exit_code } = match ran {
             Ok(Ok(output)) => output,
             Ok(Err(error)) => DebugOutput {
@@ -360,6 +380,17 @@ fn final_reason(reason: CloseReason) -> bool {
     )
 }
 
+/// The command usage a session prints: its reads, and the writes an
+/// approved elevation unlocks.
+fn usage(target: &DebugTarget) -> String {
+    let mut usage = format!("read commands: {}", target.reader.commands().join(", "));
+    let writes = target.reader.write_commands();
+    if !writes.is_empty() {
+        usage.push_str(&format!("; when elevated: {}", writes.join(", ")));
+    }
+    usage
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -401,6 +432,20 @@ mod tests {
             Ok(DebugOutput {
                 output: b"pods\n".to_vec(),
                 exit_code: 3,
+            })
+        }
+        fn debug_write_commands(&self) -> &'static [&'static str] {
+            &["restart"]
+        }
+        fn debug_write(
+            &self,
+            _: &SoftwareApplyRequest,
+            _: &[String],
+        ) -> anyhow::Result<DebugOutput> {
+            self.0.fetch_add(100, Ordering::SeqCst);
+            Ok(DebugOutput {
+                output: b"restarted\n".to_vec(),
+                exit_code: 0,
             })
         }
     }
@@ -486,5 +531,79 @@ mod tests {
             1,
             "an unrecorded read never runs"
         );
+    }
+
+    /// A known write runs only while the session's handed-out elevation
+    /// holds on the runtime's clock; an unknown argv never runs.
+    #[tokio::test]
+    async fn a_write_runs_only_while_the_session_is_elevated() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let app = {
+            let records = records.clone();
+            axum::Router::new().route(
+                "/v1/runtime/environments/prod/debug-sessions/s1/commands",
+                axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let records = records.clone();
+                    async move {
+                        records.lock().unwrap().push(body);
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                }),
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let end = StreamEnd {
+            client: reqwest::Client::new(),
+            session_url: format!("http://{address}/v1/runtime/environments/prod/debug-sessions/s1"),
+            token: "tkc_bearer".into(),
+            instance: "runtime-1".into(),
+            environment: "prod".into(),
+            session: "s1".into(),
+            targets: Default::default(),
+            builtin: None,
+        };
+        let elevate = |until: Option<i64>| {
+            end.targets.lock().unwrap().insert(
+                "s1".into(),
+                crate::runtime_delivery::RuntimeDebugSession {
+                    id: "s1".into(),
+                    instance: "api-a".into(),
+                    mode: crate::debug_session::DebugSessionMode::Read,
+                    not_after: crate::now_millis() + 600_000,
+                    target: None,
+                    elevated_until: until,
+                },
+            );
+        };
+        let counts = Arc::new(Counts::default());
+        let target = DebugTarget {
+            reader: crate::debug_command::DebugReader::Executor(counts.clone()),
+            request: crate::software_executor::request_from_parts("api", "1.0.0", "prod", ".", "r"),
+        };
+        let reason = |records: &Mutex<Vec<serde_json::Value>>| {
+            records.lock().unwrap().last().unwrap()["reason"].clone()
+        };
+
+        elevate(None);
+        assert_eq!(end.command(&target, "restart").await.1, REFUSED_EXIT);
+        assert!(reason(&records).as_str().unwrap().contains("not elevated"));
+        elevate(Some(crate::now_millis() + 60_000));
+        assert_eq!(end.command(&target, "delete pod x").await.1, REFUSED_EXIT);
+        assert_eq!(reason(&records), "not a debug command");
+        assert_eq!(
+            end.command(&target, "restart").await,
+            (b"restarted\n".to_vec(), 0)
+        );
+        let started = {
+            let records = records.lock().unwrap();
+            records[records.len() - 2].clone()
+        };
+        assert_eq!(started["outcome"], "started");
+        assert_eq!(started["access"], "write");
+        elevate(Some(crate::now_millis() - 1));
+        assert_eq!(end.command(&target, "restart").await.1, REFUSED_EXIT);
+        assert_eq!(counts.0.load(Ordering::SeqCst), 100, "one write ran");
     }
 }

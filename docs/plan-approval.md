@@ -215,6 +215,12 @@ them only after every replica runs a release that knows them.
 values. Opening and closing sessions is described in
 [debug sessions](debug-sessions.md).
 
+Under `elevate`, write access is approved with a separate envelope schema,
+`tenkai.debug-elevation-approval.v1`, signed with the same plan-approval keys
+under its own signing domain and counted against the `debug_elevate`
+`[[quorum]]` rule. The requester never counts toward it
+([elevation](debug-sessions.md#elevation)).
+
 ## Unattended approval policy
 
 An environment may opt into automatic signing of the same envelope. Auto

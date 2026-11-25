@@ -132,8 +132,8 @@ apply.
 
 Work pull does not accept supported versions and does not negotiate. The
 capabilities are `workload_identity`, `peer_grants`, `issuer_rotation`,
-`issuer_take_up`, `issuer_removal`, `instance_health`, `os_image`, and
-`debug_session`, named comma-separated in `x-tenkai-runtime-capabilities`
+`issuer_take_up`, `issuer_removal`, `instance_health`, `os_image`,
+`debug_session`, and `debug_elevation`, named comma-separated in `x-tenkai-runtime-capabilities`
 ([below](#identity-issuer), [instance health](#instance-health), [OS image reboots](#os-image-reboots), [debug sessions](#debug-sessions)). Completion covers the claimed plan in one request, not one proto
 `CompleteStep` per step. Inventory is an admitted facts map, not a proto
 `Observation`.
@@ -421,7 +421,11 @@ instance owns, each with `id`, `instance`, `mode`, `not_after` (Unix
 ms), and optional `target`: the release the environment has deployed for
 the instance (`product`, `artifact_digest`, `release_digest`, and
 `cluster_namespace` when it is not the environment), absent when it has
-none. The first capable instance to pull an unowned session owns it; the
+none. A runtime that also names `debug_elevation` gets `elevated_until`
+(Unix ms, server clock) while the session has an active
+[elevation](debug-sessions.md#elevation) and the environment's policy is
+still `elevate`; absent means read only. A runtime without the capability
+is never sent the field. The first capable instance to pull an unowned session owns it; the
 attachment is written once, so two instances never both hold it. A session
 past `not_after` is never handed out. A runtime that does not name the
 capability is never assigned a session, which stays unattached.
@@ -467,8 +471,12 @@ to `.../debug-sessions/{session}/commands` with outcome `started` before a
 command runs, `refused` for one it refuses, and `completed` with
 `exit_code` after; the server audits each as
 `debug_session.command.<outcome>`. A `started` record with access `write`
-is `400`, one for a session that has ended is `409`, and the runtime runs
-no command whose `started` record was not answered `204`. An instance that
+is `409` unless the session's elevation is still active on the server's
+clock; one for a session that has ended is `409`, and the runtime runs no
+command whose `started` record was not answered `204`. A server that admits
+write records names `debug_elevation` in `x-tenkai-server-capabilities`; an
+older one answers them `400`, and never sends `elevated_until`, so a
+runtime never starts a write against it. An instance that
 does not own the session gets `409`.
 
 ### OS image reboots

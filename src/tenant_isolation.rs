@@ -92,6 +92,26 @@ pub fn tenant_visible_rpcs() -> &'static [TenantVisibleRpc] {
             surface: TenantVisibleSurface::Management,
         },
         TenantVisibleRpc {
+            id: "management.debug_elevation_request",
+            path_template: "POST /v1/debug-sessions/{session}/elevations",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
+            id: "management.debug_elevation_list",
+            path_template: "GET /v1/debug-sessions/{session}/elevations",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
+            id: "management.debug_elevation_approve",
+            path_template: "POST /v1/debug-sessions/{session}/elevations/{elevation}/approvals",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
+            id: "management.debug_elevation_revoke",
+            path_template: "POST /v1/debug-sessions/{session}/elevations/{elevation}/revoke",
+            surface: TenantVisibleSurface::Management,
+        },
+        TenantVisibleRpc {
             id: "management.package_migration_preview",
             path_template: "POST /v1/migrations/{name}/preview",
             surface: TenantVisibleSurface::Management,

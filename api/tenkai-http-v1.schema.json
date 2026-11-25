@@ -2302,6 +2302,247 @@
       ],
       "type": "string"
     },
+    "DebugElevation": {
+      "description": "An elevation as returned by the management API.",
+      "properties": {
+        "active_from": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "approvals": {
+          "description": "Approvals collected so far, whether or not they still count.",
+          "items": {
+            "$ref": "#/$defs/DebugElevationApproval"
+          },
+          "type": "array"
+        },
+        "duration_ms": {
+          "description": "Requested length, counted from activation.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "end_reason": {
+          "type": "string"
+        },
+        "ended_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "not_after": {
+          "description": "When write access ends, once active.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "requested_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "requested_by": {
+          "description": "The human principal that asked; its own approval never counts.",
+          "type": "string"
+        },
+        "requester": {
+          "description": "The audit principal of the request.",
+          "type": "string"
+        },
+        "revoked_by": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/DebugElevationState"
+        }
+      },
+      "required": [
+        "id",
+        "session",
+        "environment",
+        "requested_by",
+        "requester",
+        "reason",
+        "requested_at",
+        "duration_ms",
+        "state",
+        "approvals"
+      ],
+      "type": "object"
+    },
+    "DebugElevationApproval": {
+      "description": "One counted or collected approval.",
+      "properties": {
+        "approved_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "key_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "key_id",
+        "approved_at"
+      ],
+      "type": "object"
+    },
+    "DebugElevationApproveRequest": {
+      "additionalProperties": false,
+      "description": "`POST /v1/debug-sessions/{session}/elevations/{elevation}/approvals`.",
+      "properties": {
+        "approval": {
+          "$ref": "#/$defs/DebugElevationStatementEnvelope"
+        }
+      },
+      "required": [
+        "approval"
+      ],
+      "type": "object"
+    },
+    "DebugElevationList": {
+      "properties": {
+        "elevations": {
+          "items": {
+            "$ref": "#/$defs/DebugElevation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "elevations"
+      ],
+      "type": "object"
+    },
+    "DebugElevationOpenRequest": {
+      "additionalProperties": false,
+      "description": "`POST /v1/debug-sessions/{session}/elevations`.",
+      "properties": {
+        "duration_ms": {
+          "default": null,
+          "description": "Write access length from activation. Default 30 minutes; never past\nthe session's bound.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Why write access is needed; recorded and audited.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "DebugElevationRevokeRequest": {
+      "additionalProperties": false,
+      "description": "`POST /v1/debug-sessions/{session}/elevations/{elevation}/revoke`.",
+      "properties": {
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "DebugElevationState": {
+      "description": "Where an elevation stands.",
+      "oneOf": [
+        {
+          "const": "pending",
+          "description": "Waiting for its quorum.",
+          "type": "string"
+        },
+        {
+          "const": "active",
+          "description": "Write commands run.",
+          "type": "string"
+        },
+        {
+          "const": "ended",
+          "description": "Over: revoked, bound reached, or the session ended. Final.",
+          "type": "string"
+        }
+      ]
+    },
+    "DebugElevationStatement": {
+      "additionalProperties": false,
+      "description": "What an approver signs: one elevation of one session in one environment.",
+      "properties": {
+        "elevation": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "issued_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "purpose": {
+          "description": "Always [`APPROVAL_PURPOSE`].",
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session",
+        "elevation",
+        "environment",
+        "purpose",
+        "issued_at",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "DebugElevationStatementEnvelope": {
+      "additionalProperties": false,
+      "description": "A signed approval: a statement, the key that signed it and the\nsignature. Plan approvals use [`ApprovalStatement`]; package migration\napprovals sign their own statement in the same envelope, under their own\nschema, purpose and domain ([`SignedApproval`]).",
+      "properties": {
+        "key_id": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        },
+        "statement": {
+          "$ref": "#/$defs/DebugElevationStatement"
+        }
+      },
+      "required": [
+        "schema",
+        "key_id",
+        "statement",
+        "signature"
+      ],
+      "type": "object"
+    },
     "DebugSession": {
       "description": "A debug session as stored and as returned by the management API.",
       "properties": {
@@ -11981,6 +12222,48 @@
       },
       "response": {
         "$ref": "#/$defs/DebugSession"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/debug-sessions/{session}/elevations",
+      "request": {
+        "$ref": "#/$defs/DebugElevationOpenRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/DebugElevation"
+      }
+    },
+    {
+      "auth": "read",
+      "method": "GET",
+      "path": "/v1/debug-sessions/{session}/elevations",
+      "request": null,
+      "response": {
+        "$ref": "#/$defs/DebugElevationList"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/debug-sessions/{session}/elevations/{elevation}/approvals",
+      "request": {
+        "$ref": "#/$defs/DebugElevationApproveRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/DebugElevation"
+      }
+    },
+    {
+      "auth": "management",
+      "method": "POST",
+      "path": "/v1/debug-sessions/{session}/elevations/{elevation}/revoke",
+      "request": {
+        "$ref": "#/$defs/DebugElevationRevokeRequest"
+      },
+      "response": {
+        "$ref": "#/$defs/DebugElevation"
       }
     },
     {

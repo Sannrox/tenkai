@@ -103,9 +103,19 @@ pub trait ReconcilePort: Send + Sync {
     fn application_ctx(&self) -> Option<Ctx> {
         None
     }
+    /// The plan-approval trust roots this host verifies signed approvals
+    /// with. A host without a reconciler config reads
+    /// [`crate::plan_approval::TRUST_ROOTS_ENV`].
+    fn approval_trust_roots(&self) -> Option<std::path::PathBuf> {
+        std::env::var_os(crate::plan_approval::TRUST_ROOTS_ENV).map(std::path::PathBuf::from)
+    }
 }
 
 impl ReconcilePort for Reconciler {
+    fn approval_trust_roots(&self) -> Option<std::path::PathBuf> {
+        self.execution_policy().trust_roots
+    }
+
     fn reconcile(&self) -> ReconcileFuture<'_> {
         Box::pin(self.run_once())
     }
@@ -1205,6 +1215,11 @@ pub struct RuntimeDebugSession {
     /// the instance has no deployed release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<RuntimeDebugTarget>,
+    /// Until when the session may run write commands, on the server's clock
+    /// (#1560). Sent only to a runtime that names `debug_elevation`; absent
+    /// means read only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevated_until: Option<i64>,
 }
 
 /// The deployed release a debug session reads.
@@ -1350,6 +1365,9 @@ pub struct RuntimeCaller<'a> {
     /// The agent named the `debug_session` capability: it holds debug
     /// sessions, ends them at their bound and POSTs the close (#1557).
     pub debug_session: bool,
+    /// The agent named the `debug_elevation` capability: it decodes
+    /// `elevated_until` and refuses writes past it (#1560).
+    pub debug_elevation: bool,
     /// The agent's installed executor kinds from `x-tenkai-runtime-executors`
     /// (ADR 0057), comma-separated. Recorded on work pull; planning refuses
     /// a release whose executor the runtime lacks.
@@ -1393,10 +1411,14 @@ pub const DEBUG_SESSION_CAPABILITY: &str = "debug_session";
 /// A server names it when it relays debug session terminal streams and
 /// admits stream error reports (#1558); a runtime only upgrades then.
 pub const DEBUG_STREAM_CAPABILITY: &str = "debug_stream";
+/// The capability a runtime names to be handed `elevated_until` and run
+/// write commands while it holds; a server names it when it admits their
+/// `started` records (#1560).
+pub const DEBUG_ELEVATION_CAPABILITY: &str = "debug_elevation";
 /// What this server admits on runtime work, comma-separated so an agent
 /// keeps to the shape an older server decodes.
 pub const SERVER_RUNTIME_CAPABILITIES: &str =
-    "certificate_observations,instance_health,debug_session,debug_stream";
+    "certificate_observations,instance_health,debug_session,debug_stream,debug_elevation";
 
 impl<'a> From<Option<&'a str>> for RuntimeCaller<'a> {
     fn from(instance: Option<&'a str>) -> Self {
@@ -1559,7 +1581,9 @@ impl RuntimeDeliveryOperations {
         if caller.debug_session
             && let Some(instance) = caller.instance
         {
-            work.debug_sessions = self.owned_debug_sessions(environment, instance).await;
+            work.debug_sessions = self
+                .owned_debug_sessions(environment, instance, caller.debug_elevation)
+                .await;
         }
         Ok(work)
     }
@@ -1571,6 +1595,7 @@ impl RuntimeDeliveryOperations {
         &self,
         environment: &str,
         instance: &str,
+        elevation: bool,
     ) -> Vec<RuntimeDebugSession> {
         let Some(mut ctx) = self.reconciler.application_ctx() else {
             return Vec::new();
@@ -1608,12 +1633,18 @@ impl RuntimeDeliveryOperations {
                 };
                 if owner == instance {
                     let target = debug_target(&mut ctx, environment, &session.instance).await?;
+                    let elevated_until = if elevation {
+                        crate::debug_elevation::elevated_until(&mut ctx, &session, now).await?
+                    } else {
+                        None
+                    };
                     owned.push(RuntimeDebugSession {
                         id: session.id,
                         instance: session.instance,
                         mode: session.mode,
                         not_after: session.not_after,
                         target,
+                        elevated_until,
                     });
                 }
             }
@@ -1820,14 +1851,6 @@ impl RuntimeDeliveryOperations {
                 "the debug command record is too long".into(),
             ));
         }
-        // Sessions read only until elevation exists (ADR 0061 §5, #1560).
-        if command.outcome == RuntimeDebugCommandOutcome::Started
-            && command.access == crate::debug_command::DebugAccess::Write
-        {
-            return Err(RuntimeDeliveryError::InvalidRequest(
-                "a debug session runs only read commands".into(),
-            ));
-        }
         if command.outcome == RuntimeDebugCommandOutcome::Started
             && (session.state != crate::debug_session::DebugSessionState::Open
                 || session.is_due(crate::now_millis())
@@ -1839,6 +1862,26 @@ impl RuntimeDeliveryOperations {
             return Err(RuntimeDeliveryError::Conflict(
                 "the debug session has ended".into(),
             ));
+        }
+        // A write starts only under a live elevation, checked on the
+        // server's clock as well as the runtime's (ADR 0061 §5, #1560).
+        if command.outcome == RuntimeDebugCommandOutcome::Started
+            && command.access == crate::debug_command::DebugAccess::Write
+        {
+            let Some(mut ctx) = self.reconciler.application_ctx() else {
+                return Err(RuntimeDeliveryError::Unavailable(
+                    "debug sessions unavailable".into(),
+                ));
+            };
+            let now = crate::now_millis();
+            let until = crate::debug_elevation::elevated_until(&mut ctx, &session, now)
+                .await
+                .map_err(|error| RuntimeDeliveryError::Unavailable(format!("{error:#}")))?;
+            if until.is_none_or(|until| now >= until) {
+                return Err(RuntimeDeliveryError::Conflict(
+                    "the debug session is not elevated".into(),
+                ));
+            }
         }
         let argv = serde_json::to_string(&command.argv)
             .map_err(|error| RuntimeDeliveryError::Internal(error.to_string()))?;
@@ -4493,6 +4536,7 @@ health = "curl -f http://127.0.0.1:9/health"
                 instance_health: false,
                 os_image: false,
                 debug_session: false,
+                debug_elevation: false,
                 executors: None,
                 engines: None,
             };
@@ -4548,6 +4592,7 @@ health = "curl -f http://127.0.0.1:9/health"
                         instance_health: false,
                         os_image: false,
                         debug_session: false,
+                        debug_elevation: false,
                         executors: None,
                         engines: None,
                     },
@@ -4736,6 +4781,7 @@ health = "curl -f http://127.0.0.1:9/health"
                             instance_health: false,
                             os_image: false,
                             debug_session: false,
+                            debug_elevation: false,
                             executors: None,
                             engines: None,
                         },
@@ -4827,6 +4873,7 @@ health = "curl -f http://127.0.0.1:9/health"
                         instance_health: false,
                         os_image: false,
                         debug_session: false,
+                        debug_elevation: false,
                         executors: None,
                         engines: None,
                     },
@@ -5805,6 +5852,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     instance_health: false,
                     os_image: false,
                     debug_session: false,
+                    debug_elevation: false,
                     executors: None,
                     engines: None,
                 },
@@ -5928,6 +5976,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     instance_health: false,
                     os_image: false,
                     debug_session: false,
+                    debug_elevation: false,
                     executors: None,
                     engines: None,
                 },
@@ -5972,6 +6021,7 @@ health = "curl -f http://127.0.0.1:9/health"
                     instance_health: false,
                     os_image: false,
                     debug_session: false,
+                    debug_elevation: false,
                     executors: None,
                     engines: None,
                 },

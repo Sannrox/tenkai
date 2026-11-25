@@ -1,5 +1,6 @@
 //! `/v1/debug-sessions` (ADR 0061, #1556): open, list, inspect and close
-//! debug sessions. The management operations hold every check.
+//! debug sessions, and request, approve and revoke their elevation (#1560).
+//! The management operations hold every check.
 
 use std::sync::Arc;
 
@@ -96,4 +97,89 @@ pub(super) async fn close_debug_session(
         );
     }
     manage_result(closed)
+}
+
+pub(super) async fn request_debug_elevation(
+    State(state): State<Arc<AppState>>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    match state
+        .management
+        .request_debug_elevation(&credential, &session, request)
+        .await
+    {
+        Ok(elevation) => (StatusCode::CREATED, Json(elevation)).into_response(),
+        Err(error) => management_error(error),
+    }
+}
+
+pub(super) async fn list_debug_elevations(
+    State(state): State<Arc<AppState>>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .list_debug_elevations(&credential, &session)
+            .await,
+    )
+}
+
+pub(super) async fn approve_debug_elevation(
+    State(state): State<Arc<AppState>>,
+    Path((session, elevation)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .approve_debug_elevation(&credential, &session, &elevation, request)
+            .await,
+    )
+}
+
+pub(super) async fn revoke_debug_elevation(
+    State(state): State<Arc<AppState>>,
+    Path((session, elevation)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let credential = match require_management(&headers) {
+        Ok(credential) => credential,
+        Err(error) => return *error,
+    };
+    let request = match parse_management_json(&body) {
+        Ok(request) => request,
+        Err(error) => return *error,
+    };
+    manage_result(
+        state
+            .management
+            .revoke_debug_elevation(&credential, &session, &elevation, request)
+            .await,
+    )
 }

@@ -31,6 +31,10 @@ written, the session does not open.
 | `GET /v1/debug-sessions/{session}` | `read` | the session |
 | `POST /v1/debug-sessions/{session}/close` with `reason` | `debug` or `management` | the session, `state` `closed` |
 | `GET /v1/debug-sessions/{session}/stream`, a WebSocket upgrade | `debug` | the terminal [stream](#stream) |
+| `POST /v1/debug-sessions/{session}/elevations` with `reason`, optional `duration_ms` | `debug` | 201 and the [elevation](#elevation), `state` `pending` |
+| `GET /v1/debug-sessions/{session}/elevations` | `read` | `{"elevations": [...]}` |
+| `POST /v1/debug-sessions/{session}/elevations/{elevation}/approvals` with `approval`, a signed envelope | `debug` | the elevation, `active` once the quorum is met |
+| `POST /v1/debug-sessions/{session}/elevations/{elevation}/revoke` with `reason` | `debug` or `management` | the elevation, `state` `ended` |
 
 `duration_ms` defaults to the environment's maximum. A session is stored in
 the operational store (SQLite, or the tenant's partition on a Postgres hub),
@@ -43,6 +47,38 @@ so it survives a restart and every replica serves it.
   Closing a session that already ended returns it unchanged.
 - `expired`: `not_after` passed while it was open. The first read after the
   bound records the expiry; `closed_at` is `not_after`.
+
+## Elevation
+
+A session reads only. In an environment whose policy sets `debug_sessions`
+to `elevate`, a human holding `debug` may request write access for a while,
+with a reason. It needs a `debug_elevate` quorum of signed approvals
+([plan approval](plan-approval.md#debug-sessions)) before any write runs.
+
+- An approval is an envelope of schema `tenkai.debug-elevation-approval.v1`
+  whose statement binds `session`, `elevation`, `environment`, purpose
+  `debug_elevate`, `issued_at` and `expires_at` (Unix ms). It is signed with
+  a plan-approval key under its own signing domain, so a plan approval never
+  verifies as an elevation approval or the other way round. The server
+  verifies it against the plan-approval trust roots
+  (`TENKAI_PLAN_APPROVAL_TRUST_ROOTS`); without them every request and
+  approval is `503`. A signer limited to other environments, or to automatic
+  or preflight approval, is refused.
+- The requester's own approval is stored but never counts, whatever the
+  quorum rule says. Two approvals from one key or one identity count once.
+  Without a `debug_elevate` rule one other approver is enough.
+- When the quorum is met the elevation is `active` until `not_after`: the
+  approval time plus `duration_ms` (default 30 minutes, at most 4 hours),
+  never past the session's own bound. It is `ended` at the first of that
+  bound, a revoke, or the session ending; `end_reason` says which.
+- An agent, a `read` or `forbid` policy, a closed session, and an approval
+  bound to another elevation are refused. A policy tightened to `read` after
+  approval ends write access at once.
+
+Requests, approvals, and revokes are stored once each and never rewritten,
+so concurrent approvals or a revoke racing an approval cannot reopen an
+ended elevation. There is no CLI; signing an approval and calling the API is
+left to the operator's tooling.
 
 ## Runtime
 
@@ -123,9 +159,21 @@ credentials, scoped to the instance and nothing beyond it:
 
 `--tail` is 1 to 5000 and defaults to 200. Commands that can print secrets
 are not offered: Helm values and manifests, `docker inspect`, and the pod
-spec, so `describe` prints each pod's status only. Any other line is a write. A `read` session refuses it with exit code
-126 and runs nothing; this layer has no elevated commands, so an `elevated`
-session refuses writes too.
+spec, so `describe` prints each pod's status only.
+
+An [elevated](#elevation) session also runs one write command, `restart`,
+which never re-applies a release:
+
+| Executor | Write command | Effect |
+| --- | --- | --- |
+| `kubernetes` | `restart` | `kubectl rollout restart` of the instance's labelled deployments, statefulsets, and daemonsets |
+| `docker` | `restart` | `docker restart` of the instance's labelled containers |
+
+`kubernetes-inprocess`, `helm`, and `host` offer no write command. Any other
+line is refused with exit code 126 in every session, and so is `restart`
+while the session is not elevated. The runtime checks the elevation's bound
+on its own clock and the server checks it again on its own before the
+command starts.
 
 The runtime records each command before running it. A command whose record
 the server does not accept, or that arrives after the session ended, is not
@@ -151,6 +199,11 @@ group); without it the command prints journalctl's refusal.
 | `debug_session.attach.completed` | a runtime instance took the session, under principal `runtime:<instance>` |
 | `debug_session.runtime_close.completed` | the owning runtime reported closing it |
 | `debug_session.stream.attached` | an end's stream upgrade was admitted; the resource names the side |
-| `debug_session.command.started` | before a read command runs, under principal `runtime:<instance>`; the resource names the access and the argv as JSON |
+| `debug_session.elevate.requested` | before an elevation request is stored; the resource names the elevation, duration and reason |
+| `debug_session.elevate.refused` | every refused request, and every approval that did not verify |
+| `debug_session.elevate.approval` | before an approval is stored; the resource names the signer and key |
+| `debug_session.elevate.completed` | the quorum was met; the resource names the bound and the counted approvers |
+| `debug_session.elevate.revoked` | a revoke, with its reason |
+| `debug_session.command.started` | before a command runs, under principal `runtime:<instance>`; the resource names the access and the argv as JSON |
 | `debug_session.command.refused` | a command the runtime refused, with its reason |
 | `debug_session.command.completed` | a command exited, with its exit code |

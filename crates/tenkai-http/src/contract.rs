@@ -995,6 +995,40 @@ pub fn http_contract() -> Value {
             response: schema::<tenkai::debug_session::DebugSession>(&mut g),
         },
         Route {
+            method: "POST",
+            path: "/v1/debug-sessions/{session}/elevations",
+            auth: Auth::Management,
+            request: Some(schema::<
+                tenkai::management_operations::DebugElevationOpenRequest,
+            >(&mut g)),
+            response: schema::<tenkai::debug_elevation::DebugElevation>(&mut g),
+        },
+        Route {
+            method: "GET",
+            path: "/v1/debug-sessions/{session}/elevations",
+            auth: Auth::Read,
+            request: None,
+            response: schema::<tenkai::management_operations::DebugElevationList>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/debug-sessions/{session}/elevations/{elevation}/approvals",
+            auth: Auth::Management,
+            request: Some(schema::<
+                tenkai::management_operations::DebugElevationApproveRequest,
+            >(&mut g)),
+            response: schema::<tenkai::debug_elevation::DebugElevation>(&mut g),
+        },
+        Route {
+            method: "POST",
+            path: "/v1/debug-sessions/{session}/elevations/{elevation}/revoke",
+            auth: Auth::Management,
+            request: Some(schema::<
+                tenkai::management_operations::DebugElevationRevokeRequest,
+            >(&mut g)),
+            response: schema::<tenkai::debug_elevation::DebugElevation>(&mut g),
+        },
+        Route {
             method: "GET",
             path: "/v1/runners",
             auth: Auth::Management,

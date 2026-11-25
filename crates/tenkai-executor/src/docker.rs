@@ -865,6 +865,51 @@ impl SoftwareExecutor for DockerHostExecutor {
         Ok(tenkai::debug_command::DebugOutput { output, exit_code })
     }
 
+    /// `restart`: restart the instance's labelled containers in place. Docker
+    /// only, like the reads.
+    fn debug_write_commands(&self) -> &'static [&'static str] {
+        if self.is_apple() {
+            &[]
+        } else {
+            &[tenkai::debug_command::RESTART]
+        }
+    }
+
+    fn debug_write(
+        &self,
+        request: &SoftwareApplyRequest,
+        argv: &[String],
+    ) -> Result<tenkai::debug_command::DebugOutput> {
+        if !tenkai::debug_command::names_write(self.debug_write_commands(), argv) {
+            bail!("not a write command of this executor");
+        }
+        let filters = instance_filters(request);
+        let mut list = vec!["ps", "-a", "--format", "{{.Names}}"];
+        list.extend(filters.iter().map(String::as_str));
+        let listed = docker_output(self, &list)?;
+        if !listed.status.success() {
+            bail!(
+                "listing the instance's containers failed: {}",
+                String::from_utf8_lossy(&listed.stderr).trim()
+            );
+        }
+        let names: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if names.is_empty() {
+            return Ok(tenkai::debug_command::DebugOutput {
+                output: b"no containers to restart\n".to_vec(),
+                exit_code: 0,
+            });
+        }
+        let mut command = self.docker_command();
+        command.arg("restart").args(&names);
+        tenkai::debug_command::run_capped(command)
+    }
+
     fn require_target(&self, request: &SoftwareApplyRequest) -> Result<(), TargetUnavailable> {
         let _ = request;
         if self.is_apple() && !self.engine_services_answer() {

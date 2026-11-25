@@ -5,6 +5,7 @@ mod catalog_list;
 mod change_events;
 mod channel_promotion;
 mod config;
+mod debug_elevations;
 mod debug_sessions;
 mod delivery_hold;
 mod deployment_history;

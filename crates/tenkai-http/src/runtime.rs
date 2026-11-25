@@ -419,6 +419,10 @@ pub(super) fn runtime_caller<'a>(
             headers,
             tenkai::runtime_delivery::DEBUG_SESSION_CAPABILITY,
         ),
+        debug_elevation: names_capability(
+            headers,
+            tenkai::runtime_delivery::DEBUG_ELEVATION_CAPABILITY,
+        ),
         executors: headers
             .get(tenkai::runtime_delivery::EXECUTORS_HEADER)
             .and_then(|value| value.to_str().ok()),
