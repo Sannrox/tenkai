@@ -10,6 +10,8 @@ use reqwest::StatusCode;
 use tokio::io::AsyncReadExt as _;
 use tokio::process::Command;
 
+mod debug_stream;
+
 use crate::inventory::{self, RUNTIME_INVENTORY_SOURCE};
 use crate::plan::{Plan, Step};
 use crate::runtime_delivery::{RuntimeCompletion, RuntimeStepReceipt};
@@ -327,6 +329,8 @@ pub struct RuntimeClient {
     health_duty_cursor: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// The last pull's server admits debug session close reports (#1557).
     server_debug_sessions: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The last pull's server relays debug session streams (#1558).
+    server_debug_stream: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Debug sessions this instance holds, and closes not yet reported. In
     /// memory only: a restarted agent is a new instance that owns none, and
     /// the server ends a session nobody reports at its bound anyway.
@@ -388,6 +392,7 @@ impl RuntimeClient {
             server_instance_health: Default::default(),
             health_duty_cursor: Default::default(),
             server_debug_sessions: Default::default(),
+            server_debug_stream: Default::default(),
             debug_sessions: Default::default(),
             preflight: None,
             local_policy: None,
@@ -606,6 +611,7 @@ impl RuntimeClient {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .hold(&work.debug_sessions, crate::now_millis());
+        self.stream_debug_sessions();
         // Again after a pull: the pull is what tells this agent the server
         // admits close reports, so one held back while it was unreachable
         // goes out on the poll that reaches it.
@@ -1115,6 +1121,10 @@ impl RuntimeClient {
             names_capability(crate::runtime_delivery::DEBUG_SESSION_CAPABILITY),
             std::sync::atomic::Ordering::SeqCst,
         );
+        self.server_debug_stream.store(
+            names_capability(crate::runtime_delivery::DEBUG_STREAM_CAPABILITY),
+            std::sync::atomic::Ordering::SeqCst,
+        );
         decode_response(response, "pulling runtime work").await
     }
 
@@ -1345,6 +1355,37 @@ impl RuntimeClient {
         }
     }
 
+    /// Open the stream of every held session that has none, when the server
+    /// relays them. A stream ends with its session here.
+    fn stream_debug_sessions(&self) {
+        if !self
+            .server_debug_stream
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let Ok(client) = self.client() else {
+            return;
+        };
+        let mut held = self
+            .debug_sessions
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for id in held.unstreamed() {
+            let end = debug_stream::StreamEnd {
+                client: client.clone(),
+                session_url: format!(
+                    "{}/v1/runtime/environments/{}/debug-sessions/{id}",
+                    self.base_url, self.environment
+                ),
+                token: self.token.clone(),
+                instance: self.instance_id.clone(),
+            };
+            let stream = tokio::spawn(end.run()).abort_handle();
+            held.streams.insert(id, stream);
+        }
+    }
+
     async fn report_debug_session_close(&self, id: &str, closed_at: i64) -> Result<()> {
         let response = self
             .client()?
@@ -1416,6 +1457,16 @@ struct HeldDebugSessions {
     open: std::collections::BTreeMap<String, i64>,
     /// Sessions closed here and when, until the server records the close.
     closed: std::collections::BTreeMap<String, i64>,
+    /// The stream task of each open session that has one (#1558).
+    streams: std::collections::BTreeMap<String, tokio::task::AbortHandle>,
+}
+
+impl Drop for HeldDebugSessions {
+    fn drop(&mut self) {
+        for stream in self.streams.values() {
+            stream.abort();
+        }
+    }
 }
 
 impl HeldDebugSessions {
@@ -1431,6 +1482,28 @@ impl HeldDebugSessions {
             self.open.remove(&id);
             self.closed.insert(id, now);
         }
+        self.end_streams();
+    }
+
+    /// Open sessions without a stream task.
+    fn unstreamed(&self) -> Vec<String> {
+        self.open
+            .keys()
+            .filter(|id| !self.streams.contains_key(*id))
+            .cloned()
+            .collect()
+    }
+
+    /// Abort the stream of every session no longer open.
+    fn end_streams(&mut self) {
+        let open = &self.open;
+        self.streams.retain(|id, stream| {
+            let keep = open.contains_key(id);
+            if !keep {
+                stream.abort();
+            }
+            keep
+        });
     }
 
     /// Take the server's list: hold new sessions and end those it no longer
@@ -1449,6 +1522,7 @@ impl HeldDebugSessions {
                 .min(now.saturating_add(crate::approval_policy::DEBUG_SESSION_BOUND_MS));
             self.open.entry(session.id.clone()).or_insert(deadline);
         }
+        self.end_streams();
     }
 }
 

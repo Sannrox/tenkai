@@ -1167,6 +1167,13 @@ pub struct RuntimeDebugSessionClose {
     pub closed_at: i64,
 }
 
+/// Why a runtime could not open a session's terminal stream (#1558).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDebugStreamError {
+    pub reason: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RuntimeDebugSessionCloseResponse {
     /// False when this close was already recorded.
@@ -1286,10 +1293,13 @@ pub const OS_IMAGE_CAPABILITY: &str = "os_image";
 /// The capability a runtime names to be handed debug sessions, and a server
 /// names when it admits their close reports (#1557).
 pub const DEBUG_SESSION_CAPABILITY: &str = "debug_session";
+/// A server names it when it relays debug session terminal streams and
+/// admits stream error reports (#1558); a runtime only upgrades then.
+pub const DEBUG_STREAM_CAPABILITY: &str = "debug_stream";
 /// What this server admits on runtime work, comma-separated so an agent
 /// keeps to the shape an older server decodes.
 pub const SERVER_RUNTIME_CAPABILITIES: &str =
-    "certificate_observations,instance_health,debug_session";
+    "certificate_observations,instance_health,debug_session,debug_stream";
 
 impl<'a> From<Option<&'a str>> for RuntimeCaller<'a> {
     fn from(instance: Option<&'a str>) -> Self {
@@ -1618,6 +1628,102 @@ impl RuntimeDeliveryOperations {
                 .map_err(unavailable)?;
         }
         Ok(RuntimeDebugSessionCloseResponse { recorded })
+    }
+
+    /// Admit the owning runtime's terminal stream on session `id` (#1558).
+    /// The relay calls it at the upgrade (`first`, which audits the attach)
+    /// and on every recheck. A session this instance does not own, or one
+    /// that has ended, is [`RuntimeDeliveryError::Conflict`].
+    pub async fn authorize_debug_stream(
+        &self,
+        token: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
+        environment: &str,
+        id: &str,
+        first: bool,
+    ) -> Result<crate::debug_session::DebugSession, RuntimeDeliveryError> {
+        let caller = caller.into();
+        let identity = self.admit_work(token, &caller, environment).await?;
+        let session = self.owned_debug_session(&identity, environment, id).await?;
+        if session.state != crate::debug_session::DebugSessionState::Open
+            || session.is_due(crate::now_millis())
+            || session
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.closed_at.is_some())
+        {
+            return Err(RuntimeDeliveryError::Conflict(
+                "the debug session has ended".into(),
+            ));
+        }
+        if first {
+            self.audit_debug_runtime(
+                &identity.instance,
+                "debug_session.stream.attached",
+                &session,
+            )
+            .map_err(|error| RuntimeDeliveryError::Unavailable(format!("{error:#}")))?;
+        }
+        Ok(session)
+    }
+
+    /// Record why the owning runtime could not open the stream of session
+    /// `id`, so the session shows it (#1558).
+    pub async fn report_debug_stream_error(
+        &self,
+        token: Option<&str>,
+        caller: impl Into<RuntimeCaller<'_>>,
+        environment: &str,
+        id: &str,
+        report: &RuntimeDebugStreamError,
+    ) -> Result<(), RuntimeDeliveryError> {
+        let caller = caller.into();
+        let identity = self.admit_work(token, &caller, environment).await?;
+        let session = self.owned_debug_session(&identity, environment, id).await?;
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "debug sessions unavailable".into(),
+            ));
+        };
+        crate::debug_session::record_stream_error(
+            &mut ctx,
+            &session,
+            &identity.instance,
+            &report.reason,
+        )
+        .await
+        .map_err(|error| RuntimeDeliveryError::Unavailable(format!("{error:#}")))
+    }
+
+    /// Session `id` of `environment`, when the calling instance owns it.
+    async fn owned_debug_session(
+        &self,
+        identity: &RuntimeIdentity,
+        environment: &str,
+        id: &str,
+    ) -> Result<crate::debug_session::DebugSession, RuntimeDeliveryError> {
+        crate::ontology::validate_opaque_identifier("debug session", id)
+            .map_err(|error| RuntimeDeliveryError::InvalidRequest(error.to_string()))?;
+        let Some(mut ctx) = self.reconciler.application_ctx() else {
+            return Err(RuntimeDeliveryError::Unavailable(
+                "debug sessions unavailable".into(),
+            ));
+        };
+        crate::debug_session::load(&mut ctx, id)
+            .await
+            .map_err(|error| RuntimeDeliveryError::Unavailable(format!("{error:#}")))?
+            .filter(|session| {
+                session.environment == environment
+                    && session
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.instance == identity.instance)
+            })
+            .ok_or_else(|| {
+                RuntimeDeliveryError::Conflict(
+                    "this runtime does not hold that debug session".into(),
+                )
+            })
     }
 
     /// The approved add plan of `environment`'s next issuer, while one

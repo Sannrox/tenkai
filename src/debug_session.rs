@@ -94,13 +94,23 @@ pub struct DebugSessionRuntime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(transform = crate::schema_contract::omitted_when_none)]
     pub closed_at: Option<i64>,
+    /// Why the runtime last failed to open the terminal stream, such as a
+    /// TLS terminator that refuses the WebSocket upgrade (#1558).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(transform = crate::schema_contract::omitted_when_none)]
+    pub stream_error: Option<String>,
 }
+
+/// Longest stream error kept.
+pub const MAX_STREAM_ERROR: usize = 256;
 
 /// What a runtime did with a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeEvent {
     Attached,
     Closed,
+    /// Overwritten on each report, unlike the create-once events.
+    StreamError,
 }
 
 impl RuntimeEvent {
@@ -108,6 +118,7 @@ impl RuntimeEvent {
         match self {
             Self::Attached => "attached",
             Self::Closed => "closed",
+            Self::StreamError => "stream_error",
         }
     }
 }
@@ -207,7 +218,11 @@ pub async fn load(ctx: &mut Ctx, id: &str) -> Result<Option<DebugSession>> {
     };
     let mut session = DebugSession::from_object(&object)?;
     let mut markers = Vec::new();
-    for event in [RuntimeEvent::Attached, RuntimeEvent::Closed] {
+    for event in [
+        RuntimeEvent::Attached,
+        RuntimeEvent::Closed,
+        RuntimeEvent::StreamError,
+    ] {
         markers.extend(ctx.get(&marker_id(id, event)).await?);
     }
     join_runtime(std::slice::from_mut(&mut session), &markers);
@@ -276,6 +291,32 @@ pub async fn record_runtime_close(
     }
 }
 
+/// Record why runtime `instance` could not open the stream of `session`,
+/// replacing an earlier reason. The reason is cut to [`MAX_STREAM_ERROR`].
+pub async fn record_stream_error(
+    ctx: &mut Ctx,
+    session: &DebugSession,
+    instance: &str,
+    reason: &str,
+) -> Result<()> {
+    let mut reason = reason.to_owned();
+    if reason.len() > MAX_STREAM_ERROR {
+        let mut end = MAX_STREAM_ERROR;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        reason.truncate(end);
+    }
+    let mut marker = runtime_marker(
+        session,
+        RuntimeEvent::StreamError,
+        instance,
+        crate::now_millis(),
+    );
+    marker.properties.insert("reason".into(), reason);
+    ctx.put(marker).await.map(|_| ())
+}
+
 fn marker_id(id: &str, event: RuntimeEvent) -> String {
     format!("{}:{}", object_id(id), event.as_str())
 }
@@ -318,6 +359,8 @@ fn join_runtime(sessions: &mut [DebugSession], markers: &[Object]) {
             instance: field(attached, "runtime_instance").unwrap_or_default(),
             attached_at: at(attached).unwrap_or(attached.created),
             closed_at: event_of(RuntimeEvent::Closed).and_then(at),
+            stream_error: event_of(RuntimeEvent::StreamError)
+                .and_then(|error| field(error, "reason")),
         });
     }
 }

@@ -331,9 +331,34 @@ pub(super) async fn runtime_debug_session_close(
     }
 }
 
+/// The holding runtime could not open the session's terminal stream; the
+/// session shows why (#1558). `204` once durable.
+pub(super) async fn runtime_debug_stream_error(
+    State(state): State<Arc<AppState>>,
+    Path((environment, session)): Path<(String, String)>,
+    headers: HeaderMap,
+    certificate: Option<axum::Extension<crate::tls::ClientCertificate>>,
+    Json(report): Json<tenkai::runtime_delivery::RuntimeDebugStreamError>,
+) -> Response {
+    match state
+        .runtime_delivery
+        .report_debug_stream_error(
+            bearer(&headers),
+            runtime_caller(&headers, certificate.as_ref()),
+            &environment,
+            &session,
+            &report,
+        )
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => runtime_delivery_error(error),
+    }
+}
+
 /// The calling instance, the agent's version when sent (#673), and the
 /// connection's verified client certificate (#674).
-fn runtime_caller<'a>(
+pub(super) fn runtime_caller<'a>(
     headers: &'a HeaderMap,
     certificate: Option<&'a axum::Extension<crate::tls::ClientCertificate>>,
 ) -> tenkai::runtime_delivery::RuntimeCaller<'a> {
@@ -426,7 +451,7 @@ fn error_response_with_reason(
         .into_response()
 }
 
-fn runtime_delivery_error(error: RuntimeDeliveryError) -> Response {
+pub(super) fn runtime_delivery_error(error: RuntimeDeliveryError) -> Response {
     let status = match error {
         RuntimeDeliveryError::MissingCredential => StatusCode::UNAUTHORIZED,
         RuntimeDeliveryError::InvalidCredential | RuntimeDeliveryError::ForeignEnvironment => {

@@ -84,10 +84,16 @@ pub(super) async fn close_debug_session(
         Ok(request) => request,
         Err(error) => return *error,
     };
-    manage_result(
-        state
-            .management
-            .close_debug_session(&credential, &session, request)
-            .await,
-    )
+    let closed = state
+        .management
+        .close_debug_session(&credential, &session, request)
+        .await;
+    if closed.is_ok() {
+        // Streams on other replicas see the close at their next recheck.
+        state.debug_relay.end_all(
+            &session,
+            tenkai::debug_stream::Control::close(tenkai::debug_stream::CloseReason::SessionClosed),
+        );
+    }
+    manage_result(closed)
 }

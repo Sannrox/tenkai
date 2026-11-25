@@ -7,7 +7,9 @@
 //! `api/tenkai-http-v1.schema.json` must match (see the drift test), and each
 //! release attaches it so clients such as the web console generate types.
 //! The pull runtime (`/v1/runtime/*`) is excluded; its contract is
-//! `proto/tenkai/runtime/v1` and `docs/runtime-protocol-v1.md`.
+//! `proto/tenkai/runtime/v1` and `docs/runtime-protocol-v1.md`. So is the
+//! debug session stream WebSocket, which carries no JSON response; its
+//! contract is `docs/debug-sessions.md`.
 
 use schemars::generate::SchemaSettings;
 use schemars::{JsonSchema, SchemaGenerator};

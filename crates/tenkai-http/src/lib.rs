@@ -4,6 +4,7 @@ mod auth;
 mod config;
 pub mod contract;
 mod debug_sessions;
+mod debug_stream;
 mod environment_config;
 mod exports;
 mod grant_rules;

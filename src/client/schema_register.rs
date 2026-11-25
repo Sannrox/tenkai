@@ -1259,9 +1259,14 @@ pub fn known_object_types() -> Vec<ObjectType> {
             vec![
                 prop("session", true, "Debug session id"),
                 prop("environment", true, "Environment of the session"),
-                prop("event", true, "attached|closed"),
+                prop("event", true, "attached|closed|stream_error"),
                 prop("runtime_instance", true, "Runtime instance that acted"),
                 prop("at", true, "Unix ms of the event"),
+                prop(
+                    "reason",
+                    false,
+                    "Why the stream could not open (stream_error)",
+                ),
             ],
         ),
     ]
