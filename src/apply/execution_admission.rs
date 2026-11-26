@@ -6,15 +6,133 @@ use anyhow::Result;
 
 use crate::client::Ctx;
 use crate::ontology::env_id;
-use crate::plan::{Action, Plan};
+use crate::plan::{Action, Plan, PlanState, Step};
+
+use super::execution_lease::{
+    ENVIRONMENT_LEASE_NAMESPACE, claim_environment, is_apply_in_progress, release_environment,
+};
 
 /// Reconciliation only needs to know whether an approved computed Plan still
 /// describes current operational state. Final execution preserves the exact
 /// rejection through [`admit`] immediately before mutation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CandidateAdmission {
     Admissible,
     Superseded,
+    /// It would install a recalled release, so it can never run; retire it
+    /// with [`retire_recalled`] and this detail (#1571).
+    Recalled(String),
+}
+
+/// Whether `step` of `plan` may run on recalled Catalog content: an audited
+/// recovery rollback, a removal (which deploys nothing), or an upgrade the
+/// plan admitted onto an advisory-recalled release. A provision step admits
+/// it only for an audited recovery removal. Step execution and admission
+/// inspection both use this rule.
+pub(super) fn step_admits_recalled(plan: &Plan, step: &Step) -> bool {
+    let recovery = plan
+        .recalled_recovery_reason
+        .as_deref()
+        .is_some_and(|reason| !reason.trim().is_empty());
+    if step.provision.is_some() {
+        return recovery && step.action == Action::Remove;
+    }
+    (recovery && step.action == Action::Rollback)
+        || step.action == Action::Remove
+        || (step.action == Action::Upgrade
+            && plan
+                .recalled_upgrade
+                .iter()
+                .any(|admission| admission.target_release == step.release_id))
+}
+
+/// The first recalled release a step of `plan` would install or restore
+/// without admitting recalled content; such a plan can never run (#1571).
+async fn recalled_content(ctx: &mut Ctx, plan: &Plan) -> Result<Option<String>> {
+    let mut checked = std::collections::HashSet::new();
+    for step in &plan.steps {
+        if step.is_cluster_namespace() || step_admits_recalled(plan, step) {
+            continue;
+        }
+        let pins = std::iter::once(step.release_id.as_str())
+            .chain(step.restore.as_ref().map(|pin| pin.release_id.as_str()));
+        for release_id in pins {
+            if release_id.is_empty() || !checked.insert(release_id) {
+                continue;
+            }
+            if crate::catalog::release_is_recalled(ctx, release_id).await? {
+                return Ok(Some(release_id.to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Fail queued `plan` when it would install recalled content, as
+/// [`classify_candidate`] would report it; true when the plan is recalled,
+/// retired now or left for a later tick. Only the recall check runs, so a
+/// runtime poll does not pay for full admission.
+pub(crate) async fn retire_if_recalled(ctx: &mut Ctx, plan: &Plan) -> Result<bool> {
+    let Some(release_id) = recalled_content(ctx, plan).await? else {
+        return Ok(false);
+    };
+    retire_recalled(ctx, plan, &recalled_detail(&release_id)).await?;
+    Ok(true)
+}
+
+/// Status detail of a plan retired before start for recalled content.
+const RECALL_RETIREMENT: &str = "retired before start: would install recalled release ";
+
+fn recalled_detail(release_id: &str) -> String {
+    format!("{RECALL_RETIREMENT}{release_id}")
+}
+
+/// The recalled release named by the detail of a plan retired before start,
+/// which operator views may show; `None` for any other detail.
+pub(crate) fn recall_retirement_release(detail: &str) -> Option<&str> {
+    detail.strip_prefix(RECALL_RETIREMENT).filter(|release| {
+        release.starts_with("tenkai:release:") && !release.contains(char::is_whitespace)
+    })
+}
+
+/// Fail queued `plan`, which would install a recalled release, under the
+/// environment lease so it never races a start; true when this call failed
+/// it. A live apply keeps the lease; the plan is then left for a later tick.
+pub(crate) async fn retire_recalled(ctx: &mut Ctx, plan: &Plan, detail: &str) -> Result<bool> {
+    let owner = format!("recall-retire:{}", crate::now_millis());
+    let lease = match claim_environment(ctx, &plan.environment, &owner).await {
+        Ok(lease) => lease,
+        Err(error) if is_apply_in_progress(&error) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let retired = async {
+        let mut stored = crate::plan::load(ctx, &plan.id).await?;
+        if !matches!(stored.state, PlanState::Computed | PlanState::Blocked) {
+            return Ok(false);
+        }
+        crate::plan::transition(
+            ctx,
+            &mut stored,
+            crate::plan::Transition::new(PlanState::Failed, detail),
+            crate::plan::Persistence::Guarded {
+                namespace: ENVIRONMENT_LEASE_NAMESPACE,
+                key: &lease.environment,
+                fencing_token: &lease.fencing_token,
+                confirm_ambiguous: true,
+                observations: &[],
+            },
+        )
+        .await?;
+        Ok(true)
+    }
+    .await;
+    match (retired, release_environment(ctx, &lease).await) {
+        (retired, Ok(())) => retired,
+        (Ok(_), Err(unlock)) => Err(unlock),
+        (Err(error), Err(unlock)) => Err(super::execution_attempt::with_release_failure(
+            error, &unlock, "",
+        )),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -49,6 +167,9 @@ enum Rejection {
     },
     SealedChanged {
         product: String,
+    },
+    Recalled {
+        release_id: String,
     },
 }
 
@@ -91,6 +212,9 @@ impl fmt::Display for Rejection {
             Self::SealedChanged { product } => {
                 write!(formatter, "is stale for {product}: sealed secrets changed")
             }
+            Self::Recalled { release_id } => {
+                write!(formatter, "would install recalled release {release_id}")
+            }
         }
     }
 }
@@ -98,6 +222,9 @@ impl fmt::Display for Rejection {
 pub(crate) async fn classify_candidate(ctx: &mut Ctx, plan: &Plan) -> Result<CandidateAdmission> {
     Ok(match inspect(ctx, plan).await? {
         Ok(()) => CandidateAdmission::Admissible,
+        Err(Rejection::Recalled { release_id }) => {
+            CandidateAdmission::Recalled(recalled_detail(&release_id))
+        }
         Err(_) => CandidateAdmission::Superseded,
     })
 }
@@ -224,6 +351,11 @@ async fn inspect(ctx: &mut Ctx, plan: &Plan) -> Result<Result<(), Rejection>> {
                 actual: actual.cloned(),
             }));
         }
+    }
+    // Step admission refuses recalled content; a plan that would install it
+    // can never run, whatever else is still current.
+    if let Some(release_id) = recalled_content(ctx, plan).await? {
+        return Ok(Err(Rejection::Recalled { release_id }));
     }
     for input in &plan.inputs {
         let Some(channel) = ctx.get(&input.channel_id).await? else {

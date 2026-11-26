@@ -438,3 +438,69 @@ async fn remote_environment_retirement_hides_listing_and_stops_runtime_polling()
     assert!(retired.claim.is_none(), "{:?}", retired.claim);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// #1571: a recall fails an approved plan that would install the release
+/// before a runtime is offered it, and the plan view names the recall.
+#[tokio::test]
+async fn a_recall_fails_approved_runtime_work_that_installs_the_release() {
+    let root = std::env::temp_dir().join(format!(
+        "tenkai-remote-recall-retire-{}-{}",
+        std::process::id(),
+        tenkai::now_millis()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (app, _) = catalog_router(&root).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let served = app.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, served).await.unwrap();
+    });
+    let client = RemoteClient::new(format!("http://{addr}"), "management-secret").unwrap();
+    client
+        .publish_release(&signed_catalog_fixture(&root, "1.0.0"))
+        .await
+        .unwrap();
+    client.promote_release("api@1.0.0", "stable").await.unwrap();
+    let generation = current_generation(&client, "stage").await;
+    client
+        .subscribe_environment("stage", "api=stable", generation, None)
+        .await
+        .unwrap();
+    let plan = client.plan_environment("stage", generation).await.unwrap();
+    let plan_id = plan.resource.clone().unwrap();
+    let (approve, _) = signed_plan_requests(
+        &root,
+        "approve-stage",
+        "stage",
+        &plan.digest.unwrap(),
+        generation,
+    );
+    client.approve_plan(&plan_id, &approve).await.unwrap();
+    client.recall_release("api@1.0.0").await.unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/runtime/environments/stage/work")
+                .header("authorization", "Bearer runtime-secret")
+                .header("x-tenkai-runtime-instance", "runtime-test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let work = serde_json::from_slice::<RuntimeWork>(&bytes).unwrap();
+    assert!(work.plan.is_none(), "{:?}", work.plan);
+    let retired = client.inspect_plan(&plan_id).await.unwrap();
+    assert_eq!(retired.state, "failed");
+    assert_eq!(
+        retired.status_detail,
+        "retired before start: would install recalled release tenkai:release:api@1.0.0"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

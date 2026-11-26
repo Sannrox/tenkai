@@ -29,7 +29,10 @@ pub(crate) use cancel::hold_after_rollback;
 pub use cancel::{
     CancelApplyReport, ROLLBACK_REASON as ROLLBACK_HOLD_REASON, request as cancel_apply,
 };
-pub(crate) use execution_admission::{CandidateAdmission, classify_candidate};
+pub(crate) use execution_admission::{
+    CandidateAdmission, classify_candidate, recall_retirement_release, retire_if_recalled,
+    retire_recalled,
+};
 pub(crate) use execution_lease::{
     ENVIRONMENT_LEASE_NAMESPACE, EnvironmentLease, claim_environment,
     claim_environment_for_completion, claim_environment_for_drill, environment_lease_status,
@@ -329,10 +332,6 @@ async fn execute_locked(
             );
             break;
         }
-        let recalled_recovery = stored_plan
-            .recalled_recovery_reason
-            .as_deref()
-            .is_some_and(|reason| !reason.trim().is_empty());
         let adapters = TargetAdapters {
             software: options.software_executors,
             model_runtime: options.model_runtime_executor,
@@ -341,27 +340,26 @@ async fn execute_locked(
             artifact_registry_handle: options.artifact_registry_handle.clone(),
             host_approvals: &host_approvals,
         };
-        let outcome = match step_lifecycle::execute(
-            ctx,
-            lease,
-            &stored_plan,
-            &step,
-            adapters,
-            recalled_recovery,
-            skip_gates,
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                if is_execution_fence_lost(&error) {
+        let outcome =
+            match step_lifecycle::execute(ctx, lease, &stored_plan, &step, adapters, skip_gates)
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if is_execution_fence_lost(&error) {
+                        return Err(error);
+                    }
+                    plan_completion::fail(
+                        ctx,
+                        lease,
+                        &mut stored_plan,
+                        skip_gates,
+                        error.to_string(),
+                    )
+                    .await?;
                     return Err(error);
                 }
-                plan_completion::fail(ctx, lease, &mut stored_plan, skip_gates, error.to_string())
-                    .await?;
-                return Err(error);
-            }
-        };
+            };
         match completion.record(outcome) {
             Ok(true) => break,
             Ok(false) => {}

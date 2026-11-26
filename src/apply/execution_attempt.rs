@@ -347,7 +347,11 @@ async fn execute_with_options_inner(
 /// Report a failed lease release after the error that ended the attempt
 /// (#982). The attempt's error leads the message, and its chain stays intact
 /// so callers still classify it, for example as a lost fence.
-fn with_release_failure(error: anyhow::Error, unlock: &anyhow::Error, hint: &str) -> anyhow::Error {
+pub(super) fn with_release_failure(
+    error: anyhow::Error,
+    unlock: &anyhow::Error,
+    hint: &str,
+) -> anyhow::Error {
     let message = format!("{error}; releasing environment apply lease also failed: {unlock}{hint}");
     error.context(message)
 }

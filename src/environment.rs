@@ -4750,9 +4750,13 @@ fn operator_safe_status_detail(plan: &Plan) -> String {
             detail
         }
         PlanState::Blocked => "blocked by Tenkai approval or policy requirements".into(),
-        PlanState::Failed => {
-            "plan execution failed; inspect authorized Tenkai audit evidence".into()
-        }
+        // A recall retirement names only the recalled release (#1571).
+        PlanState::Failed => match crate::apply::recall_retirement_release(&plan.status_detail) {
+            Some(release) => {
+                format!("retired before start: would install recalled release {release}")
+            }
+            None => "plan execution failed; inspect authorized Tenkai audit evidence".into(),
+        },
         PlanState::Succeeded if plan.steps.is_empty() => crate::plan::NO_OP_STATUS_DETAIL.into(),
         PlanState::Computed | PlanState::Running | PlanState::Succeeded => String::new(),
     }

@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
-use crate::plan::{self, PlanState};
+use crate::plan;
 
 mod environment_lifecycle;
 mod tick_admission;
@@ -325,39 +325,14 @@ impl Reconciler {
     /// not a full plan catalog scan.
     pub async fn pending_work(&self, environment: &str) -> Result<Option<plan::Plan>> {
         let mut ctx = self.ctx.clone();
-        let oldest = plan::oldest_for_environment(
-            &mut ctx,
-            environment,
-            &[PlanState::Computed, PlanState::Running],
-        )
-        .await?;
-        if oldest.is_none() {
+        if crate::environment::environment_retirement(&mut ctx, environment)
+            .await?
+            .is_some()
+        {
             return Ok(None);
         }
-        if let Some(plan) = oldest
-            && (plan.state == PlanState::Running
-                || !environment_lifecycle::held_candidate(&mut ctx, &plan).await?)
-        {
-            return Ok(Some(plan));
-        }
-        for plan in plan::load_for_environment(
-            &mut ctx,
-            environment,
-            Some(&[PlanState::Computed, PlanState::Running]),
-            false,
-            None,
-            None,
-            Some(true),
-        )
-        .await?
-        {
-            if plan.state == PlanState::Running
-                || !environment_lifecycle::held_candidate(&mut ctx, &plan).await?
-            {
-                return Ok(Some(plan));
-            }
-        }
-        Ok(None)
+        plan::require_environment_indexes_match_payloads(&mut ctx, environment).await?;
+        environment_lifecycle::next_runtime_plan(&mut ctx, environment).await
     }
 
     pub async fn check_provider_health(&self) -> Result<()> {
@@ -464,16 +439,27 @@ mod tests {
         from: &str,
         to: &str,
     ) -> Plan {
+        product_upgrade_plan("api", env, created_at, state, from, to)
+    }
+
+    fn product_upgrade_plan(
+        product: &str,
+        env: &str,
+        created_at: i64,
+        state: PlanState,
+        from: &str,
+        to: &str,
+    ) -> Plan {
         use crate::plan::{Action, DesiredStateInput, ReleasePin, Step};
 
         let inputs = vec![DesiredStateInput {
-            product: "api".into(),
+            product: product.into(),
 
             instance: String::new(),
             channel: "stable".into(),
-            channel_id: "tenkai:channel:api/stable".into(),
+            channel_id: format!("tenkai:channel:{product}/stable"),
             desired_version: to.into(),
-            release_id: format!("tenkai:release:api@{to}"),
+            release_id: format!("tenkai:release:{product}@{to}"),
             release_digest: "target-digest".into(),
             artifact_digest: "target-artifact-digest".into(),
             deployed_version: Some(from.into()),
@@ -483,22 +469,22 @@ mod tests {
         let steps = vec![Step {
             id: String::new(),
             order: 0,
-            product: "api".into(),
+            product: product.into(),
             instance: String::new(),
             action: Action::Upgrade,
             from: Some(from.into()),
             to: to.into(),
-            release_id: format!("tenkai:release:api@{to}"),
+            release_id: format!("tenkai:release:{product}@{to}"),
             release_digest: "target-digest".into(),
             artifact_digest: "target-artifact-digest".into(),
-            workdir: "/srv/api".into(),
+            workdir: format!("/srv/{product}"),
             host: None,
             sealed: Vec::new(),
             restore: Some(ReleasePin {
-                release_id: format!("tenkai:release:api@{from}"),
+                release_id: format!("tenkai:release:{product}@{from}"),
                 digest: "restore-digest".into(),
                 artifact_digest: "restore-artifact-digest".into(),
-                workdir: "/srv/api".into(),
+                workdir: format!("/srv/{product}"),
             }),
             rewrap: None,
             issuer: None,
@@ -1635,17 +1621,26 @@ mod tests {
     }
 
     async fn put_channel(ctx: &mut Ctx) {
+        put_product_channel(ctx, "api").await;
+    }
+
+    /// `product/stable` at 2.0.0, subscribed by `stage`.
+    async fn put_product_channel(ctx: &mut Ctx, product: &str) {
+        let channel_id = format!("tenkai:channel:{product}/stable");
         ctx.put(crate::pb::sekai::Object {
-            id: "tenkai:channel:api/stable".into(),
+            id: channel_id.clone(),
             kind: crate::ontology::KIND_CHANNEL.into(),
-            name: "api/stable".into(),
+            name: format!("{product}/stable"),
             namespace: crate::ontology::NS.into(),
             external_id: String::new(),
             properties: std::collections::HashMap::from([
-                ("product".into(), "api".into()),
+                ("product".into(), product.into()),
                 ("channel".into(), "stable".into()),
                 ("current_version".into(), "2.0.0".into()),
-                ("current_release".into(), "tenkai:release:api@2.0.0".into()),
+                (
+                    "current_release".into(),
+                    crate::ontology::release_id(product, "2.0.0"),
+                ),
             ]),
             created: crate::now_millis(),
             updated: crate::now_millis(),
@@ -1655,9 +1650,29 @@ mod tests {
         // Plans for a channel need the environment to subscribe to it.
         ctx.link(
             &crate::ontology::env_id("stage"),
-            "tenkai:channel:api/stable",
+            &channel_id,
             crate::ontology::REL_SUBSCRIBES,
         )
+        .await
+        .unwrap();
+    }
+
+    /// Release `api@version` with a recall recorded on it.
+    async fn put_recalled_release(ctx: &mut Ctx, version: &str) {
+        ctx.put(crate::pb::sekai::Object {
+            id: crate::ontology::release_id("api", version),
+            kind: crate::ontology::KIND_RELEASE.into(),
+            name: format!("api@{version}"),
+            namespace: crate::ontology::NS.into(),
+            external_id: String::new(),
+            properties: std::collections::HashMap::from([
+                ("product".into(), "api".into()),
+                ("version".into(), version.into()),
+                ("recalled_at".into(), "1".into()),
+            ]),
+            created: 1,
+            updated: 1,
+        })
         .await
         .unwrap();
     }
@@ -1727,6 +1742,112 @@ mod tests {
                 ..DeliverySignals::default()
             }
         );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    #[tokio::test]
+    async fn a_recall_retires_a_queued_plan_that_installs_the_release() {
+        let (database, mut ctx, work) = stage_with_work("recall-retire").await;
+        put_recalled_release(&mut ctx, "2.0.0").await;
+
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        let report = reconciler.run_once().await.unwrap();
+        let stored = plan::load(&mut ctx, &work.id).await.unwrap();
+        assert_eq!(stored.state, PlanState::Failed, "{:?}", report.environments);
+        assert!(
+            stored
+                .status_detail
+                .contains("would install recalled release tenkai:release:api@2.0.0"),
+            "{}",
+            stored.status_detail
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
+    /// #1571: a queued roll-off off a recalled release is selected before an
+    /// older unrelated plan.
+    #[tokio::test]
+    async fn a_roll_off_from_a_recalled_release_is_selected_first() {
+        // An older web plan is not a roll-off. The fixture's api plan pins
+        // 1.0.0 to restore, so the recall retires it.
+        let (database, mut ctx, _) = stage_with_work("recall-priority").await;
+        // Planned off a recalled release, a roll-off restores nothing.
+        let mut roll_off = test_plan("stage", 200, PlanState::Computed);
+        roll_off.steps[0].restore = None;
+        let roll_off = sealed_test_plan(
+            "stage",
+            200,
+            PlanState::Computed,
+            roll_off.inputs,
+            roll_off.steps,
+        );
+        plan::store(&mut ctx, &roll_off).await.unwrap();
+        let unrelated =
+            product_upgrade_plan("web", "stage", 50, PlanState::Computed, "1.0.0", "2.0.0");
+        plan::store(&mut ctx, &unrelated).await.unwrap();
+        let mut environment = ctx
+            .get(&crate::ontology::env_id("stage"))
+            .await
+            .unwrap()
+            .unwrap();
+        environment
+            .properties
+            .insert("deployed.web".into(), "1.0.0".into());
+        ctx.put(environment).await.unwrap();
+        put_product_channel(&mut ctx, "web").await;
+
+        let before = environment_lifecycle::select_plan(&mut ctx, "stage", true)
+            .await
+            .unwrap();
+        assert_eq!(before.id, unrelated.id, "oldest plan wins without a recall");
+        put_recalled_release(&mut ctx, "1.0.0").await;
+        let after = environment_lifecycle::select_plan(&mut ctx, "stage", true)
+            .await
+            .unwrap();
+        assert_eq!(after.id, roll_off.id);
+        // The runtime path selects the same plan.
+        let runtime = Reconciler::new(ctx.clone(), config())
+            .unwrap()
+            .pending_work("stage")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(runtime.id, roll_off.id);
+        let _ = std::fs::remove_file(&database);
+    }
+
+    /// #1571: retiring a full batch of recalled plans does not skip the
+    /// admissible plan behind it.
+    #[tokio::test]
+    async fn retiring_recalled_plans_keeps_the_next_batch_in_view() {
+        let (database, mut ctx, _) = stage_with_work("recall-batches").await;
+        for created_at in 1..=plan::EXECUTABLE_ADMISSION_BATCH as i64 {
+            plan::store(
+                &mut ctx,
+                &test_plan("stage", created_at, PlanState::Computed),
+            )
+            .await
+            .unwrap();
+        }
+        let admissible =
+            product_upgrade_plan("web", "stage", 200, PlanState::Computed, "1.0.0", "2.0.0");
+        plan::store(&mut ctx, &admissible).await.unwrap();
+        let mut environment = ctx
+            .get(&crate::ontology::env_id("stage"))
+            .await
+            .unwrap()
+            .unwrap();
+        environment
+            .properties
+            .insert("deployed.web".into(), "1.0.0".into());
+        ctx.put(environment).await.unwrap();
+        put_product_channel(&mut ctx, "web").await;
+        put_recalled_release(&mut ctx, "2.0.0").await;
+
+        let selected = environment_lifecycle::select_plan(&mut ctx, "stage", true)
+            .await
+            .unwrap();
+        assert_eq!(selected.id, admissible.id);
         let _ = std::fs::remove_file(&database);
     }
 

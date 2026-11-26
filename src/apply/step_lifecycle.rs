@@ -20,7 +20,6 @@ pub(super) async fn execute(
     plan: &Plan,
     step: &Step,
     adapters: TargetAdapters<'_>,
-    recalled_recovery: bool,
     skip_gates: bool,
 ) -> Result<Outcome> {
     let started_at_ms = crate::now_millis();
@@ -37,7 +36,8 @@ pub(super) async fn execute(
         return execute_cluster_namespace(ctx, step_context, step, ns).await;
     }
     if step.provision.is_some() {
-        return execute_provision(ctx, step_context, step, recalled_recovery).await;
+        let admit_recalled = super::execution_admission::step_admits_recalled(plan, step);
+        return execute_provision(ctx, step_context, step, admit_recalled).await;
     }
     let target = ReleasePin {
         release_id: step.release_id.clone(),
@@ -47,13 +47,7 @@ pub(super) async fn execute(
     };
     // Removing a recalled release deploys nothing, so it is admitted like an
     // audited recovery; signature and integrity are still checked.
-    let admit_recalled = (recalled_recovery && step.action == Action::Rollback)
-        || step.action == Action::Remove
-        || (step.action == Action::Upgrade
-            && plan
-                .recalled_upgrade
-                .iter()
-                .any(|admission| admission.target_release == step.release_id));
+    let admit_recalled = super::execution_admission::step_admits_recalled(plan, step);
     let mut content = admit_release(ctx, &target, environment, step, admit_recalled).await?;
     let mut restore_content = match step.restore.as_ref() {
         Some(pin) => Some(admit_release(ctx, pin, environment, step, admit_recalled).await?),
@@ -458,7 +452,7 @@ async fn execute_provision(
     ctx: &mut Ctx,
     step_context: StepContext<'_>,
     step: &Step,
-    recalled_recovery: bool,
+    admit_recalled: bool,
 ) -> Result<Outcome> {
     let StepContext {
         lease,
@@ -477,7 +471,6 @@ async fn execute_provision(
         artifact_digest: step.artifact_digest.clone(),
         workdir: step.workdir.clone(),
     };
-    let admit_recalled = recalled_recovery && step.action == Action::Remove;
     let content = admit_release(ctx, &target, environment, step, admit_recalled).await?;
     let executor = adapters
         .software
