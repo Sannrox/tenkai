@@ -6,7 +6,7 @@
 //! revocation are the same document with a new wrapping KEK or a revoked KEK id.
 
 use anyhow::{Result, bail};
-use sekai_keys::{KeyProvider, ProviderKind, TenantId, UnwrapGrant};
+use envelope_keys::{KeyProvider, ProviderKind, TenantId, UnwrapGrant};
 use tenkai_keys::pkcs11::Pkcs11KeyProvider;
 pub use tenkai_keys::release::{
     CustomerKeyRelease, DOCUMENT_SCHEMA, DistributedDataKey, KeyReleaseIntent, ProviderEndpoint,
@@ -47,7 +47,7 @@ pub fn preflight_unwrap(provider: &Pkcs11KeyProvider, document: &CustomerKeyRele
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sekai_keys::{Dek, KeyPurpose, RuntimeProfile};
+    use envelope_keys::{Dek, KeyPurpose, RuntimeProfile};
     use std::path::PathBuf;
     use tenkai_keys::pkcs11::{TEST_USER_PIN, next_software_token};
 

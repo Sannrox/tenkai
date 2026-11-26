@@ -19,12 +19,12 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
-use ring::rand::{SecureRandom, SystemRandom};
-use sekai_keys::{
+use envelope_keys::{
     Dek, KeyError, KeyId, KeyProvider, KeyPurpose, ProviderDescription, ProviderKind,
     RuntimeProfile, TenantId, UnwrapAudit, UnwrapGrant, UnwrapOutcome, admit_provider,
 };
+use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
+use ring::rand::{SecureRandom, SystemRandom};
 
 const ALGORITHM: &str = "AES-256-GCM";
 const TAG_LEN: usize = 16;
@@ -95,7 +95,7 @@ const STATE_DESTROYED_COMPROMISED: u32 = 0x06;
 /// KMIP Name every Tenkai KEK on an endpoint carries.
 const KEK_NAME: &str = "tenkai-kek";
 
-type Wrapped = sekai_keys::WrappedDek;
+type Wrapped = envelope_keys::WrappedDek;
 
 #[derive(Debug, Clone)]
 struct Item {
@@ -1238,7 +1238,7 @@ mod tests {
         assert!(debug.contains("redacted"));
         assert!(!debug.contains(&hint));
         drop(wrapped);
-        sekai_keys::conformance::assert_provider_contract(&provider);
+        envelope_keys::conformance::assert_provider_contract(&provider);
     }
 
     fn lab() -> SocketAddr {

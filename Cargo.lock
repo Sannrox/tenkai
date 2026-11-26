@@ -796,6 +796,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "envelope-keys"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f92cc45a0de9e2e5e8b15ed1266515952c7544613f74946b471e73dd08d8756b"
+dependencies = [
+ "aes-gcm",
+ "libc",
+ "rand 0.8.8",
+ "serde",
+ "zeroize",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2791,18 +2804,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sekai-keys"
-version = "1.0.0"
-source = "git+https://github.com/Sannrox/sekai-chisei?tag=v2.0.0#1f0cbc31e832d2ef2db527ffafa6e61e7cedf6cb"
-dependencies = [
- "aes-gcm",
- "libc",
- "rand 0.8.8",
- "serde",
- "zeroize",
-]
-
-[[package]]
 name = "sekai-proto"
 version = "1.0.1"
 source = "git+https://github.com/Sannrox/sekai-chisei?rev=67157d1fa242ac2f133c88243ef23b56f88042e6#67157d1fa242ac2f133c88243ef23b56f88042e6"
@@ -3131,6 +3132,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "ed25519-dalek",
+ "envelope-keys",
  "fencing-lease",
  "futures-util",
  "hkdf",
@@ -3146,7 +3148,6 @@ dependencies = [
  "rustls-native-certs",
  "schemars",
  "sekai-client",
- "sekai-keys",
  "semver",
  "serde",
  "serde_json",
@@ -3248,8 +3249,8 @@ version = "0.9.1"
 dependencies = [
  "base64 0.22.1",
  "cryptoki",
+ "envelope-keys",
  "ring",
- "sekai-keys",
  "serde",
  "serde_json",
  "tenkai-keys",

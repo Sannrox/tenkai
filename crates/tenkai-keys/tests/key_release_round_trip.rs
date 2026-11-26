@@ -3,7 +3,7 @@
 
 use std::net::TcpListener;
 
-use sekai_keys::{Dek, KeyProvider, KeyPurpose, RuntimeProfile, TenantId, UnwrapGrant};
+use envelope_keys::{Dek, KeyProvider, KeyPurpose, RuntimeProfile, TenantId, UnwrapGrant};
 use tenkai_keys::kmip::{KmipKeyProvider, serve_lab_endpoint};
 use tenkai_keys::pkcs11::{Pkcs11KeyProvider, TEST_USER_PIN, next_software_token};
 use tenkai_keys::{

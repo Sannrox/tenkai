@@ -68,12 +68,12 @@ pub enum OpenError {
     #[error("key provider {kind} refused to open: {source}")]
     Provider {
         kind: KeyProviderKind,
-        source: sekai_keys::KeyError,
+        source: envelope_keys::KeyError,
     },
 }
 
 /// A provider opened from a release. It implements
-/// [`sekai_keys::KeyProvider`], so `KeyProvider`-generic code takes it as is.
+/// [`envelope_keys::KeyProvider`], so `KeyProvider`-generic code takes it as is.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ReleaseProvider {
@@ -108,7 +108,7 @@ pub fn open_provider(
             given: access.kind(),
         });
     }
-    let profile = sekai_keys::RuntimeProfile::Production;
+    let profile = envelope_keys::RuntimeProfile::Production;
     let provider_error = |source| OpenError::Provider {
         kind: named,
         source,
@@ -143,51 +143,51 @@ macro_rules! forward {
     };
 }
 
-impl sekai_keys::KeyProvider for ReleaseProvider {
-    fn describe(&self) -> sekai_keys::ProviderDescription {
+impl envelope_keys::KeyProvider for ReleaseProvider {
+    fn describe(&self) -> envelope_keys::ProviderDescription {
         forward!(self, provider => provider.describe())
     }
 
     fn wrap(
         &self,
-        tenant_id: &sekai_keys::TenantId,
-        purpose: sekai_keys::KeyPurpose,
-        dek: &sekai_keys::Dek,
-    ) -> Result<sekai_keys::WrappedDek, sekai_keys::KeyError> {
+        tenant_id: &envelope_keys::TenantId,
+        purpose: envelope_keys::KeyPurpose,
+        dek: &envelope_keys::Dek,
+    ) -> Result<envelope_keys::WrappedDek, envelope_keys::KeyError> {
         forward!(self, provider => provider.wrap(tenant_id, purpose, dek))
     }
 
     fn rewrap(
         &self,
-        wrapped: &sekai_keys::WrappedDek,
-        dek: &sekai_keys::Dek,
-    ) -> Result<sekai_keys::WrappedDek, sekai_keys::KeyError> {
+        wrapped: &envelope_keys::WrappedDek,
+        dek: &envelope_keys::Dek,
+    ) -> Result<envelope_keys::WrappedDek, envelope_keys::KeyError> {
         forward!(self, provider => provider.rewrap(wrapped, dek))
     }
 
     fn unwrap(
         &self,
-        wrapped: &sekai_keys::WrappedDek,
-        grant: &sekai_keys::UnwrapGrant,
+        wrapped: &envelope_keys::WrappedDek,
+        grant: &envelope_keys::UnwrapGrant,
         engine: &str,
         now_unix_secs: i64,
-    ) -> Result<sekai_keys::UnwrapOutcome, sekai_keys::KeyError> {
+    ) -> Result<envelope_keys::UnwrapOutcome, envelope_keys::KeyError> {
         forward!(self, provider => provider.unwrap(wrapped, grant, engine, now_unix_secs))
     }
 
-    fn rotate_kek(&self) -> Result<sekai_keys::KeyId, sekai_keys::KeyError> {
+    fn rotate_kek(&self) -> Result<envelope_keys::KeyId, envelope_keys::KeyError> {
         forward!(self, provider => provider.rotate_kek())
     }
 
-    fn complete_kek_rotation(&self) -> Result<(), sekai_keys::KeyError> {
+    fn complete_kek_rotation(&self) -> Result<(), envelope_keys::KeyError> {
         forward!(self, provider => provider.complete_kek_rotation())
     }
 
-    fn revoke_kek(&self) -> Result<(), sekai_keys::KeyError> {
+    fn revoke_kek(&self) -> Result<(), envelope_keys::KeyError> {
         forward!(self, provider => provider.revoke_kek())
     }
 
-    fn revoke_dek(&self, dek_id: &sekai_keys::KeyId) -> Result<(), sekai_keys::KeyError> {
+    fn revoke_dek(&self, dek_id: &envelope_keys::KeyId) -> Result<(), envelope_keys::KeyError> {
         forward!(self, provider => provider.revoke_dek(dek_id))
     }
 }

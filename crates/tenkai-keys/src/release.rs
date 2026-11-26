@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use sekai_keys::{KeyError, KeyId, KeyPurpose, TenantId, WrappedDek};
+use envelope_keys::{KeyError, KeyId, KeyPurpose, TenantId, WrappedDek};
 use serde::{Deserialize, Serialize};
 
 pub const DOCUMENT_SCHEMA: &str = "tenkai.customer-key-release.v1";
@@ -69,7 +69,7 @@ pub struct DistributedDataKey {
 }
 
 impl DistributedDataKey {
-    /// Decode this entry into the envelope a [`sekai_keys::KeyProvider`] unwraps.
+    /// Decode this entry into the envelope a [`envelope_keys::KeyProvider`] unwraps.
     pub fn wrapped_dek(&self) -> Result<WrappedDek, ReleaseError> {
         let ciphertext = STANDARD.decode(&self.wrapped)?;
         let purpose = parse_purpose(&self.purpose)?;

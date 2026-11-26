@@ -16,11 +16,11 @@ use cryptoki::object::{Attribute, AttributeType, KeyType, ObjectClass, ObjectHan
 use cryptoki::session::{Session, UserType};
 use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
-use ring::rand::{SecureRandom, SystemRandom};
-use sekai_keys::{
+use envelope_keys::{
     Dek, KeyError, KeyId, KeyProvider, KeyPurpose, ProviderDescription, ProviderKind,
     RuntimeProfile, TenantId, UnwrapAudit, UnwrapGrant, UnwrapOutcome, admit_provider,
 };
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 
 mod session;
@@ -32,7 +32,7 @@ const NONCE_LEN: usize = 12;
 const AES_KEY_LEN: u64 = 32;
 const META_LABEL: &[u8] = b"tenkai.pkcs11.meta.v1";
 
-type Wrapped = sekai_keys::WrappedDek;
+type Wrapped = envelope_keys::WrappedDek;
 
 struct KekRef {
     id: KeyId,
@@ -809,7 +809,7 @@ mod tests {
         assert!(!debug.contains(&hint), "debug leaked DEK bytes");
         drop(wrapped);
 
-        sekai_keys::conformance::assert_provider_contract(&provider);
+        envelope_keys::conformance::assert_provider_contract(&provider);
     }
 
     /// Completing a rotation destroys the previous key before the state
