@@ -62,10 +62,9 @@ tenkaictl apply <plan-id> \
 ## eval_suite and gates
 
 Publish an `eval_suite` product to pin a content-addressed suite definition.
-Gate `[gate].eval_suite` continues to name the suite id for
-`GetEvaluationGateEvidence` lookup; the Catalog release of the `eval_suite`
-product is the versioned contract you promote and roll back. Remote evaluation
-uses the server-owned Chisei projection described in
+Gate `[gate].eval_suite` names the suite id that stored signed evaluation
+evidence must match; the Catalog release of the `eval_suite` product is the
+versioned contract you promote and roll back. Admission is described in
 [Evaluation gate evidence](evaluation-gate-evidence.md).
 
 ## agent_definition

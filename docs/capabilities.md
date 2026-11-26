@@ -113,9 +113,9 @@ closed; configured terminal-outcome and feedback-observation export use a durabl
 audit and planning-event export remain unwired and the enterprise profile stays
 gated as documented in the [provider contracts](provider-contracts.md) and
 [supported operating profiles](decisions/0010-supported-operating-profiles.md).
-An embedded apply with `[gate].eval_suite` fails closed locally unless a remote
-provider host is explicitly configured; ungated solo deploys never open a
-network connection.
+An apply with `[gate].eval_suite` fails closed unless stored signed
+evaluation evidence for that suite is bound to the release artifact.
+Ungated solo deploys never open a network connection.
 
 ## Not yet shipped
 

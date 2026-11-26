@@ -8,7 +8,6 @@ use tokio::sync::OnceCell;
 use sekai_client::CallOptions;
 
 use super::{Backend, Ctx, RemoteClient, remote_unary_with_options};
-use crate::pb::chisei::{GetEvaluationGateEvidenceRequest, GetEvaluationGateEvidenceResponse};
 use crate::pb::graph_action::ActionTypeDef;
 use crate::pb::sekai::{
     CreateSchemaTypeRequest, CreateSchemaTypeResponse, Lease, ListSchemaTypesRequest,
@@ -115,27 +114,6 @@ impl Ctx {
         action: ActionTypeDef,
     ) -> std::result::Result<(), super::ClientError> {
         self.backend.action_lifecycle().register(action).await
-    }
-
-    pub(crate) async fn evaluation_gate_evidence(
-        &mut self,
-        request: GetEvaluationGateEvidenceRequest,
-    ) -> Result<GetEvaluationGateEvidenceResponse> {
-        if self.is_embedded() {
-            anyhow::bail!(
-                "embedded mode has no governance provider; configure remote provider mode for evaluation gate evidence"
-            );
-        }
-        if self.is_tenant_hub() {
-            anyhow::bail!(super::TENANT_HUB_UNAVAILABLE);
-        }
-        Ok(self
-            .remote_unary(
-                "/chisei.ChiseiService/GetEvaluationGateEvidence",
-                request,
-                CallOptions::default(),
-            )
-            .await?)
     }
 
     pub(crate) async fn acquire_lease(

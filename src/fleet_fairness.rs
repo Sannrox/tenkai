@@ -332,18 +332,13 @@ async fn rollback_unknown_target(ctx: &mut Ctx, environment: &str, product: &str
 }
 
 async fn required_provider_fails_closed(ctx: &mut Ctx, environment: &str) -> Result<bool> {
-    let gate = ctx
-        .evaluation_gate_evidence(crate::pb::chisei::GetEvaluationGateEvidenceRequest {
-            suite_id: "missing-suite".into(),
-            release_digest: "sha256:fairness".into(),
-            artifact_digest: "sha256:fairness-artifact".into(),
-            max_timestamp_ms: crate::now_millis().saturating_add(60_000),
-        })
-        .await;
-    let gate_blocked = match gate {
-        Err(error) => error.to_string().contains("no governance provider"),
-        Ok(_) => false,
-    };
+    let gate = crate::model_release_evidence::admit_eval_suite_gate(
+        ctx,
+        "missing-suite",
+        "sha256:fairness-artifact",
+    )
+    .await;
+    let gate_blocked = !matches!(gate, Ok(Ok(())));
     let request = providers::DecisionRequest {
         request_id: "fairness-required-provider".into(),
         action: "deploy".into(),

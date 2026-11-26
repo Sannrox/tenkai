@@ -2,8 +2,9 @@
 
 Tenkai has four independent provider ports:
 
-- **Gate provider:** returns evaluation evidence for an exact release, plan,
-  environment configuration, and environment.
+- **Gate provider:** library adapter for a required policy decision. Release
+  `[gate].eval_suite` admission uses stored signed evaluation evidence, not a
+  pulled provider projection.
 - **Policy provider:** authorizes one named action for an authenticated
   principal and the same exact operational inputs.
 - **Audit exporter:** receives immutable operational events after Tenkai has
@@ -470,9 +471,9 @@ tenant partitions. Audit and planning-event export stay unwired.
 ## Remote gate HTTP JSON contract (#113)
 
 Library adapter: `HttpRemoteGateProvider` in `src/providers.rs`. Apply
-admission uses the Chisei `GetEvaluationGateEvidence` projection when policy
-requires provider evidence. No shipped binary constructs this HTTP adapter or
-reads `TENKAI_GATE_URL` / `TENKAI_GATE_TOKEN`.
+admission for `[gate].eval_suite` uses stored signed evaluation evidence
+([evaluation gate evidence](evaluation-gate-evidence.md)). No shipped binary
+constructs this HTTP adapter or reads `TENKAI_GATE_URL` / `TENKAI_GATE_TOKEN`.
 
 | Field | Value |
 | --- | --- |

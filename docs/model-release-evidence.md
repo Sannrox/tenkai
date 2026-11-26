@@ -74,6 +74,11 @@ identity, validate, have not expired, and pass (`health=healthy`,
 
 ## Channel promotion
 
+`[gate].eval_suite` apply admission uses the same stored record: `eval_suite_id`
+must match the gate, `identity.artifact_digest` must match the release
+artifact, and `outcome` must be `passed`. See
+[evaluation gate evidence](evaluation-gate-evidence.md).
+
 `catalog::promote` of a `model_runtime` release requires a stored
 `chisei.model_evaluation_evidence.v1` record, Ed25519-verified against
 installed evaluation trust roots, for the release identity derived from the

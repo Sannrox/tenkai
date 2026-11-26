@@ -229,4 +229,3 @@ binaries.
 | `TENKAI_VLLM_LIVE_TEST`, `TENKAI_VLLM_NAMESPACE`, `TENKAI_VLLM_MODEL_TAR`, `TENKAI_VLLM_NODE_SELECTOR`, `TENKAI_VLLM_TOLERATIONS`, and the same `TENKAI_TGI_*` and `TENKAI_NIM_*` names | `crates/tenkai-executor/tests/gpu_kubernetes_live.rs` | Opt-in GPU apply/rollback; namespace must already hold the weights claim |
 | `TENKAI_MLX_SERVER` | `src/model_runtime/mlx.rs` (`mlx_operator_golden_path`) | Opt-in real `mlx_lm.server`; default CI uses `FakeMlxEngine` |
 | `TENKAI_GATE_URL`, `TENKAI_GATE_TOKEN` | `crates/tenkaictl/tests/two_environment_closure_drill.rs` | Remote gate endpoint for the library-only HTTP gate adapter ([provider contracts](provider-contracts.md#remote-gate-http-json-contract-113)) |
-| `SEKAI_CHISEI_DIR`, `REPLAY_OUTPUT_DIR` | `scripts/capture-rollback-replay.sh` | Provider checkout and output directory for the replay capture |

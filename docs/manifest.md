@@ -378,11 +378,12 @@ later release removes it.
 
 ## Gates
 
-If a release declares `gate.eval_suite`, `apply` blocks unless the suite's
-latest eval run in chisei exists and every current case passed (fail closed).
-The run's `config_ref` must match the content-bound reference shown in the
-blocked-plan detail; it covers the manifest, immutable deploy inputs, and the
-current suite definition, so stale evidence cannot authorize changed content.
+If a release declares `gate.eval_suite`, `apply` blocks unless stored signed
+evaluation evidence for that suite is bound to the release artifact, is
+fresh, and records `outcome=passed` (fail closed). Record the evidence through
+the existing ingest (`tenkaictl eval-evidence` or
+`POST /v1/model-evaluation/evidence`). Missing, stale, or invalid evidence
+fails closed on every host.
 `--skip-gates` is the current v0 break-glass action, and the bypass is recorded
 on the Tenkai plan and audit record like any other apply. Under the standalone
 architecture, a bypass must carry separately authorized, auditable override
@@ -390,9 +391,7 @@ evidence; inability to authorize the override fails closed. Migrated plans
 preserve their original bypass evidence and version rather than gaining
 implicit authorization.
 
-An embedded apply with `[gate].eval_suite` fails closed locally unless a remote
-provider host is explicitly configured; ungated solo deploys never open a
-network connection. The evidence format is in
+Ungated solo deploys never open a network connection. The evidence format is in
 [evaluation gate evidence](evaluation-gate-evidence.md).
 
 Optional `[[gate.slo]]` queries are evaluated after activation succeeds and

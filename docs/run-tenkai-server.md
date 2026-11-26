@@ -56,8 +56,9 @@ Plaintext HTTP is accepted only on loopback. For remote access, either put a
 TLS reverse proxy in front of it or serve TLS natively (see
 [native TLS](#native-tls)); never pass tokens or keys on a command line. By default
 the server opens the same in-process state backend as `tenkaictl` and requires
-no provider service. `--provider-mode remote` is explicit and never inherits
-embedded development permissions. The server reconciles every
+no provider service. `--provider-mode remote` is retired: the server refuses
+to start and names the embedded SQLite store and PostgreSQL
+([ADR 0064](decisions/0064-tenkai-stands-alone.md)). The server reconciles every
 `--reconcile-interval` seconds (default 10) and works on at most
 `--max-concurrency` environments at once (default 8). A tick evaluates only
 environments a store write touched, those whose last pass was not Current,

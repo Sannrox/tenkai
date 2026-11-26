@@ -160,7 +160,7 @@ depends on these integrations. Which ones Tenkai wires today is in
 | Domain projections, links, lineage | `SekaiService` objects/links/`Traverse`, `CreateSchemaType` for the tenkai ontology |
 | Immutable audit of every publish/promote/plan/deploy | audit records + object history |
 | "Who may promote to prod-eu?" | `ResolvePolicy` / namespace policy |
-| Eval-gated promotion | Sekai-Chisei `GetEvaluationGateEvidence` — the server selects the digest-bound latest run and returns bounded case evidence; Tenkai blocks on missing, stale, malformed, unavailable, or failing evidence |
+| Eval-gated apply | Stored signed `chisei.model_evaluation_evidence.v1` for `[gate].eval_suite` — Tenkai blocks on missing, stale, or invalid recorded evidence |
 | Governed execution of destructive steps | `PlanExecution` / `ExecutePlan(Stream)` — tenkai plan steps map onto governed actions (PR #57) |
 | Cost-aware rollout (esp. model rollouts) | `CheckBudget` / `RecordUsage` |
 | Learning from deployment outcomes | Sekai `SubmitEvidence` terminal-outcome envelopes and evolve/pattern APIs — mine failure patterns across the fleet |

@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-07-22
 - Issue: [#16](https://github.com/Sannrox/tenkai/issues/16)
+- Amended-by: [ADR 0064](0064-tenkai-stands-alone.md) (provider role)
 
 ## Context
 
@@ -72,6 +73,12 @@ This prevents callers from depending on its storage schema while avoiding a
 premature distributed transaction.
 
 ### Providers and failure behavior
+
+[ADR 0064](0064-tenkai-stands-alone.md) amends the provider role: Tenkai owns
+all of its state, types and contracts. Evidence is pushed in through the
+[ADR 0032](0032-model-release-evidence.md) ingest path. Tenkai does not pull
+evidence from an external graph, and `--provider-mode remote` is refused. A
+provider, if deployed, is a product Tenkai delivers.
 
 Provider requirements are declared by the selected operation and deployment
 configuration:

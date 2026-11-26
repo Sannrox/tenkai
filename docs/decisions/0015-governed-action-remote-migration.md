@@ -1,10 +1,13 @@
 # ADR 0015: Governed-action remote migration
 
-- Status: Accepted
+- Status: Superseded by [ADR 0064](0064-tenkai-stands-alone.md)
 - Date: 2026-08-12
 - Owner: Tenkai maintainers
 - Related: [ADR 0012](0012-legacy-graph-action-compatibility-boundary.md), [ADR 0014](0014-versioned-rust-client-facade.md)
 - Supersedes: [ADR 0012](0012-legacy-graph-action-compatibility-boundary.md)
+- Superseded-by: [ADR 0064](0064-tenkai-stands-alone.md) retires
+  `--provider-mode remote`; Tenkai-owned stores keep the governed-action
+  mutation plan from this decision.
 - Dependency: [Sekai-Chisei #587](https://github.com/Sannrox/sekai-chisei/pull/587)
 
 ## Context
