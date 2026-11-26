@@ -346,7 +346,7 @@ pub struct MemoryCatalogGraph {
 
 #[derive(Clone, Default)]
 struct Partition {
-    objects: BTreeMap<String, Object>,
+    objects: memory_objects::MemoryObjects,
     links: BTreeMap<String, Link>,
     leases: BTreeMap<(String, String), Lease>,
     schemas: BTreeMap<String, ObjectType>,
@@ -519,16 +519,7 @@ impl CatalogGraph for MemoryCatalogGraph {
             KIND_PLAN => list_memory_plans(partition),
             KIND_RELEASE => list_memory_releases(partition),
             KIND_CHANNEL => list_memory_channels(partition),
-            _ => {
-                let mut objects: Vec<Object> = partition
-                    .objects
-                    .values()
-                    .filter(|object| object.kind == kind)
-                    .cloned()
-                    .collect();
-                objects.sort_by(|left, right| left.id.cmp(&right.id));
-                Ok(objects)
-            }
+            _ => Ok(partition.objects.of_kind(kind).cloned().collect()),
         }
     }
 
@@ -612,13 +603,12 @@ impl CatalogGraph for MemoryCatalogGraph {
         };
         let mut objects: Vec<Object> = partition
             .objects
-            .values()
+            .of_kind(query.kind)
             .filter(|object| {
-                object.kind == query.kind
-                    && object
-                        .properties
-                        .get(query.key)
-                        .is_some_and(|stored| stored == query.value)
+                object
+                    .properties
+                    .get(query.key)
+                    .is_some_and(|stored| stored == query.value)
             })
             .cloned()
             .collect();
@@ -1321,8 +1311,8 @@ fn list_memory_channels(partition: &Partition) -> AnyResult<Vec<Object>> {
         .collect();
     let mut seen: std::collections::BTreeSet<String> =
         objects.iter().map(|object| object.id.clone()).collect();
-    for object in partition.objects.values() {
-        if object.kind == KIND_CHANNEL && seen.insert(object.id.clone()) {
+    for object in partition.objects.of_kind(KIND_CHANNEL) {
+        if seen.insert(object.id.clone()) {
             objects.push(object.clone());
         }
     }
@@ -1372,7 +1362,7 @@ fn persist_memory_object(
         record_memory_changes(partition, previous, &object, principal);
     }
     log_memory_write(partition, &object.id, &object.kind);
-    partition.objects.insert(object.id.clone(), object.clone());
+    partition.objects.insert(object.clone());
     Ok(object)
 }
 
@@ -1737,6 +1727,7 @@ fn record_memory_changes(
     }
 }
 
+mod memory_objects;
 mod memory_operational;
 #[cfg(any(test, feature = "test-support"))]
 pub mod write_log_contract;
@@ -1782,6 +1773,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             [id]
         );
+        // A put that changes the kind moves the object between kind lookups.
+        let ids = |kind| {
+            graph
+                .list_kind(tenant, kind)
+                .unwrap()
+                .into_iter()
+                .map(|object| object.id)
+                .collect::<Vec<_>>()
+        };
+        let mut moved = updated.clone();
+        moved.kind = "tenkai.conformance_moved".into();
+        graph.put(tenant, moved).unwrap();
+        assert!(ids("tenkai.conformance").is_empty());
+        assert_eq!(ids("tenkai.conformance_moved"), [id]);
+        graph.put(tenant, updated.clone()).unwrap();
+        assert_eq!(ids("tenkai.conformance"), [id]);
         let link = Link {
             id: format!("{id}--uses--tenkai:conformance:other"),
             from_id: id.into(),
@@ -1826,6 +1833,13 @@ mod tests {
             .unwrap();
         graph.delete(tenant, id).unwrap();
         assert_eq!(graph.get(tenant, id).unwrap(), None);
+        assert!(ids("tenkai.conformance").is_empty());
+        assert!(
+            graph
+                .find_by_property(tenant, "tenkai.conformance", "status", "ready")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
