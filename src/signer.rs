@@ -952,7 +952,7 @@ mod tests {
     use crate::release_signing::{
         Provenance, ReleaseStatement, TRUST_ROOT_VERSION, TrustRoots, TrustedSigner, verify_release,
     };
-    use sekai_keys::RuntimeProfile;
+    use envelope_keys::RuntimeProfile;
     use sha2::{Digest as _, Sha256};
     use std::collections::BTreeMap;
     use std::fs;

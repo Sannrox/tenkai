@@ -49,7 +49,7 @@ closed. This is a migration of on-disk release configuration (GATE:mig).
 
 A delivered product reads that document with the `tenkai-keys` crate, the same
 type Tenkai writes. `CustomerKeyRelease::from_json` parses and checks it.
-`open_provider` opens the provider it names as a `sekai_keys::KeyProvider`;
+`open_provider` opens the provider it names as a `envelope_keys::KeyProvider`;
 the product supplies the PKCS#11 module and PIN, or the KMIP endpoint, from its
 own configuration. A PKCS#11 module path in the document records the
 producer's module and is never loaded. Each `data_keys` entry decodes with `wrapped_dek()` and unwraps

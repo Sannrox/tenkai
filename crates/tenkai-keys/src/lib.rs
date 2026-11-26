@@ -2,7 +2,7 @@
 //!
 //! Tenkai writes `tenkai.customer-key-release.v1` ([`release`]). A delivered
 //! product depends on this crate to parse that document with the same type and
-//! open the provider it names as a [`sekai_keys::KeyProvider`], then unwraps its
+//! open the provider it names as a [`envelope_keys::KeyProvider`], then unwraps its
 //! tenant data keys directly against that provider:
 //!
 //! ```ignore
