@@ -9,6 +9,6 @@ install = "mkdir -p .state && echo 0.1.0 > .state/version"
 health = "grep -qx 0.1.0 .state/version"
 uninstall = "rm -f .state/version"
 
-# Optional eval gate: apply blocks without stored signed evidence that the suite passed.
+# Optional chisei eval gate: apply blocks unless the suite's latest run passes.
 # [gate]
 # eval_suite = "hello-local-quality"
