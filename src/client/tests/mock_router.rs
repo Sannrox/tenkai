@@ -180,6 +180,7 @@ pub(super) async fn remote_ctx(state: MockSekaiState) -> (Ctx, tokio::task::Join
             execution_capabilities: None,
             held_execution_leases: Vec::new(),
             plan_proposer: None,
+            release_reads: std::sync::Weak::new(),
         },
         server,
     )

@@ -85,6 +85,7 @@ impl Ctx {
             execution_capabilities: None,
             held_execution_leases: Vec::new(),
             plan_proposer: None,
+            release_reads: std::sync::Weak::new(),
         }
     }
 
@@ -129,6 +130,7 @@ impl Ctx {
             execution_capabilities: None,
             held_execution_leases: Vec::new(),
             plan_proposer: None,
+            release_reads: std::sync::Weak::new(),
         }
     }
 

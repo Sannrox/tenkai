@@ -1780,6 +1780,36 @@ mod tests {
         let _ = std::fs::remove_file(&database);
     }
 
+    /// #1575: a planning pass that read the release before a recall landed
+    /// does not carry that read to the write; admission reads it fresh.
+    #[tokio::test]
+    async fn a_recall_recorded_during_planning_still_refuses_the_write() {
+        let (database, mut ctx, work) = stage_with_work("recall-mid-pass").await;
+        let release = crate::ontology::release_id("api", "2.0.0");
+        let mut operator = ctx.clone();
+        let planning = ctx.share_release_reads();
+        assert!(ctx.get(&release).await.unwrap().is_none());
+        put_recalled_release(&mut operator, "2.0.0").await;
+        assert!(
+            ctx.get(&release).await.unwrap().is_none(),
+            "the pass keeps its first read"
+        );
+        drop(planning);
+
+        let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
+        let report = reconciler.run_once().await.unwrap();
+        let stored = plan::load(&mut ctx, &work.id).await.unwrap();
+        assert_eq!(stored.state, PlanState::Failed, "{:?}", report.environments);
+        assert!(
+            stored
+                .status_detail
+                .contains("would install recalled release"),
+            "{}",
+            stored.status_detail
+        );
+        let _ = std::fs::remove_file(&database);
+    }
+
     /// #1571: a queued roll-off off a recalled release is selected before an
     /// older unrelated plan.
     #[tokio::test]

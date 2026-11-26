@@ -117,7 +117,9 @@ async fn load_snapshot(
     environment: &str,
     admission: SnapshotAdmission,
 ) -> Result<DeployableSnapshot> {
-    let first = ctx
+    // One read: the descriptor checks kind, recall and trust on this object,
+    // and recall is its own record, so a second read would only repeat them.
+    let object = ctx
         .get(release_id)
         .await
         .map_err(CatalogLookupError::Provider)?
@@ -125,15 +127,7 @@ async fn load_snapshot(
             release_id: release_id.into(),
         })?;
     let descriptor =
-        descriptor_from_object_with_admission(ctx, &first, environment, admission).await?;
-    let Some(object) = ctx.get(release_id).await? else {
-        bail!("release object {release_id} not found");
-    };
-    if object.kind != KIND_RELEASE {
-        bail!("object {release_id} is {}, not {KIND_RELEASE}", object.kind);
-    }
-    admit_recall(ctx, &object, admission).await?;
-    require_deployable_trust(ctx, &object, environment).await?;
+        descriptor_from_object_with_admission(ctx, &object, environment, admission).await?;
     Ok(DeployableSnapshot { descriptor, object })
 }
 

@@ -899,6 +899,8 @@ async fn compute_snapshot_with_policy(
     Vec<Step>,
     Vec<crate::plan::RecalledUpgradeAdmission>,
 )> {
+    // One planning computation reads each release record once (#1575).
+    let _release_reads = ctx.share_release_reads();
     let mut env_obj = crate::environment::active_environment(ctx, env).await?;
     crate::preview::admit_plan(&env_obj, crate::now_millis())?;
     let tearing_down = crate::preview::inspect_from_object(&env_obj)?
@@ -3247,6 +3249,8 @@ async fn create_with_content(
     default_proposer: &str,
     recalled_upgrade: Vec<crate::plan::RecalledUpgradeAdmission>,
 ) -> Result<Plan> {
+    // Planning checks share release reads; apply admission reads fresh (#1575).
+    let _release_reads = ctx.share_release_reads();
     let mut steps = bind_host_steps(ctx, executors, env, steps).await?;
     refuse_unsupported_executors(ctx, executors, env, &steps).await?;
     refuse_unsupported_engines(ctx, executors, env, &steps).await?;

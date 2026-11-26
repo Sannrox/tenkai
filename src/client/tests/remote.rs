@@ -81,6 +81,7 @@ async fn remote_fenced_writes_use_canonical_rpc_and_reuse_request_id_on_retry() 
         execution_capabilities: None,
         held_execution_leases: Vec::new(),
         plan_proposer: None,
+        release_reads: std::sync::Weak::new(),
     };
     let object = Object {
         id: "tenkai:object:remote".into(),
@@ -159,6 +160,7 @@ async fn remote_create_reclassifies_existing_object_after_sanitized_internal_err
         execution_capabilities: None,
         held_execution_leases: Vec::new(),
         plan_proposer: None,
+        release_reads: std::sync::Weak::new(),
     };
 
     let object = Object {
@@ -215,6 +217,7 @@ async fn remote_graph_action_registration_uses_governed_rpc() {
         execution_capabilities: None,
         held_execution_leases: Vec::new(),
         plan_proposer: None,
+        release_reads: std::sync::Weak::new(),
     };
     let action = ActionTypeDef {
         name: "tenkai.replace_subscription".into(),
@@ -299,6 +302,7 @@ async fn remote_grpc_forwards_its_trace_context_only_when_it_has_one() {
         execution_capabilities: None,
         held_execution_leases: Vec::new(),
         plan_proposer: None,
+        release_reads: std::sync::Weak::new(),
     };
     const PARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
     let parent = crate::telemetry::TraceContext::from_traceparent(PARENT).unwrap();
