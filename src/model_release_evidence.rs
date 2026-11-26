@@ -904,14 +904,12 @@ pub(crate) struct CompletedRuntimeExport<'a> {
     pub observed_at: i64,
 }
 
-/// Export a completed canary or smoke observation when outcome export is armed.
+/// Record a completed canary or smoke observation, signed, in the local
+/// outbox when a model evidence signing key is configured.
 pub(crate) async fn export_completed_runtime_evidence(
     ctx: &mut Ctx,
     export: CompletedRuntimeExport<'_>,
 ) -> Result<()> {
-    if !ctx.outcome_export_enabled() {
-        return Ok(());
-    }
     let Some(key) = signing_key_from_env()? else {
         return Ok(());
     };

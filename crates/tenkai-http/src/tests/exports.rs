@@ -73,7 +73,7 @@ async fn exports_download_verifiably_and_stay_inside_their_scope() {
     ));
     std::fs::create_dir_all(&root).unwrap();
     let database = root.join("tenkai.db");
-    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database).unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
     let mut plans = HashMap::new();
     for environment in ["prod", "site-c"] {

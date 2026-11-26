@@ -87,7 +87,7 @@ pub(crate) async fn run(
                 &backup,
                 database,
                 tenkai_sqlite::copy_store_file,
-                |path| tenkai_sqlite::embedded_ctx(path, false),
+                |path| tenkai_sqlite::embedded_ctx(path),
             )
             .await?;
             println!("{}", fleet_workload::format_workload(&plan));
@@ -108,7 +108,7 @@ pub(crate) async fn run(
                     // Re-open embedded ctx per sample so long watches see durable writes.
                     let database = database.to_path_buf();
                     async move {
-                        let mut sample_ctx = tenkai_sqlite::embedded_ctx(&database, false)?;
+                        let mut sample_ctx = tenkai_sqlite::embedded_ctx(&database)?;
                         plan::fleet_status(&mut sample_ctx).await
                     }
                 },

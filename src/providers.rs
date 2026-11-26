@@ -3,23 +3,18 @@
 //! Providers return or consume evidence; they never own releases, plans,
 //! execution state, leases, receipts, or rollback recovery.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
-use tonic::metadata::{MetadataMap, MetadataValue};
-use tonic::transport::{Channel, Endpoint};
 
-use crate::pb::sekai::sekai_service_client::SekaiServiceClient;
-use crate::pb::sekai::{EvidenceEnvelope, Object, SubmitEvidenceRequest};
+use crate::pb::sekai::Object;
 use crate::storage::{ProviderEventRecord, StoreError};
 
 pub use crate::provider_event::{
-    DeliveryStatus, deliver_optional_event, deliver_outcome_batch, enqueue_optional_event,
-    provider_event_record,
+    DeliveryStatus, deliver_optional_event, enqueue_optional_event, provider_event_record,
 };
 
 pub const PROVIDER_CONTRACT_VERSION: u32 = 1;
@@ -31,45 +26,12 @@ pub const PROVIDER_CONTRACT_VERSION: u32 = 1;
 /// JSON Schema is `api/tenkai-terminal-outcome-v2.schema.json`.
 pub const TERMINAL_OUTCOME_SCHEMA: &str = "tenkai.terminal_outcome.v2";
 pub const TERMINAL_OUTCOME_SCHEMA_VERSION: &str = "2.0.0";
-/// Schema id of outcomes queued before 0.7.0. They still deliver, with the
-/// `1.0.0` envelope and target an earlier attempt may already have sent.
+/// Schema id of outcomes queued before 0.7.0. They still project for
+/// inspection.
 const LEGACY_TERMINAL_OUTCOME_SCHEMA: &str = "tenkai.terminal_outcome.v1";
-const LEGACY_TERMINAL_OUTCOME_SCHEMA_VERSION: &str = "1.0.0";
-/// Evidence target kind of a community-host outcome: the target id is the
-/// deployment id.
-pub const DEPLOYMENT_TARGET_KIND: &str = "tenkai.deployment";
-/// Evidence target kind of a tenant-mode outcome: the target id is
-/// [`tenant_scoped_target_id`].
-pub const TENANT_DEPLOYMENT_TARGET_KIND: &str = "tenkai.tenant_deployment";
 pub const OUTCOME_PROVIDER_KIND: &str = "outcome";
-pub const OUTCOME_PROVIDER_REGISTRATION_ENV: &str = "TENKAI_OUTCOME_PROVIDER_REGISTRATION";
 const MAX_PROVIDER_EVENT_ID_BYTES: usize = 512;
 const MAX_PROVIDER_EVENT_PAYLOAD_BYTES: usize = 16 * 1024;
-
-pub(crate) fn evidence_submission_succeeded(
-    result: &crate::pb::sekai::EvidenceSubmissionResult,
-) -> bool {
-    let Some(submission) = result.submission.as_ref() else {
-        return false;
-    };
-    let lifecycle = submission.lifecycle_state.trim();
-    if lifecycle.is_empty()
-        || matches!(
-            lifecycle,
-            "received" | "validated" | "deduplicated" | "rejected"
-        )
-    {
-        return false;
-    }
-    // A rejection code contradicts admission unless Sekai explicitly retained
-    // an admitted submission in quarantine because projection failed.
-    let rejection_is_projection_quarantine =
-        lifecycle == "quarantined" && submission.rejection_code.starts_with("projection_");
-    if !submission.rejection_code.is_empty() && !rejection_is_projection_quarantine {
-        return false;
-    }
-    result.admitted || result.deduplicated
-}
 
 /// Exact operational inputs to which a decision or exported event applies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,15 +227,6 @@ pub fn terminal_outcome_payload_schema() -> serde_json::Value {
         TERMINAL_OUTCOME_SCHEMA_VERSION.into(),
     );
     schema.to_value()
-}
-
-/// Target id of a tenant-mode export (outcome deployment, feedback
-/// observation): `<tenant>:<object_id>` with `%` and `:` in the tenant
-/// percent-encoded, so the first `:` always ends the tenant and the object id
-/// is kept verbatim.
-pub fn tenant_scoped_target_id(tenant_id: &str, object_id: &str) -> String {
-    let tenant = tenant_id.replace('%', "%25").replace(':', "%3A");
-    format!("{tenant}:{object_id}")
 }
 
 impl TerminalOutcomePayload {
@@ -559,114 +512,6 @@ pub fn terminal_outcome_event(
     Ok(event)
 }
 
-/// Bind `tenant` into terminal-outcome records so export identities cannot
-/// collide across tenant partitions that share one producer.
-pub fn bind_tenant_to_provider_events(
-    tenant: Option<&str>,
-    events: &[ProviderEventRecord],
-) -> Result<Vec<ProviderEventRecord>, ProviderError> {
-    let Some(tenant) = tenant.map(str::trim).filter(|tenant| !tenant.is_empty()) else {
-        return Ok(events.to_vec());
-    };
-    if tenant.len() > MAX_PROVIDER_EVENT_ID_BYTES {
-        return Err(ProviderError::InvalidEvidence(
-            "terminal outcome tenant identity exceeds the bounded contract".into(),
-        ));
-    }
-    events
-        .iter()
-        .map(|record| bind_tenant_to_provider_event(record, tenant))
-        .collect()
-}
-
-fn bind_tenant_to_provider_event(
-    record: &ProviderEventRecord,
-    tenant: &str,
-) -> Result<ProviderEventRecord, ProviderError> {
-    if record.provider_kind != OUTCOME_PROVIDER_KIND {
-        return crate::feedback_export::bind_tenant_to_feedback_event(record, tenant);
-    }
-    let Ok(mut event) = serde_json::from_str::<ProviderEvent>(&record.payload_json) else {
-        return Ok(record.clone());
-    };
-    if event.validate().is_err() {
-        return Ok(record.clone());
-    }
-    let Ok(payload_value) = serde_json::from_str::<serde_json::Value>(&event.payload_json) else {
-        return Ok(record.clone());
-    };
-    if payload_value
-        .get("schema")
-        .and_then(serde_json::Value::as_str)
-        != Some(TERMINAL_OUTCOME_SCHEMA)
-    {
-        return Ok(record.clone());
-    }
-    let mut payload: TerminalOutcomePayload = serde_json::from_value(payload_value)?;
-    if payload.tenant_id.is_empty() {
-        payload.tenant_id = tenant.to_owned();
-    } else if payload.tenant_id != tenant {
-        return Err(ProviderError::InvalidEvidence(
-            "terminal outcome tenant does not match the catalog tenant".into(),
-        ));
-    }
-    event.payload_json = serde_json::to_string(&payload)?;
-    event.id = terminal_outcome_event_id(&event.binding, &payload)?;
-    event.validate()?;
-    payload.validate_for_event(&event)?;
-    if event.binding.digest() != record.binding_digest {
-        return Err(ProviderError::InvalidEvidence(
-            "durable event binding or identity does not match its envelope".into(),
-        ));
-    }
-    Ok(ProviderEventRecord {
-        id: event.id.clone(),
-        provider_kind: record.provider_kind.clone(),
-        binding_digest: record.binding_digest.clone(),
-        payload_json: serde_json::to_string(&event)?,
-        attempts: record.attempts,
-        next_attempt_at: record.next_attempt_at,
-        delivered_at: record.delivered_at,
-        last_error: record.last_error.clone(),
-        claim_token: record.claim_token.clone(),
-        claim_until: record.claim_until,
-    })
-}
-
-pub fn terminal_outcome_record(
-    plan: &crate::plan::Plan,
-    step: &crate::plan::Step,
-    deployment_id: &str,
-    terminal_state: TerminalOutcomeState,
-    environment: &Object,
-    observed_at: i64,
-) -> Result<ProviderEventRecord, ProviderError> {
-    if environment.id.trim().is_empty() {
-        return Err(ProviderError::InvalidEvidence(
-            "terminal outcome environment object is missing its identity".into(),
-        ));
-    }
-    let plan_digest = plan.executable_digest().map_err(|error| {
-        ProviderError::InvalidEvidence(format!(
-            "terminal outcome plan digest could not be computed: {error}"
-        ))
-    })?;
-    let event = terminal_outcome_event(
-        deployment_id,
-        &plan.id,
-        &plan_digest,
-        &step.release_id,
-        &step.release_digest,
-        &step.product,
-        &plan.environment,
-        &environment.id,
-        &environment_configuration_digest(environment),
-        terminal_state,
-        observed_at,
-    )?;
-    provider_event_record(OUTCOME_PROVIDER_KIND, &event, observed_at)
-}
-
 #[derive(Debug, Error)]
 pub enum ProviderError {
     #[error("provider unavailable: {0}")]
@@ -704,13 +549,6 @@ pub trait PolicyProvider: Send + Sync {
 
 pub trait AuditExporter: Send + Sync {
     fn export<'a>(
-        &'a self,
-        event: &'a ProviderEvent,
-    ) -> impl Future<Output = Result<(), ProviderError>> + Send + 'a;
-}
-
-pub trait OutcomeProvider: Send + Sync {
-    fn record<'a>(
         &'a self,
         event: &'a ProviderEvent,
     ) -> impl Future<Output = Result<(), ProviderError>> + Send + 'a;
@@ -829,363 +667,6 @@ impl GateProvider for HttpRemoteGateProvider {
     }
 }
 
-/// Reference adapter for Sekai's authenticated, namespace-scoped
-/// `SubmitEvidence` admission path.
-#[derive(Clone)]
-pub struct ChiseiOutcomeProvider {
-    namespace: String,
-    principal: String,
-    bearer_token: Option<String>,
-    registration_attested: bool,
-    /// Whether this adapter exports tenant-scoped outcomes. It must match
-    /// every payload's `tenant_id` presence, so the target kind always
-    /// matches the attested registration.
-    tenant_mode: bool,
-    client: SekaiServiceClient<Channel>,
-}
-
-impl std::fmt::Debug for ChiseiOutcomeProvider {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ChiseiOutcomeProvider")
-            .field("namespace", &self.namespace)
-            .field("principal", &self.principal)
-            .field(
-                "bearer_token",
-                &self.bearer_token.as_ref().map(|_| "[redacted]"),
-            )
-            .field("registration_attested", &self.registration_attested)
-            .field("tenant_mode", &self.tenant_mode)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Carry the current delivery trace on an outbound gRPC call. Missing or
-/// unusable context is a no-op: it never fails the call.
-pub(crate) fn attach_current_traceparent(metadata: &mut MetadataMap) {
-    let Some(trace) = crate::telemetry::current_trace() else {
-        return;
-    };
-    let Ok(value) = MetadataValue::try_from(trace.traceparent()) else {
-        return;
-    };
-    metadata.insert("traceparent", value);
-}
-
-pub(crate) fn provider_transport_is_safe(endpoint: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(endpoint) else {
-        return false;
-    };
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return false;
-    }
-    if parsed.scheme() == "https" {
-        return true;
-    }
-    if parsed.scheme() != "http" {
-        return false;
-    }
-    match parsed.host() {
-        Some(url::Host::Domain("localhost")) => true,
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        _ => false,
-    }
-}
-
-/// Return the exact, non-secret registration contract expected by the
-/// terminal-outcome adapter. Sekai administrators register the corresponding
-/// producer capability and schema out of band; Tenkai compares this value at
-/// startup before enabling delivery. A tenant-mode hub exports tenant-scoped
-/// targets, so its registration names [`TENANT_DEPLOYMENT_TARGET_KIND`].
-pub fn outcome_provider_registration_attestation(
-    principal: &str,
-    namespace: &str,
-    tenant_mode: bool,
-) -> String {
-    let target_kind = outcome_target_kind(tenant_mode);
-    format!(
-        "producer={principal};source_type={OUTCOME_PROVIDER_KIND};source_instance={namespace}:{OUTCOME_PROVIDER_KIND};namespace={namespace};evidence_type=operations.terminal_outcome;schema={TERMINAL_OUTCOME_SCHEMA}@{TERMINAL_OUTCOME_SCHEMA_VERSION};target_kind={target_kind};classification=internal;intent=upsert"
-    )
-}
-
-/// Envelope fields that depend on the queued schema and the hub mode.
-struct DeliveryTarget {
-    schema_id: &'static str,
-    schema_version: &'static str,
-    external_id: String,
-    kind: &'static str,
-}
-
-fn outcome_target_kind(tenant_mode: bool) -> &'static str {
-    if tenant_mode {
-        TENANT_DEPLOYMENT_TARGET_KIND
-    } else {
-        DEPLOYMENT_TARGET_KIND
-    }
-}
-
-impl ChiseiOutcomeProvider {
-    /// Build an adapter for evidence mapping and local inspection.
-    ///
-    /// This constructor deliberately leaves delivery disabled. The server
-    /// host must use [`Self::new_for_export`] so the operator has explicitly
-    /// confirmed the producer and schema registrations required by Sekai.
-    pub fn new(
-        endpoint: impl Into<String>,
-        namespace: impl Into<String>,
-        principal: impl Into<String>,
-        bearer_token: Option<String>,
-        tenant_mode: bool,
-    ) -> Result<Self, ProviderError> {
-        let endpoint = endpoint.into();
-        let namespace = namespace.into();
-        let principal = principal.into();
-        if namespace.trim().is_empty()
-            || principal.trim().is_empty()
-            || namespace.len() > MAX_PROVIDER_EVENT_ID_BYTES
-            || principal.len() > MAX_PROVIDER_EVENT_ID_BYTES
-        {
-            return Err(ProviderError::InvalidEvidence(
-                "outcome namespace and principal must be non-empty and bounded".into(),
-            ));
-        }
-        if bearer_token.as_ref().is_some_and(|token| token.is_empty()) {
-            return Err(ProviderError::InvalidEvidence(
-                "outcome bearer token must not be empty when configured".into(),
-            ));
-        }
-        if !provider_transport_is_safe(&endpoint) {
-            return Err(ProviderError::InvalidEvidence(
-                "outcome provider endpoints require HTTPS or loopback HTTP".into(),
-            ));
-        }
-        let secure = crate::outbound_tls::is_tls_url(&endpoint);
-        let mut channel = Endpoint::from_shared(endpoint).map_err(|_| {
-            ProviderError::InvalidEvidence(
-                "outcome provider endpoint is not a valid absolute URL".into(),
-            )
-        })?;
-        if secure {
-            let trust = crate::outbound_tls::OutboundTrust::from_env().map_err(|error| {
-                ProviderError::Unavailable(format!("outcome provider TLS: {error:#}"))
-            })?;
-            channel = channel.tls_config(trust.tonic()).map_err(|error| {
-                ProviderError::Unavailable(format!("outcome provider TLS: {error}"))
-            })?;
-        }
-        let channel = channel.connect_lazy();
-        Ok(Self {
-            namespace,
-            principal,
-            bearer_token,
-            registration_attested: false,
-            tenant_mode,
-            client: SekaiServiceClient::new(channel),
-        })
-    }
-
-    /// Build an adapter that is allowed to submit terminal outcome evidence.
-    ///
-    /// Sekai 1.0 does not expose producer-capability provisioning through the
-    /// client RPC surface. The registration attestation therefore binds the
-    /// configured principal, namespace, source identity, evidence type, and
-    /// schema to the administrator-side registration that must already exist.
-    pub fn new_for_export(
-        endpoint: impl Into<String>,
-        namespace: impl Into<String>,
-        principal: impl Into<String>,
-        bearer_token: Option<String>,
-        tenant_mode: bool,
-        registration_attestation: impl AsRef<str>,
-    ) -> Result<Self, ProviderError> {
-        let provider = Self::new(endpoint, namespace, principal, bearer_token, tenant_mode)?;
-        let expected = outcome_provider_registration_attestation(
-            &provider.principal,
-            &provider.namespace,
-            tenant_mode,
-        );
-        if registration_attestation.as_ref() != expected {
-            return Err(ProviderError::InvalidEvidence(format!(
-                "{OUTCOME_PROVIDER_REGISTRATION_ENV} must exactly confirm the configured Sekai producer and schema registration"
-            )));
-        }
-        Ok(Self {
-            registration_attested: true,
-            ..provider
-        })
-    }
-
-    /// Schema id, version, target id, and target kind for one queued outcome.
-    /// A `.v1` row queued before 0.7.0 resends exactly the `1.0.0` envelope an
-    /// earlier attempt may already have admitted.
-    fn delivery_target(
-        &self,
-        payload: &TerminalOutcomePayload,
-    ) -> Result<DeliveryTarget, ProviderError> {
-        let tenant = payload.tenant_id.as_str();
-        let deployment = payload.deployment_id.as_str();
-        if payload.schema == LEGACY_TERMINAL_OUTCOME_SCHEMA {
-            return Ok(DeliveryTarget {
-                schema_id: LEGACY_TERMINAL_OUTCOME_SCHEMA,
-                schema_version: LEGACY_TERMINAL_OUTCOME_SCHEMA_VERSION,
-                external_id: if tenant.is_empty() {
-                    deployment.into()
-                } else {
-                    format!("{tenant}:{deployment}")
-                },
-                kind: DEPLOYMENT_TARGET_KIND,
-            });
-        }
-        if tenant.is_empty() == self.tenant_mode {
-            return Err(ProviderError::InvalidEvidence(
-                "terminal outcome tenant scope does not match the registered target kind".into(),
-            ));
-        }
-        Ok(DeliveryTarget {
-            schema_id: TERMINAL_OUTCOME_SCHEMA,
-            schema_version: TERMINAL_OUTCOME_SCHEMA_VERSION,
-            external_id: if self.tenant_mode {
-                tenant_scoped_target_id(tenant, deployment)
-            } else {
-                deployment.into()
-            },
-            kind: outcome_target_kind(self.tenant_mode),
-        })
-    }
-
-    fn evidence(&self, event: &ProviderEvent) -> Result<EvidenceEnvelope, ProviderError> {
-        event.validate()?;
-        let payload: TerminalOutcomePayload = serde_json::from_str(&event.payload_json)?;
-        payload.validate_for_event(event)?;
-        let target = self.delivery_target(&payload)?;
-        let content_value: serde_json::Value = serde_json::from_str(&event.payload_json)?;
-        let content_json = serde_json::to_vec(&content_value)?;
-        let content_digest = format!("{:x}", Sha256::digest(&content_json));
-        Ok(EvidenceEnvelope {
-            contract_version: "sekai.evidence/v1".into(),
-            source_type: OUTCOME_PROVIDER_KIND.into(),
-            source_instance: format!("{}:{OUTCOME_PROVIDER_KIND}", self.namespace),
-            source_record_id: event.id.clone(),
-            source_version: PROVIDER_CONTRACT_VERSION.to_string(),
-            source_sequence: event.source_sequence.ok_or_else(|| {
-                ProviderError::InvalidEvidence(
-                    "terminal outcome delivery is missing its durable source sequence".into(),
-                )
-            })?,
-            namespace: self.namespace.clone(),
-            target_external_id: target.external_id,
-            target_kind: target.kind.into(),
-            evidence_type: "operations.terminal_outcome".into(),
-            signal: "other".into(),
-            schema_id: target.schema_id.into(),
-            schema_version: target.schema_version.into(),
-            schema_compatibility: "exact".into(),
-            observed_at_ms: payload.observed_at,
-            collected_at_ms: event.collected_at_ms.ok_or_else(|| {
-                ProviderError::InvalidEvidence(
-                    "terminal outcome delivery is missing its durable collection timestamp".into(),
-                )
-            })?,
-            expires_at_ms: None,
-            content_json,
-            relationships: Vec::new(),
-            producer_identity: self.principal.clone(),
-            confidence_bps: 10_000,
-            classification: "internal".into(),
-            provenance: {
-                let mut provenance = HashMap::from([
-                    (
-                        "environment_id".into(),
-                        event.binding.environment_id.clone(),
-                    ),
-                    (
-                        "release_digest".into(),
-                        event.binding.release_digest.clone(),
-                    ),
-                    ("plan_digest".into(), event.binding.plan_digest.clone()),
-                    (
-                        "configuration_digest".into(),
-                        event.binding.configuration_digest.clone(),
-                    ),
-                    (
-                        "provider_contract_version".into(),
-                        PROVIDER_CONTRACT_VERSION.to_string(),
-                    ),
-                ]);
-                if !payload.tenant_id.is_empty() {
-                    provenance.insert("tenant_id".into(), payload.tenant_id.clone());
-                }
-                provenance
-            },
-            idempotency_key: event.id.clone(),
-            content_digest,
-            intent: "upsert".into(),
-            causality: None,
-        })
-    }
-
-    fn authenticate<T>(
-        &self,
-        mut request: tonic::Request<T>,
-    ) -> Result<tonic::Request<T>, ProviderError> {
-        let principal = MetadataValue::try_from(self.principal.as_str()).map_err(|_| {
-            ProviderError::InvalidEvidence("outcome principal is not valid metadata".into())
-        })?;
-        request.metadata_mut().insert("x-principal", principal);
-        if let Some(token) = &self.bearer_token {
-            let authorization =
-                MetadataValue::try_from(format!("Bearer {token}")).map_err(|_| {
-                    ProviderError::InvalidEvidence(
-                        "outcome bearer token is not valid metadata".into(),
-                    )
-                })?;
-            request
-                .metadata_mut()
-                .insert("authorization", authorization);
-        }
-        attach_current_traceparent(request.metadata_mut());
-        Ok(request)
-    }
-}
-
-impl OutcomeProvider for ChiseiOutcomeProvider {
-    async fn record(&self, event: &ProviderEvent) -> Result<(), ProviderError> {
-        if !self.registration_attested {
-            return Err(ProviderError::InvalidEvidence(
-                "Sekai outcome export requires administrator-confirmed producer and schema registration".into(),
-            ));
-        }
-        let evidence = self.evidence(event)?;
-        let request = self.authenticate(tonic::Request::new(SubmitEvidenceRequest {
-            envelope: Some(evidence),
-        }))?;
-        let mut client = self.client.clone();
-        let result = client
-            .submit_evidence(request)
-            .await
-            .map_err(|status| {
-                ProviderError::Unavailable(format!(
-                    "Sekai outcome evidence admission returned gRPC {}",
-                    status.code()
-                ))
-            })?
-            .into_inner()
-            .result
-            .ok_or_else(|| {
-                ProviderError::Unavailable(
-                    "Sekai outcome evidence admission returned no result".into(),
-                )
-            })?;
-        if !evidence_submission_succeeded(&result) {
-            return Err(ProviderError::Unavailable(
-                "Sekai rejected terminal outcome evidence".into(),
-            ));
-        }
-        Ok(())
-    }
-}
-
 impl GateProvider for LocalGateProvider {
     async fn evaluate(&self, request: &DecisionRequest) -> Result<ProviderDecision, ProviderError> {
         request.binding.validate()?;
@@ -1266,12 +747,6 @@ impl LocalEventSink {
 
 impl AuditExporter for LocalEventSink {
     async fn export(&self, event: &ProviderEvent) -> Result<(), ProviderError> {
-        self.receive(event).await
-    }
-}
-
-impl OutcomeProvider for LocalEventSink {
-    async fn record(&self, event: &ProviderEvent) -> Result<(), ProviderError> {
         self.receive(event).await
     }
 }
@@ -1371,138 +846,11 @@ mod tests {
         .unwrap()
     }
 
-    #[tokio::test]
-    async fn tenant_binding_separates_identical_terminal_outcomes() {
+    /// Outcome rows queued by releases before the v2 schema still project
+    /// for inspection after export was removed (#1580).
+    #[test]
+    fn outcomes_queued_before_the_v2_bump_still_project() {
         let event = terminal_event();
-        let record = provider_event_record(OUTCOME_PROVIDER_KIND, &event, 1_000).unwrap();
-        let bound_a =
-            bind_tenant_to_provider_events(Some("tenant-a"), std::slice::from_ref(&record))
-                .unwrap();
-        let bound_b =
-            bind_tenant_to_provider_events(Some("tenant-b"), std::slice::from_ref(&record))
-                .unwrap();
-        assert_ne!(bound_a[0].id, bound_b[0].id);
-        assert_ne!(bound_a[0].id, record.id);
-        assert_eq!(
-            bind_tenant_to_provider_events(Some("tenant-a"), &bound_a).unwrap()[0].id,
-            bound_a[0].id
-        );
-        assert!(bind_tenant_to_provider_events(Some("tenant-b"), &bound_a).is_err());
-
-        let generic = ProviderEvent {
-            id: "generic-outcome-destination-event".into(),
-            binding: event.binding.clone(),
-            payload_json: "{}".into(),
-            collected_at_ms: None,
-            source_sequence: None,
-        };
-        let generic_record = provider_event_record(OUTCOME_PROVIDER_KIND, &generic, 1_000).unwrap();
-        assert_eq!(
-            bind_tenant_to_provider_events(Some("tenant-a"), std::slice::from_ref(&generic_record))
-                .unwrap()[0]
-                .id,
-            generic_record.id
-        );
-
-        let tenant_provider = ChiseiOutcomeProvider::new(
-            "http://127.0.0.1:50051",
-            "tenkai-prod",
-            "tenkai.outcome",
-            None,
-            true,
-        )
-        .unwrap();
-        let community_provider = ChiseiOutcomeProvider::new(
-            "http://127.0.0.1:50051",
-            "tenkai-prod",
-            "tenkai.outcome",
-            None,
-            false,
-        )
-        .unwrap();
-        let mut collected_a: ProviderEvent =
-            serde_json::from_str(&bound_a[0].payload_json).unwrap();
-        collected_a.collected_at_ms = Some(1_000);
-        collected_a.source_sequence = Some(1);
-        let evidence_a = tenant_provider.evidence(&collected_a).unwrap();
-        assert_eq!(
-            evidence_a.target_external_id,
-            "tenant-a:tenkai:deployment:prod:api:1"
-        );
-        assert_eq!(evidence_a.target_kind, TENANT_DEPLOYMENT_TARGET_KIND);
-        assert_eq!(evidence_a.schema_version, TERMINAL_OUTCOME_SCHEMA_VERSION);
-        assert_eq!(
-            evidence_a.provenance.get("tenant_id").map(String::as_str),
-            Some("tenant-a")
-        );
-        assert_eq!(evidence_a.source_record_id, bound_a[0].id);
-        assert_eq!(evidence_a.idempotency_key, bound_a[0].id);
-
-        let mut collected_community = event.clone();
-        collected_community.collected_at_ms = Some(1_000);
-        collected_community.source_sequence = Some(1);
-        let evidence_community = community_provider.evidence(&collected_community).unwrap();
-        assert_eq!(
-            evidence_community.target_external_id,
-            "tenkai:deployment:prod:api:1"
-        );
-        assert_eq!(evidence_community.target_kind, DEPLOYMENT_TARGET_KIND);
-        assert_eq!(
-            evidence_community.schema_version,
-            TERMINAL_OUTCOME_SCHEMA_VERSION
-        );
-        assert!(!evidence_community.provenance.contains_key("tenant_id"));
-
-        // An adapter only emits the target kind its registration attests.
-        assert!(community_provider.evidence(&collected_a).is_err());
-        assert!(tenant_provider.evidence(&collected_community).is_err());
-    }
-
-    /// `.v1` outcomes queued before 0.7.0 resend the `1.0.0` envelope and
-    /// target an earlier attempt may already have admitted, and still project.
-    #[tokio::test]
-    async fn outcomes_queued_before_the_v2_bump_keep_their_envelope() {
-        let event = terminal_event();
-        let record = provider_event_record(OUTCOME_PROVIDER_KIND, &event, 1_000).unwrap();
-        let bound = bind_tenant_to_provider_events(Some("tenant:a"), std::slice::from_ref(&record))
-            .unwrap();
-        let mut current: ProviderEvent = serde_json::from_str(&bound[0].payload_json).unwrap();
-        current.collected_at_ms = Some(1_000);
-        current.source_sequence = Some(1);
-        let legacy = ProviderEvent {
-            payload_json: current.payload_json.replace(
-                &format!("\"{TERMINAL_OUTCOME_SCHEMA}\""),
-                &format!("\"{LEGACY_TERMINAL_OUTCOME_SCHEMA}\""),
-            ),
-            ..current.clone()
-        };
-        assert_ne!(legacy.payload_json, current.payload_json);
-        let tenant_provider = ChiseiOutcomeProvider::new(
-            "http://127.0.0.1:50051",
-            "tenkai-prod",
-            "tenkai.outcome",
-            None,
-            true,
-        )
-        .unwrap();
-
-        let resent = tenant_provider.evidence(&legacy).unwrap();
-        assert_eq!(resent.schema_id, "tenkai.terminal_outcome.v1");
-        assert_eq!(resent.schema_version, "1.0.0");
-        assert_eq!(resent.target_kind, DEPLOYMENT_TARGET_KIND);
-        assert_eq!(
-            resent.target_external_id,
-            "tenant:a:tenkai:deployment:prod:api:1"
-        );
-        let fresh = tenant_provider.evidence(&current).unwrap();
-        assert_eq!(fresh.schema_id, TERMINAL_OUTCOME_SCHEMA);
-        assert_eq!(fresh.schema_version, TERMINAL_OUTCOME_SCHEMA_VERSION);
-        assert_eq!(fresh.target_kind, TENANT_DEPLOYMENT_TARGET_KIND);
-        assert_eq!(
-            fresh.target_external_id,
-            "tenant%3Aa:tenkai:deployment:prod:api:1"
-        );
-
         let legacy_community = ProviderEvent {
             payload_json: event.payload_json.replace(
                 &format!("\"{TERMINAL_OUTCOME_SCHEMA}\""),
@@ -1525,32 +873,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(projected.schema, "tenkai.terminal_outcome.v1");
-
-        let unknown = ProviderEvent {
-            payload_json: current
-                .payload_json
-                .replace(TERMINAL_OUTCOME_SCHEMA, "tenkai.terminal_outcome.v9"),
-            ..current
-        };
-        assert!(tenant_provider.evidence(&unknown).is_err());
     }
 
-    /// A tenant containing `:` or `%` cannot shift the tenant/deployment split.
-    #[test]
-    fn tenant_scoped_target_id_splits_at_the_first_colon() {
-        assert_ne!(
-            tenant_scoped_target_id("a:b", "c"),
-            tenant_scoped_target_id("a", "b:c")
-        );
-        assert_ne!(
-            tenant_scoped_target_id("a%3Ab", "c"),
-            tenant_scoped_target_id("a:b", "c")
-        );
-        assert_eq!(tenant_scoped_target_id("a:b%", "x:y"), "a%3Ab%25:x:y");
-    }
-
-    /// Payloads Tenkai builds, community and tenant-bound, satisfy the shape
-    /// the published schema declares.
+    /// Payloads Tenkai builds satisfy the shape the published schema declares.
     #[test]
     fn terminal_outcome_schema_describes_emitted_payloads() {
         let schema = terminal_outcome_payload_schema();
@@ -1573,23 +898,16 @@ mod tests {
         assert!(!required.contains(&"tenant_id"));
         assert!(schema["properties"]["tenant_id"].get("default").is_none());
 
-        let event = terminal_event();
-        let record = provider_event_record(OUTCOME_PROVIDER_KIND, &event, 1_000).unwrap();
-        let bound = bind_tenant_to_provider_events(Some("tenant-a"), std::slice::from_ref(&record))
-            .unwrap();
-        let bound: ProviderEvent = serde_json::from_str(&bound[0].payload_json).unwrap();
-        for payload_json in [&event.payload_json, &bound.payload_json] {
-            let payload: serde_json::Map<String, serde_json::Value> =
-                serde_json::from_str(payload_json).unwrap();
-            for field in &required {
-                assert!(payload.contains_key(*field), "{field} missing");
-            }
-            for field in payload.keys() {
-                assert!(
-                    schema["properties"].get(field).is_some(),
-                    "{field} undeclared"
-                );
-            }
+        let payload: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&terminal_event().payload_json).unwrap();
+        for field in &required {
+            assert!(payload.contains_key(*field), "{field} missing");
+        }
+        for field in payload.keys() {
+            assert!(
+                schema["properties"].get(field).is_some(),
+                "{field} undeclared"
+            );
         }
     }
 
@@ -1631,77 +949,6 @@ mod tests {
         invalid.binding_digest = "sha256:tampered".into();
 
         assert!(project_terminal_outcomes(&[invalid], "prod", 4_000).is_err());
-    }
-
-    #[test]
-    fn deduplicated_evidence_must_reference_an_admitted_submission() {
-        let rejected = crate::pb::sekai::EvidenceSubmissionResult {
-            deduplicated: true,
-            submission: Some(crate::pb::sekai::EvidenceSubmissionRecord {
-                lifecycle_state: "rejected".into(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert!(!evidence_submission_succeeded(&rejected));
-
-        let admitted = crate::pb::sekai::EvidenceSubmissionResult {
-            deduplicated: true,
-            submission: Some(crate::pb::sekai::EvidenceSubmissionRecord {
-                lifecycle_state: "available".into(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert!(evidence_submission_succeeded(&admitted));
-        assert!(evidence_submission_succeeded(
-            &crate::pb::sekai::EvidenceSubmissionResult {
-                deduplicated: true,
-                submission: Some(crate::pb::sekai::EvidenceSubmissionRecord {
-                    lifecycle_state: "future_admitted_state".into(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }
-        ));
-        assert!(!evidence_submission_succeeded(
-            &crate::pb::sekai::EvidenceSubmissionResult {
-                admitted: true,
-                ..Default::default()
-            }
-        ));
-        assert!(!evidence_submission_succeeded(
-            &crate::pb::sekai::EvidenceSubmissionResult {
-                admitted: true,
-                submission: Some(crate::pb::sekai::EvidenceSubmissionRecord {
-                    lifecycle_state: "rejected".into(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }
-        ));
-        assert!(evidence_submission_succeeded(
-            &crate::pb::sekai::EvidenceSubmissionResult {
-                deduplicated: true,
-                submission: Some(crate::pb::sekai::EvidenceSubmissionRecord {
-                    lifecycle_state: "quarantined".into(),
-                    rejection_code: "projection_unavailable".into(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }
-        ));
-        assert!(!evidence_submission_succeeded(
-            &crate::pb::sekai::EvidenceSubmissionResult {
-                deduplicated: true,
-                submission: Some(crate::pb::sekai::EvidenceSubmissionRecord {
-                    lifecycle_state: "quarantined".into(),
-                    rejection_code: "producer_unregistered".into(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }
-        ));
     }
 
     #[test]
@@ -1772,8 +1019,8 @@ mod tests {
         assert_eq!(delivered.delivered_at, Some(4_500));
     }
 
-    #[tokio::test]
-    async fn terminal_outcome_is_bounded_content_bound_and_sekai_evidence_mapped() {
+    #[test]
+    fn terminal_outcome_events_are_content_bound() {
         let event = terminal_event();
         let repeated_transition = terminal_event();
         let later_transition = terminal_outcome_event(
@@ -1798,173 +1045,6 @@ mod tests {
             TerminalOutcomeState::AutomaticRollbackSucceeded
         );
         assert_eq!(event.binding.environment_id, payload.environment_id);
-
-        let provider = ChiseiOutcomeProvider::new(
-            "http://127.0.0.1:50051",
-            "tenkai-prod",
-            "tenkai.outcome",
-            Some("secret-token".into()),
-            false,
-        )
-        .unwrap();
-        let mut collected_event = event.clone();
-        collected_event.collected_at_ms = Some(1_000);
-        collected_event.source_sequence = Some(1);
-        let evidence = provider.evidence(&collected_event).unwrap();
-        assert_eq!(evidence, provider.evidence(&collected_event).unwrap());
-        assert_eq!(evidence.source_record_id, event.id);
-        assert_eq!(evidence.namespace, "tenkai-prod");
-        assert_eq!(evidence.target_external_id, "tenkai:deployment:prod:api:1");
-        assert_eq!(evidence.schema_id, TERMINAL_OUTCOME_SCHEMA);
-        assert_eq!(evidence.collected_at_ms, 1_000);
-        assert_eq!(evidence.source_sequence, 1);
-        let canonical_content = serde_json::to_vec(
-            &serde_json::from_str::<serde_json::Value>(&event.payload_json).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(evidence.content_json, canonical_content);
-        assert_eq!(evidence.idempotency_key, event.id);
-        assert_eq!(evidence.confidence_bps, 10_000);
-        assert_eq!(evidence.intent, "upsert");
-        assert!(!format!("{provider:?}").contains("secret-token"));
-        assert!(provider.record(&event).await.is_err());
-        assert!(!evidence.provenance.contains_key("tenant_id"));
-
-        let registration =
-            outcome_provider_registration_attestation("tenkai.outcome", "tenkai-prod", false);
-        assert!(registration.contains("schema=tenkai.terminal_outcome.v2@2.0.0;"));
-        assert!(registration.contains("target_kind=tenkai.deployment;"));
-        let export_provider = ChiseiOutcomeProvider::new_for_export(
-            "http://127.0.0.1:50051",
-            "tenkai-prod",
-            "tenkai.outcome",
-            Some("secret-token".into()),
-            false,
-            &registration,
-        )
-        .unwrap();
-        assert!(export_provider.registration_attested);
-        // A tenant-mode hub must attest the tenant-scoped target kind.
-        assert!(
-            ChiseiOutcomeProvider::new_for_export(
-                "http://127.0.0.1:50051",
-                "tenkai-prod",
-                "tenkai.outcome",
-                None,
-                true,
-                &registration,
-            )
-            .is_err()
-        );
-        assert!(
-            outcome_provider_registration_attestation("tenkai.outcome", "tenkai-prod", true)
-                .contains("target_kind=tenkai.tenant_deployment;")
-        );
-        assert!(
-            ChiseiOutcomeProvider::new_for_export(
-                "http://127.0.0.1:50051",
-                "tenkai-prod",
-                "tenkai.outcome",
-                None,
-                false,
-                "producer=tenkai.outcome;schema=wrong",
-            )
-            .is_err()
-        );
-
-        assert!(
-            ChiseiOutcomeProvider::new(
-                "http://provider.example.test:50051",
-                "tenkai-prod",
-                "tenkai.outcome",
-                Some("secret-token".into()),
-                false,
-            )
-            .is_err()
-        );
-        assert!(
-            ChiseiOutcomeProvider::new(
-                "http://provider.example.test:50051",
-                "tenkai-prod",
-                "tenkai.outcome",
-                None,
-                false,
-            )
-            .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn a_store_error_on_one_outcome_does_not_strand_the_batch() {
-        let inner = MemoryCatalogGraph::open_in_memory().unwrap();
-        let first = terminal_event_for("prod", "tenkai:deployment:prod:api:1", 1_000);
-        let second = terminal_event_for("prod", "tenkai:deployment:prod:api:2", 1_001);
-        enqueue_optional_event(&inner, OUTCOME_PROVIDER_KIND, &first, 100).unwrap();
-        enqueue_optional_event(&inner, OUTCOME_PROVIDER_KIND, &second, 100).unwrap();
-        let store = crate::provider_event::failing_mark::FailingMark {
-            inner,
-            failing_id: first.id.clone(),
-        };
-        let sink = LocalEventSink::default();
-
-        let error = deliver_outcome_batch(&store, &sink, Duration::from_secs(1), 100, 10)
-            .await
-            .unwrap_err();
-
-        assert!(error.to_string().contains("disk full"), "{error}");
-        assert_eq!(sink.received().len(), 2);
-        // The second event was acknowledged even though the first failed,
-        // so once the claims lapse only the first is redelivered.
-        let retried = store
-            .inner
-            .claim_provider_events_for_kind(
-                OUTCOME_PROVIDER_KIND,
-                1_000_000,
-                10,
-                "retry",
-                1_001_000,
-            )
-            .unwrap();
-        assert_eq!(
-            retried.iter().map(|record| &record.id).collect::<Vec<_>>(),
-            vec![&first.id]
-        );
-    }
-
-    #[tokio::test]
-    async fn outcome_worker_claims_only_outcomes_and_acknowledges_idempotently() {
-        let store = MemoryCatalogGraph::open_in_memory().unwrap();
-        let event = terminal_event();
-        enqueue_optional_event(&store, "audit", &event, 100).unwrap();
-        enqueue_optional_event(&store, OUTCOME_PROVIDER_KIND, &event, 100).unwrap();
-        let sink = LocalEventSink::default();
-
-        let (delivered, deferred) =
-            deliver_outcome_batch(&store, &sink, Duration::from_secs(1), 100, 10)
-                .await
-                .unwrap();
-        assert_eq!((delivered, deferred), (1, 0));
-        let mut collected_event = event.clone();
-        collected_event.collected_at_ms = Some(100);
-        collected_event.source_sequence = Some(1);
-        assert_eq!(sink.received(), vec![collected_event]);
-        assert!(
-            store
-                .claim_provider_events_for_kind(
-                    OUTCOME_PROVIDER_KIND,
-                    101,
-                    10,
-                    "outcome-retry",
-                    1_101,
-                )
-                .unwrap()
-                .is_empty()
-        );
-        let audit = store
-            .claim_provider_events_for_kind("audit", 101, 10, "audit-worker", 1_101)
-            .unwrap();
-        assert_eq!(audit.len(), 1);
-        assert_eq!(audit[0].id, event.id);
     }
 
     #[tokio::test]

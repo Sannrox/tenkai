@@ -1,6 +1,6 @@
 # Governance and intelligence provider contracts
 
-Tenkai has four independent provider ports:
+Tenkai has three independent provider ports:
 
 - **Gate provider:** library adapter for a required policy decision. Release
   `[gate].eval_suite` admission uses stored signed evaluation evidence, not a
@@ -9,8 +9,9 @@ Tenkai has four independent provider ports:
   principal and the same exact operational inputs.
 - **Audit exporter:** receives immutable operational events after Tenkai has
   committed them locally.
-- **Outcome provider:** receives terminal deployment outcomes for learning or
-  analysis after Tenkai has committed them locally.
+
+Terminal-outcome and feedback-observation export were removed (#1580); see
+[Removed outcome and feedback export](#removed-outcome-and-feedback-export-1580).
 
 These ports do not expose planning, execution, lease, receipt, deployed-state,
 or rollback mutations. An adapter cannot become authoritative for operational
@@ -38,15 +39,9 @@ valid bound evidence is returned.
 
 ## Optional exports and retries
 
-Audit and outcome delivery uses a Tenkai-owned durable outbox. Host wiring must
-commit the outbox event in the same operational-store transaction as the state
-change that produced it. The shipped SQLite host wiring uses that contract for
-configured terminal-outcome export: embedded/server plan, deployment,
-cancellation, and unknown-state reconciliation transitions write the versioned
-outcome event in the same SQLite transaction as the terminal object update.
-This is not a general planning or execution-event bus: audit mutations,
-planning events, and non-terminal lifecycle changes are not wired to this
-outcome queue.
+Optional deliveries (webhooks, health gates, exposure, recall notices) use a
+Tenkai-owned durable outbox. Host wiring must commit the outbox event in the
+same operational-store transaction as the state change that produced it.
 The event is always durable before an adapter is called. Its destination kind
 and stable event ID form the adapter idempotency key; enqueueing the same pair
 and payload is safe, while reusing the pair with different content is rejected.
@@ -63,10 +58,10 @@ The first delivery attempt binds a durable collection timestamp into the
 outbox envelope; retries reuse that timestamp so Sekai replay-window checks do
 not see a new evidence body on every attempt.
 
-Outcome workers claim only the `outcome` destination. A separate adapter cannot
-consume or acknowledge audit events accidentally. Delivery failure and timeout
-leave the attempt count, bounded retry time, and sanitized failure reason in
-the durable row and emit a bounded degraded diagnostic; they do not make the
+Each worker claims only its own destination kind, so one adapter cannot
+consume or acknowledge another's events. Delivery failure and timeout leave
+the attempt count, bounded retry time, and sanitized failure reason in the
+durable row and emit a bounded degraded diagnostic; they do not make the
 server unready.
 
 ### Health/SLO gate event v1
@@ -98,6 +93,10 @@ includes both versions.
 Delivery retries use the durable outbox; apply does not wait.
 
 ### Terminal outcome event
+
+Tenkai no longer queues terminal outcomes (#1580). Rows that earlier releases
+queued keep this format and stay readable in
+[outcome inspection](#authenticated-outcome-inspection).
 
 `ProviderEvent.payload_json` contains `tenkai.terminal_outcome.v2`, version
 `2.0.0`. Its JSON Schema is
@@ -142,9 +141,8 @@ learning evidence.
 
 Every committed deployment outcome also leaves one
 `tenkai.feedback_observation.v1` record (#802). It is captured always,
-whether or not any export is on. Delivery to Sekai is a separate opt-in
-adapter (#783). The record is not a provider event until that adapter is
-enabled, and the terminal outcome event is unchanged. It is written
+and is not a provider event; an endpoint may receive it as a signed
+[`feedback.observation` webhook](deploy-webhooks.md). It is written
 in the same transaction as the outcome, into a dedicated
 `feedback_observations` table that refuses updates. On a tenant-mode
 PostgreSQL hub that table lives in the tenant's schema, beside the catalog
@@ -179,159 +177,31 @@ recalled rollback, bounded).
 A record holds no detail text: no command output, credentials, signing
 material, environment facts or content. Identifiers are bounded.
 
-### Feedback observation export (#783)
+## Removed outcome and feedback export (#1580)
 
-Reference adapter: `ChiseiFeedbackProvider` in `src/feedback_export.rs`.
+Releases before #1580 could export terminal outcomes
+(`--outcome-provider chisei`) and feedback observations
+(`--feedback-provider chisei`) to an external evidence service through the
+outbox. Both exports are removed, so delivery state stays in Tenkai:
 
-When `--feedback-provider chisei` is set, each captured observation is also
-enqueued on the durable provider-event outbox as destination kind `feedback`.
-The outbox payload wraps the captured observation; the evidence body submitted
-to Sekai is only that observation. Delivery uses existing authenticated
-submission:
-
-1. `SekaiService.SubmitEvidence` with evidence type
-   `tenkai.feedback_observation`, schema
-   `tenkai.feedback_observation.v1@1.0.0` from
-   [`api/tenkai-feedback-observation-v1.schema.json`](../api/tenkai-feedback-observation-v1.schema.json),
-   a target (below), and provenance for the observation identity, package
-   `pkg:feedback.evidence-finding/v1`, and evidence binding. Additive fields
-   stay in 1.x (`1.0.0` → `1.1.0` and a schema update); a breaking change
-   becomes `.v2` and a new major version. `schema_compatibility` is `exact`
-   against the registered 1.x version.
-2. `SekaiService.SubmitActionInstance` for `feedback.observation.record`,
-   passing the admitted submission id. Action parameters (`object_id`,
-   `problem_signature`, `occurrence_ids`, `classification`, `disposition`,
-   `operation_id`, `observed_at_ms`, `scope`) are derived from the captured
-   fields. No new core RPC.
-
-Occurrence identity:
-
-- `occurrence_ids` is the observation id: one committed outcome. An apply
-  attempt uses the deployment attempt id; a plan-level block, failure, or
-  orphan recovery uses `tenkai:plan:<plan_id>:<operation>:<lease_generation>`;
-  a reconciliation uses `<deployment_id>:reconciled:<observed_at_ms>`. A
-  retry, lease takeover, or later reconciliation is a distinct occurrence.
-- `operation_id` is the plan id when the outcome names a plan, otherwise the
-  observation id. It is stable across attempts, lease generations, and
-  reconciliation of that plan.
-- `observed_at_ms` is the captured observation time, not delivery or ingest
-  time.
-- `scope` is the environment. On a tenant-mode hub it is
-  `<tenant>/<environment>`, with `%`, `/`, and `:` in the tenant
-  percent-encoded (`%25`, `%2F`, `%3A`) so the first `/` ends the tenant.
-- `problem_signature` stays `{product}:{reason}` (or `{operation}:{reason}`
-  when product is empty). Consumers that cluster by signature plus `scope`
-  keep environments and tenants apart.
-
-`operation_id`, `observed_at_ms`, and `scope` are additive. A plane on the
-current package that ignores unknown Action keys keeps working. Rely on them
-only after the plane admits those keys.
-
-Target:
-
-- on a community host, the observation ID → `target_external_id` with target
-  kind `feedback_observation`;
-- on a tenant-mode hub, `<tenant>:<observation ID>` → `target_external_id`
-  with target kind `tenant_feedback_observation`. `%` and `:` in the tenant
-  are percent-encoded (`%25`, `%3A`), the same grammar as
-  `tenkai.tenant_deployment`, so the first `:` ends the tenant and the
-  observation ID follows verbatim.
-
-Versioning: the outbox wrapper carries `schema: tenkai.feedback_export.v2`
-(#945), and the delivery worker derives the target kind and target id from it,
-the same rule as terminal outcomes. Rows queued before 0.7.0 carry no wrapper
-schema and are resent with exactly the target they had: kind
-`feedback_observation`, and on a tenant-mode hub the unescaped
-`<tenant>:<observation ID>`. The wrapper is closed, so an older release
-refuses a `.v2` row as a visible, retryable failure instead of resending it
-with a different target under the same idempotency key. The wrapper schema
-is part of the event id. The evidence body is the captured observation
-(`tenkai.feedback_observation.v1`). Export names evidence type
-`tenkai.feedback_observation` and schema
-`tenkai.feedback_observation.v1@1.0.0`. A plane that still only has
-`feedback.observation@1.0.0` keeps accepting that type from older replicas
-until operators remove it.
-
-Retryable delivery survives restart, duplicate enqueue, and lost
-acknowledgements: the outbox event id is the evidence and Action
-idempotency key. Adapters may see an event more than once; Sekai
-deduplicates. An event is marked delivered only when the Action instance is
-`admitted`, whether fresh or replayed. Sekai stores a denial under the
-idempotency key and replays it, so a `denied` or `parked` instance stays
-undelivered in the outbox with its reason as `last_error` and keeps
-retrying. A `parked` instance retries with the normal backoff (up to about
-17 minutes). A `denied` instance waits a fixed 6 hours between attempts,
-because asking again sooner returns the same stored denial. Disabled or unavailable export never interrupts deployment,
-rollback, or standalone operation.
-
-Before enabling export, a Sekai administrator must register, for the
-configured principal and namespace, a producer capability for
-`source_type=feedback`, evidence type `tenkai.feedback_observation`, schema
-`tenkai.feedback_observation.v1@1.0.0`, target kind
-`feedback_observation` (community host) or `tenant_feedback_observation`
-(tenant-mode hub), and the `feedback.observation.record` Action. Tenkai
-fails startup unless `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` exactly attests
-to that registration.
-
-```sh
-export TENKAI_FEEDBACK_PROVIDER_URL=https://sekai.example.internal
-export TENKAI_FEEDBACK_NAMESPACE=delivery-learning
-export TENKAI_FEEDBACK_PROVIDER_PRINCIPAL=tenkai.feedback
-export TENKAI_FEEDBACK_PROVIDER_TOKEN='inject-from-secret-store'
-export TENKAI_FEEDBACK_PROVIDER_REGISTRATION='producer=tenkai.feedback;source_type=feedback;source_instance=delivery-learning:feedback;namespace=delivery-learning;evidence_type=tenkai.feedback_observation;schema=tenkai.feedback_observation.v1@1.0.0;target_kind=feedback_observation;classification=internal;intent=upsert;action=feedback.observation.record'
-tenkai-server --feedback-provider chisei
-```
-
-On a tenant-mode hub the attestation names
-`target_kind=tenant_feedback_observation`.
-
-The token is environment-only. Remote plaintext endpoints are rejected even
-when no token is configured. Feedback export requires embedded Tenkai
-application state so capture and outbox enqueue share one local transaction.
-
-#### Upgrading tenant-mode feedback export (0.7.0)
-
-Only tenant-mode hubs with `--feedback-provider chisei` change. Community
-hosts keep their registration and targets.
-
-1. In Sekai, add target kind `tenant_feedback_observation` to the feedback
-   producer capability and keep `feedback_observation`.
-2. Upgrade Tenkai with `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` changed from
-   `target_kind=feedback_observation` to
-   `target_kind=tenant_feedback_observation`. A tenant-mode hub with the old
-   attestation refuses to start.
-3. Observations queued before the upgrade deliver with their old target.
-   Older replicas still running during a rolling upgrade, or after a
-   rollback, leave newer rows retrying until a 0.7.0 replica delivers them.
-   Once no older replica runs and no observation queued before the upgrade
-   is undelivered, remove `feedback_observation` from the capability.
-
-Evidence keyed on a tenant-mode target sees a new key for later observations
-(`tenant_feedback_observation`, encoded tenant). Every host enqueues `.v2`
-rows, and the wrapper schema is part of the event id, so an observation
-enqueued again across the upgrade can be exported once under each id.
-
-#### Upgrading the feedback evidence type
-
-Hosts with `--feedback-provider chisei` change. The Action
-(`feedback.observation.record`) and target kinds do not.
-
-1. In Sekai, register evidence type `tenkai.feedback_observation` and schema
-   `tenkai.feedback_observation.v1@1.0.0` from
-   `api/tenkai-feedback-observation-v1.schema.json` at the release tag. Keep
-   `feedback.observation@1.0.0` so older replicas still deliver.
-2. Upgrade Tenkai with `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` naming
-   `evidence_type=tenkai.feedback_observation` and
-   `schema=tenkai.feedback_observation.v1@1.0.0`. A host whose registration
-   still attests `feedback.observation@1.0.0` refuses to start.
-3. Once no older replica runs, remove `feedback.observation` from the
-   capability.
+- `tenkai-server` refuses to start, before opening any store or connection,
+  when either flag is `chisei` or any of `TENKAI_OUTCOME_NAMESPACE`,
+  `TENKAI_FEEDBACK_NAMESPACE`, or `TENKAI_{OUTCOME,FEEDBACK}_PROVIDER_{URL,PRINCIPAL,REGISTRATION,TOKEN}`
+  is set. The error names what to unset.
+- Tenkai queues no new `outcome` or `feedback` outbox rows. Feedback
+  observations are still captured locally and still feed webhooks.
+- Rows already queued are kept, never deleted and never sent. Outcome rows
+  stay visible in [outcome inspection](#authenticated-outcome-inspection).
+  Rolling back to the previous release resumes their export.
+- Model-runtime canary and smoke evidence is still signed and recorded in
+  the local outbox whenever a model evidence signing key is configured
+  ([model release evidence](model-release-evidence.md)).
 
 ## Standalone operation and external adapters
 
 The built-in local gate consumes explicitly configured evidence, and the local
 policy uses an explicit action allow-list. Without matching configuration they
-deny rather than implicitly allow. The local audit/outcome sink is idempotent.
+deny rather than implicitly allow. The local audit sink is idempotent.
 Together with SQLite these implementations exercise the complete provider
 workflow without sekai-chisei or another external service.
 
@@ -339,108 +209,6 @@ External sekai/chisei or other adapters translate their protocol into these
 ports. They must enforce transport authentication, bounded payloads and
 deadlines, redact credentials, validate returned evidence, and pass the same
 binding, denial, timeout, idempotency, and retry tests as the local adapters.
-
-## Chisei terminal-outcome adapter (#197)
-
-Reference adapter: `ChiseiOutcomeProvider` in `src/providers.rs`.
-
-The adapter maps each terminal event to Sekai's canonical
-`SekaiService.SubmitEvidence` RPC:
-
-- Tenkai event ID → `source_record_id` and `idempotency_key`;
-- configured namespace → `namespace`;
-- the Tenkai-owned outbox → a durable monotonic `source_sequence` per
-  outcome producer;
-- on a community host, deployment ID → `target_external_id` with target kind
-  `tenkai.deployment`;
-- on a tenant-mode hub, `<tenant>:<deployment ID>` → `target_external_id`
-  with target kind `tenkai.tenant_deployment`. `%` and `:` in the tenant are
-  percent-encoded (`%25`, `%3A`), so the first `:` ends the tenant and the
-  deployment ID follows verbatim;
-- `tenkai.terminal_outcome.v2` → `schema_id`, `2.0.0` → `schema_version`,
-  with `exact` compatibility (a queued `.v1` row keeps `1.0.0`, target kind
-  `tenkai.deployment`, and its pre-0.7.0 target id);
-- the bounded payload → `content_json`, with a SHA-256 `content_digest`; and
-- the exact release, plan, configuration, and environment binding → bounded
-  evidence provenance fields.
-
-Sekai authenticates the telemetry-writer principal and enforces namespace
-membership. A result that is neither admitted nor deduplicated, transport
-error, timeout, or gRPC failure defers the event. The adapter never calls a
-Tenkai mutation or recovery API.
-
-Before enabling export, a Sekai administrator must register both of the
-following for the configured principal and namespace:
-
-- a producer capability for `source_type=outcome`, source instance
-  `<namespace>:outcome`, the configured namespace,
-  `operations.terminal_outcome`, target kind `tenkai.deployment` (community
-  host) or `tenkai.tenant_deployment` (tenant-mode hub), internal
-  classification, and the `upsert` intent; and
-- the immutable schema `tenkai.terminal_outcome.v2@2.0.0` for evidence type
-  `operations.terminal_outcome`, registered from
-  `api/tenkai-terminal-outcome-v2.schema.json` at the release tag.
-
-The Sekai 1.0 client contract does not expose producer-capability provisioning,
-so Tenkai cannot safely bootstrap this state with the telemetry-writer
-credential. Tenkai therefore fails startup unless
-`TENKAI_OUTCOME_PROVIDER_REGISTRATION` exactly attests to the configured
-registration. This is an operator confirmation, not a remote health probe; a
-rejected submission remains a visible, retryable failure. An adapter exports
-only the target kind it attests: a tenant-mode hub refuses an outcome without
-a tenant, and a community host refuses one with a tenant, as retryable
-delivery failures.
-
-Configure the server explicitly:
-
-```sh
-export TENKAI_OUTCOME_PROVIDER_URL=https://sekai.example.internal
-export TENKAI_OUTCOME_NAMESPACE=delivery-learning
-export TENKAI_OUTCOME_PROVIDER_PRINCIPAL=tenkai.outcome
-export TENKAI_OUTCOME_PROVIDER_TOKEN='inject-from-secret-store'
-export TENKAI_OUTCOME_PROVIDER_REGISTRATION='producer=tenkai.outcome;source_type=outcome;source_instance=delivery-learning:outcome;namespace=delivery-learning;evidence_type=operations.terminal_outcome;schema=tenkai.terminal_outcome.v2@2.0.0;target_kind=tenkai.deployment;classification=internal;intent=upsert'
-tenkai-server --outcome-provider chisei
-```
-
-On a tenant-mode hub the attestation ends in
-`target_kind=tenkai.tenant_deployment;classification=internal;intent=upsert`.
-
-#### Upgrading from `.v1` (0.7.0)
-
-Releases before 0.7.0 delivered `tenkai.terminal_outcome.v1@1.0.0`, and a
-tenant-mode hub sent `<tenant>:<deployment ID>` unescaped under target kind
-`tenkai.deployment`.
-
-1. Register `tenkai.terminal_outcome.v2@2.0.0` from
-   `api/tenkai-terminal-outcome-v2.schema.json`. Keep `.v1@1.0.0`
-   registered. On a tenant-mode hub, also add target kind
-   `tenkai.tenant_deployment` to the producer capability and keep
-   `tenkai.deployment`.
-2. Upgrade Tenkai with `TENKAI_OUTCOME_PROVIDER_REGISTRATION` changed to
-   `schema=tenkai.terminal_outcome.v2@2.0.0` (and, on a tenant-mode hub,
-   `target_kind=tenkai.tenant_deployment`). A host with the old attestation
-   refuses to start.
-3. Outcomes queued before the upgrade stay `.v1` and are resent with the
-   `1.0.0` envelope and their old target, so an admission whose
-   acknowledgement was lost is never resent with a different envelope. Older
-   replicas still running during a rolling upgrade, or after a rollback, leave
-   `.v2` rows retrying until a 0.7.0 replica delivers them. Once no older
-   replica runs and env inspect shows no undelivered outcome from before the
-   upgrade, `.v1` and, on a tenant-mode hub, the `tenkai.deployment` target
-   kind can be removed.
-
-Evidence keyed on a tenant-mode target id sees a new key for later outcomes:
-`tenkai.tenant_deployment` with the encoded tenant. Community target ids do
-not change. Outcome event ids cover the schema id, so a transition replayed
-across the upgrade can be exported once under each id.
-
-The token is environment-only, and remote plaintext endpoints are rejected
-even when no token is configured. Outcome export requires embedded Tenkai
-application state so the authoritative transition and outbox write share one
-local transaction; the legacy `--provider-mode remote` composition is rejected.
-With no `--outcome-provider`, Tenkai creates no adapter, queues no outcome
-events, and opens no outcome-provider connection; embedded inspection may still
-show already durable Tenkai-owned outcome rows.
 
 ### Authenticated outcome inspection
 
@@ -452,8 +220,8 @@ the evidence binding digests; the terminal state; the Tenkai observation time;
 and one of `pending`, `in_flight`, `retrying`, or `delivered` with attempts,
 bounded retry timing, acknowledgement time, and delivery lag. Claim tokens,
 retry error text, event payloads, credentials, source content, and executor logs
-are never returned. An unconfigured outcome provider produces no new rows;
-embedded inspection may show already durable rows. The absence of a row is not
+are never returned. Tenkai queues no new rows (#1580); inspection shows rows
+earlier releases queued. The absence of a row is not
 inferred to mean that an outcome was delivered.
 Tenant-mode hosts project terminal outcomes from the authenticated tenant
 partition, so one tenant cannot observe another tenant's outcome identities.
@@ -461,12 +229,6 @@ Pre-v2 outcome rows remain durable for delivery but are omitted from this
 projection because their historical identity did not bind every returned field.
 
 The PostgreSQL adapter exposes the same kind-filtered queue contract.
-Tenant-mode hubs enqueue terminal outcomes in the tenant schema with the
-catalog write and export them with `--outcome-provider chisei`. Catalog enqueue
-stamps the tenant into the payload so two tenants with the same environment and
-deployment identities export distinct event IDs and Chisei targets. The hub
-allocates one monotonic `source_sequence` for that producer identity across
-tenant partitions. Audit and planning-event export stay unwired.
 
 ## Remote gate HTTP JSON contract (#113)
 

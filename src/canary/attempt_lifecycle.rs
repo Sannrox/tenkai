@@ -825,7 +825,12 @@ async fn export_model_runtime_canary_evidence(
     release: &str,
     evidence: &CanaryOutcome,
 ) -> Result<()> {
-    if !ctx.outcome_export_enabled() {
+    // Without a signing key nothing is recorded; skip the release read.
+    if crate::host_env::var_os(
+        crate::model_release_evidence::MODEL_RUNTIME_EVIDENCE_SIGNING_KEY_ENV,
+    )
+    .is_none()
+    {
         return Ok(());
     }
     let Some(release_object) = ctx.get(release).await? else {

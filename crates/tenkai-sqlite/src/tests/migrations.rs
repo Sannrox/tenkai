@@ -256,3 +256,72 @@ fn previous_release_state_database_migrates_with_its_data() {
     assert_eq!(copies(), vec![copy]);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A store upgraded with outcome and feedback export rows still queued
+/// (#1580) opens, projects the outcomes for inspection, and leaves every row
+/// unsent, so rolling back to a release with export resumes them.
+#[tokio::test]
+async fn queued_export_rows_stay_readable_and_unsent_after_upgrade() {
+    let dir = std::env::temp_dir().join(format!(
+        "tenkai-1580-queued-exports-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tenkai.db");
+    let mut ctx = crate::embedded_ctx(&path).unwrap();
+    tenkai::ontology::register(&mut ctx).await.unwrap();
+    tenkai::environment::env_add(&mut ctx, "prod", "prod")
+        .await
+        .unwrap();
+    drop(ctx);
+
+    let event = tenkai::providers::terminal_outcome_event(
+        "deployment-queued",
+        "plan-prod",
+        "sha256:plan",
+        "release-api",
+        "sha256:release",
+        "api",
+        "prod",
+        "environment-prod",
+        "sha256:config",
+        tenkai::providers::TerminalOutcomeState::DeploymentSucceeded,
+        100,
+    )
+    .unwrap();
+    let queued = [
+        tenkai::providers::provider_event_record(
+            tenkai::providers::OUTCOME_PROVIDER_KIND,
+            &event,
+            100,
+        )
+        .unwrap(),
+        tenkai::providers::provider_event_record("feedback", &event, 100).unwrap(),
+    ];
+    let store = SqliteStore::open_embedded(&path, "tenkai").unwrap();
+    for record in &queued {
+        store.enqueue_provider_event(record).unwrap();
+    }
+    drop(store);
+
+    let mut ctx = crate::embedded_ctx(&path).unwrap();
+    let report = tenkai::environment::inspect_environment_with_outcomes(&mut ctx, "prod")
+        .await
+        .unwrap();
+    assert_eq!(report.terminal_outcomes.len(), 1);
+    assert_eq!(report.terminal_outcomes[0].event_id, event.id);
+    drop(ctx);
+
+    let store = SqliteStore::open_embedded(&path, "tenkai").unwrap();
+    for record in &queued {
+        let stored = store
+            .list_provider_events(&record.provider_kind, "prod", 8)
+            .unwrap();
+        assert_eq!(stored.len(), 1, "{}", record.provider_kind);
+        assert_eq!(stored[0].delivered_at, None);
+        assert_eq!(stored[0].attempts, 0);
+    }
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
+}

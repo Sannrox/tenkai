@@ -13,18 +13,10 @@ use tenkai::auth_context::{
     AUTH_CONTEXT_CONTRACT_VERSION, AuthHostConfig, EnterpriseAuthExtension,
 };
 use tenkai::deploy_webhook::{ProcessWebhookSecrets, deliver_webhook_batch};
-use tenkai::feedback_export::{
-    ChiseiFeedbackProvider, FEEDBACK_PROVIDER_KIND, FEEDBACK_PROVIDER_REGISTRATION_ENV,
-    deliver_feedback_batch,
-};
 use tenkai::issuer_auth::{ISSUER_AUTH_EXTENSION_ID, IssuerAuthExtension};
 use tenkai::oidc_verifier::{
     JwksCache, OIDC_AUTH_EXTENSION_ID, OidcAuthExtension, OidcClientDiscovery, OidcConfig,
     key_source, spawn_refresher,
-};
-use tenkai::providers::{
-    ChiseiOutcomeProvider, OUTCOME_PROVIDER_KIND, OUTCOME_PROVIDER_REGISTRATION_ENV,
-    deliver_outcome_batch,
 };
 use tenkai::reconciler::{Config as ReconcilerConfig, Reconciler};
 use tenkai::runtime_capabilities::{
@@ -144,27 +136,29 @@ struct Cli {
     /// Enable the authenticated, non-executable local demo fixture surface.
     #[arg(long, default_value_t = false)]
     with_development_fixtures: bool,
-    /// Optional terminal-outcome adapter. Disabled keeps standalone operation network-free.
+    /// Removed terminal-outcome export (#1580). Parsed only so a host still
+    /// configured for it refuses to start.
     #[arg(
         long,
         env = "TENKAI_OUTCOME_PROVIDER",
         value_enum,
-        default_value_t = OutcomeProviderMode::Disabled
+        default_value_t = RemovedExportMode::Disabled,
+        hide = true
     )]
-    outcome_provider: OutcomeProviderMode,
-    /// Namespace admitted by the configured Chisei telemetry-writer policy.
-    #[arg(long, env = "TENKAI_OUTCOME_NAMESPACE")]
+    outcome_provider: RemovedExportMode,
+    #[arg(long, env = "TENKAI_OUTCOME_NAMESPACE", hide = true)]
     outcome_namespace: Option<String>,
-    /// Optional feedback-observation adapter. Disabled keeps standalone operation network-free.
+    /// Removed feedback-observation export (#1580). Parsed only so a host
+    /// still configured for it refuses to start.
     #[arg(
         long,
         env = "TENKAI_FEEDBACK_PROVIDER",
         value_enum,
-        default_value_t = OutcomeProviderMode::Disabled
+        default_value_t = RemovedExportMode::Disabled,
+        hide = true
     )]
-    feedback_provider: OutcomeProviderMode,
-    /// Namespace admitted by the configured Chisei feedback-observation Action.
-    #[arg(long, env = "TENKAI_FEEDBACK_NAMESPACE")]
+    feedback_provider: RemovedExportMode,
+    #[arg(long, env = "TENKAI_FEEDBACK_NAMESPACE", hide = true)]
     feedback_namespace: Option<String>,
     /// Development only: serve a local console build at /ui/ instead of the
     /// bundle embedded by feature `ui`.
@@ -193,9 +187,47 @@ enum ProviderMode {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum OutcomeProviderMode {
+enum RemovedExportMode {
     Disabled,
     Chisei,
+}
+
+/// Refuses to start a host still configured for the removed outcome or
+/// feedback export (#1580), before any store or network connection. Queued
+/// export rows stay in the outbox, readable by inspection and never sent, so
+/// rolling back to the previous release resumes their export.
+fn refuse_removed_exports(cli: &Cli) -> Result<()> {
+    let configured = |mode: RemovedExportMode, namespace: &Option<String>, prefix: &str| {
+        mode == RemovedExportMode::Chisei
+            || namespace.is_some()
+            || ["URL", "PRINCIPAL", "REGISTRATION"]
+                .iter()
+                .any(|suffix| std::env::var_os(format!("{prefix}_{suffix}")).is_some())
+            || tenkai::secret_source::is_configured(&format!("{prefix}_TOKEN"))
+    };
+    for (export, mode, namespace, prefix) in [
+        (
+            "outcome",
+            cli.outcome_provider,
+            &cli.outcome_namespace,
+            "TENKAI_OUTCOME_PROVIDER",
+        ),
+        (
+            "feedback",
+            cli.feedback_provider,
+            &cli.feedback_namespace,
+            "TENKAI_FEEDBACK_PROVIDER",
+        ),
+    ] {
+        anyhow::ensure!(
+            !configured(mode, namespace, prefix),
+            "{export} export was removed in this release: unset --{export}-provider, \
+             TENKAI_{upper}_NAMESPACE, and {prefix}_* to start; queued {export} rows stay \
+             in the outbox, unsent, and the previous release resumes their export",
+            upper = export.to_ascii_uppercase(),
+        );
+    }
+    Ok(())
 }
 
 struct EnterpriseAuthComposition {
@@ -574,6 +606,7 @@ async fn main() -> Result<()> {
     }
     require_hub_tenant_mode(cli.tenant_mode)
         .context("hub host refuses to start as the community SQLite host")?;
+    refuse_removed_exports(&cli)?;
     if let Some(path) = &cli.deploy_profile {
         tenkai::signer::bind_deploy_profile(tenkai::key_provider::DeployProfile::load(path)?)?;
     }
@@ -866,93 +899,6 @@ async fn main() -> Result<()> {
     let tenant_store = opened.tenant;
     let catalog = opened.catalog;
     let tenant_store_for_lease = tenant_store.clone();
-    let outcome_provider = match cli.outcome_provider {
-        OutcomeProviderMode::Disabled => {
-            anyhow::ensure!(
-                cli.outcome_namespace.is_none()
-                    && std::env::var_os("TENKAI_OUTCOME_PROVIDER_URL").is_none()
-                    && tenkai::secret_source::read("TENKAI_OUTCOME_PROVIDER_TOKEN")?.is_none()
-                    && std::env::var_os(OUTCOME_PROVIDER_REGISTRATION_ENV).is_none(),
-                "outcome provider configuration requires --outcome-provider chisei"
-            );
-            None
-        }
-        OutcomeProviderMode::Chisei => {
-            anyhow::ensure!(
-                matches!(cli.provider_mode, ProviderMode::Embedded),
-                "outcome export requires embedded Tenkai application state so terminal state and outbox enqueue share one transaction"
-            );
-            let endpoint = std::env::var("TENKAI_OUTCOME_PROVIDER_URL")
-                .context("TENKAI_OUTCOME_PROVIDER_URL is required for Chisei outcome export")?;
-            let namespace = cli
-                .outcome_namespace
-                .as_deref()
-                .context("TENKAI_OUTCOME_NAMESPACE is required for Chisei outcome export")?;
-            let principal = std::env::var("TENKAI_OUTCOME_PROVIDER_PRINCIPAL")
-                .unwrap_or_else(|_| "tenkai.outcome".into());
-            let token = tenkai::secret_source::read("TENKAI_OUTCOME_PROVIDER_TOKEN")?;
-            let registration = std::env::var(OUTCOME_PROVIDER_REGISTRATION_ENV).with_context(|| {
-                format!(
-                    "{OUTCOME_PROVIDER_REGISTRATION_ENV} is required after the Sekai producer capability and terminal-outcome schema are registered"
-                )
-            })?;
-            Some(
-                ChiseiOutcomeProvider::new_for_export(
-                    endpoint,
-                    namespace,
-                    principal,
-                    token,
-                    cli.tenant_mode,
-                    registration,
-                )
-                .context("validating Chisei outcome adapter configuration")?,
-            )
-        }
-    };
-    let feedback_provider = match cli.feedback_provider {
-        OutcomeProviderMode::Disabled => {
-            anyhow::ensure!(
-                cli.feedback_namespace.is_none()
-                    && std::env::var_os("TENKAI_FEEDBACK_PROVIDER_URL").is_none()
-                    && tenkai::secret_source::read("TENKAI_FEEDBACK_PROVIDER_TOKEN")?.is_none()
-                    && std::env::var_os(FEEDBACK_PROVIDER_REGISTRATION_ENV).is_none(),
-                "feedback provider configuration requires --feedback-provider chisei"
-            );
-            None
-        }
-        OutcomeProviderMode::Chisei => {
-            anyhow::ensure!(
-                matches!(cli.provider_mode, ProviderMode::Embedded),
-                "feedback export requires embedded Tenkai application state so capture and outbox enqueue share one transaction"
-            );
-            let endpoint = std::env::var("TENKAI_FEEDBACK_PROVIDER_URL")
-                .context("TENKAI_FEEDBACK_PROVIDER_URL is required for Chisei feedback export")?;
-            let namespace = cli
-                .feedback_namespace
-                .as_deref()
-                .context("TENKAI_FEEDBACK_NAMESPACE is required for Chisei feedback export")?;
-            let principal = std::env::var("TENKAI_FEEDBACK_PROVIDER_PRINCIPAL")
-                .unwrap_or_else(|_| "tenkai.feedback".into());
-            let token = tenkai::secret_source::read("TENKAI_FEEDBACK_PROVIDER_TOKEN")?;
-            let registration =
-                std::env::var(FEEDBACK_PROVIDER_REGISTRATION_ENV).with_context(|| {
-                    format!(
-                        "{FEEDBACK_PROVIDER_REGISTRATION_ENV} is required after the Sekai producer capability, observation schema, and observation Action are registered"
-                    )
-                })?;
-            Some(
-                ChiseiFeedbackProvider::new_for_export(
-                    endpoint,
-                    namespace,
-                    principal,
-                    token,
-                    cli.tenant_mode,
-                    registration,
-                )
-                .context("validating Chisei feedback adapter configuration")?,
-            )
-        }
-    };
     let jwt_trust_path = std::env::var_os(JWT_VERIFIER_CONFIG_ENV).map(PathBuf::from);
     let oidc_config_path = std::env::var_os(OIDC_CONFIG_ENV).map(PathBuf::from);
     let enterprise_auth = compose_enterprise_auth(
@@ -1053,18 +999,14 @@ async fn main() -> Result<()> {
     )?);
     let ctx = match cli.provider_mode {
         ProviderMode::Embedded if cli.tenant_mode => match catalog {
-            Some(catalog) => tenkai::client::Ctx::tenant_hub_catalog_with_outcome_export(
-                catalog,
-                outcome_provider.is_some(),
-            ),
+            Some(catalog) => tenkai::client::Ctx::tenant_hub_catalog(catalog),
             None => tenkai::client::Ctx::tenant_hub(),
         },
         ProviderMode::Embedded => {
             let database = community_database
                 .as_ref()
                 .expect("community hosts open SQLite");
-            tenkai_sqlite::embedded_ctx(database, outcome_provider.is_some())
-                .context("opening embedded application state")?
+            tenkai_sqlite::embedded_ctx(database).context("opening embedded application state")?
         }
         ProviderMode::Remote => anyhow::bail!(
             "--provider-mode remote is retired; Tenkai owns its catalog in the embedded SQLite store or PostgreSQL (--tenant-mode)"
@@ -1094,8 +1036,7 @@ async fn main() -> Result<()> {
             std::env::var_os("TENKAI_RELEASE_TRUST_ROOTS").map(std::path::PathBuf::from),
         )
         .with_trust_sources(trust_sources.clone())
-        .with_execution_capabilities(execution_capabilities.clone())
-        .with_feedback_export(feedback_provider.is_some());
+        .with_execution_capabilities(execution_capabilities.clone());
     let runtime_environments = runtime_assignments
         .values()
         .cloned()
@@ -1121,7 +1062,6 @@ async fn main() -> Result<()> {
     // Shared with the host watch, which announces trust.expiring (#775).
     let trust_status: Arc<std::sync::RwLock<Option<tenkai::trust_posture::TrustSnapshot>>> =
         Default::default();
-    let tenant_store_for_outbox = tenant_store.clone();
     let import_staging = imports.as_ref().map(|settings| settings.staging.clone());
     let clock_every = clock_settings()?;
     let audit_export = audit_export_settings(cli.tenant_mode)?;
@@ -1209,26 +1149,6 @@ async fn main() -> Result<()> {
         !interval.is_zero(),
         "reconcile interval must be greater than zero"
     );
-    // One outbox worker for every enabled export kind (#877), on its own
-    // blocking thread: the delivery path makes synchronous store calls, so it
-    // must not hold a shared Tokio worker.
-    let outbox_task = (outcome_provider.is_some() || feedback_provider.is_some()).then(|| {
-        let outbox = ProviderOutbox {
-            store: store.clone(),
-            tenant_store: tenant_store_for_outbox,
-            outcome: outcome_provider,
-            feedback: feedback_provider,
-        };
-        let shutdown_rx = shutdown_tx.subscribe();
-        tokio::task::spawn_blocking(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .context("building the provider outbox runtime")?
-                .block_on(outbox.run(shutdown_rx));
-            anyhow::Ok(())
-        })
-    });
     let host_backups = backups.as_ref().map(|(backups, _)| backups.clone());
     let backup_task = backups.and_then(|(backups, every)| {
         let every = every?;
@@ -1744,11 +1664,6 @@ async fn main() -> Result<()> {
     reconcile_task
         .await
         .context("joining reconciliation task during shutdown")?;
-    if let Some(outbox_task) = outbox_task {
-        outbox_task
-            .await
-            .context("joining provider outbox task during shutdown")??;
-    }
     webhook_task
         .await
         .context("joining webhook delivery task during shutdown")?;
@@ -2174,90 +2089,30 @@ fn runner_ca_from_env() -> Result<Option<Arc<tenkai::runner_ca::RunnerCa>>> {
     }
 }
 
-/// The provider export outbox: terminal outcomes and feedback, whichever
-/// are enabled. Runs on a dedicated thread (see `run`), never a shared
-/// Tokio worker.
-struct ProviderOutbox {
-    store: Arc<dyn OperationalStore>,
-    tenant_store: Option<Arc<dyn TenantOperationalStore>>,
-    outcome: Option<ChiseiOutcomeProvider>,
-    feedback: Option<ChiseiFeedbackProvider>,
-}
-
-impl ProviderOutbox {
-    /// Drains the outbox every 5 s until shutdown. Each tick runs one due
-    /// query across all enabled kinds, so an idle hub costs one query rather
-    /// than a claim per tenant per kind (#872, #877). A partition due for one
-    /// kind costs the other kind an empty claim.
-    async fn run(self, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
-        let kinds: Vec<&str> = [
-            self.outcome.as_ref().map(|_| OUTCOME_PROVIDER_KIND),
-            self.feedback.as_ref().map(|_| FEEDBACK_PROVIDER_KIND),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        let timeout = Duration::from_secs(5);
-        let mut timer = tokio::time::interval(timeout);
-        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                changed = shutdown_rx.changed() => {
-                    if changed.is_err() || *shutdown_rx.borrow() {
-                        break;
-                    }
-                }
-                _ = timer.tick() => {
-                    let partitions = match &self.tenant_store {
-                        // This thread is ours, so the store call may block.
-                        Some(tenant) => match tenant.provider_event_partitions_due(&kinds, tenkai::now_millis()) {
-                            Ok(partitions) => partitions,
-                            Err(error) => {
-                                eprintln!("tenkai.provider_export outcome=degraded detail={error}");
-                                continue;
-                            }
-                        },
-                        None => vec![Arc::clone(&self.store)],
-                    };
-                    for partition in partitions {
-                        if let Some(provider) = &self.outcome {
-                            report_export(
-                                "tenkai.outcome_export",
-                                deliver_outcome_batch(partition.as_ref(), provider, timeout, tenkai::now_millis(), 10).await,
-                            );
-                        }
-                        if let Some(provider) = &self.feedback {
-                            report_export(
-                                "tenkai.feedback_export",
-                                deliver_feedback_batch(partition.as_ref(), provider, timeout, tenkai::now_millis(), 10).await,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Logs one export batch: counts when it did work, the error when it failed.
-fn report_export<E: std::fmt::Display>(
-    prefix: &str,
-    result: std::result::Result<(usize, usize), E>,
-) {
-    match result {
-        Ok((delivered, deferred)) if delivered > 0 || deferred > 0 => {
-            eprintln!("{prefix} delivered={delivered} deferred={deferred}");
-        }
-        Ok(_) => {}
-        Err(error) => eprintln!("{prefix} outcome=degraded detail={error}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use base64::Engine as _;
     use ed25519_dalek::SigningKey;
+
+    /// A host still configured for the removed outcome or feedback export
+    /// refuses to start, naming what to unset (#1580).
+    #[test]
+    fn removed_export_flags_refuse_to_start() {
+        for args in [
+            &["--outcome-provider", "chisei"][..],
+            &["--feedback-provider", "chisei"][..],
+            &["--feedback-namespace", "tenkai-prod"][..],
+        ] {
+            let cli =
+                Cli::try_parse_from(std::iter::once("tenkai-server").chain(args.iter().copied()))
+                    .unwrap();
+            let error = refuse_removed_exports(&cli).unwrap_err().to_string();
+            assert!(error.contains("export was removed"), "{error}");
+        }
+        let cli = Cli::try_parse_from(["tenkai-server"]).unwrap();
+        refuse_removed_exports(&cli).unwrap();
+    }
 
     /// The host-identity socket appears at its path only with its final
     /// mode, and the staging directory it was bound in is gone.

@@ -178,12 +178,8 @@ In-memory adapter remains for unit tests (`ServerConfig.tenant_store = Some(Arc:
 
 `--replica-count > 1` passes capability negotiation when the Postgres hub store
 is composed (#128). Only the writer-lease holder reconciles (#129). Catalog
-lifecycle, terminal-outcome export and feedback observation capture share one
-tenant-schema transaction.
-`--outcome-provider chisei` starts on a tenant-mode hub and drains each tenant
-outbox, allocating `source_sequence` from the hub producer identity. Catalog
-enqueue stamps the tenant into the outcome payload so exported event IDs stay
-distinct across tenants. Product
+lifecycle and feedback observation capture share one tenant-schema
+transaction. Product
 `high_availability` remains unclaimed. Failover:
 [ha-failover-runbook.md](ha-failover-runbook.md). Compose steps:
 [multi-replica-hub-runbook.md](multi-replica-hub-runbook.md) (#130).

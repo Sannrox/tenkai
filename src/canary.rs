@@ -894,7 +894,7 @@ max_startup_seconds = 30
         )]);
         write_model_runtime_manifest(&manifest_dir, "qwen-export", "1.0.0");
 
-        let mut ctx = Ctx::embedded_with_outcome_export(&database, true).unwrap();
+        let mut ctx = Ctx::embedded(&database).unwrap();
         crate::ontology::register(&mut ctx).await.unwrap();
         crate::plan::env_add(&mut ctx, "local", "export host")
             .await

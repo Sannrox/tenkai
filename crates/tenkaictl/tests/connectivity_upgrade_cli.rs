@@ -154,7 +154,7 @@ install = "true"
     assert!(started.contains("status admitted"), "{started}");
 
     let record = {
-        let mut ctx = tenkai_sqlite::embedded_ctx(&db, false).unwrap();
+        let mut ctx = tenkai_sqlite::embedded_ctx(&db).unwrap();
         connectivity::load_upgrade(&mut ctx, "fleet-1")
             .await
             .unwrap()
@@ -244,7 +244,7 @@ install = "true"
     );
 
     let record = {
-        let mut ctx = tenkai_sqlite::embedded_ctx(&db, false).unwrap();
+        let mut ctx = tenkai_sqlite::embedded_ctx(&db).unwrap();
         connectivity::load_upgrade(&mut ctx, "fleet-1")
             .await
             .unwrap()

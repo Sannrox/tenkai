@@ -502,11 +502,10 @@ impl CatalogGraph for PostgresTenantOperationalStore {
         let schema = self.catalog_schema(tenant)?;
         #[cfg(feature = "postgres")]
         {
-            let events = tenkai::providers::bind_tenant_to_provider_events(tenant, events)?;
             Ok(self.inner.catalog_put_objects_with_provider_events(
                 &schema,
                 objects,
-                &events,
+                events,
                 observations,
             )?)
         }
@@ -530,7 +529,6 @@ impl CatalogGraph for PostgresTenantOperationalStore {
         let schema = self.catalog_schema(tenant)?;
         #[cfg(feature = "postgres")]
         {
-            let events = tenkai::providers::bind_tenant_to_provider_events(tenant, events)?;
             Ok(self
                 .inner
                 .catalog_guarded_put_objects_with_provider_events(
@@ -539,7 +537,7 @@ impl CatalogGraph for PostgresTenantOperationalStore {
                     namespace,
                     key,
                     fencing_token,
-                    &events,
+                    events,
                     observations,
                 )?)
         }

@@ -42,7 +42,7 @@ async fn runtime_get_requires_read_and_returns_docker_and_model_runtime_fixtures
     let (status, _) = get_json(&app, "/v1/environments/stage/runtime", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    let mut ctx = tenkai_sqlite::embedded_ctx(root.join("tenkai.db"), false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(root.join("tenkai.db")).unwrap();
     tenkai::observed_runtime::persist(
         &mut ctx,
         "stage",

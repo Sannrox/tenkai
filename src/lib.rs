@@ -220,7 +220,6 @@ pub mod exports;
 pub mod exposure;
 pub mod family_release;
 pub mod federated_identity;
-pub mod feedback_export;
 pub mod feedback_observation;
 pub mod feedback_webhook;
 pub mod fenced_mutation;

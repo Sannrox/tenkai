@@ -7,7 +7,7 @@ const PARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
 /// Plan `prod` through the hub with `traceparent`, capturing the hub's spans.
 async fn plan_with_traceparent(traceparent: &str) -> (StatusCode, Vec<CompletedSpan>) {
-    let mut ctx = tenkai_sqlite::embedded_ctx(":memory:", false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(":memory:").unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
     tenkai::environment::env_add(&mut ctx, "prod", "prod")
         .await

@@ -71,7 +71,7 @@ pub(crate) async fn run_dev(cli: &Cli) -> Result<()> {
                 })?;
                 dev_sign::sign_plan_approval(
                     keys,
-                    tenkai_sqlite::embedded_ctx(&cli.database, false)?,
+                    tenkai_sqlite::embedded_ctx(&cli.database)?,
                     plan_id,
                     approval,
                     trust_roots,

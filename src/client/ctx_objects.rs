@@ -11,32 +11,14 @@ use crate::pb::sekai::{CreateObjectResponse, Lease, Object, UpdateObjectResponse
 use crate::storage::LeaseRefresh;
 
 impl Ctx {
-    fn with_feedback_export_events(
-        &self,
-        events: &[crate::storage::ProviderEventRecord],
-        observations: &[crate::feedback_observation::FeedbackObservation],
-    ) -> Vec<crate::storage::ProviderEventRecord> {
-        if !self.feedback_export_enabled()
-            || observations.is_empty()
-            || (!self.is_embedded() && !self.has_catalog())
-        {
-            return events.to_vec();
-        }
-        let mut events = events.to_vec();
-        events.extend(crate::feedback_export::records_for_observations(
-            observations,
-        ));
-        events
-    }
-
-    /// Sekai export when enabled, plus opt-in `feedback.observation` webhooks.
+    /// Opt-in `feedback.observation` webhooks for the captured observations.
     /// Lookup failures skip the webhook; they never fail the capture write.
     async fn with_observation_delivery_events(
         &mut self,
         events: &[crate::storage::ProviderEventRecord],
         observations: &[crate::feedback_observation::FeedbackObservation],
     ) -> Vec<crate::storage::ProviderEventRecord> {
-        let mut events = self.with_feedback_export_events(events, observations);
+        let mut events = events.to_vec();
         events.extend(self.feedback_webhook_records(observations).await);
         events
     }

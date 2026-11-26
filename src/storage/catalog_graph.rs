@@ -1153,7 +1153,6 @@ impl MemoryCatalogGraph {
             unique.len() == objects.len(),
             "embedded object update contains duplicate identities"
         );
-        let events = crate::providers::bind_tenant_to_provider_events(tenant, events)?;
         let mut partitions = self.lock()?;
         let key = Self::key(tenant);
         let mut partition = partitions.get(&key).cloned().unwrap_or_default();
@@ -1177,7 +1176,7 @@ impl MemoryCatalogGraph {
                 Some(&previous),
             )?;
         }
-        for event in &events {
+        for event in events {
             enqueue_memory_provider_event(&mut partition, event)?;
         }
         // First write wins, like the durable stores' immutable table.
@@ -2129,63 +2128,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-    }
-
-    #[test]
-    fn memory_catalog_stamps_tenant_on_terminal_outcomes() {
-        let graph = MemoryCatalogGraph::new();
-        let id = "tenkai:conformance:outbox-tenant";
-        let original = sample(id, "tenkai.conformance", "original");
-        graph.create(Some("tenant-a"), original.clone()).unwrap();
-        graph.create(Some("tenant-b"), original.clone()).unwrap();
-        let event = crate::providers::terminal_outcome_event(
-            "tenkai:deployment:prod:api:1",
-            "tenkai:plan:prod:1",
-            "sha256:plan",
-            "tenkai:release:api@2.0.0",
-            "sha256:release",
-            "api",
-            "prod",
-            "tenkai:environment:prod",
-            "sha256:config",
-            crate::providers::TerminalOutcomeState::DeploymentSucceeded,
-            100,
-        )
-        .unwrap();
-        let record = crate::providers::provider_event_record("outcome", &event, 100).unwrap();
-        let mut updated = original;
-        updated.name = "terminal".into();
-        graph
-            .put_with_provider_events(
-                Some("tenant-a"),
-                updated.clone(),
-                std::slice::from_ref(&record),
-                &[],
-            )
-            .unwrap();
-        graph
-            .put_with_provider_events(
-                Some("tenant-b"),
-                updated,
-                std::slice::from_ref(&record),
-                &[],
-            )
-            .unwrap();
-        let listed_a = graph
-            .listed_provider_events(Some("tenant-a"), "outcome", "prod")
-            .unwrap();
-        let listed_b = graph
-            .listed_provider_events(Some("tenant-b"), "outcome", "prod")
-            .unwrap();
-        assert_eq!(listed_a.len(), 1);
-        assert_eq!(listed_b.len(), 1);
-        assert_ne!(listed_a[0].id, listed_b[0].id);
-        let payload_a: crate::providers::TerminalOutcomePayload = {
-            let event: crate::providers::ProviderEvent =
-                serde_json::from_str(&listed_a[0].payload_json).unwrap();
-            serde_json::from_str(&event.payload_json).unwrap()
-        };
-        assert_eq!(payload_a.tenant_id, "tenant-a");
     }
 
     #[test]

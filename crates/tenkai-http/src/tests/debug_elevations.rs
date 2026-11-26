@@ -94,7 +94,7 @@ async fn stage_policy(fixture: &Fixture, debug_sessions: &str) {
         ),
     )
     .unwrap();
-    let mut ctx = tenkai_sqlite::embedded_ctx(fixture.root.join("tenkai.db"), false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(fixture.root.join("tenkai.db")).unwrap();
     tenkai::plan::set_plan_approval_policy(&mut ctx, "stage", &policy)
         .await
         .unwrap();

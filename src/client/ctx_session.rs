@@ -25,37 +25,24 @@ impl Ctx {
     /// SQLite file use `tenkai_sqlite::embedded_ctx`.
     #[cfg(any(test, feature = "test-support"))]
     pub fn embedded(path: impl AsRef<Path>) -> Result<Self> {
-        Self::embedded_with_outcome_export(path, false)
-    }
-
-    /// Test helper matching the former SQLite embedded constructor.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn embedded_with_outcome_export(
-        path: impl AsRef<Path>,
-        outcome_export_enabled: bool,
-    ) -> Result<Self> {
         crate::storage::refuse_postgres_on_embedded().map_err(anyhow::Error::from)?;
-        Self::memory_application_state(path, outcome_export_enabled)
+        Self::memory_application_state(path)
     }
 
     /// Test helper matching the former hub constructor (Postgres URL allowed).
     #[cfg(any(test, feature = "test-support"))]
-    pub fn embedded_hub(path: impl AsRef<Path>, outcome_export_enabled: bool) -> Result<Self> {
-        Self::memory_application_state(path, outcome_export_enabled)
+    pub fn embedded_hub(path: impl AsRef<Path>) -> Result<Self> {
+        Self::memory_application_state(path)
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn memory_application_state(
-        path: impl AsRef<Path>,
-        outcome_export_enabled: bool,
-    ) -> Result<Self> {
+    fn memory_application_state(path: impl AsRef<Path>) -> Result<Self> {
         let store = std::sync::Arc::new(crate::storage::MemoryCatalogGraph::open(path)?);
         let backup = std::sync::Arc::clone(&store);
         Ok(Self::from_embedded(
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn crate::storage::CatalogGraph>,
             store as std::sync::Arc<dyn crate::storage::OperationalStore>,
             move |destination: &Path| backup.backup(destination),
-            outcome_export_enabled,
         ))
     }
 
@@ -65,7 +52,6 @@ impl Ctx {
         catalog: Arc<dyn crate::storage::CatalogGraph>,
         operational: Arc<dyn crate::storage::OperationalStore>,
         backup: impl Fn(&Path) -> anyhow::Result<()> + Send + Sync + 'static,
-        outcome_export_enabled: bool,
     ) -> Self {
         Self {
             backend: Backend::Embedded {
@@ -74,8 +60,6 @@ impl Ctx {
                 backup: Arc::new(backup),
             },
             canary_schema_preflight: Arc::new(OnceCell::new()),
-            outcome_export_enabled,
-            feedback_export_enabled: false,
             outcome_inspection_enabled: true,
             release_trust_roots: None,
             require_host_release_trust: false,
@@ -93,34 +77,22 @@ impl Ctx {
     /// does not open SQLite. Writes fail closed until a catalog and tenant
     /// are bound.
     pub fn tenant_hub() -> Self {
-        Self::tenant_hub_backend(None, None, false)
+        Self::tenant_hub_backend(None, None)
     }
 
     /// Tenant-mode hub with a catalog adapter. Bind the tenant from the
     /// authenticated request before catalog writes.
     pub fn tenant_hub_catalog(catalog: Arc<dyn crate::storage::CatalogGraph>) -> Self {
-        Self::tenant_hub_catalog_with_outcome_export(catalog, false)
-    }
-
-    /// Tenant-mode hub that enqueues terminal outcomes in the tenant catalog
-    /// transaction when `outcome_export_enabled` is set.
-    pub fn tenant_hub_catalog_with_outcome_export(
-        catalog: Arc<dyn crate::storage::CatalogGraph>,
-        outcome_export_enabled: bool,
-    ) -> Self {
-        Self::tenant_hub_backend(Some(catalog), None, outcome_export_enabled)
+        Self::tenant_hub_backend(Some(catalog), None)
     }
 
     fn tenant_hub_backend(
         catalog: Option<Arc<dyn crate::storage::CatalogGraph>>,
         tenant: Option<String>,
-        outcome_export_enabled: bool,
     ) -> Self {
         Self {
             backend: Backend::TenantHub { catalog, tenant },
             canary_schema_preflight: Arc::new(OnceCell::new()),
-            outcome_export_enabled,
-            feedback_export_enabled: false,
             outcome_inspection_enabled: true,
             release_trust_roots: None,
             require_host_release_trust: false,
@@ -294,19 +266,6 @@ impl Ctx {
             PlanKindListSnapshot::from_objects(self.list_kind(crate::ontology::KIND_PLAN).await?);
         let _ = cell.set(Arc::clone(&snapshot));
         Ok(snapshot)
-    }
-
-    pub(crate) fn outcome_export_enabled(&self) -> bool {
-        self.outcome_export_enabled
-    }
-
-    pub fn with_feedback_export(mut self, enabled: bool) -> Self {
-        self.feedback_export_enabled = enabled;
-        self
-    }
-
-    pub(crate) fn feedback_export_enabled(&self) -> bool {
-        self.feedback_export_enabled
     }
 
     /// Read the bounded Tenkai-owned terminal-outcome projection for one

@@ -355,53 +355,6 @@ async fn reconcile_held(
             .cloned(),
     );
     let observed_at = crate::now_millis();
-    // An unreadable origin plan skips its outcome event and says so in the
-    // result, instead of blocking the operator's reconciliation (#1339). A
-    // readable origin that does not match stays an error.
-    let mut skipped_outcome = None;
-    let provider_events = if ctx.outcome_export_enabled() && was_unknown {
-        match unknown_origin.clone() {
-            (Some(plan_id), Some(step_id), Some(deployment_id)) => {
-                let plan = match crate::plan::load(ctx, &plan_id).await {
-                    Ok(plan) => Some(plan),
-                    Err(error) => {
-                        skipped_outcome = Some(format!(
-                            "; outcome export skipped: origin plan {plan_id} is unreadable: {error:#}"
-                        ));
-                        None
-                    }
-                };
-                if let Some(plan) = plan {
-                    anyhow::ensure!(
-                        plan.environment == env,
-                        "unknown deployment origin belongs to a different environment"
-                    );
-                    let step = plan
-                    .steps
-                    .iter()
-                    .find(|step| step.id == step_id && step.product == product)
-                    .with_context(|| {
-                        format!(
-                            "unknown deployment origin step {step_id} is absent from plan {plan_id}"
-                        )
-                    })?;
-                    vec![crate::providers::terminal_outcome_record(
-                        &plan,
-                        step,
-                        &deployment_id,
-                        crate::providers::TerminalOutcomeState::UnknownReconciled,
-                        &object,
-                        observed_at,
-                    )?]
-                } else {
-                    Vec::new()
-                }
-            }
-            _ => Vec::new(),
-        }
-    } else {
-        Vec::new()
-    };
     // An operator resolving an unknown state is a committed outcome too
     // (#802); its identity is the deployment attempt that left it unknown.
     let feedback = match (&unknown_origin, was_unknown) {
@@ -465,7 +418,7 @@ async fn reconcile_held(
         crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
         env,
         &lease.fencing_token,
-        &provider_events,
+        &[],
         &feedback,
     )
     .await?;
@@ -473,7 +426,7 @@ async fn reconcile_held(
         Some(version) => format!("recorded {product}@{version} as deployed in {env}"),
         None => format!("cleared unknown deployment state for {product} in {env}"),
     };
-    Ok(message + skipped_outcome.as_deref().unwrap_or_default())
+    Ok(message)
 }
 
 async fn update_reconciled_deployment_object(
@@ -774,8 +727,7 @@ pub(crate) async fn record_deployment_observation(
         deployment.properties.insert("restore".into(), encoded);
     }
     deployment.updated = crate::now_millis();
-    let mut environment = if ctx.outcome_export_enabled()
-        || observation.transition != DeploymentTransition::Unchanged
+    let mut environment = if observation.transition != DeploymentTransition::Unchanged
         || matches!(observation.status, "failed" | "rolled_back" | "succeeded")
     {
         Some(environment(ctx, observation.environment).await?)
@@ -901,42 +853,12 @@ pub(crate) async fn record_deployment_observation(
             .unwrap_or_default();
         webhook_endpoints = crate::owner::union_endpoints(webhook_endpoints, product_endpoints);
     }
-    let needs_plan = ctx.outcome_export_enabled() || !webhook_endpoints.is_empty();
-    let plan = if needs_plan {
+    let plan = if !webhook_endpoints.is_empty() {
         Some(crate::plan::load(ctx, observation.plan_id).await?)
     } else {
         None
     };
-    let mut provider_events = if ctx.outcome_export_enabled() {
-        let plan = plan.as_ref().expect("outcome export loads Plan");
-        let environment = environment
-            .as_ref()
-            .expect("outcome export loads Environment");
-        crate::terminal_outcome::classify(
-            observation.step.action,
-            crate::terminal_outcome::Observation::Controller {
-                status: observation.status,
-                detail: observation.detail,
-                had_previous_release: observation.step.from.is_some(),
-            },
-        )
-        .map(|terminal_state| {
-            crate::providers::terminal_outcome_record(
-                plan,
-                observation.step,
-                &attempt_id,
-                terminal_state,
-                environment,
-                deployment.updated,
-            )
-            .map_err(anyhow::Error::from)
-        })
-        .transpose()?
-        .into_iter()
-        .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    let mut provider_events = Vec::new();
     if !webhook_endpoints.is_empty() {
         let source_revision =
             crate::deploy_webhook::source_revision(ctx, &observation.step.release_id).await;
@@ -969,8 +891,8 @@ pub(crate) async fn record_deployment_observation(
             .and_then(|plan| plan.recalled_recovery_reason),
         _ => None,
     };
-    // Captured always, independent of outcome export, and committed with the
-    // deployment record wherever this process holds the store (#802).
+    // Captured always and committed with the deployment record wherever this
+    // process holds the store (#802).
     let feedback = [crate::feedback_observation::FeedbackObservation::capture(
         crate::feedback_observation::Capture {
             id: &attempt_id,
@@ -998,11 +920,7 @@ pub(crate) async fn record_deployment_observation(
             },
         },
     )];
-    let update_result = if ctx.outcome_export_enabled()
-        || !provider_events.is_empty()
-        || ctx.is_embedded()
-        || ctx.has_catalog()
-    {
+    let update_result = if !provider_events.is_empty() || ctx.is_embedded() || ctx.has_catalog() {
         let mut objects = vec![deployment];
         if environment_changed {
             objects.push(environment.expect("an Environment transition loads its object"));
@@ -4992,39 +4910,6 @@ mod tests {
             created: 1,
             updated: 1,
         }
-    }
-
-    // #1339: with outcome export on, an unreadable origin plan skips its
-    // outcome event and says so; the reconciliation itself still lands.
-    #[tokio::test]
-    async fn an_unreadable_origin_plan_does_not_block_reconciliation() {
-        let root = std::env::temp_dir().join(format!(
-            "tenkai-unknown-origin-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let mut ctx = Ctx::embedded_with_outcome_export(root.join("state.db"), true).unwrap();
-        crate::ontology::register(&mut ctx).await.unwrap();
-        env_add(&mut ctx, "stage", "stage").await.unwrap();
-        let mut object = environment(&mut ctx, "stage").await.unwrap();
-        object.properties.extend(environment_object().properties);
-        ctx.put(object).await.unwrap();
-
-        let message = reconcile_deployment_fenced(&mut ctx, "stage", "api", None, |_| Ok(()))
-            .await
-            .unwrap();
-        assert!(
-            message.contains("outcome export skipped: origin plan old-plan"),
-            "{message}"
-        );
-        let object = environment(&mut ctx, "stage").await.unwrap();
-        assert!(
-            !object
-                .properties
-                .contains_key("deployment_unknown_plan.api")
-        );
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

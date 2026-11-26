@@ -387,8 +387,6 @@ mod live_failover_drill;
 #[cfg(feature = "postgres")]
 mod live_feedback_capture;
 #[cfg(feature = "postgres")]
-mod live_feedback_denial;
-#[cfg(feature = "postgres")]
 mod live_fixture;
 #[cfg(feature = "postgres")]
 mod live_grant_rules;

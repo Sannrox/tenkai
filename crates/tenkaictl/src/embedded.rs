@@ -30,7 +30,7 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
             &signing_key,
             tenkai::now_millis(),
             tenkai_sqlite::copy_store_file,
-            |path| tenkai_sqlite::hub_ctx(path, false).ok(),
+            |path| tenkai_sqlite::hub_ctx(path).ok(),
         )
         .await?;
         // A new file only: the output can never replace the database, the
@@ -52,7 +52,7 @@ pub(crate) async fn run(mut cli: Cli, config: &ClientConfig) -> Result<()> {
         );
         return Ok(());
     }
-    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false)?;
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database)?;
     let fill_env = client_config::needs_env_resolution(&mut cli.command);
     if fill_env {
         let names = if config.default_environment.is_some() {

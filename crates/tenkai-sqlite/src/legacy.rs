@@ -1308,24 +1308,6 @@ mod tests {
             embedded.get(&environment.id).unwrap(),
             Some(environment.clone())
         );
-        let sink = tenkai::providers::LocalEventSink::default();
-        assert_eq!(
-            tenkai::providers::deliver_outcome_batch(
-                &operational,
-                &sink,
-                std::time::Duration::from_secs(1),
-                100,
-                10,
-            )
-            .await
-            .unwrap(),
-            (1, 0)
-        );
-        let mut delivered_event = provider_event.clone();
-        delivered_event.collected_at_ms = Some(100);
-        delivered_event.source_sequence = Some(1);
-        assert_eq!(sink.received(), vec![delivered_event]);
-
         let mut conflicting = event;
         conflicting.payload_json = "{\"different\":true}".into();
         object.name = "must-roll-back".into();

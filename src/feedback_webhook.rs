@@ -5,8 +5,6 @@
 //! POST on the durable provider-event outbox, using its own outbox kind so a
 //! version that does not know it never claims the row. Delivery is opt-in
 //! per endpoint, retried in the background, and never interrupts capture.
-//! The Sekai export in [`crate::feedback_export`] stays until a receiver
-//! exists on that side; both paths may run together.
 
 use std::time::Duration;
 

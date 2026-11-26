@@ -213,7 +213,7 @@ async fn remote_configuration_matches_embedded_and_refuses_like_the_cli() {
             .unwrap();
     }
 
-    let mut ctx = tenkai_sqlite::embedded_ctx(root.join("tenkai.db"), false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(root.join("tenkai.db")).unwrap();
     tenkai::environment_config::register(
         &mut ctx,
         &tenkai::environment_config::RegisterEnvironmentRequest {
@@ -538,7 +538,7 @@ async fn inspect_reports_webhooks_and_the_policy_path_for_conditional_edits() {
     }
 
     // The embedded report `tenkaictl env inspect` prints is the same.
-    let mut ctx = tenkai_sqlite::embedded_ctx(root.join("tenkai.db"), false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(root.join("tenkai.db")).unwrap();
     let embedded = tenkai::plan::inspect_environment_with_outcomes(&mut ctx, "edge")
         .await
         .unwrap();

@@ -9,7 +9,7 @@ pub(super) struct FixedReconciler {
 impl FixedReconciler {
     pub(super) fn for_runtime() -> Self {
         Self {
-            ctx: Some(tenkai_sqlite::embedded_ctx(":memory:", false).unwrap()),
+            ctx: Some(tenkai_sqlite::embedded_ctx(":memory:").unwrap()),
             plan: tokio::sync::OnceCell::new(),
         }
     }

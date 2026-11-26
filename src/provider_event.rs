@@ -8,7 +8,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use crate::providers::{OUTCOME_PROVIDER_KIND, OutcomeProvider, ProviderError, ProviderEvent};
+use crate::providers::{ProviderError, ProviderEvent};
 use crate::storage::{ProviderEventRecord, Result as StoreResult};
 
 /// Public persistence seam retained for custom provider-event adapters.
@@ -310,57 +310,6 @@ where
             Ok(DeliveryStatus::Deferred)
         }
     }
-}
-
-pub async fn deliver_outcome_batch<S, P>(
-    store: &S,
-    provider: &P,
-    timeout: Duration,
-    now: i64,
-    limit: usize,
-) -> Result<(usize, usize), ProviderError>
-where
-    S: ProviderEventStore + ?Sized,
-    P: OutcomeProvider + ?Sized,
-{
-    let claim_token = format!("outcome-worker:{}", uuid::Uuid::new_v4());
-    let claim_until = now.saturating_add(
-        i64::try_from(timeout.saturating_mul(limit.max(1) as u32).as_millis())
-            .unwrap_or(i64::MAX)
-            .saturating_add(30_000),
-    );
-    let records = store.claim_provider_events_for_kind(
-        OUTCOME_PROVIDER_KIND,
-        now,
-        limit,
-        &claim_token,
-        claim_until,
-    )?;
-    let mut delivered = 0;
-    let mut deferred = 0;
-    // One record's store error must not strand the rest of the claimed
-    // batch: every record is attempted, then the first error is returned
-    // (#1339).
-    let mut failure = None;
-    for record in &records {
-        match deliver_optional_event(store, record, timeout, now, |event, kind| async move {
-            if kind != OUTCOME_PROVIDER_KIND {
-                return Err(ProviderError::InvalidEvidence(
-                    "outcome worker claimed a different provider destination".into(),
-                ));
-            }
-            provider.record(&event).await
-        })
-        .await
-        {
-            Ok(DeliveryStatus::Delivered) => delivered += 1,
-            Ok(DeliveryStatus::Deferred) => deferred += 1,
-            Err(error) => {
-                failure.get_or_insert(error);
-            }
-        }
-    }
-    failure.map_or(Ok((delivered, deferred)), Err)
 }
 
 fn bind_first_delivery_metadata(
