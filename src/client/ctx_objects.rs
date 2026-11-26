@@ -76,7 +76,15 @@ impl Ctx {
 
     /// Get an object by id; `None` on not-found.
     pub async fn get(&mut self, id: &str) -> Result<Option<Object>> {
-        self.backend.object_lifecycle().get(id).await
+        let Some(reads) = self.release_reads_for(id) else {
+            return self.backend.object_lifecycle().get(id).await;
+        };
+        if let Some(object) = reads.lock().get(id) {
+            return Ok(object.clone());
+        }
+        let object = self.backend.object_lifecycle().get(id).await?;
+        reads.lock().insert(id.to_string(), object.clone());
+        Ok(object)
     }
 
     /// Create an object without falling back to update when its id exists.
@@ -84,10 +92,12 @@ impl Ctx {
         &mut self,
         object: Object,
     ) -> std::result::Result<Object, super::ClientError> {
+        self.forget_release_read(&object.id);
         self.backend.object_lifecycle().create_once(object).await
     }
 
     pub async fn delete(&mut self, id: &str) -> Result<()> {
+        self.forget_release_read(id);
         self.backend.object_lifecycle().delete(id).await
     }
 
@@ -132,6 +142,7 @@ impl Ctx {
 
     /// Create the object, or update it if the id already exists.
     pub async fn put(&mut self, object: Object) -> Result<Object> {
+        self.forget_release_read(&object.id);
         self.backend.object_lifecycle().put(object).await
     }
 

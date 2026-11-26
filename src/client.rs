@@ -14,6 +14,7 @@ mod lease_lifecycle;
 mod object_lifecycle;
 mod plan_kind_list;
 mod relation_lifecycle;
+mod release_reads;
 mod schema_register;
 mod transport;
 
@@ -97,6 +98,8 @@ pub struct Ctx {
         Option<Arc<dyn crate::execution_capabilities::ExecutionCapabilitySource>>,
     pub(crate) held_execution_leases: Vec<HeldExecutionLease>,
     plan_proposer: Option<crate::plan::PlanProposer>,
+    /// Open while a planning call shares its release reads (#1575).
+    release_reads: std::sync::Weak<release_reads::ReleaseReads>,
 }
 
 type EmbeddedBackup = Arc<dyn Fn(&std::path::Path) -> anyhow::Result<()> + Send + Sync>;
@@ -274,6 +277,7 @@ pub async fn connect() -> Result<Ctx> {
         execution_capabilities: None,
         held_execution_leases: Vec::new(),
         plan_proposer: None,
+        release_reads: std::sync::Weak::new(),
     })
 }
 
