@@ -1,6 +1,9 @@
-# Governance and intelligence provider contracts
+# Evidence and integration contracts
 
-Tenkai has three independent provider ports:
+Tenkai owns its state and stores the evidence its gates read
+([ADR 0064](decisions/0064-tenkai-stands-alone.md)). Producers push signed
+evidence in; Tenkai never pulls evidence from, or exports delivery state to,
+an external graph. Optional integrations plug into three independent ports:
 
 - **Gate provider:** library adapter for a required policy decision. Release
   `[gate].eval_suite` admission uses stored signed evaluation evidence, not a
@@ -55,8 +58,8 @@ Restarting Tenkai does not lose pending events. Adapters may receive an event
 more than once and must deduplicate by event ID. Optional lag degrades the
 integration but never changes or rolls back committed operational truth.
 The first delivery attempt binds a durable collection timestamp into the
-outbox envelope; retries reuse that timestamp so Sekai replay-window checks do
-not see a new evidence body on every attempt.
+outbox envelope; retries reuse that timestamp so a receiver's replay-window
+checks do not see a new evidence body on every attempt.
 
 Each worker claims only its own destination kind, so one adapter cannot
 consume or acknowledge another's events. Delivery failure and timeout leave
@@ -197,6 +200,19 @@ outbox. Both exports are removed, so delivery state stays in Tenkai:
   the local outbox whenever a model evidence signing key is configured
   ([model release evidence](model-release-evidence.md)).
 
+## Legacy evidence identifiers
+
+Some stored evidence schemas and verifier profiles carry identifiers from the
+service that first produced them. Tenkai accepts them as stable legacy
+identifiers, because stored evidence keeps its schema identifier for life; no
+external service is needed to produce or verify them:
+
+- `chisei.model_evaluation_evidence.v1`: signed evaluation evidence for
+  `[gate].eval_suite` ([model release evidence](model-release-evidence.md)).
+- `chisei.governed-subject-receipt/v1`: governed-subject receipt schema a
+  provenance verifier profile may admit
+  ([release provenance](release-provenance.md)).
+
 ## Tenkai-owned records (#1582)
 
 Catalog records (`Object`, `Link`, `Lease`, `Decision`, `ObjectChange`,
@@ -212,11 +228,10 @@ and `SEKAI_AUTH_TOKEN` settings are removed; nothing reads them.
 The built-in local gate consumes explicitly configured evidence, and the local
 policy uses an explicit action allow-list. Without matching configuration they
 deny rather than implicitly allow. The local audit sink is idempotent.
-Together with SQLite these implementations exercise the complete provider
-workflow without sekai-chisei or another external service.
+Together with SQLite these implementations exercise the complete workflow
+without an external service.
 
-External sekai/chisei or other adapters translate their protocol into these
-ports. They must enforce transport authentication, bounded payloads and
+External adapters translate their protocol into these ports. They must enforce transport authentication, bounded payloads and
 deadlines, redact credentials, validate returned evidence, and pass the same
 binding, denial, timeout, idempotency, and retry tests as the local adapters.
 
@@ -260,7 +275,7 @@ Example decision response:
 {
   "allowed": true,
   "reason": "eval suite passed",
-  "evidence_id": "chisei:run:…",
+  "evidence_id": "eval:run:…",
   "binding_digest": "sha256:…",
   "request_id": "…",
   "action": "deploy",
@@ -272,10 +287,9 @@ Example decision response:
 `request_id` / `action` / `principal` must match. Hosts wrap the call in
 `required_decision` so denials, timeouts, and forged bindings block apply.
 
-**Chisei mapping (compatible, not hard lock):** a chisei eval host may implement
-this endpoint by evaluating the named suite against the bound digests and
-returning its run id as `evidence_id`. Other eval products can use the same
-JSON without vendored protocols.
+**Evaluation hosts:** an evaluation service may implement this endpoint by
+evaluating the named suite against the bound digests and returning its run id
+as `evidence_id`.
 
 **Configuration:** callers pass an endpoint URL and optional bearer into the
 library constructor. Community ungated products never construct the remote

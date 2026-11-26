@@ -2,9 +2,9 @@
 //!
 //! The application core owns releases, channels, environments, plans, approvals,
 //! execution, rollback, and recovery state. [`storage::OperationalStore`] is the
-//! persistence seam shared by embedded and server hosts. Sekai-Chisei integrations
-//! are derived, retryable providers unless an operation explicitly requires their
-//! evidence; they are never the recovery path.
+//! persistence seam shared by embedded and server hosts. Tenkai owns its state and
+//! record types; evidence is pushed in and stored signed, and optional adapters are
+//! never the recovery path (ADR 0064).
 //!
 //! The crate is organized around a small set of application seams:
 //!
@@ -108,8 +108,8 @@
 //!   completion validation and ordering, durable Plan and Deployment effects,
 //!   heartbeat renewal, and inventory admission behind one interface.
 //! - [`model_release_evidence`] owns the versioned two-way model-release
-//!   evidence schema: runtime health and canary from Tenkai, evaluation
-//!   results from Chisei, signed outbox export when a `model_runtime` canary
+//!   evidence schema: runtime health and canary from Tenkai, signed evaluation
+//!   results pushed to Tenkai, signed outbox recording when a `model_runtime` canary
 //!   or smoke completes, and fail-closed promotion when evaluation evidence is
 //!   missing, stale, or invalid.
 //!   Classical `onnx` channel promotion also requires a signed registry
@@ -134,10 +134,10 @@
 //!   JSON products so apply/publish call sites do not re-encode that dispatch.
 //! - [`atomic_state`] hides verified atomic local state-file mutation shared by
 //!   those local executor adapters.
-//! - [`providers`] and [`client`] contain optional Sekai-Chisei integration.
-//!   The client's private object-lifecycle module hides embedded/remote adapter
-//!   selection, RPC paths, not-found mapping, conflict recovery, and upsert
-//!   selection behind the shared `Ctx` object interface.
+//! - [`providers`] holds the optional gate, policy, and audit adapter ports.
+//! - [`client`] is the `Ctx` facade over the embedded and tenant catalogs. Its
+//!   private object-lifecycle module hides catalog selection, not-found
+//!   mapping, and upsert behind the shared `Ctx` object interface.
 //!   Its private relation-lifecycle module likewise hides deterministic link
 //!   identity, duplicate normalization, direction semantics, and deletion
 //!   across the embedded and tenant catalogs.

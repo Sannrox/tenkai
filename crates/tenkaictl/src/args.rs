@@ -260,7 +260,7 @@ pub(crate) enum Command {
         #[arg(long)]
         expected_head: Option<String>,
     },
-    /// Install evaluation trust roots or record a signed Chisei evaluation.
+    /// Install evaluation trust roots or record a signed evaluation result.
     EvalEvidence {
         #[command(subcommand)]
         command: EvalEvidenceCommand,

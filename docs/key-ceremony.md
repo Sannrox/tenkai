@@ -3,7 +3,7 @@
 Air-gapped and customer-managed installs name the key provider in a deploy
 profile, then run a ceremony that creates a customer root key reference and
 per-tenant data-key ids. The root never leaves the provider. Evidence records
-ids and custodians only. See sekai-chisei ADR 0113.
+ids and custodians only.
 
 Signing-key rollover is a different key class. Use [key rollover](key-rollover.md).
 Release, bundle, and approval signatures go through the content signer

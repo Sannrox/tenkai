@@ -2,8 +2,8 @@
 
 Tenkai owns the environment-scoped worker-pool release, fixed replica intent,
 drain, health, rollback, and recovery. It does not admit, claim, lease, or
-acknowledge individual agent work. That authority stays with Sekai Chisei;
-Shikigami executes Harness runs through `PlaneClaimIntake`.
+acknowledge individual agent work. That authority stays with the worker
+system; Shikigami executes Harness runs through `PlaneClaimIntake`.
 
 See [ADR 0011](decisions/0011-shikigami-worker-pool-lifecycle.md) and
 [ADR 0028](decisions/0028-live-worker-lifecycle-port.md).
@@ -62,5 +62,5 @@ a newer generation still refuses an older controller.
 
 Environment inspect shows
 `worker_pool.<product>.{state,replicas,intake,detail,observation_source}`.
-Recovery uses Tenkai operational state and retained snapshots; Chisei is not
-required to reconstruct the pool record.
+Recovery uses Tenkai operational state and retained snapshots; no external
+service is required to reconstruct the pool record.

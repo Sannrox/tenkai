@@ -191,7 +191,7 @@ pub(crate) enum ChannelCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum EvalEvidenceCommand {
-    /// Install trusted Ed25519 signers for Chisei model-evaluation records.
+    /// Install trusted Ed25519 signers for model-evaluation records.
     Trust {
         /// Versioned TOML file containing trusted evaluation signers.
         #[arg(long)]

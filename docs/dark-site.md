@@ -3,8 +3,8 @@
 A dark site needs one profile that imports a signed offline bundle, verifies
 local weights, runs `model_runtime`, and runs a fixed set of site-agent
 workers without cloud model callers. This profile is that packaging. It is
-standalone: the only identity input is a local JWKS. Chisei is not required
-to activate, refuse cloud routes, or roll back.
+standalone: the only identity input is a local JWKS. No external service is
+required to activate, refuse cloud routes, or roll back.
 
 Worker claim admission stays with the plane. Tenkai owns the pool, drain,
 health, and digest pins. See [worker pools](worker-pool.md) and

@@ -3,10 +3,8 @@ package tenkai.graph_action.v1;
 
 // Tenkai-owned embedded graph-action definitions.
 //
-// These messages preserve the wire layout of the pre-1.0 sekai ActionTypeDef
-// family so existing embedded SQLite action-type payloads remain decodable.
-// Remote Tenkai no longer sends these types to Sekai-Chisei; remote registration
-// and admission use the governed Action Type / ActionInstance surface instead.
+// These messages preserve the wire layout of the pre-1.0 ActionTypeDef family
+// so existing embedded SQLite action-type payloads remain decodable.
 
 message ActionParamDef {
   string name = 1;

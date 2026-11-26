@@ -74,9 +74,8 @@ Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
   [ADR 0016](decisions/0016-same-version-remediation.md).
 
 Publication has the same atomic authorization and audit requirement as
-promotion. The current sekai-backed compatibility adapter keeps its existing
-governed operations; the Tenkai-owned persistence migration must not split
-their authorization, audit, and state writes.
+promotion. Authorization, audit, and state writes commit together in the
+Tenkai-owned store.
 
 Registered release provenance is an optional immutable Catalog fact. See
 [registered release provenance](release-provenance.md) for its compiled profile
@@ -106,7 +105,7 @@ Embedded and remote adapters must run the same behavior cases:
 
 A remote API may add wire-version negotiation, authentication, rate limits, and
 pagination, but must translate into this contract without exposing database rows
-or sekai objects. Compatibility is additive within v1. Removing fields, changing
+or stored records. Compatibility is additive within v1. Removing fields, changing
 digest meaning, or changing failure semantics requires a new contract version
 and dual-version conformance fixtures. Remote publish, promote, channel remove, subscribe, and
 recall use the [management lifecycle](management-lifecycle.md) header

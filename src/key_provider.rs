@@ -1,6 +1,6 @@
 //! On-site key-provider deploy profile and lab ceremony.
 //!
-//! A deploy profile names the customer key provider ([ADR 0113] in sekai-chisei).
+//! A deploy profile names the customer key provider.
 //! Production profiles refuse file, memory, and software providers. The software
 //! provider exists for labs and CI: `tenkaictl keys ceremony` creates a root key
 //! reference that never leaves the provider directory, mints per-tenant data-key

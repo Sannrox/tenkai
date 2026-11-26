@@ -2,8 +2,9 @@
 
 GitHub is the artifact source; Tenkai is the delivery plane. A new tag in the
 product repository becomes publish → promote → apply, with the same gates,
-health probes, and rollback as any other product. sekai-chisei is the first
-product delivered this way and is used as the example below.
+health probes, and rollback as any other product. The example below delivers
+a graph service, `sekai-chisei`, as an ordinary product; Tenkai does not depend
+on it.
 
 1. **The product repo owns its manifest**: for example `deploy/tenkai.toml` in
    sekai-chisei, pinning the container image tag that matches

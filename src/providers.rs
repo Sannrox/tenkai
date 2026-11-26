@@ -564,7 +564,7 @@ pub struct LocalGateProvider {
 /// Remote gate provider over the generic HTTP JSON decision contract.
 ///
 /// POSTs a [`DecisionRequest`] to `endpoint` and expects a [`ProviderDecision`]
-/// body. Used for chisei-compatible (or other) evaluation hosts. Community
+/// body. Used for evaluation hosts that implement the contract. Community
 /// ungated deploys never construct this adapter, so they never open a network
 /// connection.
 ///

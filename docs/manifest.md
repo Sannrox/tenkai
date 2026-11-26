@@ -17,7 +17,7 @@ health = "curl -sf localhost:8080/healthz"  # exit 0 = healthy; failure rolls ba
 inputs = ["compose.yaml"]          # immutable files/directories used by these commands
 
 [gate]
-eval_suite = "my-suite"          # chisei eval suite; latest run must fully pass
+eval_suite = "my-suite"          # needs stored signed evaluation evidence that passed
 bake_window_seconds = 60         # optional SLO bake window; first breach halts
 on_fail = "halt"                 # or "rollback" to the previously signed pin
 
@@ -419,7 +419,7 @@ The portable subset other tools can emit is the
 
 ### Routing-configuration products
 
-Tenkai can deliver a versioned model-routing document without sekai-chisei.
+Tenkai delivers a versioned model-routing document on its own.
 The manifest declares `product.kind = "routing_config"`, a JSON configuration,
 and the providers admitted by that release:
 
@@ -441,6 +441,5 @@ uses the normal pinned-release plan path for rollback. See
 [`examples/routing-local`](../examples/routing-local) and
 [ADR 0002](decisions/0002-tenkai-owned-routing-configuration.md).
 
-sekai-chisei may supply policy, evaluation, provenance, or an explicitly
-configured adapter, but it is not required for standalone routing delivery and
-does not own release, plan, apply, rollback, or recovery state.
+Evaluation and provenance arrive as signed evidence pushed to Tenkai; no
+external service owns release, plan, apply, rollback, or recovery state.

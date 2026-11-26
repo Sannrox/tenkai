@@ -37,8 +37,8 @@ embedded `tenkaictl`:
 An agent in the actor chain is refused on create and close. ADR 0034 is
 unchanged.
 
-The pin is Tenkai-owned identity after admission. Sekai-Chisei remains the
-authority for branch membership, merge, and compatibility gates. Tenkai does
+The pin is Tenkai-owned identity after admission. The branch service remains
+the authority for branch membership, merge, and compatibility gates. Tenkai does
 not import member payloads and does not recover from the branch service.
 
 ## Invariants

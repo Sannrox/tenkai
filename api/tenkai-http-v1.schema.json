@@ -7016,7 +7016,7 @@
     },
     "ModelEvaluationEvidence": {
       "additionalProperties": false,
-      "description": "Chisei → Tenkai evaluation result for the same identity.",
+      "description": "Signed evaluation result pushed to Tenkai for the same identity.",
       "properties": {
         "eval_run_id": {
           "type": "string"
