@@ -71,6 +71,7 @@ impl SqliteStore {
                         insert_link_in(&tx, link)?;
                     }
                     ActionWrite::DeleteLink(id) => {
+                        record_link_write(&tx, id)?;
                         tx.execute("DELETE FROM catalog_links WHERE id=?1", [id])?;
                     }
                 }

@@ -62,3 +62,4 @@
 - [0060 — Agent budgets and release previews](0060-agent-budgets-and-release-previews.md) (proposed)
 - [0061 — Time-boxed audited debug sessions](0061-time-boxed-audited-debug-sessions.md)
 - [0062 — Atomic catalog actions](0062-atomic-catalog-actions.md)
+- [0063 — Change-driven reconcile ticks](0063-change-driven-reconcile-ticks.md)

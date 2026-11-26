@@ -6,6 +6,23 @@ use tenkai::pb::graph_action::{ActionResult, ActionTypeDef};
 use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 
 impl CatalogGraph for SqliteStore {
+    fn writes_after(
+        &self,
+        _tenant: Option<&str>,
+        after: i64,
+        limit: usize,
+    ) -> AnyResult<Vec<tenkai::storage::CatalogWrite>> {
+        SqliteStore::writes_after(self, after, limit)
+    }
+
+    fn latest_write(&self, _tenant: Option<&str>) -> AnyResult<i64> {
+        SqliteStore::latest_write(self)
+    }
+
+    fn prune_writes(&self, _tenant: Option<&str>, before_ms: i64) -> AnyResult<()> {
+        SqliteStore::prune_writes(self, before_ms)
+    }
+
     fn get(&self, _tenant: Option<&str>, id: &str) -> AnyResult<Option<Object>> {
         SqliteStore::get(self, id)
     }

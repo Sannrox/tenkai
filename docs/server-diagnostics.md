@@ -16,7 +16,7 @@ tenkai.reconcile outcome=ok environments_total=2 environments_failed=0 ...
 | Field | Meaning |
 | --- | --- |
 | `outcome` | `ok`, `degraded` (env failure), or `error` (tick failed) |
-| `environments_total` | Environments considered this tick |
+| `environments_total` | Environments evaluated this tick; a periodic tick skips quiet ones ([ADR 0063](decisions/0063-change-driven-reconcile-ticks.md)) |
 | `environments_failed` | Failed statuses |
 | `environments_current` | Already up to date |
 | `environments_applied` | Applied a plan this tick |

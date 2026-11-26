@@ -252,6 +252,11 @@ TENKAI_POSTGRES_URL='postgresql://…?sslmode=disable' \
 Only the writer-lease holder ticks. The hub no longer creates or reads
 `tenkai_reconcile_tick_claims`; an existing table is left for older replicas
 during a rolling deploy. See [reconcile-tick-fencing.md](reconcile-tick-fencing.md).
+A replica that acquires the lease evaluates every environment on its first
+tick; later ticks evaluate only what changed, what has work, and due
+rechecks. Writes by an older replica during a rolling deploy are not in the
+store write log; the full first tick and the recheck cover them
+([ADR 0063](decisions/0063-change-driven-reconcile-ticks.md)).
 Mutation-level replay and stale-generation evidence:
 [fenced delivery-effect conformance](delivery-effect-conformance.md).
 

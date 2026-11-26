@@ -52,6 +52,7 @@ impl SqliteStore {
             "INSERT INTO plans(id,environment_id,format_version,content_digest,plan_json,status,status_detail) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![plan.id, plan.environment_id, plan.format_version, plan.content_digest, plan.plan_json, plan.status.as_str(), plan.status_detail],
         )?;
+        crate::objects::record_write(&tx, &plan.id, tenkai::ontology::KIND_PLAN)?;
         tx.commit()?;
         Ok(())
     }
@@ -104,6 +105,7 @@ impl SqliteStore {
             "UPDATE plans SET status=?2,status_detail=?3 WHERE id=?1",
             params![id, status.as_str(), detail],
         )?;
+        crate::objects::record_write(&tx, id, tenkai::ontology::KIND_PLAN)?;
         tx.commit()?;
         drop(connection);
         self.get_plan(id)?

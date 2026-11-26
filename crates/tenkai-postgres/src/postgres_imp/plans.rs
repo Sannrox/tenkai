@@ -46,6 +46,7 @@ impl Inner {
                 ],
             )
             .map_err(pg)?;
+            super::write_log::record_write(tx, &plan.id, tenkai::ontology::KIND_PLAN)?;
             let existing = tx
                 .query_one(
                     "SELECT environment_id,format_version,content_digest,plan_json
@@ -153,6 +154,7 @@ impl Inner {
                 &[&id, &status.as_str(), &detail],
             )
             .map_err(pg)?;
+            super::write_log::record_write(tx, &id, tenkai::ontology::KIND_PLAN)?;
             let row = tx
                 .query_one(
                     "SELECT id,environment_id,format_version,content_digest,plan_json,status,status_detail

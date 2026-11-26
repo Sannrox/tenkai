@@ -32,6 +32,7 @@ impl SqliteStore {
             "INSERT INTO releases(id,product,version,content_digest,descriptor_json) VALUES(?1,?2,?3,?4,?5)",
             params![release.id, release.product, release.version, release.content_digest, release.descriptor_json],
         )?;
+        crate::objects::record_write(&tx, &release.id, tenkai::ontology::KIND_RELEASE)?;
         tx.commit()?;
         Ok(())
     }
@@ -122,6 +123,7 @@ impl SqliteStore {
              ON CONFLICT(id) DO UPDATE SET release_id=excluded.release_id, revision=excluded.revision",
             params![channel.id, channel.product, channel.name, channel.release_id, next],
         )?;
+        crate::objects::record_write(&tx, &channel.id, tenkai::ontology::KIND_CHANNEL)?;
         tx.commit()?;
         Ok(ChannelRecord {
             revision: next,
@@ -227,6 +229,7 @@ impl SqliteStore {
                 .map(|retirement| retirement.retired_at)
             ],
         )?;
+        crate::objects::record_write(&tx, &environment.id, tenkai::ontology::KIND_ENVIRONMENT)?;
         tx.commit()?;
         Ok(EnvironmentRecord {
             revision: next,

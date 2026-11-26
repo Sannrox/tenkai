@@ -235,6 +235,11 @@ pub(crate) fn migrate_tenant_schema(tx: &mut Transaction<'_>) -> Result<()> {
             ON catalog_changes(timestamp);
         CREATE INDEX IF NOT EXISTS catalog_decisions_timestamp
             ON catalog_decisions(timestamp);
+        CREATE TABLE IF NOT EXISTS catalog_writes (
+            seq BIGSERIAL PRIMARY KEY, object_id TEXT NOT NULL,
+            kind TEXT NOT NULL, recorded_at BIGINT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS catalog_writes_recorded ON catalog_writes(recorded_at);
         ",
     )
     .map_err(pg)?;

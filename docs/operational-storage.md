@@ -56,6 +56,15 @@ skip kinds their version does not know, so a newer replica, or the release
 before a rollback, can add a kind without failing older readers' pages
 (#775).
 
+Every catalog write (create, put, delete, link, unlink) also appends
+`(seq, object_id, kind)` to `catalog_writes` in the same transaction, on
+SQLite and in each tenant PostgreSQL schema; a link logs both endpoints. The
+reconciler reads it to evaluate only touched environments. Rows older than
+24 hours (`CATALOG_WRITE_RETENTION_MS`) are pruned hourly through the
+`recorded_at` index. The table is created on open and is not recovery
+material: losing it costs one full tick
+([ADR 0063](decisions/0063-change-driven-reconcile-ticks.md)).
+
 An environment execution claim whose only property diff is `expires_at` is a
 lease heartbeat and does not append a change row. When a claim is written,
 its own change rows older than seven days (`CATALOG_HISTORY_RETENTION_MS`)

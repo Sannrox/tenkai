@@ -123,6 +123,9 @@ impl Inner {
                 )
                 .map_err(pg)?
             };
+            if changed > 0 {
+                super::write_log::record_write(tx, &channel.id, tenkai::ontology::KIND_CHANNEL)?;
+            }
             if changed == 0 {
                 let observed = tx
                     .query_one(

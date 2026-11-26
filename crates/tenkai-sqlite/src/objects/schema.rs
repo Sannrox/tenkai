@@ -184,7 +184,12 @@ pub(crate) fn ensure_catalog(connection: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS catalog_changes_timestamp
              ON catalog_changes(timestamp);
          CREATE INDEX IF NOT EXISTS catalog_decisions_timestamp
-             ON catalog_decisions(timestamp);",
+             ON catalog_decisions(timestamp);
+         CREATE TABLE IF NOT EXISTS catalog_writes (
+             seq INTEGER PRIMARY KEY AUTOINCREMENT, object_id TEXT NOT NULL,
+             kind TEXT NOT NULL, recorded_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS catalog_writes_recorded ON catalog_writes(recorded_at);",
     )?;
     Ok(())
 }

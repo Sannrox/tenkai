@@ -13,6 +13,8 @@ pub const CATALOG_HISTORY_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 mod action_writes;
 mod catalog_graph;
+#[cfg(any(test, feature = "test-support"))]
+pub use catalog_graph::write_log_contract;
 mod error;
 mod object_codec;
 mod operational_store;
@@ -20,8 +22,8 @@ mod records;
 
 pub use action_writes::{ActionPlanError, ActionWrite, ActionWrites};
 pub use catalog_graph::{
-    CatalogGraph, LeaseRefresh, MemoryCatalogGraph, skip_execution_claim_heartbeat,
-    stamp_claim_expiry,
+    CATALOG_WRITE_RETENTION_MS, CatalogGraph, CatalogWrite, LeaseRefresh, MemoryCatalogGraph,
+    skip_execution_claim_heartbeat, stamp_claim_expiry,
 };
 pub use error::*;
 pub use object_codec::{

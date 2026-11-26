@@ -415,4 +415,6 @@ mod live_schema_owner;
 #[cfg(feature = "postgres")]
 mod live_sole_store;
 #[cfg(feature = "postgres")]
+mod live_write_log;
+#[cfg(feature = "postgres")]
 mod live_writer_lease;

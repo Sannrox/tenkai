@@ -23,8 +23,8 @@ use tenkai::pb::graph_action::{ActionResult, ActionTypeDef};
 use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use tenkai::plan::{Plan, PlanState};
 use tenkai::storage::{
-    ActionWrite, ActionWrites, ChannelRecord, EnvironmentRecord, PlanRecord, PlanStatus,
-    ProviderEventRecord, ReleaseRecord, StoreError,
+    ActionWrite, ActionWrites, CatalogWrite, ChannelRecord, EnvironmentRecord, PlanRecord,
+    PlanStatus, ProviderEventRecord, ReleaseRecord, StoreError,
 };
 
 use crate::Result;
@@ -47,6 +47,7 @@ mod schema;
 #[cfg(test)]
 mod tests;
 mod upserts;
+mod write_log;
 
 use actions::*;
 use codec::*;
@@ -58,3 +59,5 @@ use namespaced_leases::*;
 pub(super) use schema::*;
 pub(crate) use upserts::channel_revision_floor;
 use upserts::*;
+pub(crate) use write_log::record_write;
+use write_log::*;

@@ -59,7 +59,13 @@ the server opens the same in-process state backend as `tenkaictl` and requires
 no provider service. `--provider-mode remote` is explicit and never inherits
 embedded development permissions. The server reconciles every
 `--reconcile-interval` seconds (default 10) and works on at most
-`--max-concurrency` environments at once (default 8).
+`--max-concurrency` environments at once (default 8). A tick evaluates only
+environments a store write touched, those whose last pass was not Current,
+and those whose recheck is due (about every five to ten minutes); the first
+tick after a start or a writer-lease takeover evaluates all of them
+([ADR 0063](decisions/0063-change-driven-reconcile-ticks.md)). A tick
+requested with `reconcile --once` against the server is one such tick, run
+now.
 
 ```sh
 export TENKAI_MANAGEMENT_TOKEN='replace-from-secret-store'

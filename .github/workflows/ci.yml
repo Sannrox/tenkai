@@ -79,8 +79,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # The hub writer lease and the kill-the-leader drill (#748, #749),
       # the hub HA qualification drill (#903), the large property value
-      # migration (#879), and tenant feedback observation capture (#868).
-      - run: cargo test --locked -p tenkai-postgres --features postgres --lib -- --ignored live_writer_lease live_failover_drill live_ha_qualification live_property_lookup live_feedback_capture live_provider_enqueue
+      # migration (#879), tenant feedback observation capture (#868), and
+      # the store write log (#1569).
+      - run: cargo test --locked -p tenkai-postgres --features postgres --lib -- --ignored live_writer_lease live_write_log live_failover_drill live_ha_qualification live_property_lookup live_feedback_capture live_provider_enqueue
 
   fmt:
     name: Rustfmt

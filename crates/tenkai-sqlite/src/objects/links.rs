@@ -2,7 +2,11 @@ use super::*;
 
 impl SqliteStore {
     pub fn create_link(&self, link: Link, fail_if_exists: bool) -> Result<()> {
-        let changed = insert_link_in(&*self.connection()?, &link)?;
+        // The link and its write-log rows commit together.
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+        let changed = insert_link_in(&tx, &link)?;
+        tx.commit()?;
         if fail_if_exists && !changed {
             return Err((StoreError::already_exists("link", link.id)).into());
         }
@@ -10,8 +14,11 @@ impl SqliteStore {
     }
 
     pub fn unlink(&self, id: &str) -> AnyResult<()> {
-        self.connection()?
-            .execute("DELETE FROM catalog_links WHERE id=?1", [id])?;
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+        record_link_write(&tx, id)?;
+        tx.execute("DELETE FROM catalog_links WHERE id=?1", [id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -157,5 +164,8 @@ pub(super) fn insert_link_in(connection: &Connection, link: &Link) -> rusqlite::
             link.encode_to_vec()
         ],
     )?;
+    if changed > 0 {
+        record_link_write(connection, &link.id)?;
+    }
     Ok(changed > 0)
 }

@@ -21,6 +21,17 @@ There is no separate per-environment tick claim. Earlier releases kept one
 (`tenkai_reconcile_tick_claims`); it duplicated the writer lease and was
 removed in #1112.
 
+## Which environments a tick evaluates (#1569)
+
+Every store write appends a row to `catalog_writes` in its own transaction.
+A periodic tick maps the rows since its last run to environments and
+evaluates those, plus every environment whose last pass was not Current and
+every environment whose staggered recheck is due. The first tick after a
+process start or a writer-lease takeover evaluates everything, so a new
+leader never relies on its predecessor's in-memory cursor. A bounded tick
+(`Reconciler::run_once_for`) evaluates every environment it names. See
+[ADR 0063](decisions/0063-change-driven-reconcile-ticks.md).
+
 ## Upgrading
 
 Current replicas no longer create or read `tenkai_reconcile_tick_claims`.

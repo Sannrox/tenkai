@@ -152,6 +152,7 @@ impl Inner {
                 ],
             )
             .map_err(pg)?;
+            super::write_log::record_write(tx, &environment.id, tenkai::ontology::KIND_ENVIRONMENT)?;
             Ok(EnvironmentRecord {
                 revision: next,
                 ..environment.clone()
@@ -175,6 +176,7 @@ impl Inner {
                 ],
             )
             .map_err(pg)?;
+            super::write_log::record_write(tx, &release.id, tenkai::ontology::KIND_RELEASE)?;
             let existing = tx
                 .query_one(
                     "SELECT product, version, content_digest, descriptor_json
