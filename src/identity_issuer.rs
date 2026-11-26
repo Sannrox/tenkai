@@ -36,7 +36,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::sealed_secret::{RecipientWrap, SealedOpener, SealedTarget, SealedValue};
 use crate::sealing_key::SealingPublicKey;
 

@@ -548,7 +548,7 @@ async fn claim_drill_environment(
 
 async fn put_env_fenced(
     ctx: &mut Ctx,
-    object: crate::pb::sekai::Object,
+    object: crate::pb::record::Object,
     replica: &str,
     env_fencing_token: &str,
 ) -> Result<()> {

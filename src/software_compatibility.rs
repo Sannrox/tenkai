@@ -1232,7 +1232,7 @@ pub async fn record_evidence(
         validate_identifier(name)?;
     }
     let identity = format!("{:x}", Sha256::digest(raw.as_bytes()));
-    let record = crate::pb::sekai::Object {
+    let record = crate::pb::record::Object {
         id: format!("tenkai:software-compatibility:{environment}:{identity}"),
         kind: EVIDENCE_KIND.into(),
         namespace: crate::ontology::NS.into(),

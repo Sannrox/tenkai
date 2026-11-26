@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
 use crate::ontology::{KIND_DEBUG_SESSION, KIND_DEBUG_SESSION_RUNTIME, NS};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 /// Record format written into property `record`.
 const RECORD_FORMAT: u32 = 1;

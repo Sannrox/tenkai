@@ -819,7 +819,7 @@ mod tests {
             let retry =
                 test_upgrade_plan("env-a", created_at, PlanState::Computed, "1.0.0", target);
             plan::store(&mut ctx, &retry).await.unwrap();
-            ctx.put(crate::pb::sekai::Object {
+            ctx.put(crate::pb::record::Object {
                 id: retry.steps[0].release_id.clone(),
                 kind: crate::ontology::KIND_RELEASE.into(),
                 name: format!("api@{target}"),
@@ -865,7 +865,7 @@ mod tests {
         let (database, mut ctx) = registered_ctx("completion-lease", &["env-a"]).await;
         let deployed = test_plan("env-a", 100, PlanState::Computed);
         plan::store(&mut ctx, &deployed).await.unwrap();
-        ctx.put(crate::pb::sekai::Object {
+        ctx.put(crate::pb::record::Object {
             id: deployed.steps[0].release_id.clone(),
             kind: crate::ontology::KIND_RELEASE.into(),
             name: "api@2.0.0".into(),
@@ -1083,7 +1083,7 @@ mod tests {
             .properties
             .insert("deployed.api".into(), "1.0.0".into());
         ctx.put(environment).await.unwrap();
-        ctx.put(crate::pb::sekai::Object {
+        ctx.put(crate::pb::record::Object {
             id: "tenkai:channel:api/stable".into(),
             kind: crate::ontology::KIND_CHANNEL.into(),
             name: "api/stable".into(),
@@ -1143,7 +1143,7 @@ mod tests {
             .properties
             .insert("deployed.api".into(), "1.0.0".into());
         ctx.put(environment).await.unwrap();
-        ctx.put(crate::pb::sekai::Object {
+        ctx.put(crate::pb::record::Object {
             id: "tenkai:channel:api/stable".into(),
             kind: crate::ontology::KIND_CHANNEL.into(),
             name: "api/stable".into(),
@@ -1204,7 +1204,7 @@ mod tests {
             .properties
             .insert("deployed.api".into(), "1.0.0".into());
         ctx.put(environment).await.unwrap();
-        ctx.put(crate::pb::sekai::Object {
+        ctx.put(crate::pb::record::Object {
             id: "tenkai:channel:api/stable".into(),
             kind: crate::ontology::KIND_CHANNEL.into(),
             name: "api/stable".into(),
@@ -1643,7 +1643,7 @@ mod tests {
     /// `product/stable` at 2.0.0, subscribed by `stage`.
     pub(super) async fn put_product_channel(ctx: &mut Ctx, product: &str) {
         let channel_id = format!("tenkai:channel:{product}/stable");
-        ctx.put(crate::pb::sekai::Object {
+        ctx.put(crate::pb::record::Object {
             id: channel_id.clone(),
             kind: crate::ontology::KIND_CHANNEL.into(),
             name: format!("{product}/stable"),
@@ -1675,7 +1675,7 @@ mod tests {
 
     /// Release `api@version` with a recall recorded on it.
     async fn put_recalled_release(ctx: &mut Ctx, version: &str) {
-        ctx.put(crate::pb::sekai::Object {
+        ctx.put(crate::pb::record::Object {
             id: crate::ontology::release_id("api", version),
             kind: crate::ontology::KIND_RELEASE.into(),
             name: format!("api@{version}"),
@@ -1716,7 +1716,7 @@ mod tests {
         let (database, mut ctx) = registered_ctx("delivery-signals", &["stage"]).await;
         for (version, has_migration) in [("1.0.0", "false"), ("2.0.0", "true"), ("3.0.0", "false")]
         {
-            ctx.put(crate::pb::sekai::Object {
+            ctx.put(crate::pb::record::Object {
                 id: format!("tenkai:release:api@{version}"),
                 kind: crate::ontology::KIND_RELEASE.into(),
                 name: format!("api@{version}"),

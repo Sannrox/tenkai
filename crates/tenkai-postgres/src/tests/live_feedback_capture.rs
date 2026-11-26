@@ -1,6 +1,6 @@
 use super::super::*;
 use tenkai::feedback_observation::{Capture, FeedbackObservation, Operation, Reason};
-use tenkai::pb::sekai::Object;
+use tenkai::pb::record::Object;
 use tenkai::storage::{CatalogGraph, ProviderEventRecord};
 
 fn observation(id: &str, status: &str) -> FeedbackObservation {

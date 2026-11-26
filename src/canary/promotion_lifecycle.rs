@@ -114,7 +114,7 @@ async fn pre_lease_link_held(ctx: &mut Ctx, id: &str) -> Result<bool> {
 async fn hold_pre_lease_link(
     ctx: &mut Ctx,
     lock: &PromotionLock,
-    previous: Option<&crate::pb::sekai::Lease>,
+    previous: Option<&crate::pb::record::Lease>,
     product: &str,
     target_channel: &str,
 ) -> Result<()> {

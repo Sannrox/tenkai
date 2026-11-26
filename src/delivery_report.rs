@@ -330,7 +330,7 @@ fn lower_median(mut values: Vec<i64>) -> Option<i64> {
 mod tests {
     use super::*;
     use crate::ontology::{KIND_RELEASE, NS, deployment_id};
-    use crate::pb::sekai::Object;
+    use crate::pb::record::Object;
     use std::collections::HashMap;
 
     async fn store(label: &str) -> (Ctx, std::path::PathBuf) {

@@ -25,7 +25,7 @@ use sha2::{Digest as _, Sha256};
 use crate::client::Ctx;
 use crate::host_apply::state::{APPLIED_STATE_SCHEMA, AppliedStateRecord};
 use crate::host_executor::HostExecutor;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 /// Most records one report may carry.
 const MAX_RECORDS: usize = 1024;

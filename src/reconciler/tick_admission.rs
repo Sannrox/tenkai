@@ -17,7 +17,7 @@ use super::change_scope::{self, ChangeScope, Touched};
 use super::environment_lifecycle;
 use super::*;
 use crate::ontology::{KIND_ENVIRONMENT, env_id};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 #[derive(Default)]
 pub(super) struct SchedulerState {

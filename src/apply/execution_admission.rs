@@ -415,7 +415,7 @@ mod tests {
 
     use super::*;
     use crate::ontology::{KIND_CHANNEL, KIND_ENVIRONMENT, NS, REL_SUBSCRIBES, channel_id};
-    use crate::pb::sekai::Object;
+    use crate::pb::record::Object;
     use crate::plan::{DesiredStateInput, PLAN_FORMAT_VERSION, PlanState, Step};
 
     fn object(id: String, kind: &str, name: &str, properties: HashMap<String, String>) -> Object {

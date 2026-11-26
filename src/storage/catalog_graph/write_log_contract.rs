@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::pb::sekai::{Link, Object};
+use crate::pb::record::{Link, Object};
 use crate::storage::CatalogGraph;
 
 const KIND: &str = "tenkai.conformance";

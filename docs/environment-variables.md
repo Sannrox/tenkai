@@ -8,7 +8,7 @@ command line.
 ## Secret files
 
 Every secret setting below (management and runtime tokens, the token maps,
-`TENKAI_POSTGRES_URL`, `SEKAI_AUTH_TOKEN`,
+`TENKAI_POSTGRES_URL`,
 `TENKAI_OIDC_CLIENT_SECRET`, `TENKAI_JWT_ASSERTION`, and the webhook secrets
 named by `secret_env`) is read, in order, from:
 
@@ -56,7 +56,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_CLOCK_REFUSE_MS` | `30000` | Skew above which approvals, applies and runtime lease claims are refused |
 | `TENKAI_CLOCK_CHECK_SECS` | `60` | Seconds between clock measurements |
 | `TENKAI_CA_BUNDLE` | unset | PEM file of CA certificates every outbound TLS client trusts in addition to the built-in roots: registry and model downloads, OIDC, webhooks, telemetry, remote gates, the runtime agent, the remote CLI and its login, the gRPC outcome provider, the remote backend and PostgreSQL. Unreadable or empty fails closed. Kubernetes clients use their kubeconfig CA |
-| `TENKAI_TLS_SYSTEM_ROOTS` | `true` | `false` drops the built-in and platform roots, so only `TENKAI_CA_BUNDLE` is trusted; requires the bundle. A remote HTTPS backend (`TENKAI_SEKAI_URL`) is refused with `false` until its client can drop its built-in roots |
+| `TENKAI_TLS_SYSTEM_ROOTS` | `true` | `false` drops the built-in and platform roots, so only `TENKAI_CA_BUNDLE` is trusted; requires the bundle. |
 | `TENKAI_BACKUP_DIR` | unset | `tenkai-server` only: directory for scheduled and on-demand backups ([backup and restore](backup-restore.md#server-mode-backups)). In tenant mode, the directory of recorded PostgreSQL backup evidence ([evidence](backup-restore.md#postgresql-backup-evidence)) |
 | `TENKAI_BACKUP_INTERVAL_SECS` | `86400` | Seconds between scheduled backups; `0` takes backups only on demand |
 | `TENKAI_BACKUP_RETAIN` | `7` | Backups kept; older ones are removed after each backup |
@@ -65,7 +65,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_IMPORT_STAGING_DIR` | unset | `tenkai-server` only: server-owned directory of staged offline bundles for `/v1/imports` ([offline bundles](offline-bundles.md#server-side-import)). Set with `TENKAI_BUNDLE_TRUST_ROOTS` |
 | `TENKAI_BUNDLE_TRUST_ROOTS` | unset | Trust roots that must authenticate an exporter of a bundle imported through the server |
 | `TENKAI_STATE_DIR` | `<workdir-parent>/.tenkai-state` | Immutable deploy-input snapshots and per-environment runtime directories; must be outside the source workdir |
-| `TENKAI_PRINCIPAL` | `tenkai` | Remote provider caller identity |
+| `TENKAI_PRINCIPAL` | `tenkai` | Actor the embedded SQLite store records on its catalog writes |
 | `TENKAI_MANAGEMENT_TOKEN` | unset | Community management bearer for server management requests, remote CLI mode, and embedded `promote` / canary mutations including `canary repair`. When set, remote `tenkaictl` uses it instead of a saved OIDC login. `tenkaictl` also reads client-config `token_file` (`/etc/tenkai/client.toml`, then `$XDG_CONFIG_HOME/tenkai/client.toml`) when this setting is unset. A root-only token file is for `sudo tenkaictl`; copy the value into this variable for `tenkai-server` (the `tenkai` user cannot read a root-owned 0600 file) |
 | `TENKAI_TARGET` | unset | `tenkaictl`: `embedded` or `remote`. Overrides client config `target`. Unset with no config uses the embedded store when it exists, otherwise `tenkaictl` names `--target remote` or `tenkaictl init` instead of opening an empty store |
 | `TENKAI_ENVIRONMENT` | unset | `tenkaictl --env` default. Overrides client config `default_environment`. If unset and exactly one environment is registered, `tenkaictl` uses that name |
@@ -123,9 +123,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `TENKAI_SEKAI_URL` | `http://127.0.0.1:$GRPC_PORT` | Optional provider endpoint used by the server host |
-| `GRPC_PORT` | `50051` | Port used for the optional provider URL |
-| `SEKAI_AUTH_TOKEN` | unset | Optional provider bearer token |
+| `TENKAI_SEKAI_URL`, `GRPC_PORT`, `SEKAI_AUTH_TOKEN` | unset | Removed with the remote provider client (#1582); nothing reads them |
 | `TENKAI_OUTCOME_PROVIDER`, `TENKAI_FEEDBACK_PROVIDER`, `TENKAI_{OUTCOME,FEEDBACK}_NAMESPACE`, `TENKAI_{OUTCOME,FEEDBACK}_PROVIDER_{URL,PRINCIPAL,TOKEN,REGISTRATION}` | unset | Removed with outcome and feedback export ([#1580](provider-contracts.md#removed-outcome-and-feedback-export-1580)); `tenkai-server` refuses to start while any is set |
 
 ## `tenkai-runtime`

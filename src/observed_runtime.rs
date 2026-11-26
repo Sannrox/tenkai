@@ -136,7 +136,7 @@ async fn strip_snapshot(
     ctx: &mut Ctx,
     environment: &str,
     product: &str,
-) -> Result<crate::pb::sekai::Object> {
+) -> Result<crate::pb::record::Object> {
     validate_identifier("environment", environment)?;
     validate_identifier("product", product)?;
     let mut env_obj = crate::environment::environment(ctx, environment).await?;
@@ -151,7 +151,7 @@ async fn encode_snapshot(
     ctx: &mut Ctx,
     environment: &str,
     component: &ObservedRuntimeComponent,
-) -> Result<crate::pb::sekai::Object> {
+) -> Result<crate::pb::record::Object> {
     validate_identifier("environment", environment)?;
     validate_identifier("product", &component.product)?;
     let mut env_obj = crate::environment::environment(ctx, environment).await?;

@@ -88,4 +88,4 @@ all gate bindings and reads the persisted run evidence.
 - The Tenkai mapping and validation are implemented in
   [`src/apply.rs`](../../src/apply.rs) and [`src/client.rs`](../../src/client.rs);
   the vendored contract is pinned in
-  [`proto/vendor/chisei.proto`](../../proto/vendor/chisei.proto).
+  `proto/vendor/chisei.proto` (removed by #1582).

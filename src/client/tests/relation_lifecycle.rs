@@ -1,8 +1,5 @@
 use crate::client::Ctx;
-use crate::pb::sekai::{Link, Object};
-
-use super::mock_router::remote_ctx;
-use super::mock_state::MockSekaiState;
+use crate::pb::record::{Link, Object};
 
 async fn assert_relation_lifecycle(mut ctx: Ctx) {
     let source = Object {
@@ -104,11 +101,4 @@ async fn embedded_ctx_conforms_to_relation_lifecycle() {
     let ctx = Ctx::embedded(&path).unwrap();
     assert_relation_lifecycle(ctx).await;
     std::fs::remove_file(path).unwrap();
-}
-
-#[tokio::test]
-async fn remote_ctx_conforms_to_relation_lifecycle() {
-    let (ctx, server) = remote_ctx(MockSekaiState::default()).await;
-    assert_relation_lifecycle(ctx).await;
-    server.abort();
 }

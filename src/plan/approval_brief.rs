@@ -13,7 +13,7 @@ use serde_json::Value;
 use super::{Plan, Step};
 use crate::actor_chain::{Actor, ActorKind};
 use crate::client::Ctx;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::spec_drift::TargetChange;
 
 /// Who proposed the plan. Copied onto the approval brief, which the digest covers.

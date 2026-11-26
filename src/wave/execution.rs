@@ -22,7 +22,7 @@ use crate::ontology::{
     KIND_CHANNEL, KIND_WAVE, NS, channel_id, release_id, require_wave_schema, validate_identifier,
     wave_id,
 };
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::plan::{self, Action, Plan, PlanState};
 use crate::topology::TOPOLOGY_LEASE_NAMESPACE;
 

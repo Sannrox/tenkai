@@ -7,7 +7,7 @@ use tenkai::ontology::{
     CHANNEL_REVISION_FLOOR, KIND_CHANNEL, KIND_ENVIRONMENT, KIND_PLAN, KIND_RELEASE, NS, env_id,
 };
 use tenkai::pb::graph_action::{ActionResult, ActionTypeDef};
-use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
+use tenkai::pb::record::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use tenkai::plan::Plan;
 use tenkai::storage::{
     CATALOG_HISTORY_RETENTION_MS, ChannelRecord, LeaseRefresh, PlanStatus, encode_object,

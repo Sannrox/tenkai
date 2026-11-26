@@ -14,7 +14,7 @@ use url::Url;
 
 use crate::client::Ctx;
 use crate::ontology::validate_identifier;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::plan::{Plan, Step};
 use crate::provider_event::{ProviderEventStore, deliver_optional_event, provider_event_record};
 use crate::providers::{

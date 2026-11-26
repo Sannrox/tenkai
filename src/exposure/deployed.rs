@@ -17,7 +17,7 @@ use crate::auth_context::{
 use crate::client::{Ctx, LeaseError};
 use crate::fleet::OpenEnvironmentExposure;
 use crate::ontology::{KIND_ENVIRONMENT, KIND_RELEASE, NS};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 use super::{
     AUTO_RECALL_SEVERITY_PROPERTY, Advisory, AdvisoryFeed, KIND_DEPLOYED_EXPOSURE,

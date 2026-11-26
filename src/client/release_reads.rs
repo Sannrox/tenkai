@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 use super::Ctx;
 
@@ -71,7 +71,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::client::Ctx;
-    use crate::pb::sekai::Object;
+    use crate::pb::record::Object;
 
     fn release(marker: &str) -> Object {
         Object {

@@ -22,7 +22,7 @@ use sha2::{Digest as _, Sha256};
 use crate::auth_context::{AuthenticatedRequestContext, DeliveryCapability};
 use crate::client::Ctx;
 use crate::ontology::{NS, release_id, validate_identifier};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::release_signing::{SignatureEnvelope, TrustRoots, verify_release};
 use crate::signature_verification::validate_prefixed_digest;
 use crate::software_compatibility::{

@@ -417,7 +417,7 @@ mod tests {
             .await
             .unwrap();
         let first = observation();
-        let object = crate::pb::sekai::Object {
+        let object = crate::pb::record::Object {
             id: "note-1".into(),
             kind: "note".into(),
             name: "a".into(),
@@ -511,7 +511,7 @@ mod tests {
         .await
         .unwrap();
         let captured = observation();
-        let object = crate::pb::sekai::Object {
+        let object = crate::pb::record::Object {
             id: "note-1".into(),
             kind: "note".into(),
             name: "a".into(),
@@ -610,7 +610,7 @@ mod tests {
         set_environment_webhook(&mut ctx, "prod", subscribed.clone())
             .await
             .unwrap();
-        let note = crate::pb::sekai::Object {
+        let note = crate::pb::record::Object {
             id: "note-1".into(),
             kind: "note".into(),
             name: "a".into(),

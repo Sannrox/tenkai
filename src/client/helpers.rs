@@ -1,10 +1,8 @@
-//! Shared request and property-index helpers for the client facade.
+//! Shared action-actor and property-index helpers for the client facade.
 
 use anyhow::Result;
 
-use crate::pb::sekai::{
-    CreateObjectRequest, LeasePrecondition, Object, ObjectChange, UpdateObjectRequest,
-};
+use crate::pb::record::{Object, ObjectChange};
 
 pub(crate) fn action_actor_from_changes(
     changes: &[ObjectChange],
@@ -19,49 +17,15 @@ pub(crate) fn action_actor_from_changes(
     })
 }
 
-pub(crate) fn lease_precondition(
-    lease_namespace: &str,
-    lease_key: &str,
-    fencing_token: &str,
-) -> LeasePrecondition {
-    LeasePrecondition {
-        namespace: lease_namespace.into(),
-        key: lease_key.into(),
-        fencing_token: fencing_token.into(),
-        request_id: uuid::Uuid::new_v4().to_string(),
-    }
-}
-
-pub(crate) fn canonical_create_request(
-    object: Object,
-    precondition: Option<LeasePrecondition>,
-) -> CreateObjectRequest {
-    CreateObjectRequest {
-        object: Some(object),
-        lease_precondition: precondition,
-    }
-}
-
-pub(crate) fn canonical_update_request(
-    object: Object,
-    precondition: Option<LeasePrecondition>,
-) -> UpdateObjectRequest {
-    UpdateObjectRequest {
-        object: Some(object),
-        lease_precondition: precondition,
-    }
-}
-
 fn property_integer(object: &Object, key: &str) -> Option<i64> {
     object.properties.get(key)?.parse().ok()
 }
 
-/// Apply matching/equals/order/limit after a remote `FindByProperty` transfer.
+/// Apply matching/equals/order/limit to an unfiltered `find_by_property` set.
 ///
-/// Vendored `FindByProperty` has no filter, order, or page fields (ADR 0025).
-/// Callers that need multiple OFFSET windows must reuse this transferred set
-/// instead of re-issuing the RPC.
-pub(crate) fn apply_remote_property_index(
+/// Tenant catalogs answer only the plain property match; callers that need
+/// several OFFSET windows reuse this set instead of re-reading it.
+pub(crate) fn apply_property_index(
     mut objects: Vec<Object>,
     query: &crate::embedded::PropertyIndexQuery<'_>,
 ) -> Result<Vec<Object>> {

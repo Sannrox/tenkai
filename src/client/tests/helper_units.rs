@@ -1,10 +1,5 @@
-use crate::client::action_governed::idempotency_key;
-use crate::client::{
-    action_actor_from_changes, apply_remote_property_index, canonical_create_request,
-    canonical_update_request, lease_precondition, token_transport_is_safe,
-};
-use crate::pb::sekai::{Object, ObjectChange};
-use sekai_client::ClientConfig;
+use crate::client::{action_actor_from_changes, apply_property_index};
+use crate::pb::record::{Object, ObjectChange};
 
 fn indexed_plan_object(id: &str, created_at: i64) -> Object {
     Object {
@@ -21,12 +16,12 @@ fn indexed_plan_object(id: &str, created_at: i64) -> Object {
 }
 
 #[test]
-fn remote_property_index_pages_one_transferred_set() {
+fn property_index_pages_one_transferred_set() {
     let objects = (1..=16)
         .map(|created_at| indexed_plan_object(&format!("plan-{created_at}"), created_at))
         .collect::<Vec<_>>();
     let matching = ["computed"];
-    let page0 = apply_remote_property_index(
+    let page0 = apply_property_index(
         objects.clone(),
         &crate::embedded::PropertyIndexQuery {
             matching_key: Some("status"),
@@ -45,7 +40,7 @@ fn remote_property_index_pages_one_transferred_set() {
         },
     )
     .unwrap();
-    let page1 = apply_remote_property_index(
+    let page1 = apply_property_index(
         objects,
         &crate::embedded::PropertyIndexQuery {
             matching_key: Some("status"),
@@ -80,58 +75,6 @@ fn remote_property_index_pages_one_transferred_set() {
 }
 
 #[test]
-fn bearer_tokens_require_tls_or_loopback() {
-    assert!(token_transport_is_safe("https://sekai.example.com"));
-    assert!(token_transport_is_safe("http://127.0.0.1:50051"));
-    assert!(token_transport_is_safe("http://[::1]:50051"));
-    assert!(!token_transport_is_safe("http://sekai.example.com"));
-    assert!(!token_transport_is_safe("http://127.0.0.1.evil.test"));
-    assert!(!token_transport_is_safe(
-        "http://localhost:80@attacker.example:50051"
-    ));
-}
-
-#[test]
-fn remote_client_config_redacts_credentials_and_preserves_principal() {
-    let config = ClientConfig::new("http://127.0.0.1:50051", "tenkai.operator")
-        .with_token("provider-token")
-        .unwrap();
-
-    assert_eq!(config.principal, "tenkai.operator");
-    assert_eq!(
-        format!("{:?}", config.credential.as_ref().unwrap()),
-        "Credential(REDACTED)"
-    );
-}
-
-#[test]
-fn canonical_fenced_requests_preserve_lease_identity_and_request_id() {
-    let precondition = lease_precondition("tenkai", "environment/prod", "fence-7");
-    let create = canonical_create_request(
-        Object {
-            id: "object-1".into(),
-            ..Default::default()
-        },
-        Some(precondition.clone()),
-    );
-    let update = canonical_update_request(
-        Object {
-            id: "object-1".into(),
-            ..Default::default()
-        },
-        Some(precondition),
-    );
-
-    let create_lease = create.lease_precondition.as_ref().unwrap();
-    let update_lease = update.lease_precondition.as_ref().unwrap();
-    assert_eq!(create_lease.namespace, "tenkai");
-    assert_eq!(create_lease.key, "environment/prod");
-    assert_eq!(create_lease.fencing_token, "fence-7");
-    assert!(!create_lease.request_id.is_empty());
-    assert_eq!(create_lease, update_lease);
-}
-
-#[test]
 fn emergency_override_actor_uses_property_change_field() {
     let changes = vec![ObjectChange {
         field: "properties.last_emergency_override_correlation".into(),
@@ -157,17 +100,4 @@ fn emergency_override_actor_uses_property_change_field() {
         ),
         None
     );
-}
-
-#[test]
-fn a_reused_correlation_with_other_parameters_gets_its_own_admission_key() {
-    let params = |target: &str| {
-        std::collections::HashMap::from([
-            ("correlation".to_owned(), "c-1".to_owned()),
-            ("target".to_owned(), target.to_owned()),
-        ])
-    };
-    let key = idempotency_key("pause", &params("a"));
-    assert_eq!(key, idempotency_key("pause", &params("a")));
-    assert_ne!(key, idempotency_key("pause", &params("b")));
 }

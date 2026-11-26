@@ -1,0 +1,100 @@
+syntax = "proto3";
+package tenkai.record.v1;
+
+// Tenkai-owned catalog records.
+//
+// These messages keep the field numbers, types, and names of the records
+// earlier releases stored, so every SQLite and PostgreSQL payload written
+// before Tenkai owned them decodes to the same record and re-encodes to the
+// same bytes. Change a field only by adding a new number; never reuse or
+// renumber one.
+
+// A catalog object: releases, plans, environments, and the other kinds in
+// `src/ontology.rs`.
+message Object {
+  string id = 1;
+  string kind = 2;
+  string name = 3;
+  string namespace = 4;
+  string external_id = 5;
+  map<string, string> properties = 6;
+  int64 created = 7;
+  int64 updated = 8;
+}
+
+// A directed relation between two objects.
+message Link {
+  string id = 1;
+  string from_id = 2;
+  string to_id = 3;
+  string relation = 4;
+  int64 created = 5;
+}
+
+// A fenced lease. `status` is `active` or `released`.
+message Lease {
+  string namespace = 1;
+  string key = 2;
+  uint64 generation = 3;
+  string fencing_token = 4;
+  string owner = 5;
+  string status = 6;
+  int64 acquired_at_ms = 7;
+  int64 refreshed_at_ms = 8;
+  int64 expires_at_ms = 9;
+  int64 released_at_ms = 10;
+  // Kept for stored-record compatibility; Tenkai writes it empty.
+  string site_id = 11;
+}
+
+// One audited property change on an object.
+message ObjectChange {
+  string id = 1;
+  string object_id = 2;
+  string field = 3;
+  string old_value = 4;
+  string new_value = 5;
+  string changed_by = 6;
+  int64 timestamp = 7;
+}
+
+// A registered object schema.
+message ObjectType {
+  string kind = 1;
+  string description = 2;
+  repeated PropertyDef properties = 3;
+  bool is_builtin = 4;
+  repeated string implements = 5;
+}
+
+message PropertyDef {
+  string name = 1;
+  string type = 2;
+  bool required = 3;
+  string description = 4;
+  repeated string enum_values = 5;
+  string link_kind = 6;
+  string compute_expr = 7;
+  string classification = 8;
+  repeated StructFieldDef struct_fields = 9;
+}
+
+message StructFieldDef {
+  string name = 1;
+  string type = 2;
+  bool required = 3;
+  string description = 4;
+  repeated string enum_values = 5;
+}
+
+// An audited decision with its evidence.
+message Decision {
+  string id = 1;
+  int64 timestamp = 2;
+  string actor = 3;
+  string action = 4;
+  string reason = 5;
+  map<string, string> evidence = 6;
+  string target_id = 7;
+  string outcome = 8;
+}

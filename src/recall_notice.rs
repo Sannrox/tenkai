@@ -22,7 +22,7 @@ use sha2::{Digest as _, Sha256};
 use crate::auth_context::{AuthenticatedRequestContext, DeliveryCapability};
 use crate::client::Ctx;
 use crate::ontology::{KIND_ENVIRONMENT, KIND_RELEASE, NS, release_id};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::provider_event::{ProviderEventStore, enqueue_optional_event};
 use crate::providers::{EvidenceBinding, PROVIDER_CONTRACT_VERSION, ProviderEvent};
 use crate::release_signing::TrustRoots;

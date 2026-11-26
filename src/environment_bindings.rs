@@ -198,7 +198,7 @@ pub(crate) async fn unbind_locked(
 
 async fn persist_environment(
     ctx: &mut Ctx,
-    object: crate::pb::sekai::Object,
+    object: crate::pb::record::Object,
     lease: &crate::apply::EnvironmentLease,
 ) -> Result<()> {
     ctx.guarded_update(
@@ -296,7 +296,7 @@ fn merge_requirement(
 
 async fn required_for_dependent(
     ctx: &mut Ctx,
-    env_obj: &crate::pb::sekai::Object,
+    env_obj: &crate::pb::record::Object,
     dependent: &str,
     contract: &str,
     deployed: &BTreeMap<String, DeployedRelease>,
@@ -368,7 +368,7 @@ fn offer_satisfies(
 /// Digest-bound observation of `dependent`, the same evidence `report_manifest` uses.
 async fn observed_provides_for_dependent(
     ctx: &mut Ctx,
-    env_obj: &crate::pb::sekai::Object,
+    env_obj: &crate::pb::record::Object,
     dependent: &str,
 ) -> Result<BTreeMap<String, String>> {
     let Some(digest) =

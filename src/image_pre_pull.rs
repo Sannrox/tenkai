@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::apply::EnvironmentLease;
 use crate::client::Ctx;
 use crate::ontology::{KIND_IMAGE_PRE_PULL, NS, image_pre_pull_id};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::plan::{self, Action, Plan, PlanState};
 use crate::product_kind::ProductTarget;
 use crate::software_executor::{

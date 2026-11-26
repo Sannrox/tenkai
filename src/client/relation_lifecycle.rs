@@ -1,17 +1,11 @@
-//! Relation lifecycle semantics across embedded and remote adapters.
+//! Relation lifecycle semantics across the embedded and tenant catalogs.
 
 use anyhow::Result;
 use std::sync::Arc;
 
-use super::{RemoteClient, remote_unary};
-use crate::pb::sekai::{
-    CreateLinkRequest, CreateLinkResponse, DeleteLinkRequest, DeleteLinkResponse,
-    GetLinkedObjectsRequest, GetLinkedObjectsResponse, GetLinksRequest, GetLinksResponse, Link,
-    Object,
-};
+use crate::pb::record::{Link, Object};
 
-pub(super) enum RelationLifecycle<'a> {
-    Remote(&'a RemoteClient),
+pub(super) enum RelationLifecycle {
     Catalog {
         catalog: Arc<dyn crate::storage::CatalogGraph>,
         tenant: Option<String>,
@@ -19,12 +13,10 @@ pub(super) enum RelationLifecycle<'a> {
     /// A tenant hub without a usable catalog binding. `tenant_unbound` is a
     /// hub that has a catalog but no tenant yet: its reads fail with
     /// [`super::TENANT_NOT_BOUND`] instead of looking like an empty catalog.
-    Unavailable {
-        tenant_unbound: bool,
-    },
+    Unavailable { tenant_unbound: bool },
 }
 
-impl RelationLifecycle<'_> {
+impl RelationLifecycle {
     pub(super) async fn link(&self, from_id: &str, to_id: &str, relation: &str) -> Result<()> {
         let link = Link {
             id: format!("{from_id}--{relation}--{to_id}"),
@@ -45,33 +37,6 @@ impl RelationLifecycle<'_> {
                 })
                 .await
             }
-            Self::Remote(client) => {
-                let link_id = link.id.clone();
-                let from_id = link.from_id.clone();
-                let relation_name = link.relation.clone();
-                let response: std::result::Result<CreateLinkResponse, tonic::Status> =
-                    remote_unary(
-                        client,
-                        "/sekai.SekaiService/CreateLink",
-                        CreateLinkRequest {
-                            link: Some(link),
-                            fail_if_exists: true,
-                        },
-                    )
-                    .await;
-                match response {
-                    Ok(_) => Ok(()),
-                    Err(status) if status.code() == tonic::Code::AlreadyExists => Ok(()),
-                    Err(status)
-                        if status.code() == tonic::Code::Internal
-                            && remote_link_exists(client, &from_id, &relation_name, &link_id)
-                                .await =>
-                    {
-                        Ok(())
-                    }
-                    Err(status) => Err(status.into()),
-                }
-            }
         }
     }
 
@@ -91,32 +56,6 @@ impl RelationLifecycle<'_> {
                 })
                 .await
             }
-            Self::Remote(client) => {
-                let link_id = link.id.clone();
-                let from_id = link.from_id.clone();
-                let relation_name = link.relation.clone();
-                let response: std::result::Result<CreateLinkResponse, tonic::Status> =
-                    remote_unary(
-                        client,
-                        "/sekai.SekaiService/CreateLink",
-                        CreateLinkRequest {
-                            link: Some(link),
-                            fail_if_exists: true,
-                        },
-                    )
-                    .await;
-                match response {
-                    Ok(_) => Ok(()),
-                    Err(status)
-                        if status.code() == tonic::Code::Internal
-                            && remote_link_exists(client, &from_id, &relation_name, &link_id)
-                                .await =>
-                    {
-                        Err(super::ClientError::UniqueConflict)
-                    }
-                    Err(status) => Err(status.into()),
-                }
-            }
         }
     }
 
@@ -131,20 +70,6 @@ impl RelationLifecycle<'_> {
                     catalog.unlink(tenant.as_deref(), &id)
                 })
                 .await
-            }
-            Self::Remote(client) => {
-                let response: std::result::Result<DeleteLinkResponse, tonic::Status> =
-                    remote_unary(
-                        client,
-                        "/sekai.SekaiService/DeleteLink",
-                        DeleteLinkRequest { id },
-                    )
-                    .await;
-                match response {
-                    Ok(_) => Ok(()),
-                    Err(status) if status.code() == tonic::Code::NotFound => Ok(()),
-                    Err(status) => Err(status.into()),
-                }
             }
         }
     }
@@ -171,19 +96,6 @@ impl RelationLifecycle<'_> {
                 })
                 .await
             }
-            Self::Remote(client) => {
-                let response: GetLinkedObjectsResponse = remote_unary(
-                    client,
-                    "/sekai.SekaiService/GetLinkedObjects",
-                    GetLinkedObjectsRequest {
-                        object_id: object_id.into(),
-                        relation: relation.into(),
-                        direction: direction.into(),
-                    },
-                )
-                .await?;
-                Ok(response.objects)
-            }
         }
     }
 
@@ -203,38 +115,6 @@ impl RelationLifecycle<'_> {
                 })
                 .await
             }
-            Self::Remote(client) => {
-                let response: GetLinksResponse = remote_unary(
-                    client,
-                    "/sekai.SekaiService/GetLinks",
-                    GetLinksRequest {
-                        object_id: object_id.into(),
-                        relation: relation.into(),
-                        direction: "out".into(),
-                    },
-                )
-                .await?;
-                Ok(response.links)
-            }
         }
     }
-}
-
-async fn remote_link_exists(
-    client: &RemoteClient,
-    from_id: &str,
-    relation: &str,
-    link_id: &str,
-) -> bool {
-    let response: std::result::Result<GetLinksResponse, tonic::Status> = remote_unary(
-        client,
-        "/sekai.SekaiService/GetLinks",
-        GetLinksRequest {
-            object_id: from_id.into(),
-            relation: relation.into(),
-            direction: "out".into(),
-        },
-    )
-    .await;
-    response.is_ok_and(|response| response.links.iter().any(|link| link.id == link_id))
 }

@@ -13,7 +13,7 @@
 - [0011 — Shikigami worker-pool lifecycle ownership](0011-shikigami-worker-pool-lifecycle.md)
 - [0012 — Legacy graph-action compatibility boundary](0012-legacy-graph-action-compatibility-boundary.md) (superseded by 0015)
 - [0013 — Evaluation gate evidence projection](0013-evaluation-gate-evidence-projection.md) (`[gate].eval_suite` pull retired by 0064)
-- [0014 — Versioned Rust client facade](0014-versioned-rust-client-facade.md)
+- [0014 — Versioned Rust client facade](0014-versioned-rust-client-facade.md) (superseded by 0064; client removed by #1582)
 - [0015 — Governed-action remote migration](0015-governed-action-remote-migration.md) (superseded by 0064)
 - [0016 — Bounded same-version remediations](0016-same-version-remediation.md) (secret storage amended by 0045; certificate-renewal restart by 0046)
 - [0017 — Executable release-wave advancement](0017-executable-release-waves.md)

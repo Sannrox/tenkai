@@ -134,28 +134,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-stream"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
-dependencies = [
- "async-stream-impl",
- "futures-core",
- "pin-project-lite",
-]
-
-[[package]]
-name = "async-stream-impl"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -971,17 +949,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
 
 [[package]]
-name = "futures-macro"
-version = "0.3.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.3",
-]
-
-[[package]]
 name = "futures-sink"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1002,7 +969,6 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "futures-io",
- "futures-macro",
  "futures-sink",
  "futures-task",
  "memchr",
@@ -2783,40 +2749,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sekai-client"
-version = "0.1.2"
-source = "git+https://github.com/Sannrox/sekai-chisei?rev=67157d1fa242ac2f133c88243ef23b56f88042e6#67157d1fa242ac2f133c88243ef23b56f88042e6"
-dependencies = [
- "async-stream",
- "async-trait",
- "futures-core",
- "futures-util",
- "http",
- "hyper-util",
- "prost",
- "sekai-proto",
- "tokio",
- "tokio-util",
- "tonic",
- "tonic-prost",
- "tower",
- "uuid",
-]
-
-[[package]]
-name = "sekai-proto"
-version = "1.0.1"
-source = "git+https://github.com/Sannrox/sekai-chisei?rev=67157d1fa242ac2f133c88243ef23b56f88042e6#67157d1fa242ac2f133c88243ef23b56f88042e6"
-dependencies = [
- "prost",
- "prost-types",
- "protoc-bin-vendored",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
-]
-
-[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3147,7 +3079,6 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "schemars",
- "sekai-client",
  "semver",
  "serde",
  "serde_json",
@@ -3338,7 +3269,6 @@ version = "0.9.1"
 dependencies = [
  "prost",
  "protoc-bin-vendored",
- "sekai-proto",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

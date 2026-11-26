@@ -1,9 +1,6 @@
 use crate::client::Ctx;
 use crate::pb::graph_action::{ActionOp, ActionTypeDef};
-use crate::pb::sekai::Object;
-
-use super::mock_router::remote_ctx;
-use super::mock_state::MockSekaiState;
+use crate::pb::record::Object;
 
 async fn assert_action_lifecycle(mut ctx: Ctx) {
     let target = Object {
@@ -96,11 +93,4 @@ async fn embedded_ctx_conforms_to_action_lifecycle() {
     let ctx = Ctx::embedded(&path).unwrap();
     assert_action_lifecycle(ctx).await;
     std::fs::remove_file(path).unwrap();
-}
-
-#[tokio::test]
-async fn remote_ctx_conforms_to_action_lifecycle() {
-    let (ctx, server) = remote_ctx(MockSekaiState::default()).await;
-    assert_action_lifecycle(ctx).await;
-    server.abort();
 }

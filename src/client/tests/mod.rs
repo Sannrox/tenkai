@@ -6,16 +6,9 @@ use crate::storage::StoreError;
 mod action_lifecycle;
 mod helper_units;
 mod lease_lifecycle;
-mod mock_action_rpc;
-mod mock_lease_rpc;
-mod mock_object_rpc;
-mod mock_relation_rpc;
-mod mock_router;
-mod mock_state;
 mod object_lifecycle;
 mod plan_kind_list;
 mod relation_lifecycle;
-mod remote;
 
 #[test]
 fn unique_conflict_treats_already_exists_and_internal_unique_as_the_same() {

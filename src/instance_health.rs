@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::software_executor::sanitize_diagnostic_text;
 
 pub const HEALTH_OBSERVATION_SCHEMA: &str = "tenkai.instance-health.v1";

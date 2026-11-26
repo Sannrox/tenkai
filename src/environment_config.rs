@@ -22,7 +22,7 @@ use crate::client::Ctx;
 use crate::connectivity::ConnectivityClass;
 use crate::deploy_webhook::{WebhookEndpoint, WebhookEvent};
 use crate::ontology::{NS, validate_identifier};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 pub const CONFIG_AUDIT_KIND: &str = "tenkai.environment_config_audit";
 const MAX_REASON_BYTES: usize = 1024;

@@ -6,7 +6,7 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::client::Ctx;
 use crate::ontology::{KIND_PACKAGE_MIGRATION, NS, require_package_migration_schema};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 use super::types::{MigrationListEntry, MigrationRecord, record_catalog_id};
 

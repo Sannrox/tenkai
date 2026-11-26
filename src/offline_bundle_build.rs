@@ -33,7 +33,7 @@ use crate::offline_bundle::{
 use crate::offline_chunk_store::{self, OfflineChunkArtifact};
 use crate::offline_host_binaries::{HostBinaryInput, HostBinaryRole};
 use crate::ontology;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::release_signing::TrustRoots;
 
 pub const CHECKSUM_MANIFEST_SCHEMA: &str = "tenkai.offline-checksum-manifest.v1";

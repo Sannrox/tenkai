@@ -8,7 +8,7 @@ use tokio::sync::OnceCell;
 use super::{
     Backend, Ctx, PlanKindListSnapshot, PlanKindListTick, PlanRetargetTickGuard, block_operational,
 };
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::storage::OperationalStore;
 #[cfg(any(test, feature = "test-support"))]
 use crate::storage::StoreBackup;
@@ -269,9 +269,7 @@ impl Ctx {
     }
 
     /// Read the bounded Tenkai-owned terminal-outcome projection for one
-    /// environment. Remote provider mode has no local outbox to inspect; its
-    /// authenticated server host supplies the same projection from its local
-    /// operational store.
+    /// environment.
     pub(crate) async fn terminal_outcomes(
         &self,
         environment: &str,

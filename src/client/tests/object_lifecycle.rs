@@ -1,8 +1,5 @@
 use crate::client::{Ctx, block_catalog};
-use crate::pb::sekai::Object;
-
-use super::mock_router::remote_ctx;
-use super::mock_state::MockSekaiState;
+use crate::pb::record::Object;
 
 async fn assert_object_lifecycle(mut ctx: Ctx) {
     let id = "tenkai:conformance:object";
@@ -97,13 +94,6 @@ async fn embedded_ctx_serves_catalog_and_operational_ports_and_file_backup() {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(backup);
     let _ = std::fs::remove_file(restored);
-}
-
-#[tokio::test]
-async fn remote_ctx_conforms_to_object_lifecycle() {
-    let (ctx, server) = remote_ctx(MockSekaiState::default()).await;
-    assert_object_lifecycle(ctx).await;
-    server.abort();
 }
 
 #[tokio::test]

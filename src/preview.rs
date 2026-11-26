@@ -19,7 +19,7 @@ use crate::client::Ctx;
 use crate::ontology::{
     KIND_ENVIRONMENT, NS, env_id, validate_identifier, validate_opaque_identifier,
 };
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::signature_verification;
 
 pub const PIN_CONTRACT: &str = "tenkai.branch_pin.v1";

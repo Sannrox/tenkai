@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::OnceCell;
 
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 /// Tick-scoped list of `KIND_PLAN` (embedded `list_kind` or remote `ListObjects`) for retarget detection.
 ///

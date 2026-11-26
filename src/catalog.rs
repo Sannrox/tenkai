@@ -13,7 +13,7 @@ use crate::change_set_pin::{self, ChangeSetEvidenceInput, ChangeSetPinProjection
 use crate::client::Ctx;
 use crate::manifest;
 use crate::ontology::*;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::release_provenance::{self, ProvenanceEnvelope, ProvenanceProjection};
 use crate::release_signing::{self, VerificationEvidence};
 

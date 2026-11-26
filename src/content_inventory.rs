@@ -687,7 +687,7 @@ fn collected_item(digest: &str, kind: &str, size_bytes: u64) -> CollectedItem {
 /// Every `(kind, digest)` a release names: its layers, the blobs its
 /// stored image manifests reference (transitively), and its weights.
 fn release_digests(
-    object: &crate::pb::sekai::Object,
+    object: &crate::pb::record::Object,
     layer_files: &HashMap<String, Vec<(PathBuf, u64)>>,
     manifest_depth: &mut HashMap<String, usize>,
     kept: bool,
@@ -754,7 +754,7 @@ fn release_digests(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pb::sekai::Object;
+    use crate::pb::record::Object;
 
     fn temp_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(

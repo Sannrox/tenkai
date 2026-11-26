@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::Result as AnyResult;
 
 use crate::ontology::{KIND_CHANNEL, KIND_ENVIRONMENT, KIND_RELEASE, NS};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::plan::{Plan, PlanState};
 
 use super::{ChannelRecord, EnvironmentRecord, PlanRecord, PlanStatus, ReleaseRecord};

@@ -2,7 +2,7 @@ use super::super::*;
 use super::live_property_lookup::{plan_object, plan_with_steps};
 use std::collections::HashMap;
 use tenkai::ontology::{KIND_CHANNEL, KIND_ENVIRONMENT, KIND_PLAN, KIND_RELEASE};
-use tenkai::pb::sekai::Object;
+use tenkai::pb::record::Object;
 use tenkai::storage::CatalogGraph;
 
 /// #869 drill: set-based kind listings return exactly what a per-id `get`

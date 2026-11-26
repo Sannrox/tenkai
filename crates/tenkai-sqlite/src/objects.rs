@@ -20,7 +20,7 @@ use tenkai::ontology::{
     release_id,
 };
 use tenkai::pb::graph_action::{ActionResult, ActionTypeDef};
-use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
+use tenkai::pb::record::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use tenkai::plan::{Plan, PlanState};
 use tenkai::storage::{
     ActionWrite, ActionWrites, CatalogWrite, ChannelRecord, EnvironmentRecord, PlanRecord,

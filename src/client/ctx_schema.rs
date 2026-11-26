@@ -1,56 +1,14 @@
-//! Schema, lease, and remote-dispatch methods on `Ctx`.
+//! Schema and lease methods on `Ctx`.
 
 use anyhow::{Result, anyhow};
-use prost::Message;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-use sekai_client::CallOptions;
-
-use super::{Backend, Ctx, RemoteClient, remote_unary_with_options};
+use super::Ctx;
 use crate::pb::graph_action::ActionTypeDef;
-use crate::pb::sekai::{
-    CreateSchemaTypeRequest, CreateSchemaTypeResponse, Lease, ListSchemaTypesRequest,
-    ListSchemaTypesResponse, ObjectType,
-};
+use crate::pb::record::{Lease, ObjectType};
 
 impl Ctx {
-    pub(super) fn remote(&self) -> Result<&RemoteClient> {
-        match &self.backend {
-            Backend::Remote { client, .. } => Ok(client.as_ref()),
-            Backend::Embedded { .. } | Backend::TenantHub { .. } => {
-                anyhow::bail!("operation requires a configured remote provider")
-            }
-        }
-    }
-
-    pub(super) async fn remote_unary<Req, Resp>(
-        &self,
-        path: &str,
-        request: Req,
-        options: CallOptions,
-    ) -> std::result::Result<Resp, tonic::Status>
-    where
-        Req: Message + Default + Clone + Send + 'static,
-        Resp: Message + Default + Send + 'static,
-    {
-        let client = self
-            .remote()
-            .map_err(|error| tonic::Status::internal(error.to_string()))?;
-        remote_unary_with_options(client, path, request, options).await
-    }
-
-    async fn remote_schema_exists(&self, kind: &str) -> bool {
-        let response: std::result::Result<ListSchemaTypesResponse, tonic::Status> = self
-            .remote_unary(
-                "/sekai.SekaiService/ListSchemaTypes",
-                ListSchemaTypesRequest {},
-                CallOptions::default(),
-            )
-            .await;
-        response.is_ok_and(|response| response.types.iter().any(|schema| schema.kind == kind))
-    }
-
     pub(crate) async fn register_schema(
         &mut self,
         schema: ObjectType,
@@ -61,31 +19,9 @@ impl Ctx {
             })
             .await;
         }
-        if self.is_tenant_hub() {
-            return Err(super::ClientError::Failed(anyhow!(
-                super::TENANT_HUB_UNAVAILABLE
-            )));
-        }
-        let kind = schema.kind.clone();
-        let response: std::result::Result<CreateSchemaTypeResponse, tonic::Status> = self
-            .remote_unary(
-                "/sekai.SekaiService/CreateSchemaType",
-                CreateSchemaTypeRequest {
-                    r#type: Some(schema),
-                },
-                CallOptions::default(),
-            )
-            .await;
-        match response {
-            Ok(_) => Ok(()),
-            Err(status)
-                if status.code() == tonic::Code::Internal
-                    && self.remote_schema_exists(&kind).await =>
-            {
-                Err(super::ClientError::UniqueConflict)
-            }
-            Err(status) => Err(status.into()),
-        }
+        Err(super::ClientError::Failed(anyhow!(
+            super::TENANT_HUB_UNAVAILABLE
+        )))
     }
 
     pub(crate) async fn schemas(&mut self) -> Result<Vec<ObjectType>> {
@@ -95,18 +31,8 @@ impl Ctx {
             })
             .await;
         }
-        if self.is_tenant_hub() {
-            anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
-            return Ok(Vec::new());
-        }
-        let response: ListSchemaTypesResponse = self
-            .remote_unary(
-                "/sekai.SekaiService/ListSchemaTypes",
-                ListSchemaTypesRequest {},
-                CallOptions::default(),
-            )
-            .await?;
-        Ok(response.types)
+        anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
+        Ok(Vec::new())
     }
 
     pub(crate) async fn register_action(

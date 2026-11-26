@@ -19,7 +19,7 @@ use crate::ontology::{
     KIND_CHANNEL, KIND_CONNECTIVITY_UPGRADE, NS, channel_id, connectivity_upgrade_id, env_id,
     release_id, require_connectivity_upgrade_schema, validate_identifier,
 };
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::plan::{self, Action, Plan, PlanState};
 
 pub const UPGRADE_FORMAT_VERSION: u32 = 1;

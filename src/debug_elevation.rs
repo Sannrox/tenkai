@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::client::Ctx;
 use crate::debug_session::{DebugSession, DebugSessionState};
 use crate::ontology::{KIND_DEBUG_ELEVATION, NS};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::plan_approval::{
     ApprovalEnvelope, CountedApproval, QuorumTally, SignedApproval, count_quorum,
 };

@@ -20,7 +20,7 @@ use crate::criticality::{
     refuse_generated_in_the_future, require_owner_reason,
 };
 use crate::ontology::{env_id, product_id, validate_identifier};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::release_signing::TrustRoots;
 
 const PRODUCT_MUTATION_LEASE_NAMESPACE: &str = "tenkai/product-mutation";

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 /// Objects by id with an index by kind, so a kind or property lookup reads
 /// only that kind's objects instead of the whole partition. Planning makes

@@ -21,7 +21,7 @@ use crate::client::{Ctx, block_operational};
 use crate::manifest::ProductKind;
 use crate::model_runtime::ModelRuntimeDescriptor;
 use crate::ontology::validate_identifier;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::providers::{
     EvidenceBinding, PROVIDER_CONTRACT_VERSION, ProviderEvent, enqueue_optional_event,
 };

@@ -2,7 +2,7 @@ use super::support::{FixedReconciler, app_with_reconciler};
 use super::*;
 
 use tenkai::ontology::{KIND_DEPLOYMENT, NS, deployment_id};
-use tenkai::pb::sekai::Object;
+use tenkai::pb::record::Object;
 
 fn attempt(env: &str, instance: &str, created: i64, status: &str, detail: &str) -> Object {
     Object {

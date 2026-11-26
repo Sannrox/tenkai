@@ -314,7 +314,7 @@ async fn persist_correlation(
 /// Write an environment object, fenced to `lease` when the caller holds one.
 async fn put_environment(
     ctx: &mut Ctx,
-    object: crate::pb::sekai::Object,
+    object: crate::pb::record::Object,
     lease: Option<&EnvironmentLease>,
 ) -> Result<()> {
     match lease {

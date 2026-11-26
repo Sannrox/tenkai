@@ -14,7 +14,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
 use crate::ontology::validate_identifier;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::sealed_secret::{SealedTarget, SealedValue};
 
 /// Environment property holding a sealed saved plan for one instance.

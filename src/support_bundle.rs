@@ -878,7 +878,7 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
         created_at: i64,
     ) {
         let release_id = crate::ontology::release_id(product, version);
-        ctx.create_once(crate::pb::sekai::Object {
+        ctx.create_once(crate::pb::record::Object {
             id: release_id.clone(),
             kind: crate::ontology::KIND_RELEASE.into(),
             name: format!("{product}@{version}"),
