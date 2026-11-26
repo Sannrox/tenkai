@@ -252,20 +252,37 @@ async fn admit_before_delegation(
         .await?;
         if !options.skip_gates && !apply_already_admitted_gates {
             for step in &plan.steps {
-                let gate = ctx
-                    .evaluation_gate_evidence(crate::pb::chisei::GetEvaluationGateEvidenceRequest {
-                        suite_id: format!("required-gate:{}", step.product),
-                        release_digest: step.release_digest.clone(),
-                        artifact_digest: step.artifact_digest.clone(),
-                        max_timestamp_ms: options.now.saturating_add(60_000),
-                    })
-                    .await;
-                if let Err(error) = gate {
-                    let detail = error.to_string();
-                    if detail.contains("no governance provider") {
-                        bail!("required gate evidence is unavailable: {detail}");
+                let Some(release) = ctx.get(&step.release_id).await? else {
+                    continue;
+                };
+                let Some(raw) = release.properties.get("manifest") else {
+                    continue;
+                };
+                let manifest = crate::manifest::parse_raw(raw)?;
+                let Some(suite) = manifest
+                    .gate
+                    .eval_suite
+                    .as_deref()
+                    .filter(|suite| !suite.is_empty())
+                else {
+                    continue;
+                };
+                match crate::model_release_evidence::admit_eval_suite_gate(
+                    ctx,
+                    suite,
+                    &step.artifact_digest,
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(failure)) => {
+                        bail!(
+                            "required gate evidence is unavailable: eval suite {suite} {failure}"
+                        );
                     }
-                    bail!("required gate evidence failed: {detail}");
+                    Err(error) => {
+                        bail!("required gate evidence failed: {error}");
+                    }
                 }
             }
         }
@@ -555,6 +572,10 @@ mod tests {
     }
 
     async fn signed_upgrade(label: &str) -> Fixture {
+        signed_upgrade_with(label, "").await
+    }
+
+    async fn signed_upgrade_with(label: &str, extra_toml: &str) -> Fixture {
         let root = std::env::temp_dir().join(format!(
             "tenkai-bridge-{label}-{}-{}",
             std::process::id(),
@@ -567,7 +588,11 @@ mod tests {
             .await
             .unwrap();
         for version in ["1.0.0", "1.1.0"] {
-            publish_signed(&mut ctx, &root, version).await;
+            if extra_toml.is_empty() {
+                publish_signed(&mut ctx, &root, version).await;
+            } else {
+                publish_signed_extra(&mut ctx, &root, version, extra_toml).await;
+            }
         }
         let actor = crate::auth_context::test_management_context(label);
         crate::catalog::promote(&mut ctx, &actor, "bridge-app@1.1.0", "stable")
@@ -599,6 +624,36 @@ mod tests {
         crate::dev_sign::publish_signed_product(ctx, root, version, "bridge-app")
             .await
             .unwrap();
+    }
+
+    async fn publish_signed_extra(ctx: &mut Ctx, root: &Path, version: &str, extra_toml: &str) {
+        use crate::catalog::{self, PublishOptions};
+
+        let dir = root.join(version);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tenkai.toml"),
+            format!(
+                "[product]\nname = \"bridge-app\"\nversion = \"{version}\"\n\n[deploy]\ninstall = \"true\"\n{extra_toml}"
+            ),
+        )
+        .unwrap();
+        let keys = root.join("keys");
+        let signature = dir.join("release.sig.json");
+        let trust = dir.join("release-trust.toml");
+        crate::dev_sign::sign_release(&keys, &dir.join("tenkai.toml"), &signature, &trust).unwrap();
+        catalog::publish(
+            ctx,
+            &dir.join("tenkai.toml"),
+            &PublishOptions {
+                signature: Some(signature),
+                trust_roots: Some(trust),
+                allow_unsigned_development: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     }
 
     fn write_plan_approval(plan: &Plan, approval: &Path, trust: &Path, now: i64, ttl: i64) {
@@ -756,7 +811,7 @@ mod tests {
         assert!(err.contains("recalled"), "{err}");
         let _ = std::fs::remove_dir_all(ranged.root);
 
-        let mut gated = signed_upgrade("gate").await;
+        let mut gated = signed_upgrade_with("gate", "\n[gate]\neval_suite = \"quality\"\n").await;
         let gated_approval = gated.approval.clone();
         let gated_trust = gated.trust.clone();
         let gated_plan = gated.plan.clone();

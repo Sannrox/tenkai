@@ -1,10 +1,9 @@
 //! Evaluation, maintenance, and durable state admission for one Plan start.
 
 use anyhow::{Context as _, Result, bail};
-use sha2::{Digest as _, Sha256};
 
 use crate::maintenance::{self, Eligibility};
-use crate::pb::chisei::{EvaluationGateCaseResult, GetEvaluationGateEvidenceRequest};
+use crate::model_release_evidence::ModelReleaseEvidenceFailure;
 
 use super::*;
 
@@ -140,14 +139,7 @@ pub(super) async fn admit(
             else {
                 continue;
             };
-            let detail = match check_eval_gate(
-                ctx,
-                suite,
-                &step.release_digest,
-                &step.artifact_digest,
-            )
-            .await
-            {
+            let detail = match check_eval_gate(ctx, suite, &step.artifact_digest).await {
                 GateDecision::Allowed => continue,
                 GateDecision::Denied(detail) | GateDecision::Unavailable(detail) => detail,
             };
@@ -334,108 +326,23 @@ enum GateDecision {
     Unavailable(String),
 }
 
-fn evaluate_gate(
-    results: &[EvaluationGateCaseResult],
-    suite_id: &str,
-    expected_cases: &[String],
-) -> GateDecision {
-    if results.is_empty() {
-        return GateDecision::Denied(format!(
-            "gate blocked: latest run of eval suite {suite_id} has no case results"
-        ));
-    }
-    let expected: std::collections::HashSet<_> = expected_cases.iter().collect();
-    let actual: std::collections::HashSet<_> =
-        results.iter().map(|result| &result.case_id).collect();
-    if expected.is_empty() || actual.len() != results.len() || actual != expected {
-        return GateDecision::Denied(format!(
-            "gate blocked: latest run of eval suite {suite_id} does not contain exactly one result for every current case"
-        ));
-    }
-    let failed: Vec<_> = results
-        .iter()
-        .filter(|result| !result.passed)
-        .map(|result| result.case_id.clone())
-        .collect();
-    if !failed.is_empty() {
-        return GateDecision::Denied(format!(
-            "gate blocked: eval suite {suite_id} latest run failing cases: {}",
-            failed.join(", ")
-        ));
-    }
-    GateDecision::Allowed
-}
-
-async fn check_eval_gate(
-    ctx: &mut Ctx,
-    suite_id: &str,
-    release_digest: &str,
-    artifact_digest: &str,
-) -> GateDecision {
-    let max_timestamp_ms = crate::now_millis().saturating_add(60_000);
-    let response = match ctx
-        .evaluation_gate_evidence(GetEvaluationGateEvidenceRequest {
-            suite_id: suite_id.into(),
-            release_digest: release_digest.into(),
-            artifact_digest: artifact_digest.into(),
-            max_timestamp_ms,
-        })
-        .await
+async fn check_eval_gate(ctx: &mut Ctx, suite_id: &str, artifact_digest: &str) -> GateDecision {
+    match crate::model_release_evidence::admit_eval_suite_gate(ctx, suite_id, artifact_digest).await
     {
-        Ok(response) => response,
-        Err(error) => {
-            return GateDecision::Unavailable(format!(
-                "gate unavailable: could not read evaluation gate evidence for suite {suite_id}: {error}"
-            ));
-        }
-    };
-    match response.status.as_str() {
-        "suite_not_found" => GateDecision::Denied(format!(
-            "gate blocked: eval suite {suite_id} does not exist"
+        Ok(Ok(())) => GateDecision::Allowed,
+        Ok(Err(ModelReleaseEvidenceFailure::Missing)) => GateDecision::Denied(format!(
+            "gate blocked: eval suite {suite_id} has no recorded evaluation evidence bound to this artifact"
         )),
-        "no_matching_run" => GateDecision::Denied(format!(
-            "gate blocked: eval suite {suite_id} has no current run bound to this release and artifact"
+        Ok(Err(ModelReleaseEvidenceFailure::Stale)) => GateDecision::Denied(format!(
+            "gate blocked: recorded evaluation evidence for suite {suite_id} is stale"
         )),
-        "found" => {
-            let Some(evidence) = response.evidence else {
-                return GateDecision::Unavailable(format!(
-                    "gate unavailable: evaluation gate evidence for suite {suite_id} omitted its projection"
-                ));
-            };
-            if evidence.suite_id != suite_id
-                || evidence.release_digest != release_digest
-                || evidence.artifact_digest != artifact_digest
-                || evidence.suite_digest.is_empty()
-                || evidence.config_ref
-                    != gate_config_ref(release_digest, artifact_digest, &evidence.suite_digest)
-                || evidence.run_id.is_empty()
-                || evidence.run_timestamp <= 0
-                || evidence.run_timestamp > max_timestamp_ms
-            {
-                return GateDecision::Unavailable(format!(
-                    "gate unavailable: evaluation gate evidence for suite {suite_id} had an invalid binding"
-                ));
-            }
-            evaluate_gate(&evidence.results, suite_id, &evidence.expected_case_ids)
-        }
-        status => GateDecision::Unavailable(format!(
-            "gate unavailable: evaluation gate evidence for suite {suite_id} returned unknown status {status:?}"
+        Ok(Err(ModelReleaseEvidenceFailure::Invalid)) => GateDecision::Denied(format!(
+            "gate blocked: recorded evaluation evidence for suite {suite_id} is invalid"
+        )),
+        Err(error) => GateDecision::Unavailable(format!(
+            "gate unavailable: could not read recorded evaluation evidence for suite {suite_id}: {error}"
         )),
     }
-}
-
-fn gate_config_ref(release_digest: &str, artifact_digest: &str, suite_digest: &str) -> String {
-    let mut hasher = Sha256::new();
-    for value in [
-        b"tenkai-gate-v1".as_slice(),
-        release_digest.as_bytes(),
-        artifact_digest.as_bytes(),
-        suite_digest.as_bytes(),
-    ] {
-        hasher.update((value.len() as u64).to_le_bytes());
-        hasher.update(value);
-    }
-    format!("tenkai:{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -581,49 +488,130 @@ mod tests {
         );
     }
 
-    #[test]
-    fn gate_uses_latest_run_and_reports_failed_cases() {
-        let results = vec![
-            EvaluationGateCaseResult {
-                case_id: "old".into(),
-                passed: true,
+    async fn gated_software_fixture(name: &str) -> (std::path::PathBuf, crate::client::Ctx) {
+        let root = std::env::temp_dir().join(format!(
+            "tenkai-eval-suite-gate-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let product = root.join("product");
+        std::fs::create_dir_all(&product).unwrap();
+        std::fs::write(
+            product.join("tenkai.toml"),
+            "[product]\nname = \"gated-app\"\nversion = \"1.0.0\"\n\n[deploy]\ninstall = \"true\"\nuninstall = \"true\"\n\n[gate]\neval_suite = \"quality\"\n",
+        )
+        .unwrap();
+        let mut ctx = crate::client::Ctx::embedded(root.join("tenkai.db")).unwrap();
+        crate::ontology::register(&mut ctx).await.unwrap();
+        crate::catalog::publish(
+            &mut ctx,
+            &product.join("tenkai.toml"),
+            &crate::catalog::PublishOptions {
+                allow_unsigned_development: true,
+                ..Default::default()
             },
-            EvaluationGateCaseResult {
-                case_id: "smoke".into(),
-                passed: false,
-            },
-        ];
-        match evaluate_gate(&results, "suite", &["smoke".into(), "old".into()]) {
-            GateDecision::Denied(detail) => assert!(detail.contains("smoke")),
-            _ => panic!("a failing case must deny the gate"),
+        )
+        .await
+        .unwrap();
+        let actor = crate::auth_context::test_management_context("eval-suite-gate");
+        crate::catalog::promote(&mut ctx, &actor, "gated-app@1.0.0", "stable")
+            .await
+            .unwrap();
+        crate::plan::env_add(&mut ctx, "local", "eval-suite gate")
+            .await
+            .unwrap();
+        crate::plan::subscribe(&mut ctx, "local", "gated-app", "stable")
+            .await
+            .unwrap();
+        (root, ctx)
+    }
+
+    struct SucceedingExecutor;
+
+    impl crate::software_executor::SoftwareExecutor for SucceedingExecutor {
+        fn apply(
+            &self,
+            _request: &crate::software_executor::SoftwareApplyRequest,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn remove(
+            &self,
+            _request: &crate::software_executor::SoftwareApplyRequest,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn observe(
+            &self,
+            _request: &crate::software_executor::SoftwareApplyRequest,
+        ) -> anyhow::Result<crate::software_executor::SoftwareObserveStatus> {
+            Ok(crate::software_executor::SoftwareObserveStatus::Present)
         }
     }
 
-    #[test]
-    fn gate_rejects_incomplete_or_duplicate_case_results() {
-        let results = vec![
-            EvaluationGateCaseResult {
-                case_id: "first".into(),
-                passed: true,
+    async fn apply_local(
+        ctx: &mut crate::client::Ctx,
+    ) -> anyhow::Result<Vec<crate::apply::Outcome>> {
+        let plan = crate::plan::create(ctx, "local").await?;
+        crate::apply::execute_with_options(
+            ctx,
+            &plan.id,
+            crate::apply::ExecutionOptions {
+                rollback_hold: true,
+                skip_gates: false,
+                emergency_reason: None,
+                authorization: crate::apply::ExecutionAuthorization::LocalDevelopment {
+                    reason: "eval-suite gate fixture",
+                },
+                software_executors: crate::software_executor::SoftwareExecutors::with_default(
+                    std::sync::Arc::new(SucceedingExecutor),
+                ),
+                model_runtime_executor: None,
+                worker_lifecycle: None,
+                artifact_registry: None,
+                delivery_adapter: None,
             },
-            EvaluationGateCaseResult {
-                case_id: "first".into(),
-                passed: true,
-            },
-        ];
-        assert!(matches!(
-            evaluate_gate(&results, "suite", &["first".into(), "second".into()]),
-            GateDecision::Denied(detail) if detail.contains("exactly one result")
-        ));
+        )
+        .await
     }
 
-    #[test]
-    fn gate_reference_changes_with_artifact_or_suite_content() {
-        let original = gate_config_ref("manifest", "artifact-one", "suite-digest-one");
-        let changed_artifact = gate_config_ref("manifest", "artifact-two", "suite-digest-one");
-        let changed_suite = gate_config_ref("manifest", "artifact-one", "suite-digest-two");
+    #[tokio::test]
+    async fn eval_suite_apply_refuses_without_recorded_evidence() {
+        let (root, mut ctx) = gated_software_fixture("refuse").await;
+        let outcomes = apply_local(&mut ctx).await.unwrap();
+        assert_eq!(
+            outcomes[0].classified_status().unwrap(),
+            crate::apply::StepOutcomeStatus::Blocked,
+            "{outcomes:?}"
+        );
+        assert!(
+            outcomes[0]
+                .detail
+                .contains("no recorded evaluation evidence"),
+            "{outcomes:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
-        assert_ne!(original, changed_artifact);
-        assert_ne!(original, changed_suite);
+    #[tokio::test]
+    async fn eval_suite_apply_admits_valid_recorded_evidence() {
+        let (root, mut ctx) = gated_software_fixture("admit").await;
+        crate::model_release_evidence::record_passing_evaluation_for_suite(
+            &mut ctx,
+            "quality",
+            "gated-app@1.0.0",
+        )
+        .await
+        .unwrap();
+        let outcomes = apply_local(&mut ctx).await.unwrap();
+        assert_eq!(
+            outcomes[0].classified_status().unwrap(),
+            crate::apply::StepOutcomeStatus::Succeeded,
+            "{outcomes:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

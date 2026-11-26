@@ -1,34 +1,25 @@
 # Evaluation gate evidence
 
-Tenkai release gates use Sekai-Chisei's server-owned
-`GetEvaluationGateEvidence` projection. This is the selected 1.0 evidence
-contract for the existing `[gate].eval_suite` behavior. Tenkai does not use
-`ResolveEvaluationPlan` as a substitute: plan resolution freezes inputs but
-does not select historical runs or make a gate decision.
+`[gate].eval_suite` admits a release from stored signed evaluation evidence
+([ADR 0064](decisions/0064-tenkai-stands-alone.md),
+[ADR 0032](decisions/0032-model-release-evidence.md)). Producers push a
+`chisei.model_evaluation_evidence.v1` record through the existing ingest
+(`tenkaictl eval-evidence` or `POST /v1/model-evaluation/evidence`). Tenkai
+does not pull `GetEvaluationGateEvidence` for this gate.
 
-The request contains the suite ID, exact release digest, exact artifact digest,
-and an upper timestamp bound of the current time plus 60 seconds. The caller
-does not provide a run ID, config reference, expected case set, or pass/fail
-result. Chisei accepts this bound no more than 120 seconds ahead of its own
-clock: the additional 60 seconds is an explicit inter-host clock-skew
-allowance. Tenkai validates returned evidence against the exact cutoff it sent.
+The stored record must:
 
-| Existing gate responsibility | Server-owned projection behavior |
-| --- | --- |
-| Expected case set | Chisei reads the immutable suite and returns `expected_case_ids`. |
-| Current release/artifact binding | Chisei computes the suite digest and the length-delimited `tenkai-gate-v1` `config_ref`; Tenkai verifies the returned binding. |
-| Latest run selection | Chisei selects the matching run with the greatest valid timestamp, then greatest run ID, at or before the request bound. |
-| Case evidence | Chisei returns only case IDs and pass/fail bits, after exact one-result-per-case validation. Tenkai denies any failing, empty, duplicate, missing, or unexpected result set. |
-| Missing or unavailable evidence | `suite_not_found` and `no_matching_run` deny the gate; transport errors, malformed responses, unknown statuses, invalid bindings, and unavailable storage become `Unavailable` and fail closed. |
+- name the suite in `eval_suite_id`;
+- bind `identity.artifact_digest` to the release artifact (`sha256:` plus 64
+  lowercase hex characters; an unprefixed 64-hex stored digest still matches);
+- record `outcome=passed`;
+- verify against installed evaluation trust roots;
+- be fresh (`expires_at` after now, `observed_at` not more than 60 seconds
+  ahead).
 
-The response echoes the suite, release, artifact, suite digest, config
-reference, selected run ID, and timestamp. Tenkai checks those bindings before
-evaluating the bounded case projection. The suite digest is the raw SHA-256
-hex digest of the former `EvalSuite` wire shape, so pre-migration run
-`config_ref` values remain selectable after the old public suite/run reads are
-removed.
+Missing, stale, or invalid evidence fails closed on every host. When several
+records match the suite and artifact, Tenkai uses the newest `observed_at`;
+two records at the same time are invalid.
 
-The projection intentionally omits suite specifications, assertions, raw
-results, scores, reasons, and elapsed timings. Evaluation plans, manifests,
-and execution receipts remain separate contracts with their own authority and
-semantics.
+The ingest contract, identity fields, and trust roots are in
+[model-release evidence](model-release-evidence.md).

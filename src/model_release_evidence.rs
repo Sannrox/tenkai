@@ -429,10 +429,29 @@ fn signed_fixture_evaluation(
     expires_at: i64,
     signing_key: &SigningKey,
 ) -> Result<ModelEvaluationEvidence> {
+    signed_fixture_evaluation_with_suite(
+        identity,
+        "model-quality",
+        outcome,
+        observed_at,
+        expires_at,
+        signing_key,
+    )
+}
+
+#[cfg(test)]
+fn signed_fixture_evaluation_with_suite(
+    identity: ModelReleaseIdentity,
+    eval_suite_id: &str,
+    outcome: EvaluationOutcome,
+    observed_at: i64,
+    expires_at: i64,
+    signing_key: &SigningKey,
+) -> Result<ModelEvaluationEvidence> {
     let mut evidence = ModelEvaluationEvidence {
         schema: EVALUATION_EVIDENCE_SCHEMA.into(),
         identity,
-        eval_suite_id: "model-quality".into(),
+        eval_suite_id: eval_suite_id.into(),
         eval_run_id: "fixture-run".into(),
         outcome,
         observed_at,
@@ -486,6 +505,11 @@ pub async fn record_evaluation_evidence(
             (
                 "observed_at_order".into(),
                 format!("{:020}", evidence.observed_at),
+            ),
+            ("eval_suite_id".into(), evidence.eval_suite_id.clone()),
+            (
+                "artifact_digest".into(),
+                evidence.identity.artifact_digest.clone(),
             ),
             ("evidence".into(), raw.clone()),
         ]),
@@ -558,6 +582,115 @@ async fn load_evaluation_for_promotion(
     }
 }
 
+fn artifact_digest_matches(evidence: &str, step: &str) -> bool {
+    fn hex(value: &str) -> &str {
+        value.strip_prefix("sha256:").unwrap_or(value)
+    }
+    !evidence.is_empty() && !step.is_empty() && hex(evidence) == hex(step)
+}
+
+async fn load_evaluation_for_suite_gate(
+    ctx: &mut Ctx,
+    suite_id: &str,
+    artifact_digest: &str,
+) -> Result<LoadedEvaluation> {
+    let records = ctx
+        .find_by_property(EVALUATION_EVIDENCE_KIND, "eval_suite_id", suite_id)
+        .await?;
+    if records.is_empty() {
+        return Ok(LoadedEvaluation::Missing);
+    }
+    let mut newest: Vec<ModelEvaluationEvidence> = Vec::new();
+    let mut newest_at = i64::MIN;
+    let mut matched = false;
+    for record in records {
+        if record.kind != EVALUATION_EVIDENCE_KIND {
+            return Ok(LoadedEvaluation::Invalid);
+        }
+        let Some(raw) = record.properties.get("evidence") else {
+            return Ok(LoadedEvaluation::Invalid);
+        };
+        let Ok(evidence) = ModelEvaluationEvidence::parse_json(raw) else {
+            return Ok(LoadedEvaluation::Invalid);
+        };
+        if evidence.eval_suite_id != suite_id {
+            return Ok(LoadedEvaluation::Invalid);
+        }
+        if !artifact_digest_matches(&evidence.identity.artifact_digest, artifact_digest) {
+            continue;
+        }
+        matched = true;
+        match evidence.observed_at.cmp(&newest_at) {
+            std::cmp::Ordering::Greater => {
+                newest_at = evidence.observed_at;
+                newest = vec![evidence];
+            }
+            std::cmp::Ordering::Equal => newest.push(evidence),
+            std::cmp::Ordering::Less => {}
+        }
+    }
+    if !matched {
+        return Ok(LoadedEvaluation::Missing);
+    }
+    match newest.as_slice() {
+        [only] => Ok(LoadedEvaluation::Record(Box::new(only.clone()))),
+        [] => Ok(LoadedEvaluation::Missing),
+        _ => Ok(LoadedEvaluation::Invalid),
+    }
+}
+
+/// Admit `[gate].eval_suite` from stored signed evaluation evidence (ADR 0064).
+pub(crate) async fn admit_eval_suite_gate(
+    ctx: &mut Ctx,
+    suite_id: &str,
+    artifact_digest: &str,
+) -> Result<std::result::Result<(), ModelReleaseEvidenceFailure>> {
+    let evidence = match load_evaluation_for_suite_gate(ctx, suite_id, artifact_digest).await? {
+        LoadedEvaluation::Missing => return Ok(Err(ModelReleaseEvidenceFailure::Missing)),
+        LoadedEvaluation::Invalid => return Ok(Err(ModelReleaseEvidenceFailure::Invalid)),
+        LoadedEvaluation::Record(evidence) => *evidence,
+    };
+    let Some(roots) = load_evaluation_trust_roots(ctx).await? else {
+        return Ok(Err(ModelReleaseEvidenceFailure::Invalid));
+    };
+    if verify_evaluation_signature(&evidence, &roots).is_err() {
+        return Ok(Err(ModelReleaseEvidenceFailure::Invalid));
+    }
+    if is_stale(
+        evidence.observed_at,
+        evidence.expires_at,
+        crate::now_millis(),
+    ) {
+        return Ok(Err(ModelReleaseEvidenceFailure::Stale));
+    }
+    if evidence.outcome != EvaluationOutcome::Passed {
+        return Ok(Err(ModelReleaseEvidenceFailure::Invalid));
+    }
+    Ok(Ok(()))
+}
+
+#[cfg(test)]
+fn software_gate_identity(
+    product: &str,
+    version: &str,
+    artifact_digest: &str,
+) -> Result<ModelReleaseIdentity> {
+    let artifact_digest = if artifact_digest.starts_with("sha256:") {
+        artifact_digest.to_string()
+    } else {
+        format!("sha256:{artifact_digest}")
+    };
+    let identity = ModelReleaseIdentity {
+        provider: "software".into(),
+        model: product.into(),
+        profile_version: version.into(),
+        artifact_digest,
+        endpoint: format!("served://{product}"),
+    };
+    identity.validate()?;
+    Ok(identity)
+}
+
 /// Admit a model-runtime channel promotion from the Chisei evaluation half.
 pub fn admit_model_evaluation_evidence(
     evaluation: Option<&ModelEvaluationEvidence>,
@@ -626,6 +759,54 @@ pub async fn record_passing_evaluation_for_release(ctx: &mut Ctx, spec: &str) ->
         &actor,
         signed_fixture_evaluation(
             identity,
+            EvaluationOutcome::Passed,
+            now,
+            now.saturating_add(3_600_000),
+            &signing_key,
+        )?,
+    )
+    .await
+}
+
+/// Test helper: store passing eval evidence bound to a published release's artifact.
+#[cfg(test)]
+pub(crate) async fn record_passing_evaluation_for_suite(
+    ctx: &mut Ctx,
+    suite_id: &str,
+    spec: &str,
+) -> Result<()> {
+    let Some((product, version)) = spec.split_once('@') else {
+        bail!("expected <product>@<version>, got {spec:?}");
+    };
+    let release = ctx
+        .get(&crate::ontology::release_id(product, version))
+        .await?
+        .with_context(|| format!("release {spec} is not published"))?;
+    let artifact_digest = release
+        .properties
+        .get("artifact_digest")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .context("published release is missing artifact_digest")?;
+    let raw = release
+        .properties
+        .get("manifest")
+        .context("published release is missing its manifest")?;
+    let manifest = crate::manifest::parse_raw(raw)?;
+    let identity = if manifest.product.kind == ProductKind::ModelRuntime {
+        identity_from_descriptor(&ModelRuntimeDescriptor::from_manifest(&manifest)?)?
+    } else {
+        software_gate_identity(product, version, &artifact_digest)?
+    };
+    let signing_key = ensure_fixture_evaluation_trust(ctx).await?;
+    let now = crate::now_millis();
+    let actor = crate::auth_context::test_management_context("eval-suite-record-fixture");
+    record_evaluation_evidence(
+        ctx,
+        &actor,
+        signed_fixture_evaluation_with_suite(
+            identity,
+            suite_id,
             EvaluationOutcome::Passed,
             now,
             now.saturating_add(3_600_000),

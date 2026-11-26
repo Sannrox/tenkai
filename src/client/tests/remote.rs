@@ -14,28 +14,6 @@ use crate::pb::sekai::Object;
 use super::mock_state::MockSekaiState;
 
 #[tokio::test]
-async fn embedded_gate_evidence_lookup_fails_locally_without_networking() {
-    let path =
-        std::env::temp_dir().join(format!("tenkai-embedded-gate-{}.db", uuid::Uuid::new_v4()));
-    let mut ctx = Ctx::embedded(&path).unwrap();
-    let error = ctx
-        .evaluation_gate_evidence(crate::pb::chisei::GetEvaluationGateEvidenceRequest {
-            suite_id: "required-suite".into(),
-            release_digest: "release".into(),
-            artifact_digest: "artifact".into(),
-            max_timestamp_ms: 1,
-        })
-        .await
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("embedded mode has no governance provider")
-    );
-    std::fs::remove_file(path).unwrap();
-}
-
-#[tokio::test]
 async fn remote_fenced_writes_use_canonical_rpc_and_reuse_request_id_on_retry() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

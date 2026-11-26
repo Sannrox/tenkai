@@ -98,20 +98,6 @@ every host before writing those fields. Restore files without the fields
 before running an older binary; an older release refuses a file that still
 has them.
 
-## Capture a rollback replay
-
-The deterministic replay capture runs a healthy deployment followed by a
-deliberately unhealthy upgrade, records Tenkai's automatic rollback, and asks
-`sekaictl replay export` for a static JSON bundle rooted at the incident plan:
-
-```sh
-./scripts/capture-rollback-replay.sh
-```
-
-By default it expects `../sekai-chisei`, uses an isolated temporary database,
-and writes `artifacts/replay/rollback-incident.json`. Override the repository
-with `SEKAI_CHISEI_DIR` or the destination with `REPLAY_OUTPUT_DIR`.
-
 Independent fresh-checkout evidence for the provider-free embedded workflow,
 including automatic rollback and backup/restore, is recorded in the
 [embedded golden-path usability exercise](research/embedded-golden-path-usability.md).

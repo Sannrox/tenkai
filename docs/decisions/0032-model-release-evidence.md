@@ -6,6 +6,8 @@
 - Owner: Tenkai maintainers
 - Related: [ADR 0007](0007-model-runtime-fleet-control-plane.md),
   [ADR 0013](0013-evaluation-gate-evidence-projection.md)
+- Amended-by: [ADR 0064](0064-tenkai-stands-alone.md) (`[gate].eval_suite`
+  consumes this stored record)
 - Companion: Sekai-Chisei will consume the same identity and schema names when
   it takes the evaluation-side record (tracked there as the model-eval
   companion to this contract).
@@ -56,9 +58,10 @@ Schema name: `chisei.model_evaluation_evidence.v1`.
 Fields: `schema`, `identity`, `eval_suite_id`, `eval_run_id`, `outcome`
 (`passed` / `failed`), `observed_at`, `expires_at`, `signer`.
 
-This record is not a substitute for ADR 0013's suite-case projection. It
-binds evaluation of a *model identity* for model-release promotion. Suite
-gates on software releases stay on `GetEvaluationGateEvidence`.
+This record is the stored evaluation evidence `[gate].eval_suite` admits
+([ADR 0064](0064-tenkai-stands-alone.md)). It binds evaluation of a model
+identity for model-release promotion, and of a release artifact for suite
+gates. Tenkai does not pull `GetEvaluationGateEvidence` for those gates.
 
 ### Promotion refusal
 

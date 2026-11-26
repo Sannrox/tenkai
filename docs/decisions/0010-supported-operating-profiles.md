@@ -161,7 +161,7 @@ silently rewritten.
 | Enterprise authentication required without a usable verifier | Fail before listen. |
 | Plaintext non-loopback server listener | Reject; use authenticated TLS termination. |
 | Development fixture principals without the fixture flag | Reject. |
-| Remote provider mode without a configured reachable provider | Fail the affected startup or operation; never silently fall back. |
+| Remote provider mode | Refuse to start; Tenkai owns the catalog in embedded SQLite or PostgreSQL. |
 | Profile name plus contradictory low-level flags | Reject. Legacy no-profile invocations continue through capability validation during the compatibility window. |
 
 ## Documentation and release contract

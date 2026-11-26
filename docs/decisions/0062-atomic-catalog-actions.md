@@ -5,6 +5,7 @@
 - Issue: [#1304](https://github.com/Sannrox/tenkai/issues/1304)
 - Owner: Tenkai maintainers
 - Builds on: [ADR 0015](0015-governed-action-remote-migration.md)
+- Amended-by: [ADR 0064](0064-tenkai-stands-alone.md) (§4 obsolete)
 
 ## Context
 
@@ -30,16 +31,10 @@ concurrent writers could overwrite each other's object update.
    existing action transaction and the in-memory store one lock guard. A
    dry run reads only.
 
-4. **Remote actions move to one atomic provider write.** The remote path
-   computes the same edit list, sends it as one atomic graph write bound to
-   the admitted action instance with the object revision it read, then
-   records the decision. A provider without the write fails closed; there is
-   no fallback to separate calls. Remote `put` uses the same write with a
-   bounded retry on a failed precondition. This half
-   ([#1566](https://github.com/Sannrox/tenkai/issues/1566)) waits for a released
-   provider that serves the write by default, and for a rule that gives a
-   repeated action with unchanged parameters a fresh instance. Until then
-   remote actions keep the separate calls, with parameters checked first.
+4. **Remote actions move to one atomic provider write.** Obsolete.
+   [ADR 0064](0064-tenkai-stands-alone.md) retires `--provider-mode remote`.
+   [#1566](https://github.com/Sannrox/tenkai/issues/1566) is not built.
+   Tenkai-owned stores remain the atomic path in §3.
 
 ## Rejected
 
@@ -52,6 +47,5 @@ concurrent writers could overwrite each other's object update.
 ## Consequences
 
 - An embedded action either lands entirely or leaves nothing behind.
-- Remote actions still apply in several calls until the remote half lands;
-  a failure after a link write can leave that link without the object
-  update.
+- There is no remote catalog-provider action path. Operators who used
+  `--provider-mode remote` re-initialize a Tenkai-owned store.

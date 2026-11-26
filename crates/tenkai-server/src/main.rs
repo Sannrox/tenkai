@@ -94,7 +94,8 @@ struct Cli {
     reconcile_interval: u64,
     #[arg(long, default_value_t = 8)]
     max_concurrency: usize,
-    /// Use Tenkai's in-process state or an explicitly configured remote provider.
+    /// Catalog store. `embedded` (default) uses SQLite or PostgreSQL.
+    /// `remote` stays parseable for one release and is refused at startup.
     #[arg(long, value_enum, default_value_t = ProviderMode::Embedded)]
     provider_mode: ProviderMode,
     /// Require tenant isolation capability before accepting traffic.
@@ -639,7 +640,7 @@ async fn main() -> Result<()> {
     let postgres_configured = tenkai::secret_source::is_configured("TENKAI_POSTGRES_URL");
     refuse_mixed_store_configuration(cli.database.is_some(), postgres_configured)
         .context("refusing mixed SQLite and PostgreSQL runtime configuration")?;
-    refuse_tenant_remote_provider(cli.tenant_mode, cli.provider_mode)?;
+    refuse_remote_provider(cli.provider_mode)?;
     let community_database = if cli.tenant_mode {
         anyhow::ensure!(
             cli.database.is_none(),
@@ -1065,9 +1066,9 @@ async fn main() -> Result<()> {
             tenkai_sqlite::embedded_ctx(database, outcome_provider.is_some())
                 .context("opening embedded application state")?
         }
-        ProviderMode::Remote => tenkai::client::connect()
-            .await
-            .context("connecting explicitly configured remote provider")?,
+        ProviderMode::Remote => anyhow::bail!(
+            "--provider-mode remote is retired; Tenkai owns its catalog in the embedded SQLite store or PostgreSQL (--tenant-mode)"
+        ),
     };
     // Plans are refused against the executors of whichever replica or
     // runtime may run them (ADR 0057): runtimes from activity records,
@@ -1890,10 +1891,10 @@ struct OpenedHostStore {
     grant_rules: Arc<dyn tenkai::grant_rules::GrantRuleStore>,
 }
 
-fn refuse_tenant_remote_provider(tenant_mode: bool, provider_mode: ProviderMode) -> Result<()> {
+fn refuse_remote_provider(provider_mode: ProviderMode) -> Result<()> {
     anyhow::ensure!(
-        !tenant_mode || matches!(provider_mode, ProviderMode::Embedded),
-        "tenant-mode hubs refuse --provider-mode remote; PostgreSQL is the sole authoritative store"
+        matches!(provider_mode, ProviderMode::Embedded),
+        "--provider-mode remote is retired; Tenkai owns its catalog in the embedded SQLite store or PostgreSQL (--tenant-mode)"
     );
     Ok(())
 }
@@ -2319,10 +2320,18 @@ mod tests {
     }
 
     #[test]
-    fn tenant_mode_refuses_remote_provider() {
-        refuse_tenant_remote_provider(true, ProviderMode::Remote).unwrap_err();
-        refuse_tenant_remote_provider(true, ProviderMode::Embedded).unwrap();
-        refuse_tenant_remote_provider(false, ProviderMode::Remote).unwrap();
+    fn remote_provider_mode_is_refused_before_any_connection() {
+        let error = refuse_remote_provider(ProviderMode::Remote)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("--provider-mode remote is retired"),
+            "{error}"
+        );
+        assert!(error.contains("embedded SQLite"), "{error}");
+        assert!(error.contains("PostgreSQL"), "{error}");
+        refuse_remote_provider(ProviderMode::Embedded).unwrap();
     }
 
     #[test]
