@@ -1,5 +1,6 @@
 //! Reconcile one Environment from Plan selection through execution outcome.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
@@ -62,14 +63,7 @@ async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<E
     plan::require_environment_indexes_match_payloads(ctx, environment).await?;
     plan::retire_empty_executable_plans(ctx, environment).await?;
     crate::delivery_hold::evaluate_failure_threshold(ctx, environment, crate::now_millis()).await?;
-    if let Some(plan) = plan::load_oldest_for_environment(
-        ctx,
-        environment,
-        &[PlanState::Computed, PlanState::Running],
-    )
-    .await?
-        && (plan.state == PlanState::Running || !held_candidate(ctx, &plan).await?)
-    {
+    if let Some(plan) = next_runtime_plan(ctx, environment).await? {
         // A claimed Running plan finishes; only queued work reports the hold.
         if plan.state == PlanState::Computed
             && let Some(held) = held(ctx, &plan).await?
@@ -77,27 +71,6 @@ async fn reconcile_runtime_managed(ctx: &mut Ctx, environment: &str) -> Result<E
             return Ok(held);
         }
         return Ok(awaiting_runtime(plan));
-    }
-    for plan in plan::load_for_environment(
-        ctx,
-        environment,
-        Some(&[PlanState::Computed, PlanState::Running]),
-        false,
-        None,
-        None,
-        Some(true),
-    )
-    .await?
-    {
-        if plan.state == PlanState::Running || !held_candidate(ctx, &plan).await? {
-            // As above: queued work reports its hold, not awaiting runtime.
-            if plan.state == PlanState::Computed
-                && let Some(held) = held(ctx, &plan).await?
-            {
-                return Ok(held);
-            }
-            return Ok(awaiting_runtime(plan));
-        }
     }
     if crate::preview::is_terminal_residue(ctx, environment, crate::now_millis()).await? {
         return Ok(EnvironmentStatus::Current);
@@ -148,28 +121,151 @@ pub(super) async fn held_candidate(ctx: &mut Ctx, plan: &Plan) -> Result<bool> {
     }))
 }
 
-async fn select_plan(ctx: &mut Ctx, environment: &str, approval_required: bool) -> Result<Plan> {
+pub(super) async fn select_plan(
+    ctx: &mut Ctx,
+    environment: &str,
+    approval_required: bool,
+) -> Result<Plan> {
     if !approval_required {
         return plan::create_for_reconcile(ctx, environment).await;
     }
     if let Some(plan) =
-        first_admissible_executable(ctx, environment, &[PlanState::Computed], false).await?
+        first_admissible_executable(ctx, environment, &[PlanState::Computed], Pick::Any).await?
     {
-        return Ok(plan);
+        return prefer_roll_off(ctx, plan).await;
     }
-    if let Some(plan) =
-        first_admissible_executable(ctx, environment, &[PlanState::Blocked], true).await?
+    if let Some(plan) = first_admissible_executable(
+        ctx,
+        environment,
+        &[PlanState::Blocked],
+        Pick::MaintenanceBlocked,
+    )
+    .await?
     {
         return Ok(plan);
     }
     plan::create_for_reconcile(ctx, environment).await
 }
 
+/// Returns the oldest admissible queued plan that moves the environment off a
+/// recalled release, or `chosen` when it is one or none exists (#1571). The
+/// queue is walked only while a deployed release is recalled. Holds and
+/// maintenance windows apply to a roll-off as to any plan.
+pub(super) async fn prefer_roll_off(ctx: &mut Ctx, chosen: Plan) -> Result<Plan> {
+    let recalled = recalled_instances(ctx, &chosen.environment).await?;
+    if recalled.is_empty() || rolls_off(&chosen, &recalled) {
+        return Ok(chosen);
+    }
+    Ok(first_admissible_executable(
+        ctx,
+        &chosen.environment,
+        &[PlanState::Computed],
+        Pick::RollOff(&recalled),
+    )
+    .await?
+    .unwrap_or(chosen))
+}
+
+/// Instances of `environment` whose deployed release is recalled.
+async fn recalled_instances(ctx: &mut Ctx, environment: &str) -> Result<HashSet<String>> {
+    let mut recalled = HashSet::new();
+    let Some(object) = ctx.get(&crate::ontology::env_id(environment)).await? else {
+        return Ok(recalled);
+    };
+    for (key, version) in &object.properties {
+        let Some(instance) = key.strip_prefix("deployed.") else {
+            continue;
+        };
+        let release = object
+            .properties
+            .get(&format!("deployed_release.{instance}"))
+            .cloned()
+            .unwrap_or_else(|| crate::ontology::release_id(instance, version));
+        if crate::catalog::release_is_recalled(ctx, &release).await? {
+            recalled.insert(instance.to_string());
+        }
+    }
+    Ok(recalled)
+}
+
+/// True when a step replaces or removes the deployed release of an instance
+/// in `recalled`.
+fn rolls_off(plan: &Plan, recalled: &HashSet<String>) -> bool {
+    plan.steps.iter().any(|step| {
+        step.from
+            .as_deref()
+            .is_some_and(|from| from != step.to || step.action == plan::Action::Remove)
+            && recalled.contains(step.instance_name())
+    })
+}
+
+/// Which queued plans a selection walk may return.
+#[derive(Clone, Copy)]
+enum Pick<'a> {
+    Any,
+    /// Only plans a maintenance window blocked.
+    MaintenanceBlocked,
+    /// Only plans that roll one of these instances off a recalled release.
+    RollOff(&'a HashSet<String>),
+}
+
+impl Pick<'_> {
+    fn admits(self, plan: &Plan) -> bool {
+        match self {
+            Self::Any => true,
+            Self::MaintenanceBlocked => plan.maintenance_blocked,
+            Self::RollOff(recalled) => rolls_off(plan, recalled),
+        }
+    }
+}
+
+/// The plan a runtime-managed environment runs next: a running plan, else
+/// the oldest queued plan no failed target holds, a roll-off from a recalled
+/// release first. Queued plans that would install recalled content are
+/// retired on the way (#1571). Tick status and runtime work both use it.
+pub(super) async fn next_runtime_plan(ctx: &mut Ctx, environment: &str) -> Result<Option<Plan>> {
+    let statuses = [PlanState::Computed, PlanState::Running];
+    if let Some(plan) = plan::load_oldest_for_environment(ctx, environment, &statuses).await?
+        && runtime_runnable(ctx, &plan).await?
+    {
+        return runtime_choice(ctx, plan).await.map(Some);
+    }
+    for plan in plan::load_for_environment(
+        ctx,
+        environment,
+        Some(&statuses),
+        false,
+        None,
+        None,
+        Some(true),
+    )
+    .await?
+    {
+        if runtime_runnable(ctx, &plan).await? {
+            return runtime_choice(ctx, plan).await.map(Some);
+        }
+    }
+    Ok(None)
+}
+
+async fn runtime_runnable(ctx: &mut Ctx, plan: &Plan) -> Result<bool> {
+    Ok(plan.state == PlanState::Running
+        || !(held_candidate(ctx, plan).await? || apply::retire_if_recalled(ctx, plan).await?))
+}
+
+/// A running plan finishes first; queued work prefers a roll-off.
+async fn runtime_choice(ctx: &mut Ctx, plan: Plan) -> Result<Plan> {
+    if plan.state == PlanState::Running {
+        return Ok(plan);
+    }
+    prefer_roll_off(ctx, plan).await
+}
+
 async fn first_admissible_executable(
     ctx: &mut Ctx,
     environment: &str,
     statuses: &[PlanState],
-    maintenance_blocked_only: bool,
+    pick: Pick<'_>,
 ) -> Result<Option<Plan>> {
     if !ctx.is_embedded() {
         // Remote FindByProperty transfers every environment-matching object
@@ -185,7 +281,7 @@ async fn first_admissible_executable(
             Some(true),
         )
         .await?;
-        return first_admissible_in(ctx, candidates, maintenance_blocked_only).await;
+        return Ok(first_admissible_in(ctx, candidates, pick).await?.0);
     }
     let mut offset = 0_u32;
     loop {
@@ -201,23 +297,29 @@ async fn first_admissible_executable(
         if batch_len == 0 {
             return Ok(None);
         }
-        if let Some(plan) = first_admissible_in(ctx, batch, maintenance_blocked_only).await? {
-            return Ok(Some(plan));
+        let (selected, retired) = first_admissible_in(ctx, batch, pick).await?;
+        if selected.is_some() {
+            return Ok(selected);
         }
         if batch_len < plan::EXECUTABLE_ADMISSION_BATCH as usize {
             return Ok(None);
         }
+        // Retired plans left the state-filtered window; the rows after them
+        // moved up by as many.
         offset = offset
-            .checked_add(plan::EXECUTABLE_ADMISSION_BATCH)
+            .checked_add(plan::EXECUTABLE_ADMISSION_BATCH - retired)
             .context("executable admission offset overflowed")?;
     }
 }
 
+/// The first admissible candidate `pick` allows, and how many candidates
+/// were retired as recalled on the way.
 async fn first_admissible_in(
     ctx: &mut Ctx,
     candidates: Vec<Plan>,
-    maintenance_blocked_only: bool,
-) -> Result<Option<Plan>> {
+    pick: Pick<'_>,
+) -> Result<(Option<Plan>, u32)> {
+    let mut retired = 0;
     for candidate in candidates {
         if held_candidate(ctx, &candidate).await? {
             continue;
@@ -228,16 +330,20 @@ async fn first_admissible_in(
                 candidate.id
             );
         }
-        if maintenance_blocked_only && !candidate.maintenance_blocked {
+        if !pick.admits(&candidate) {
             continue;
         }
-        if apply::classify_candidate(ctx, &candidate).await?
-            == apply::CandidateAdmission::Admissible
-        {
-            return Ok(Some(candidate));
+        match apply::classify_candidate(ctx, &candidate).await? {
+            apply::CandidateAdmission::Admissible => return Ok((Some(candidate), retired)),
+            apply::CandidateAdmission::Recalled(detail) => {
+                if apply::retire_recalled(ctx, &candidate, &detail).await? {
+                    retired += 1;
+                }
+            }
+            apply::CandidateAdmission::Superseded => {}
         }
     }
-    Ok(None)
+    Ok((None, retired))
 }
 
 async fn execute(
@@ -622,9 +728,10 @@ mod tests {
                 .await
                 .unwrap();
                 assert!(
-                    first_admissible_in(&mut ctx, vec![old.clone()], false)
+                    first_admissible_in(&mut ctx, vec![old.clone()], Pick::Any)
                         .await
                         .unwrap()
+                        .0
                         .is_none()
                 );
                 let reconciler = crate::reconciler::Reconciler::new(
@@ -647,9 +754,10 @@ mod tests {
                     .unwrap();
                 assert!(retry.created_at > failed_at);
                 assert_eq!(
-                    first_admissible_in(&mut ctx, vec![old, retry.clone()], false)
+                    first_admissible_in(&mut ctx, vec![old, retry.clone()], Pick::Any)
                         .await
                         .unwrap()
+                        .0
                         .unwrap()
                         .id,
                     retry.id

@@ -60,7 +60,13 @@ Its Rust contract version is `CATALOG_CONTRACT_VERSION = 1`.
   plan). A deployed recalled release in the removal scope otherwise rolls off to a non-recalled
   head without restoring the recalled pin. Rollback onto recalled content is
   denied unless the Plan records an audited `--allow-recalled-recovery
-  --recovery-reason` inside the signed executable digest. Ordinary lookup and
+  --recovery-reason` inside the signed executable digest. A queued plan that
+  would install or restore recalled content without one of those admissions
+  fails before
+  it starts, with the recall as its reason; a running plan stops at its next
+  step. Among an environment's queued plans, one that moves it off a recalled
+  release is selected first. Holds and maintenance windows still apply to it.
+  Ordinary lookup and
   channel-head planning stay fail-closed. A signed `tenkai.recall-notice.v2` file carries
   the same recall to an isolated spoke
   ([recall notices](recall-notices.md)) under the trust rules of

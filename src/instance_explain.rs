@@ -509,7 +509,12 @@ async fn load_store_facts(
         {
             let plan = crate::plan::load(ctx, &summary.id).await?;
             match crate::apply::classify_candidate(ctx, &plan).await {
-                Ok(crate::apply::CandidateAdmission::Superseded) => (Some(plan.id), None),
+                // A recalled plan is retired on the next tick; until then it
+                // is as stale as a superseded one.
+                Ok(
+                    crate::apply::CandidateAdmission::Superseded
+                    | crate::apply::CandidateAdmission::Recalled(_),
+                ) => (Some(plan.id), None),
                 Ok(crate::apply::CandidateAdmission::Admissible) => (None, None),
                 Err(error) => (None, Some((plan.id, format!("{error:#}")))),
             }

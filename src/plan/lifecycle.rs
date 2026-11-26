@@ -324,6 +324,9 @@ async fn validated_plan_object(ctx: &mut Ctx, plan: &Plan) -> Result<Object> {
                 (stored.state, plan.state),
                 (PlanState::Computed, PlanState::Running)
                     | (PlanState::Computed, PlanState::Blocked)
+                    // A plan retired before it starts, e.g. after a recall (#1571).
+                    | (PlanState::Computed, PlanState::Failed)
+                    | (PlanState::Blocked, PlanState::Failed)
                     | (PlanState::Blocked, PlanState::Running)
                     | (PlanState::Running, PlanState::Blocked)
                     | (PlanState::Running, PlanState::Succeeded)
