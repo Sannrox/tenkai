@@ -1,7 +1,7 @@
 # Server reconcile diagnostics
 
 A bounded, read-only recovery diagnostic for one plan is
-`tenkaictl recovery export --env <env> --plan <plan-id> --output bundle.json`.
+`tenkaictl recovery export --env <env> --plan <plan-id> --out bundle.json`.
 See [ADR 0027](decisions/0027-recovery-diagnostic-bundle.md). The file is not
 an apply or rollback grant.
 
