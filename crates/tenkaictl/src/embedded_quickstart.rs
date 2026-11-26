@@ -32,7 +32,7 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
         tenkai::dev_sign::write_lab_approval_policy(&policy)?;
     }
 
-    let mut ctx = tenkai_sqlite::embedded_ctx(&cli.database, false)?;
+    let mut ctx = tenkai_sqlite::embedded_ctx(&cli.database)?;
     let registered = ontology::register(&mut ctx).await?;
     if registered.is_empty() {
         println!("schema already registered");

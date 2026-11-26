@@ -449,7 +449,7 @@ mod tests {
         std::fs::write(&trust_path, &trust_toml).unwrap();
         let archive = root.join("hosts.bundle.json");
         let registry = MemoryArtifactRegistry::new();
-        let mut ctx = tenkai_sqlite::embedded_ctx(root.join("catalog.db"), false).unwrap();
+        let mut ctx = tenkai_sqlite::embedded_ctx(root.join("catalog.db")).unwrap();
         let issued_at = tenkai::now_millis();
         offline_bundle_build::build(
             &mut ctx,

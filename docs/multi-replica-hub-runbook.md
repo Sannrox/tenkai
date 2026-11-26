@@ -271,8 +271,8 @@ Mutation-level replay and stale-generation evidence:
   is not claimed by the Postgres adapter by default. The writer lease (#748)
   gives one active writer with fenced takeover; it does not make this a
   supported HA profile.
-- Terminal-outcome export drains each tenant-schema outbox. The hub schema
-  keeps host-scoped audit and claims.
+- Each tenant schema keeps its own outbox. The hub schema keeps host-scoped
+  audit and claims.
 
 ## Related docs
 

@@ -424,12 +424,10 @@ pub(crate) async fn complete_runtime_work(
             // Keyed by instance, as the server records failures.
             let instance = step.instance_name();
             let key = format!("failed_target.{instance}");
-            if crate::terminal_outcome::classify(
+            if crate::terminal_outcome::classify_runtime(
                 step.action,
-                crate::terminal_outcome::Observation::Runtime {
-                    succeeded: receipt.succeeded,
-                    detail: &receipt.detail,
-                },
+                receipt.succeeded,
+                &receipt.detail,
             )
             .is_none()
             {
@@ -472,58 +470,6 @@ pub(crate) async fn complete_runtime_work(
                     .remove(&format!("failed_target_plan.{instance}"));
             }
         }
-        let provider_events = if ctx.outcome_export_enabled() {
-            if environment_object.is_none() {
-                environment_object = Some(
-                    ctx.get(&crate::ontology::env_id(environment))
-                        .await?
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "environment {environment} disappeared during outcome enqueue"
-                            )
-                        })?,
-                );
-            }
-            let environment_object = environment_object
-                .as_ref()
-                .expect("outcome export always loads the environment");
-            deploying
-                .iter()
-                .filter_map(|step| {
-                    completion
-                        .receipts
-                        .iter()
-                        .find(|receipt| receipt.step_id == step.id)
-                        .map(|receipt| (step, receipt))
-                })
-                .filter_map(|(step, receipt)| {
-                    crate::terminal_outcome::classify(
-                        step.action,
-                        crate::terminal_outcome::Observation::Runtime {
-                            succeeded: receipt.succeeded,
-                            detail: &receipt.detail,
-                        },
-                    )
-                    .map(|terminal_state| (step, terminal_state))
-                })
-                .map(|(step, terminal_state)| {
-                    crate::providers::terminal_outcome_record(
-                        &stored,
-                        step,
-                        &format!(
-                            "tenkai:runtime-deployment:{}:{}:{}",
-                            stored.id, completion.generation, step.id
-                        ),
-                        terminal_state,
-                        environment_object,
-                        observed_at,
-                    )
-                    .map_err(anyhow::Error::from)
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?
-        } else {
-            Vec::new()
-        };
         // One observation per step the runtime reports a terminal result for,
         // committed with the completion (#802). The runtime's start time is not
         // observed here, so no duration is recorded.
@@ -535,12 +481,10 @@ pub(crate) async fn complete_runtime_work(
                     .receipts
                     .iter()
                     .find(|receipt| receipt.step_id == step.id)?;
-                crate::terminal_outcome::classify(
+                crate::terminal_outcome::classify_runtime(
                     step.action,
-                    crate::terminal_outcome::Observation::Runtime {
-                        succeeded: receipt.succeeded,
-                        detail: &receipt.detail,
-                    },
+                    receipt.succeeded,
+                    &receipt.detail,
                 )?;
                 Some(crate::feedback_observation::FeedbackObservation::capture(
                     crate::feedback_observation::Capture {
@@ -603,7 +547,7 @@ pub(crate) async fn complete_runtime_work(
                     crate::apply::ENVIRONMENT_LEASE_NAMESPACE,
                     &lease.environment,
                     &lease.fencing_token,
-                    &provider_events,
+                    &[],
                     &observations,
                 )
                 .await?;
@@ -629,7 +573,7 @@ pub(crate) async fn complete_runtime_work(
                 crate::plan::Persistence::WithFencedEnvironment {
                     environment,
                     fencing_token: &lease.fencing_token,
-                    provider_events: &provider_events,
+                    provider_events: &[],
                     observations: &observations,
                 },
             )
@@ -640,7 +584,7 @@ pub(crate) async fn complete_runtime_work(
                 &mut stored,
                 crate::plan::Transition::new(terminal, completion.detail.clone()),
                 crate::plan::Persistence::WithProviderEvents {
-                    provider_events: &provider_events,
+                    provider_events: &[],
                     observations: &observations,
                 },
             )

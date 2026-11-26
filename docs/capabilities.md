@@ -65,8 +65,6 @@ it ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md),
 | Web console served at `/ui/` from a pinned, checksum-verified release (feature `ui`, on in release binaries) | [Open the web console](run-tenkai-server.md#open-the-web-console); [ADR 0031](decisions/0031-web-console.md); #463 |
 | OIDC access tokens with group-to-grant mapping, for the web console | [Configure server authentication](configure-server-authentication.md#oidc-access-tokens-468); [ADR 0031](decisions/0031-web-console.md); #468 |
 | Customer-directory sign-in via a site-local OIDC issuer (no LDAP bind in Tenkai) | [Sign in against a customer directory](directory-sign-in.md); #637 |
-| Durable terminal outcome export to Chisei | [Provider contracts](provider-contracts.md#chisei-terminal-outcome-adapter-197); #197 |
-| Opt-in feedback observation export to Sekai | [Provider contracts](provider-contracts.md#feedback-observation-export-783); #783 |
 | Remote HTTP GateProvider library adapter (chisei-compatible JSON; not wired into shipped binaries) | [Provider contracts](provider-contracts.md#remote-gate-http-json-contract-113); #113 |
 | Optional advisory plan priors (default off) | [Plan priors](plan-priors.md); #114 |
 | Staged products: policy_bundle, eval_suite, agent_definition, prompt_package, workshop_module | [Staged products](staged-products.md); [Workshop modules](workshop-modules.md); #115, #116, #117, #285, #290 |

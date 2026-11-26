@@ -49,7 +49,7 @@ async fn observe(
 }
 
 async fn configure_policy(database: &std::path::Path, soak_ms: i64) {
-    let mut ctx = tenkai_sqlite::embedded_ctx(database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(database).unwrap();
     let actor = management_actor();
     tenkai::channel_promotion::configure(
         &mut ctx,
@@ -68,7 +68,7 @@ async fn configure_policy(database: &std::path::Path, soak_ms: i64) {
 }
 
 async fn backdate_soak(database: &std::path::Path, ago_ms: i64) {
-    let mut ctx = tenkai_sqlite::embedded_ctx(database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(database).unwrap();
     let id = "tenkai:channel-promotion-soak:api/stable";
     let mut object = ctx.get(id).await.unwrap().unwrap();
     let last = object
@@ -192,7 +192,7 @@ async fn soak_reset_and_policy_promotion_are_visible_over_http() {
         .await
         .unwrap();
     let database = root.join("tenkai.db");
-    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database).unwrap();
     observe(&mut ctx, "stage", "api", "1.0.0", true).await;
     drop(ctx);
     configure_policy(&database, 60_000).await;
@@ -205,7 +205,7 @@ async fn soak_reset_and_policy_promotion_are_visible_over_http() {
     assert_eq!(soaking.state, "soaking", "{soaking:?}");
     assert_eq!(soaking.soaking_release.as_deref(), Some("api@1.0.0"));
     backdate_soak(&database, 5_000).await;
-    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database).unwrap();
     observe(&mut ctx, "stage", "api", "1.0.0", false).await;
     drop(ctx);
     management.reconcile().await.unwrap();
@@ -223,7 +223,7 @@ async fn soak_reset_and_policy_promotion_are_visible_over_http() {
     );
     assert!(reset.last_reset_at.is_some(), "{reset:?}");
 
-    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database).unwrap();
     observe(&mut ctx, "stage", "api", "1.0.0", true).await;
     let actor = management_actor();
     tenkai::channel_promotion::configure(
@@ -300,7 +300,7 @@ async fn policy_view_shows_the_canary_cohort_and_its_selector() {
         .await
         .unwrap();
     let database = root.join("tenkai.db");
-    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database).unwrap();
     observe(&mut ctx, "stage", "api", "1.0.0", true).await;
     drop(ctx);
     configure_policy(&database, 60_000).await;
@@ -314,7 +314,7 @@ async fn policy_view_shows_the_canary_cohort_and_its_selector() {
 
     // A canary cohort configured by selector reads back on the policy view
     // with the selector and the environments it froze.
-    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database).unwrap();
     let actor = management_actor();
     tenkai::canary::set_designated(&mut ctx, &actor, "stage", true)
         .await

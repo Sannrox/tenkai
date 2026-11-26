@@ -91,10 +91,7 @@ pub use sqlite_store::SqliteStore;
 pub(crate) use sqlite_store::immediate_transactions;
 
 /// Open a community embedded session on the SQLite file at `path`.
-pub fn embedded_ctx(
-    path: impl AsRef<Path>,
-    outcome_export_enabled: bool,
-) -> anyhow::Result<tenkai::client::Ctx> {
+pub fn embedded_ctx(path: impl AsRef<Path>) -> anyhow::Result<tenkai::client::Ctx> {
     let principal = std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "tenkai".into());
     let store = std::sync::Arc::new(SqliteStore::open_embedded(path, principal)?);
     let backup_store = std::sync::Arc::clone(&store);
@@ -102,15 +99,11 @@ pub fn embedded_ctx(
         std::sync::Arc::clone(&store) as std::sync::Arc<dyn CatalogGraph>,
         std::sync::Arc::clone(&store) as std::sync::Arc<dyn OperationalStore>,
         move |destination: &Path| backup_store.backup(destination),
-        outcome_export_enabled,
     ))
 }
 
 /// Open a hub control-plane session; `TENKAI_POSTGRES_URL` is allowed.
-pub fn hub_ctx(
-    path: impl AsRef<Path>,
-    outcome_export_enabled: bool,
-) -> anyhow::Result<tenkai::client::Ctx> {
+pub fn hub_ctx(path: impl AsRef<Path>) -> anyhow::Result<tenkai::client::Ctx> {
     let principal = std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "tenkai".into());
     let store = std::sync::Arc::new(SqliteStore::open_control_plane(path, principal)?);
     let backup_store = std::sync::Arc::clone(&store);
@@ -118,7 +111,6 @@ pub fn hub_ctx(
         std::sync::Arc::clone(&store) as std::sync::Arc<dyn CatalogGraph>,
         std::sync::Arc::clone(&store) as std::sync::Arc<dyn OperationalStore>,
         move |destination: &Path| backup_store.backup(destination),
-        outcome_export_enabled,
     ))
 }
 

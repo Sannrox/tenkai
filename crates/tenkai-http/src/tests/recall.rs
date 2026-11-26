@@ -69,7 +69,7 @@ async fn observe(
 }
 
 async fn backdate_soak(database: &std::path::Path, ago_ms: i64) {
-    let mut ctx = tenkai_sqlite::embedded_ctx(database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(database).unwrap();
     let id = "tenkai:channel-promotion-soak:api/stable";
     let mut object = ctx.get(id).await.unwrap().unwrap();
     let last = object
@@ -112,7 +112,7 @@ async fn remote_recall_rule_triggers_a_recall_with_typed_measures() {
         .await
         .unwrap();
     let database = root.join("tenkai.db");
-    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database).unwrap();
     observe(&mut ctx, "stage", "api", "1.0.0", true).await;
     let actor = management_actor();
     tenkai::channel_promotion::configure(
@@ -194,7 +194,7 @@ async fn remote_recall_rule_triggers_a_recall_with_typed_measures() {
     assert_eq!(policy.soak_duration_ms, 60_000, "{policy:?}");
 
     management.reconcile().await.unwrap();
-    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database).unwrap();
     observe(&mut ctx, "stage", "api", "1.0.0", false).await;
     drop(ctx);
     backdate_soak(&database, 5_000).await;
@@ -245,7 +245,7 @@ async fn remote_recall_rule_triggers_a_recall_with_typed_measures() {
         [("prod".to_string(), 0, 1), ("stage".to_string(), 0, 1)]
     );
 
-    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database).unwrap();
     let mut prod = ctx.get(&env_id("prod")).await.unwrap().unwrap();
     prod.properties.remove("deployed_release.api");
     ctx.put(prod).await.unwrap();
@@ -286,7 +286,7 @@ async fn remote_recall_rule_count_threshold_fires_before_share() {
         .await
         .unwrap();
     let database = root.join("tenkai.db");
-    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database).unwrap();
     observe(&mut ctx, "stage", "api", "1.0.0", true).await;
     let actor = management_actor();
     tenkai::channel_promotion::configure(
@@ -333,7 +333,7 @@ async fn remote_recall_rule_count_threshold_fires_before_share() {
     management.reconcile().await.unwrap();
     backdate_soak(&database, 30_000).await;
     management.reconcile().await.unwrap();
-    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database).unwrap();
     observe(&mut ctx, "stage", "api", "1.0.0", false).await;
     drop(ctx);
     backdate_soak(&database, 1_000).await;
@@ -374,7 +374,7 @@ async fn scoped_recall_and_widen_are_on_the_versioned_http_contract() {
         .await
         .unwrap();
     let database = root.join("tenkai.db");
-    let mut ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(&database).unwrap();
     for env in ["stage", "prod"] {
         observe(&mut ctx, env, "api", "1.0.0", true).await;
     }

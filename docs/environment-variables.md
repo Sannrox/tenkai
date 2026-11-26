@@ -8,7 +8,7 @@ command line.
 ## Secret files
 
 Every secret setting below (management and runtime tokens, the token maps,
-`TENKAI_POSTGRES_URL`, `TENKAI_OUTCOME_PROVIDER_TOKEN`, `TENKAI_FEEDBACK_PROVIDER_TOKEN`, `SEKAI_AUTH_TOKEN`,
+`TENKAI_POSTGRES_URL`, `SEKAI_AUTH_TOKEN`,
 `TENKAI_OIDC_CLIENT_SECRET`, `TENKAI_JWT_ASSERTION`, and the webhook secrets
 named by `secret_env`) is read, in order, from:
 
@@ -126,18 +126,7 @@ Read by `tenkaictl`, `tenkai-server`, or both.
 | `TENKAI_SEKAI_URL` | `http://127.0.0.1:$GRPC_PORT` | Optional provider endpoint used by the server host |
 | `GRPC_PORT` | `50051` | Port used for the optional provider URL |
 | `SEKAI_AUTH_TOKEN` | unset | Optional provider bearer token |
-| `TENKAI_OUTCOME_PROVIDER` | `disabled` | Set to `chisei` to enable durable terminal-outcome export |
-| `TENKAI_OUTCOME_PROVIDER_URL` | unset | Explicit Sekai endpoint used only with `tenkai-server --outcome-provider chisei` |
-| `TENKAI_OUTCOME_NAMESPACE` | unset | Namespace authorized for terminal-outcome admission |
-| `TENKAI_OUTCOME_PROVIDER_PRINCIPAL` | `tenkai.outcome` | Authenticated telemetry-writer principal for outcome admission |
-| `TENKAI_OUTCOME_PROVIDER_TOKEN` | unset | Optional outcome-adapter bearer secret; environment-only and never persisted |
-| `TENKAI_OUTCOME_PROVIDER_REGISTRATION` | unset | Required exact attestation of the administrator-registered Sekai producer and `tenkai.terminal_outcome.v2@2.0.0` schema (and target kind) when outcome export is enabled |
-| `TENKAI_FEEDBACK_PROVIDER` | `disabled` | Set to `chisei` to enable durable feedback-observation export |
-| `TENKAI_FEEDBACK_PROVIDER_URL` | unset | Explicit Sekai endpoint used only with `tenkai-server --feedback-provider chisei` |
-| `TENKAI_FEEDBACK_NAMESPACE` | unset | Namespace authorized for feedback-observation admission |
-| `TENKAI_FEEDBACK_PROVIDER_PRINCIPAL` | `tenkai.feedback` | Authenticated telemetry-writer principal for feedback admission |
-| `TENKAI_FEEDBACK_PROVIDER_TOKEN` | unset | Optional feedback-adapter bearer secret; environment-only and never persisted |
-| `TENKAI_FEEDBACK_PROVIDER_REGISTRATION` | unset | Required exact attestation of the administrator-registered Sekai producer, `tenkai.feedback_observation.v1@1.0.0` schema, target kind (`feedback_observation`, or `tenant_feedback_observation` on a tenant-mode hub), and `feedback.observation.record` Action when feedback export is enabled |
+| `TENKAI_OUTCOME_PROVIDER`, `TENKAI_FEEDBACK_PROVIDER`, `TENKAI_{OUTCOME,FEEDBACK}_NAMESPACE`, `TENKAI_{OUTCOME,FEEDBACK}_PROVIDER_{URL,PRINCIPAL,TOKEN,REGISTRATION}` | unset | Removed with outcome and feedback export ([#1580](provider-contracts.md#removed-outcome-and-feedback-export-1580)); `tenkai-server` refuses to start while any is set |
 
 ## `tenkai-runtime`
 

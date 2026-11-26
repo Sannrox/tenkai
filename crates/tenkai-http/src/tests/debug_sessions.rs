@@ -46,7 +46,7 @@ impl Fixture {
     /// A server over the fixture's database; a second call is a restart.
     pub(super) async fn server(&self) -> (Router, Arc<tenkai_sqlite::SqliteStore>) {
         let database = self.root.join("tenkai.db");
-        let ctx = tenkai_sqlite::embedded_ctx(&database, false).unwrap();
+        let ctx = tenkai_sqlite::embedded_ctx(&database).unwrap();
         // Plan-approval roots, when a test wrote them; elevation approvals
         // verify against them.
         let roots = self.root.join("approval-roots.toml");
@@ -110,7 +110,7 @@ pub(super) async fn fixture(label: &str) -> Fixture {
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let mut ctx = tenkai_sqlite::embedded_ctx(root.join("tenkai.db"), false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(root.join("tenkai.db")).unwrap();
     tenkai::ontology::register(&mut ctx).await.unwrap();
     for name in ["stage", "prod"] {
         tenkai::plan::env_add(&mut ctx, name, "fixture")
@@ -146,7 +146,7 @@ pub(super) async fn fixture(label: &str) -> Fixture {
         "version = 1\nmode = \"manual\"\nttl_ms = 60000\ndebug_sessions = \"read\"\ndebug_session_max_ms = 3600000\n",
     )
     .unwrap();
-    let mut ctx = tenkai_sqlite::embedded_ctx(fixture.root.join("tenkai.db"), false).unwrap();
+    let mut ctx = tenkai_sqlite::embedded_ctx(fixture.root.join("tenkai.db")).unwrap();
     tenkai::plan::set_plan_approval_policy(&mut ctx, "stage", &policy)
         .await
         .unwrap();

@@ -117,8 +117,9 @@ reserved for a terminal canary outcome that satisfies the existing canary
 pass checks. Identity uses an opaque `served://<product>` URI, never a host
 or credential.
 
-Signing uses the 32-byte Ed25519 seed at `TENKAI_MODEL_EVIDENCE_KEY`. Export
-runs only when terminal-outcome export is enabled and that key is present.
+Signing uses the 32-byte Ed25519 seed at `TENKAI_MODEL_EVIDENCE_KEY`. Tenkai
+records the signed evidence in its local outbox whenever that key is present
+(#1580).
 
 ## Follow-on
 

@@ -211,9 +211,7 @@ async fn tenant_hub_catalog_enqueues_provider_events() {
         claim_token: None,
         claim_until: None,
     };
-    let mut ctx =
-        Ctx::tenant_hub_catalog_with_outcome_export(graph, true).with_catalog_tenant("tenant-a");
-    assert!(ctx.outcome_export_enabled());
+    let mut ctx = Ctx::tenant_hub_catalog(graph).with_catalog_tenant("tenant-a");
     ctx.put_with_provider_events(updated.clone(), std::slice::from_ref(&event), &[])
         .await
         .unwrap();

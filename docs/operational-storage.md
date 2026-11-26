@@ -25,15 +25,9 @@ audit and planning-event mutations remain unwired. Provider adapters can
 acknowledge delivery, but cannot change or reconstruct operational truth. See
 [provider contracts](provider-contracts.md) for delivery semantics.
 
-When terminal-outcome export is configured, `SqliteStore` updates the
-authoritative plan, deployment, or reconciled environment record and inserts
-the `provider_events` row through the same SQLite transaction. A failed insert
-rolls back the object update; a committed object update therefore cannot lose
-its outcome row. Tenant-mode hubs enqueue the same outbox row in the tenant
-PostgreSQL schema in the same catalog write, with the tenant identity bound
-into the outcome payload; the host export worker drains
-each tenant partition and allocates `source_sequence` from the hub producer
-identity so export stays monotonic.
+Tenkai no longer queues terminal-outcome or feedback export rows (#1580).
+Rows earlier releases queued stay in `provider_events`, readable by outcome
+inspection and never sent.
 
 Software compatibility observations are immutable content-addressed operational
 records (`tenkai.software_compatibility_evidence`), indexed by environment and

@@ -204,10 +204,6 @@ observation is retried. The outbox identity is a digest of the
 destination URL and the observation id; replaying the same outcome reuses
 that row and `X-Tenkai-Idempotency-Key`.
 
-The Sekai export (`TENKAI_FEEDBACK_PROVIDER` / `TENKAI_FEEDBACK_NAMESPACE`)
-stays until a receiver exists on that side. Until then both paths work, and
-an operator enables one or the other.
-
 Delivery status, for apply outcomes, operational events, and feedback
 observations, is at
 `GET /v1/environments/{environment}/webhooks/deliveries` and, for host

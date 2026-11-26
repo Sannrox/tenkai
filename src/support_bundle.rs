@@ -756,7 +756,7 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
             &seed,
             1_000,
             crate::storage::MemoryCatalogGraph::copy_store_file,
-            |path| crate::client::Ctx::embedded_hub(path, false).ok(),
+            |path| crate::client::Ctx::embedded_hub(path).ok(),
         )
         .await
         .unwrap();
@@ -773,7 +773,7 @@ tenkai.audit_export outcome=ok sequence=3 entries=12";
             &seed,
             1_000,
             crate::storage::MemoryCatalogGraph::copy_store_file,
-            |path| crate::client::Ctx::embedded_hub(path, false).ok(),
+            |path| crate::client::Ctx::embedded_hub(path).ok(),
         )
         .await
         .unwrap();
