@@ -17,7 +17,7 @@ use crate::ontology::{
     KIND_UPGRADE_PACE_ADMIT_AUDIT, NS, REL_SUBSCRIBES, channel_id, env_id, upgrade_pace_admit_id,
     validate_identifier,
 };
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::plan::{Action, Plan};
 
 /// Configured pace duration on the channel object. Absent means off.

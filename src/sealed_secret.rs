@@ -25,7 +25,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
 use crate::ontology::validate_identifier;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::plan::SealedStep;
 use crate::sealing_key::SealingPublicKey;
 

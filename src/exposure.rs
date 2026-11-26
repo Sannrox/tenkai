@@ -21,7 +21,7 @@ use crate::client::Ctx;
 use crate::connectivity::CONNECTIVITY_CLASS_PROPERTY;
 use crate::manifest::{self, Manifest};
 use crate::ontology::{KIND_CHANNEL, KIND_ENVIRONMENT, KIND_RELEASE, NS};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::plan::Step;
 use crate::provider_event::{ProviderEventStore, enqueue_optional_event};
 use crate::providers::{EvidenceBinding, PROVIDER_CONTRACT_VERSION, ProviderEvent};
@@ -2993,7 +2993,7 @@ install = "true"
         ctx.put(object).await.unwrap();
     }
 
-    async fn stored_exposure(ctx: &mut Ctx) -> crate::pb::sekai::Object {
+    async fn stored_exposure(ctx: &mut Ctx) -> crate::pb::record::Object {
         ctx.list_kind(KIND_DEPLOYED_EXPOSURE)
             .await
             .unwrap()

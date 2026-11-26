@@ -1,7 +1,7 @@
 use super::super::*;
 use std::collections::HashMap;
 use tenkai::ontology::ACTION_SUBSCRIBE;
-use tenkai::pb::sekai::{Link, Object};
+use tenkai::pb::record::{Link, Object};
 use tenkai::storage::{CatalogGraph, StoreError};
 
 /// Live catalog object-graph drill. Requires feature `postgres` and `TENKAI_POSTGRES_URL`.

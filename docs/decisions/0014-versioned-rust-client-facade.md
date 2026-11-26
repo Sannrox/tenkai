@@ -1,6 +1,9 @@
 # ADR 0014: Versioned Rust client facade
 
-- Status: Accepted
+- Status: Superseded by [ADR 0064](0064-tenkai-stands-alone.md)
+- Superseded-by: [ADR 0064](0064-tenkai-stands-alone.md) retires the remote
+  provider; #1582 removes the client and the vendored record types. Tenkai
+  owns its records in `proto/tenkai/record.proto`.
 - Date: 2026-08-04
 - Issue: [#209](https://github.com/Sannrox/tenkai/issues/209)
 - Owner: Tenkai maintainers

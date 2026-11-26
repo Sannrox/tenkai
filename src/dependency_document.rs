@@ -12,7 +12,7 @@ use sha2::{Digest as _, Sha256};
 use crate::client::Ctx;
 use crate::environment_bindings::{EnvironmentBindings, OBSERVED_INSTANCE};
 use crate::ontology::release_id;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::software_compatibility::{CompatibilityProfile, ContractRequirement};
 use crate::workload_identity::{Peers, uri};
 

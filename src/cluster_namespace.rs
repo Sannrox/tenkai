@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
 use crate::ontology::validate_identifier;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 pub const DECLARED_PROPERTY: &str = "cluster_namespaces";
 pub const APPLIED_PROPERTY: &str = "applied_cluster_namespaces";

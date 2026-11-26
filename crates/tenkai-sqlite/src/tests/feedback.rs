@@ -2,7 +2,7 @@
 
 use super::*;
 use tenkai::feedback_observation::{Capture, FeedbackObservation, Operation, Reason};
-use tenkai::pb::sekai::Object;
+use tenkai::pb::record::Object;
 
 fn note(id: &str, value: &str) -> Object {
     Object {

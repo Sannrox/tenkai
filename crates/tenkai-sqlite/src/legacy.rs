@@ -18,7 +18,7 @@ use rusqlite::{
 use crate::{enqueue_provider_event_in, immediate_transactions};
 use tenkai::embedded::PropertyIndexQuery;
 use tenkai::pb::graph_action::ActionTypeDef;
-use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
+use tenkai::pb::record::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use tenkai::storage::{ProviderEventRecord, StoreError};
 
 const SCHEMA_VERSION: u32 = 5;

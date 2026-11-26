@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::plan::Plan;
 use crate::signature_verification::validate_signer_text as validate_text;
 pub use crate::signature_verification::{TrustRootKind, TrustRoots, TrustedSigner};

@@ -13,7 +13,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
 use crate::ontology::*;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::plan::{Plan, PlanState, Step};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

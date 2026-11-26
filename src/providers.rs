@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::storage::{ProviderEventRecord, StoreError};
 
 pub use crate::provider_event::{

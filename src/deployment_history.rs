@@ -8,7 +8,7 @@ use crate::client::Ctx;
 use crate::environment::environment;
 use crate::ontology::{KIND_DEPLOYMENT, REL_PART_OF_PLAN, validate_identifier};
 use crate::page::{Page, PageQuery};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::schema_contract::omitted_when_none;
 
 /// One recorded deployment attempt, as stored.
@@ -264,7 +264,7 @@ mod tests {
     use crate::client::Ctx;
     use crate::ontology::{KIND_DEPLOYMENT, NS, REL_PART_OF_PLAN, deployment_id};
     use crate::page::DEFAULT_PAGE_LIMIT;
-    use crate::pb::sekai::Object;
+    use crate::pb::record::Object;
     use std::collections::HashMap;
 
     fn db_path(label: &str) -> std::path::PathBuf {

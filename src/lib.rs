@@ -140,14 +140,12 @@
 //!   selection behind the shared `Ctx` object interface.
 //!   Its private relation-lifecycle module likewise hides deterministic link
 //!   identity, duplicate normalization, direction semantics, and deletion
-//!   across embedded and remote adapters.
+//!   across the embedded and tenant catalogs.
 //!   Its private lease-lifecycle module hides acquire/get/refresh/release/
 //!   takeover fencing, request-id binding, and not-found mapping behind the
 //!   shared `Ctx` lease interface.
-//!   Its private action-lifecycle module hides embedded graph-action
-//!   registration/execution and remote governed Action Type / ActionInstance
-//!   admission, conflict recovery, and decision listing behind the shared
-//!   `Ctx` action interface.
+//!   Its private action-lifecycle module hides graph-action registration,
+//!   execution, and decision listing behind the shared `Ctx` action interface.
 //! - [`provider_event`] hides durable optional-provider event admission,
 //!   claiming, fencing, sequencing, retry, poison isolation, and
 //!   acknowledgement behind one delivery interface; authoritative store

@@ -15,7 +15,7 @@ use sha2::{Digest as _, Sha256};
 use crate::change_set_pin::{AdmittedChangeSetPin, ChangeSetMember};
 use crate::client::Ctx;
 use crate::manifest::Manifest;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::signature_verification;
 
 pub const MODULE_PROFILE: &str = "tenkai.workshop_module.v1";

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::Ctx;
 use crate::ontology::{KIND_CHANNEL, NS, channel_id, validate_identifier};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 use super::{KIND_DEPLOYED_EXPOSURE, MatchedExposure};
 

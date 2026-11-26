@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 pub const CERTIFICATE_REPORT_SCHEMA: &str = "tenkai.workload-certificate.v1";
 /// Most reports one request may carry; a runtime sends more in batches.

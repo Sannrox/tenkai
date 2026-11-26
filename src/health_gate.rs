@@ -19,7 +19,7 @@ use crate::apply::{Outcome, StepOutcomeStatus};
 use crate::client::Ctx;
 use crate::manifest::{GateFailPolicy, GateSection, SloComparator, SloGate};
 use crate::ontology::{KIND_HEALTH_GATE_EVIDENCE, NS, channel_id, env_id, health_gate_evidence_id};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::plan::{Action, Plan, Step};
 use crate::providers::{
     EvidenceBinding, PROVIDER_CONTRACT_VERSION, ProviderEvent, enqueue_optional_event,

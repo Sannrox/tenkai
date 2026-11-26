@@ -212,7 +212,7 @@ impl ModelRuntimeDescriptor {
 /// Channel promotion of classical (`onnx`) model_runtime releases requires a
 /// signed registry promotion attestation matching the deployed version and
 /// artifact digest. Other product kinds are unchanged.
-pub fn require_classical_registry_attestation(release: &crate::pb::sekai::Object) -> Result<()> {
+pub fn require_classical_registry_attestation(release: &crate::pb::record::Object) -> Result<()> {
     let Some(raw) = release.properties.get("manifest") else {
         return Ok(());
     };

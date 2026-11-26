@@ -14,7 +14,7 @@ use crate::ontology::{
     KIND_RELEASE, NS, env_id, release_id,
 };
 use crate::pb::graph_action::{ActionResult, ActionTypeDef};
-use crate::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
+use crate::pb::record::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 use crate::plan::Plan;
 use crate::storage::{
     CATALOG_HISTORY_RETENTION_MS, ChannelRecord, EnvironmentRecord, PlanRecord, PlanStatus,

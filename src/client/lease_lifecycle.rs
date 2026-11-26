@@ -1,18 +1,11 @@
-//! Lease lifecycle semantics across embedded and remote adapters.
+//! Lease lifecycle semantics across the embedded and tenant catalogs.
 
-use anyhow::{Context as _, Result};
-use sekai_client::CallOptions;
+use anyhow::Result;
 use std::sync::Arc;
 
-use super::{RemoteClient, remote_unary, remote_unary_with_options};
-use crate::pb::sekai::{
-    AcquireLeaseRequest, AcquireLeaseResponse, GetLeaseRequest, GetLeaseResponse, Lease,
-    RefreshLeaseRequest, RefreshLeaseResponse, ReleaseLeaseRequest, ReleaseLeaseResponse,
-    TakeoverExpiredLeaseRequest, TakeoverExpiredLeaseResponse,
-};
+use crate::pb::record::Lease;
 
-pub(super) enum LeaseLifecycle<'a> {
-    Remote(&'a RemoteClient),
+pub(super) enum LeaseLifecycle {
     Catalog {
         catalog: Arc<dyn crate::storage::CatalogGraph>,
         tenant: Option<String>,
@@ -20,12 +13,10 @@ pub(super) enum LeaseLifecycle<'a> {
     /// A tenant hub without a usable catalog binding. `tenant_unbound` is a
     /// hub that has a catalog but no tenant yet: its reads fail with
     /// [`super::TENANT_NOT_BOUND`] instead of looking like an empty catalog.
-    Unavailable {
-        tenant_unbound: bool,
-    },
+    Unavailable { tenant_unbound: bool },
 }
 
-impl LeaseLifecycle<'_> {
+impl LeaseLifecycle {
     pub(super) async fn acquire(
         &self,
         namespace: &str,
@@ -49,35 +40,6 @@ impl LeaseLifecycle<'_> {
                 .await
                 .map_err(super::LeaseError::from_anyhow)
             }
-            Self::Remote(client) => {
-                let request_id = uuid::Uuid::new_v4().to_string();
-                match remote_unary_with_options(
-                    client,
-                    "/sekai.SekaiService/AcquireLease",
-                    AcquireLeaseRequest {
-                        namespace: namespace.into(),
-                        key: key.into(),
-                        owner: owner.into(),
-                        ttl_ms,
-                        request_id: request_id.clone(),
-                    },
-                    CallOptions::default().with_request_id(request_id),
-                )
-                .await
-                {
-                    Ok(response) => {
-                        let response: AcquireLeaseResponse = response;
-                        response
-                            .lease
-                            .context("provider returned an empty lease")
-                            .map_err(super::LeaseError::Failed)
-                    }
-                    Err(status) if status.code() == tonic::Code::AlreadyExists => {
-                        Err(super::LeaseError::AlreadyExists)
-                    }
-                    Err(status) => Err(super::LeaseError::Failed(status.into())),
-                }
-            }
         }
     }
 
@@ -96,22 +58,6 @@ impl LeaseLifecycle<'_> {
                     catalog.get_lease(tenant.as_deref(), &namespace, &key)
                 })
                 .await
-            }
-            Self::Remote(client) => {
-                let response: std::result::Result<GetLeaseResponse, tonic::Status> = remote_unary(
-                    client,
-                    "/sekai.SekaiService/GetLease",
-                    GetLeaseRequest {
-                        namespace: namespace.into(),
-                        key: key.into(),
-                    },
-                )
-                .await;
-                match response {
-                    Ok(response) => Ok(response.lease),
-                    Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
-                    Err(status) => Err(status.into()),
-                }
             }
         }
     }
@@ -142,25 +88,6 @@ impl LeaseLifecycle<'_> {
                 })
                 .await
             }
-            Self::Remote(client) => {
-                let request_id = uuid::Uuid::new_v4().to_string();
-                let response: RefreshLeaseResponse = remote_unary_with_options(
-                    client,
-                    "/sekai.SekaiService/RefreshLease",
-                    RefreshLeaseRequest {
-                        namespace: namespace.into(),
-                        key: key.into(),
-                        fencing_token: fencing_token.into(),
-                        ttl_ms,
-                        request_id: request_id.clone(),
-                    },
-                    CallOptions::default().with_request_id(request_id),
-                )
-                .await?;
-                response
-                    .lease
-                    .context("provider returned an empty refreshed lease")
-            }
         }
     }
 
@@ -182,24 +109,6 @@ impl LeaseLifecycle<'_> {
                     catalog.release_lease(tenant.as_deref(), &namespace, &key, &fencing_token)
                 })
                 .await
-            }
-            Self::Remote(client) => {
-                let request_id = uuid::Uuid::new_v4().to_string();
-                let response: ReleaseLeaseResponse = remote_unary_with_options(
-                    client,
-                    "/sekai.SekaiService/ReleaseLease",
-                    ReleaseLeaseRequest {
-                        namespace: namespace.into(),
-                        key: key.into(),
-                        fencing_token: fencing_token.into(),
-                        request_id: request_id.clone(),
-                    },
-                    CallOptions::default().with_request_id(request_id),
-                )
-                .await?;
-                response
-                    .lease
-                    .context("provider returned an empty released lease")
             }
         }
     }
@@ -234,27 +143,6 @@ impl LeaseLifecycle<'_> {
                     )
                 })
                 .await
-            }
-            Self::Remote(client) => {
-                let request_id = uuid::Uuid::new_v4().to_string();
-                let response: TakeoverExpiredLeaseResponse = remote_unary_with_options(
-                    client,
-                    "/sekai.SekaiService/TakeoverExpiredLease",
-                    TakeoverExpiredLeaseRequest {
-                        namespace: namespace.into(),
-                        key: key.into(),
-                        owner: owner.into(),
-                        expected_fencing_token: expected_fencing_token.into(),
-                        expected_expires_at_ms,
-                        ttl_ms,
-                        request_id: request_id.clone(),
-                    },
-                    CallOptions::default().with_request_id(request_id),
-                )
-                .await?;
-                response
-                    .lease
-                    .context("provider returned an empty takeover lease")
             }
         }
     }

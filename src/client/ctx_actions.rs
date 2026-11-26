@@ -2,13 +2,9 @@
 
 use anyhow::{Context as _, Result};
 
-use sekai_client::CallOptions;
-
 use super::{Ctx, action_actor_from_changes};
 use crate::pb::graph_action::ActionResult;
-use crate::pb::sekai::{
-    Decision, ListObjectChangesRequest, ListObjectChangesResponse, ObjectChange,
-};
+use crate::pb::record::{Decision, ObjectChange};
 
 impl Ctx {
     pub async fn execute_action_result(
@@ -72,28 +68,7 @@ impl Ctx {
             })
             .await;
         }
-        let mut offset = 0;
-        let mut all = Vec::new();
-        loop {
-            let response: ListObjectChangesResponse = self
-                .remote_unary(
-                    "/sekai.SekaiService/ListObjectChanges",
-                    ListObjectChangesRequest {
-                        object_id: object_id.into(),
-                        limit: 100,
-                        offset,
-                    },
-                    CallOptions::default(),
-                )
-                .await?;
-            let changes = response.changes;
-            let received = changes.len();
-            all.extend(changes);
-            if received < 100 {
-                return Ok(all);
-            }
-            offset += received as i32;
-        }
+        anyhow::bail!(super::TENANT_HUB_UNAVAILABLE)
     }
 
     pub async fn authorize_emergency_override(

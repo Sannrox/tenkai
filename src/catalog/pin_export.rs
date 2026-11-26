@@ -301,7 +301,7 @@ mod tests {
     };
     use crate::catalog::{PublishOptions, promote, publish};
     use crate::ontology::{KIND_CHANNEL, NS, channel_id, register};
-    use crate::pb::sekai::Object;
+    use crate::pb::record::Object;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};

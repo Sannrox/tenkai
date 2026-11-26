@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::release_signing::{SignatureEnvelope, TrustRoots, verify_release};
 use crate::signature_verification::validate_prefixed_digest;
 

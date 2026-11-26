@@ -202,7 +202,7 @@ pub(super) fn record_changes(
         if old == new {
             continue;
         }
-        let change = tenkai::pb::sekai::ObjectChange {
+        let change = tenkai::pb::record::ObjectChange {
             id: uuid::Uuid::new_v4().to_string(),
             object_id: next.id.clone(),
             field: format!("properties.{key}"),

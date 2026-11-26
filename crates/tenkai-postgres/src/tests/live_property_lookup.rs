@@ -1,7 +1,7 @@
 use super::super::*;
 use std::collections::HashMap;
 use tenkai::ontology::KIND_PLAN;
-use tenkai::pb::sekai::Object;
+use tenkai::pb::record::Object;
 use tenkai::plan::{Action, PLAN_FORMAT_VERSION, Plan, PlanState, Step};
 use tenkai::storage::CatalogGraph;
 

@@ -3,7 +3,7 @@ use anyhow::Result as AnyResult;
 use std::collections::HashMap;
 use tenkai::feedback_observation::FeedbackObservation;
 use tenkai::pb::graph_action::{ActionResult, ActionTypeDef};
-use tenkai::pb::sekai::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
+use tenkai::pb::record::{Decision, Lease, Link, Object, ObjectChange, ObjectType};
 
 impl CatalogGraph for SqliteStore {
     fn writes_after(

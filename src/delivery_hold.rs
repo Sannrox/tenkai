@@ -20,7 +20,7 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::client::Ctx;
 use crate::ontology::{KIND_CHANNEL, NS, channel_id, validate_identifier};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 pub const HOLD_KIND: &str = "tenkai.delivery_hold";
 pub const HOLD_AUDIT_KIND: &str = "tenkai.delivery_hold_audit";

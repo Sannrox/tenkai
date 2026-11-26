@@ -85,7 +85,7 @@ unverifiable.
 - The client boundary is implemented in
   [`src/client.rs`](../../src/client.rs), the bootstrap registration is in
   [`src/ontology.rs`](../../src/ontology.rs), and the vendored public contract
-  is pinned in [`proto/vendor/sekai.proto`](../../proto/vendor/sekai.proto).
+  is pinned in `proto/vendor/sekai.proto` (removed by #1582).
 - The portable Sekai ontology was validated before this decision. It describes
   Tenkai's host and Chisei public API boundaries but does not define these
   action-registry names; this ADR records the project decision rather than

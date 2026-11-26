@@ -4,10 +4,8 @@ use std::collections::HashMap;
 
 use anyhow::{Context as _, Result, ensure};
 
-use sekai_client::CallOptions;
-
-use super::{Ctx, canonical_create_request, canonical_update_request, lease_precondition};
-use crate::pb::sekai::{CreateObjectResponse, Lease, Object, UpdateObjectResponse};
+use super::Ctx;
+use crate::pb::record::{Lease, Object};
 use crate::storage::LeaseRefresh;
 
 impl Ctx {
@@ -130,8 +128,6 @@ impl Ctx {
 
     /// Write `object` with `events` and feedback `observations` atomically,
     /// on the embedded store or the tenant's catalog partition (#868).
-    /// Remote application state has no observation store: there the
-    /// observations are dropped and the write goes ahead (#802).
     pub(crate) async fn put_with_provider_events(
         &mut self,
         object: Object,
@@ -151,23 +147,17 @@ impl Ctx {
             })
             .await;
         }
-        if events.is_empty() {
-            return self.put(object).await;
-        }
-        anyhow::bail!("remote application state cannot atomically enqueue Tenkai provider events")
+        anyhow::bail!(super::TENANT_HUB_UNAVAILABLE)
     }
 
     /// Whether this context commits objects and provider events in one
-    /// transaction: embedded state and a tenant hub do; remote application
-    /// state does not.
+    /// transaction: embedded state and a bound tenant hub do.
     pub(crate) fn commits_provider_events_atomically(&self) -> bool {
         self.catalog_port().is_some()
     }
 
     /// [`Self::put_with_provider_events`] for an existing object, committed
     /// only while the lease `fencing_token` names is still held (#1294).
-    /// Remote application state keeps dropping observations, but refuses
-    /// events it cannot enqueue with the write.
     pub(crate) async fn guarded_put_with_provider_events(
         &mut self,
         object: Object,
@@ -189,16 +179,7 @@ impl Ctx {
                 )
                 .await;
         }
-        let events = self
-            .with_observation_delivery_events(events, observations)
-            .await;
-        ensure!(
-            events.is_empty(),
-            "remote application state cannot atomically enqueue Tenkai provider events"
-        );
-        self.guarded_update(object, lease_namespace, lease_key, fencing_token)
-            .await?;
-        Ok(())
+        anyhow::bail!(super::TENANT_HUB_UNAVAILABLE)
     }
 
     pub(crate) async fn guarded_create(
@@ -224,28 +205,7 @@ impl Ctx {
             })
             .await;
         }
-        let request = canonical_create_request(
-            object,
-            Some(lease_precondition(
-                lease_namespace,
-                lease_key,
-                fencing_token,
-            )),
-        );
-        let request_id = request
-            .lease_precondition
-            .as_ref()
-            .map(|precondition| precondition.request_id.clone());
-        let mut options = CallOptions::default().retryable(true);
-        if let Some(request_id) = request_id {
-            options = options.with_request_id(request_id);
-        }
-        let response: CreateObjectResponse = self
-            .remote_unary("/sekai.SekaiService/CreateObject", request, options)
-            .await?;
-        response
-            .object
-            .context("Sekai returned an empty canonical create result")
+        anyhow::bail!(super::TENANT_HUB_UNAVAILABLE)
     }
 
     /// Refresh every lease in `refreshes` in one store transaction where
@@ -368,28 +328,7 @@ impl Ctx {
             })
             .await;
         }
-        let request = canonical_update_request(
-            object,
-            Some(lease_precondition(
-                lease_namespace,
-                lease_key,
-                fencing_token,
-            )),
-        );
-        let request_id = request
-            .lease_precondition
-            .as_ref()
-            .map(|precondition| precondition.request_id.clone());
-        let mut options = CallOptions::default().retryable(true);
-        if let Some(request_id) = request_id {
-            options = options.with_request_id(request_id);
-        }
-        let response: UpdateObjectResponse = self
-            .remote_unary("/sekai.SekaiService/UpdateObject", request, options)
-            .await?;
-        response
-            .object
-            .context("Sekai returned an empty canonical update result")
+        anyhow::bail!(super::TENANT_HUB_UNAVAILABLE)
     }
 
     pub(crate) async fn guarded_update_objects_with_provider_events(
@@ -425,8 +364,6 @@ impl Ctx {
             })
             .await;
         }
-        anyhow::bail!(
-            "remote application state cannot atomically update objects and enqueue Tenkai provider events"
-        )
+        anyhow::bail!(super::TENANT_HUB_UNAVAILABLE)
     }
 }

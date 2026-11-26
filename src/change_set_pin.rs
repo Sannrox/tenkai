@@ -15,7 +15,7 @@ use sha2::{Digest as _, Sha256};
 #[cfg(test)]
 use crate::manifest::ChangeSetMemberSection;
 use crate::manifest::ChangeSetPinSection;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 use crate::signature_verification;
 
 pub const PIN_CONTRACT: &str = "tenkai.change_set_pin.v1";

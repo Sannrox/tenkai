@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result, bail};
 use crate::apply;
 use crate::client::{Ctx, LeaseError};
 use crate::ontology::{KIND_PACKAGE_MIGRATION_LOCK, NS};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 use super::types::{
     MIGRATION_EXEC_NAMESPACE, MIGRATION_EXEC_TTL_MS, MigrationRecord, exec_lease_name,

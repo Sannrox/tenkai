@@ -2,12 +2,8 @@
 
 use anyhow::Result;
 
-use sekai_client::CallOptions;
-
-use super::{Ctx, apply_remote_property_index};
-use crate::pb::sekai::{
-    FindByPropertyRequest, Link, ListFilter, ListObjectsRequest, ListObjectsResponse, Object,
-};
+use super::{Ctx, apply_property_index};
+use crate::pb::record::{Link, Object};
 
 impl Ctx {
     /// Create a link with a deterministic id; already-exists is treated as success.
@@ -136,27 +132,10 @@ impl Ctx {
                 catalog.find_by_property(tenant.as_deref(), &kind, &key, &value)
             })
             .await?;
-            return apply_remote_property_index(objects, &query);
+            return apply_property_index(objects, &query);
         }
-        if self.is_tenant_hub() {
-            anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
-            return Ok(Vec::new());
-        }
-        if query.matching_key.is_some() && query.matching_values.is_empty() {
-            return Ok(Vec::new());
-        }
-        let response: ListObjectsResponse = self
-            .remote_unary(
-                "/sekai.SekaiService/FindByProperty",
-                FindByPropertyRequest {
-                    kind: query.kind.into(),
-                    key: query.key.into(),
-                    value: query.value.into(),
-                },
-                CallOptions::default(),
-            )
-            .await?;
-        apply_remote_property_index(response.objects, &query)
+        anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
+        Ok(Vec::new())
     }
 
     pub async fn links(&mut self, object_id: &str, relation: &str) -> Result<Vec<Link>> {
@@ -174,37 +153,12 @@ impl Ctx {
             })
             .await;
         }
-        if self.is_tenant_hub() {
-            anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
-            return Ok(Vec::new());
-        }
-        const PAGE_SIZE: i32 = 100;
-        let mut objects = Vec::new();
-        loop {
-            let response: ListObjectsResponse = self
-                .remote_unary(
-                    "/sekai.SekaiService/ListObjects",
-                    ListObjectsRequest {
-                        filter: Some(ListFilter {
-                            kind: kind.into(),
-                            limit: PAGE_SIZE,
-                            offset: objects.len() as i32,
-                            ..Default::default()
-                        }),
-                    },
-                    CallOptions::default(),
-                )
-                .await?;
-            let received = response.objects.len();
-            objects.extend(response.objects);
-            if received < PAGE_SIZE as usize {
-                return Ok(objects);
-            }
-        }
+        anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
+        Ok(Vec::new())
     }
 
     /// Store write-log rows after `after` (#1569). `None` when this context
-    /// has no catalog port (remote), so callers evaluate everything.
+    /// has no catalog port (an unbound hub), so callers evaluate everything.
     pub(crate) async fn writes_after(
         &mut self,
         after: i64,
@@ -245,9 +199,6 @@ impl Ctx {
     }
 
     /// List ids of `kind` without materializing embedded object payloads.
-    ///
-    /// Remote adapters still page `ListObjects` and keep only ids; there is no
-    /// cheaper name/id RPC on the vendored protocol.
     pub(crate) async fn list_kind_ids(&mut self, kind: &str) -> Result<Vec<String>> {
         if let Some((catalog, tenant)) = self.catalog_port() {
             let kind = kind.to_string();
@@ -256,15 +207,7 @@ impl Ctx {
             })
             .await;
         }
-        if self.is_tenant_hub() {
-            anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
-            return Ok(Vec::new());
-        }
-        Ok(self
-            .list_kind(kind)
-            .await?
-            .into_iter()
-            .map(|object| object.id)
-            .collect())
+        anyhow::ensure!(!self.has_catalog(), super::TENANT_NOT_BOUND);
+        Ok(Vec::new())
     }
 }

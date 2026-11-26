@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::pb::graph_action::ActionTypeDef;
-use crate::pb::sekai::{Link, Object};
+use crate::pb::record::{Link, Object};
 
 /// One write of a resolved action, in definition order.
 #[derive(Clone, Debug, PartialEq)]

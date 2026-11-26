@@ -42,7 +42,7 @@ pub async fn mark_runtime_managed(
     environment: &str,
 ) -> anyhow::Result<()> {
     let now = crate::now_millis();
-    let marker = crate::pb::sekai::Object {
+    let marker = crate::pb::record::Object {
         id: marker_id(environment),
         kind: crate::ontology::KIND_RUNTIME_ENROLLMENT.into(),
         name: format!("{environment} runtime enrollment"),

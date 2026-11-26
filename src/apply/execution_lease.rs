@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context as _, Result, bail};
 
 use crate::client::Ctx;
-use crate::pb::sekai::Lease;
+use crate::pb::record::Lease;
 
 use super::ReleaseContent;
 

@@ -23,7 +23,7 @@ use crate::ontology::{
     KIND_CHANNEL_PROMOTION_POLICY_POINTER, KIND_CHANNEL_PROMOTION_SOAK, KIND_ENVIRONMENT,
     KIND_INSTANCE, NS, REL_SUBSCRIBES, channel_id, env_id, validate_identifier,
 };
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 /// Authenticator id stamped on policy-driven promotions.
 pub const POLICY_AUTHENTICATOR: &str = "channel-promotion-policy";

@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result, bail};
 use crate::client::Ctx;
 use crate::manifest::{GpuRequirements, ModelRequirementsSection, ProductKind};
 use crate::ontology::{REL_RELEASE_OF, product_id, release_id};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 pub(super) struct ChannelHead<'a> {
     pub product: &'a str,

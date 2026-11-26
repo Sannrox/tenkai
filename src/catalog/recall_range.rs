@@ -146,7 +146,7 @@ fn require_reason<'a>(reason: &'a str, what: &str) -> Result<&'a str> {
     Ok(reason)
 }
 
-fn range_from_object(object: &crate::pb::sekai::Object) -> Result<RecallRange> {
+fn range_from_object(object: &crate::pb::record::Object) -> Result<RecallRange> {
     let from = object
         .properties
         .get("from")
@@ -177,7 +177,7 @@ fn range_from_object(object: &crate::pb::sekai::Object) -> Result<RecallRange> {
     })
 }
 
-fn exclusion_from_object(object: &crate::pb::sekai::Object) -> Result<RecallRangeExclusionView> {
+fn exclusion_from_object(object: &crate::pb::record::Object) -> Result<RecallRangeExclusionView> {
     Ok(RecallRangeExclusionView {
         version: object
             .properties
@@ -195,7 +195,7 @@ fn exclusion_from_object(object: &crate::pb::sekai::Object) -> Result<RecallRang
     })
 }
 
-fn overlay_close(range: &mut RecallRange, close: &crate::pb::sekai::Object) {
+fn overlay_close(range: &mut RecallRange, close: &crate::pb::record::Object) {
     if range.before.is_none() {
         range.before = close
             .properties
@@ -208,7 +208,7 @@ fn overlay_close(range: &mut RecallRange, close: &crate::pb::sekai::Object) {
 async fn list_product_ranges(ctx: &mut Ctx, product: &str) -> Result<Vec<RecallRange>> {
     let mut recorded = HashMap::new();
     let mut closes = HashMap::new();
-    let mut exclusions: HashMap<String, Vec<crate::pb::sekai::Object>> = HashMap::new();
+    let mut exclusions: HashMap<String, Vec<crate::pb::record::Object>> = HashMap::new();
     let mut removed = HashMap::new();
     for object in ctx.list_kind(KIND_RELEASE_RECALL_RANGE).await? {
         if object.kind != KIND_RELEASE_RECALL_RANGE {

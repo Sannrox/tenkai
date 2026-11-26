@@ -1,9 +1,7 @@
-//! Embedded and remote `Ctx` facade plus object, relation, lease, and action
+//! Embedded and tenant-hub `Ctx` facade plus object, relation, lease, and action
 //! lifecycle ports.
 
-mod action_governed;
 mod action_lifecycle;
-mod action_remote;
 mod ctx_actions;
 mod ctx_objects;
 mod ctx_queries;
@@ -21,27 +19,17 @@ mod transport;
 #[cfg(test)]
 mod tests;
 
-use anyhow::{Context as _, Result};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::OnceCell;
 use tonic::Status;
 
-use sekai_client::{ClientConfig, RetryPolicy, SdkErrorCode};
-
-pub(crate) use helpers::{
-    action_actor_from_changes, apply_remote_property_index, canonical_create_request,
-    canonical_update_request, lease_precondition,
-};
+pub(crate) use helpers::{action_actor_from_changes, apply_property_index};
 pub(crate) use plan_kind_list::{PlanKindListSnapshot, PlanKindListTick, PlanRetargetTickGuard};
 pub use schema_register::{
     known_action, known_actions, known_object_types, register, require_canary_schema,
     require_connectivity_upgrade_schema, require_package_migration_schema, require_wave_schema,
 };
-pub(crate) use transport::{
-    RemoteClient, block_catalog, block_catalog_status, block_operational, remote_unary,
-    remote_unary_with_options, token_transport_is_safe,
-};
+pub(crate) use transport::{block_catalog, block_catalog_status, block_operational};
 
 /// A lease a plan execution must keep, refreshed with the environment apply
 /// fence so a long run cannot outlast its wave or topology (#834).
@@ -104,10 +92,6 @@ type EmbeddedBackup = Arc<dyn Fn(&std::path::Path) -> anyhow::Result<()> + Send 
 
 #[derive(Clone)]
 enum Backend {
-    Remote {
-        client: Arc<RemoteClient>,
-        action_defs: action_lifecycle::RemoteActionDefs,
-    },
     Embedded {
         catalog: Arc<dyn crate::storage::CatalogGraph>,
         operational: Arc<dyn crate::storage::OperationalStore>,
@@ -129,9 +113,8 @@ pub(super) const TENANT_HUB_UNAVAILABLE: &str =
     "the enterprise hub does not open SQLite; catalog lifecycle is not available in tenant mode";
 
 impl Backend {
-    fn object_lifecycle(&self) -> object_lifecycle::ObjectLifecycle<'_> {
+    fn object_lifecycle(&self) -> object_lifecycle::ObjectLifecycle {
         match self {
-            Self::Remote { client, .. } => object_lifecycle::ObjectLifecycle::Remote(client),
             Self::Embedded { catalog, .. } => object_lifecycle::ObjectLifecycle::Catalog {
                 catalog: Arc::clone(catalog),
                 tenant: None,
@@ -149,9 +132,8 @@ impl Backend {
         }
     }
 
-    fn relation_lifecycle(&self) -> relation_lifecycle::RelationLifecycle<'_> {
+    fn relation_lifecycle(&self) -> relation_lifecycle::RelationLifecycle {
         match self {
-            Self::Remote { client, .. } => relation_lifecycle::RelationLifecycle::Remote(client),
             Self::Embedded { catalog, .. } => relation_lifecycle::RelationLifecycle::Catalog {
                 catalog: Arc::clone(catalog),
                 tenant: None,
@@ -169,9 +151,8 @@ impl Backend {
         }
     }
 
-    fn lease_lifecycle(&self) -> lease_lifecycle::LeaseLifecycle<'_> {
+    fn lease_lifecycle(&self) -> lease_lifecycle::LeaseLifecycle {
         match self {
-            Self::Remote { client, .. } => lease_lifecycle::LeaseLifecycle::Remote(client),
             Self::Embedded { catalog, .. } => lease_lifecycle::LeaseLifecycle::Catalog {
                 catalog: Arc::clone(catalog),
                 tenant: None,
@@ -189,15 +170,8 @@ impl Backend {
         }
     }
 
-    fn action_lifecycle(&self) -> action_lifecycle::ActionLifecycle<'_> {
+    fn action_lifecycle(&self) -> action_lifecycle::ActionLifecycle {
         match self {
-            Self::Remote {
-                client,
-                action_defs,
-            } => action_lifecycle::ActionLifecycle::Remote {
-                client,
-                action_defs,
-            },
             Self::Embedded { catalog, .. } => action_lifecycle::ActionLifecycle::Catalog {
                 catalog: Arc::clone(catalog),
                 tenant: None,
@@ -214,67 +188,6 @@ impl Backend {
             },
         }
     }
-}
-
-/// Connect to sekai-chisei. Honors `TENKAI_SEKAI_URL`, `GRPC_PORT`,
-/// `SEKAI_AUTH_TOKEN`, and `TENKAI_PRINCIPAL` (default `tenkai`).
-pub async fn connect() -> Result<Ctx> {
-    let port = std::env::var("GRPC_PORT").unwrap_or_else(|_| "50051".into());
-    let url =
-        std::env::var("TENKAI_SEKAI_URL").unwrap_or_else(|_| format!("http://127.0.0.1:{port}"));
-    let token = crate::secret_source::read("SEKAI_AUTH_TOKEN")?;
-    if token.is_some() && !token_transport_is_safe(&url) {
-        anyhow::bail!(
-            "refusing to send SEKAI_AUTH_TOKEN to non-loopback plaintext endpoint {url}; use HTTPS"
-        );
-    }
-    let principal = std::env::var("TENKAI_PRINCIPAL").unwrap_or_else(|_| "tenkai".into());
-    let mut config = ClientConfig::new(url.clone(), principal).with_retry_policy(RetryPolicy {
-        max_attempts: 2,
-        initial_backoff: Duration::from_millis(0),
-        max_backoff: Duration::from_millis(0),
-        retryable_codes: vec![SdkErrorCode::Unavailable, SdkErrorCode::DeadlineExceeded],
-    });
-    if let Some(token) = token {
-        config = config.with_token(token).map_err(anyhow::Error::new)?;
-    }
-    let trust = crate::outbound_tls::OutboundTrust::from_env()?;
-    if crate::outbound_tls::is_tls_url(&url) && !trust.system_roots {
-        // The backend SDK always trusts its built-in roots; refuse rather
-        // than trust more than TENKAI_TLS_SYSTEM_ROOTS=false allows.
-        anyhow::bail!(
-            "{}=false cannot be honored for the remote backend at {url} yet: its client always trusts the built-in roots",
-            crate::outbound_tls::SYSTEM_ROOTS_ENV
-        );
-    }
-    if let Some(pem) = trust.bundle_pem {
-        config = config.with_tls_ca_certificate(pem);
-    }
-    let client = RemoteClient::connect(config)
-        .await
-        .map_err(anyhow::Error::new)
-        .with_context(|| {
-            format!(
-                "connecting to sekai-chisei at {url} — is the server running? (SEKAI_INSECURE=1 cargo run)"
-            )
-        })?;
-    Ok(Ctx {
-        release_trust_roots: None,
-        require_host_release_trust: false,
-        backend: Backend::Remote {
-            client: Arc::new(client),
-            action_defs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        },
-        canary_schema_preflight: Arc::new(OnceCell::new()),
-        outcome_inspection_enabled: false,
-        plan_kind_list: Arc::new(PlanKindListTick::default()),
-        health_metrics: None,
-        trust_sources: None,
-        execution_capabilities: None,
-        held_execution_leases: Vec::new(),
-        plan_proposer: None,
-        release_reads: std::sync::Weak::new(),
-    })
 }
 
 /// Application-level client failure. Transport adapters map `tonic::Status` here

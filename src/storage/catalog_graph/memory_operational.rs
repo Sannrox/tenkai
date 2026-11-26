@@ -176,7 +176,7 @@ impl MemoryCatalogGraph {
         namespace: &str,
         key: &str,
         fencing_token: &str,
-    ) -> anyhow::Result<crate::pb::sekai::Lease> {
+    ) -> anyhow::Result<crate::pb::record::Lease> {
         self.release_lease(None, namespace, key, fencing_token)
     }
 

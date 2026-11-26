@@ -9,7 +9,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::client::Ctx;
 use crate::ontology::*;
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 mod approval_brief;
 mod artifact_availability;
@@ -2625,7 +2625,7 @@ document = "sbom.json"
         })
         .to_string();
         let digest = format!("{:x}", Sha256::digest(document.as_bytes()));
-        ctx.create_once(crate::pb::sekai::Object {
+        ctx.create_once(crate::pb::record::Object {
             id: format!("tenkai:recall-notice:{digest}"),
             kind: crate::recall_notice::KIND_RECALL_NOTICE.into(),
             name: format!("notice {spec}"),

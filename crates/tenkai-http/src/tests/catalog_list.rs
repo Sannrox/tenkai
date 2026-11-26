@@ -341,7 +341,7 @@ async fn catalog_lists_serve_bound_tenant_catalog() {
     use super::auth_support::TenantAssertionExtension;
     use super::support::FixedReconciler;
     use tenkai::ontology::{KIND_CHANNEL, KIND_RELEASE};
-    use tenkai::pb::sekai::Object;
+    use tenkai::pb::record::Object;
     use tenkai::runtime_capabilities::enterprise_auth_capabilities;
     use tenkai::storage::{CatalogGraph, MemoryCatalogGraph};
     use tenkai::tenant_store::tenant_memory_store_capabilities;

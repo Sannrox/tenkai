@@ -32,7 +32,7 @@ fn opening_a_large_legacy_graph_store_keeps_memory_flat() {
         for index in 0..OBJECTS {
             let name = format!("env-{index}");
             graph
-                .put(tenkai::pb::sekai::Object {
+                .put(tenkai::pb::record::Object {
                     id: env_id(&name),
                     kind: KIND_ENVIRONMENT.into(),
                     namespace: NS.into(),

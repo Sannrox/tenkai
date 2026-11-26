@@ -1,40 +1,17 @@
-//! Governed action lifecycle semantics across embedded and remote adapters.
+//! Graph action lifecycle on the embedded and tenant catalogs.
 //!
-//! Embedded Tenkai keeps a local graph-action definition store and applies the
-//! Tenkai-owned mutation DSL in-process. Remote Tenkai registers
-//! `GovernedActionType` records and admits work through `SubmitActionInstance`,
-//! then applies the same mutation plan through ordinary graph RPCs after
-//! admission. Missing, disabled, denied, or unauthorized definitions fail closed.
+//! Tenkai keeps a local graph-action definition store and applies the
+//! Tenkai-owned mutation DSL in-process. Missing, disabled, denied, or
+//! unauthorized definitions fail closed.
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Result, anyhow};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use super::action_governed::{
-    governed_action_type, idempotency_key, map_instance_decision, parameters_json,
-    resolve_remote_action_def,
-};
-use super::action_remote::{
-    apply_remote_ops, ensure_remote_type_enabled, preview_remote_decision,
-    record_remote_execution_decision, refuse_divergent_type, remote_governed_action,
-};
-use super::{RemoteClient, remote_unary};
 use crate::pb::graph_action::{ActionResult, ActionTypeDef};
-use crate::pb::sekai::{
-    Decision, ListDecisionsRequest, ListDecisionsResponse, PutGovernedActionTypeRequest,
-    PutGovernedActionTypeResponse, SubmitActionInstanceRequest, SubmitActionInstanceResponse,
-};
+use crate::pb::record::Decision;
 
-pub(super) const GOVERNED_ACTION_NAMESPACE: &str = "tenkai";
-pub(super) const GOVERNED_ACTION_VERSION: &str = "1";
-
-pub(super) type RemoteActionDefs = Arc<Mutex<HashMap<String, ActionTypeDef>>>;
-
-pub(super) enum ActionLifecycle<'a> {
-    Remote {
-        client: &'a RemoteClient,
-        action_defs: &'a RemoteActionDefs,
-    },
+pub(super) enum ActionLifecycle {
     Catalog {
         catalog: Arc<dyn crate::storage::CatalogGraph>,
         tenant: Option<String>,
@@ -45,7 +22,7 @@ pub(super) enum ActionLifecycle<'a> {
     Unavailable { tenant_unbound: bool },
 }
 
-impl ActionLifecycle<'_> {
+impl ActionLifecycle {
     pub(super) async fn register(
         &self,
         action: ActionTypeDef,
@@ -61,58 +38,6 @@ impl ActionLifecycle<'_> {
                     catalog.register_action(tenant.as_deref(), action)
                 })
                 .await
-            }
-            Self::Remote {
-                client,
-                action_defs,
-            } => {
-                let action_name = action.name.clone();
-                let governed = governed_action_type(&action)?;
-                let local = governed.clone();
-                let response: std::result::Result<PutGovernedActionTypeResponse, tonic::Status> =
-                    remote_unary(
-                        client,
-                        "/sekai.SekaiService/PutGovernedActionType",
-                        PutGovernedActionTypeRequest {
-                            r#type: Some(governed),
-                            request_id: uuid::Uuid::new_v4().to_string(),
-                        },
-                    )
-                    .await;
-                match response {
-                    Ok(response) => {
-                        if response.r#type.is_none() {
-                            return Err(super::ClientError::Failed(anyhow!(
-                                "Sekai PutGovernedActionType returned no type"
-                            )));
-                        }
-                    }
-                    // An existing type is success only when it is this
-                    // definition. Some hosts surface the conflict as Internal.
-                    Err(status)
-                        if matches!(
-                            status.code(),
-                            tonic::Code::AlreadyExists | tonic::Code::Internal
-                        ) =>
-                    {
-                        match remote_governed_action(client, &action_name).await {
-                            Some(remote) => refuse_divergent_type(&local, &remote)
-                                .map_err(super::ClientError::Failed)?,
-                            None if status.code() == tonic::Code::AlreadyExists => {
-                                return Err(super::ClientError::Failed(anyhow!(
-                                    "remote action type {action_name} already exists but cannot be read to confirm it matches"
-                                )));
-                            }
-                            None => return Err(status.into()),
-                        }
-                    }
-                    Err(status) => return Err(status.into()),
-                }
-                action_defs
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .insert(action_name, action);
-                Ok(())
             }
         }
     }
@@ -134,78 +59,6 @@ impl ActionLifecycle<'_> {
                 })
                 .await
             }
-            Self::Remote {
-                client,
-                action_defs,
-            } => {
-                let definition = resolve_remote_action_def(action_defs, action).with_context(|| {
-                    format!(
-                        "remote action {action} is not registered in this Tenkai process; run `tenkaictl init`"
-                    )
-                })?;
-                ensure_remote_type_enabled(client, action).await?;
-                let planned_ops = definition
-                    .ops
-                    .iter()
-                    .map(|op| op.op.clone())
-                    .collect::<Vec<_>>();
-                if dry_run {
-                    let decision = preview_remote_decision(client, action).await?;
-                    return Ok(ActionResult {
-                        action: action.into(),
-                        message: format!("remote governed preview decision: {decision}"),
-                        dry_run: true,
-                        planned_ops,
-                        decision,
-                        approval_id: String::new(),
-                    });
-                }
-
-                let parameters_json = parameters_json(&definition, &params)?;
-                let response: SubmitActionInstanceResponse = remote_unary(
-                    client,
-                    "/sekai.SekaiService/SubmitActionInstance",
-                    SubmitActionInstanceRequest {
-                        namespace: GOVERNED_ACTION_NAMESPACE.into(),
-                        type_id: action.into(),
-                        version: GOVERNED_ACTION_VERSION.into(),
-                        parameters_json,
-                        idempotency_key: idempotency_key(action, &params),
-                        evidence_submission_ids: Vec::new(),
-                        request_id: uuid::Uuid::new_v4().to_string(),
-                    },
-                )
-                .await?;
-                let instance = response
-                    .instance
-                    .context("Sekai SubmitActionInstance returned no instance")?;
-                let decision = map_instance_decision(&instance);
-                if decision != "allow" {
-                    return Ok(ActionResult {
-                        action: action.into(),
-                        message: if instance.deny_reason.is_empty() {
-                            format!("governed action admission status {}", instance.status)
-                        } else {
-                            instance.deny_reason.clone()
-                        },
-                        dry_run: false,
-                        planned_ops,
-                        decision,
-                        approval_id: instance.instance_id,
-                    });
-                }
-
-                apply_remote_ops(client, action, &definition, &params).await?;
-                record_remote_execution_decision(client, action, &params).await?;
-                Ok(ActionResult {
-                    action: action.into(),
-                    message: "allowed by governed action admission".into(),
-                    dry_run: false,
-                    planned_ops,
-                    decision: "allow".into(),
-                    approval_id: instance.instance_id,
-                })
-            }
         }
     }
 
@@ -214,12 +67,6 @@ impl ActionLifecycle<'_> {
             Self::Unavailable { .. } => anyhow::bail!(super::TENANT_HUB_UNAVAILABLE),
             Self::Catalog { .. } => anyhow::bail!(
                 "embedded mode has no deferred approvals; action {approval_id} cannot be denied"
-            ),
-            // Governed admissions are decided at submit time. There is no
-            // deferred approval queue to cancel, so a deny that reported
-            // success would claim an effect that never happened.
-            Self::Remote { .. } => anyhow::bail!(
-                "governed actions are decided when submitted; there is no deferred approval {approval_id} to deny"
             ),
         }
     }
@@ -244,21 +91,6 @@ impl ActionLifecycle<'_> {
                     catalog.decisions(tenant.as_deref(), &actor, &action, after)
                 })
                 .await
-            }
-            Self::Remote { client, .. } => {
-                let response: ListDecisionsResponse = remote_unary(
-                    client,
-                    "/sekai.SekaiService/ListDecisions",
-                    ListDecisionsRequest {
-                        actor: actor.into(),
-                        action: action.into(),
-                        after,
-                        limit: i32::MAX,
-                        target_id: String::new(),
-                    },
-                )
-                .await?;
-                Ok(response.decisions)
             }
         }
     }

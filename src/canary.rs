@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::ontology::*;
-use crate::pb::sekai::{Link, Object};
+use crate::pb::record::{Link, Object};
 use crate::plan::{Action, Plan, PlanState};
 use crate::{apply::Outcome, client::Ctx};
 

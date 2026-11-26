@@ -1,8 +1,5 @@
-use crate::client::PlanKindListTick;
-use crate::pb::sekai::Object;
-
-use super::mock_router::remote_ctx;
-use super::mock_state::MockSekaiState;
+use crate::client::{Ctx, PlanKindListTick};
+use crate::pb::record::Object;
 
 #[test]
 fn plan_kind_list_tick_is_inactive_outside_begin() {
@@ -43,33 +40,24 @@ fn mock_plan_object(env: &str, created_at: i64) -> Object {
 async fn shared_retarget_tick_fails_closed_when_later_env_index_omits_after_snapshot() {
     let env_a = mock_plan_object("env-a", 10);
     let env_b = mock_plan_object("env-b", 20);
-    let env_b_id = env_b.id.clone();
-    let state = MockSekaiState::default();
-    state
-        .objects
-        .lock()
-        .unwrap()
-        .insert(env_a.id.clone(), env_a);
-    state
-        .objects
-        .lock()
-        .unwrap()
-        .insert(env_b.id.clone(), env_b);
-    let (ctx, server) = remote_ctx(state.clone()).await;
+    let path = std::env::temp_dir().join(format!(
+        "tenkai-plan-retarget-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut ctx = Ctx::embedded(&path).unwrap();
+    ctx.put(env_a).await.unwrap();
+    let mut retargeted = ctx.put(env_b).await.unwrap();
     let (mut tick_ctx, _guard) = ctx.with_shared_plan_retarget_tick();
 
     crate::plan::require_environment_indexes_match_payloads(&mut tick_ctx, "env-a")
         .await
         .unwrap();
 
-    {
-        let mut objects = state.objects.lock().unwrap();
-        let mut retargeted = objects.get(&env_b_id).cloned().unwrap();
-        retargeted
-            .properties
-            .insert("environment".into(), "other".into());
-        objects.insert(env_b_id, retargeted);
-    }
+    retargeted
+        .properties
+        .insert("environment".into(), "other".into());
+    ctx.put(retargeted).await.unwrap();
 
     let error = crate::plan::require_environment_indexes_match_payloads(&mut tick_ctx, "env-b")
         .await
@@ -79,5 +67,5 @@ async fn shared_retarget_tick_fails_closed_when_later_env_index_omits_after_snap
         error.contains("omitted from environment env-b after shared retarget snapshot"),
         "{error}"
     );
-    server.abort();
+    let _ = std::fs::remove_file(path);
 }

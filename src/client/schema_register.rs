@@ -23,7 +23,7 @@ use crate::ontology::{
     REL_SUBSCRIBES,
 };
 use crate::pb::graph_action::{ActionOp, ActionParamDef, ActionTypeDef};
-use crate::pb::sekai::{ObjectType, PropertyDef};
+use crate::pb::record::{ObjectType, PropertyDef};
 
 fn prop(name: &str, required: bool, description: &str) -> PropertyDef {
     PropertyDef {
@@ -141,8 +141,7 @@ fn configure_product_maintenance_action() -> ActionTypeDef {
 
 /// Built-in graph-action definitions owned by Tenkai.
 ///
-/// Remote hosts still need these local mutation plans after Sekai admits a
-/// governed ActionInstance; embedded hosts persist the same definitions.
+/// Embedded and tenant catalogs persist these definitions.
 pub fn known_actions() -> Vec<ActionTypeDef> {
     vec![
         ActionTypeDef {

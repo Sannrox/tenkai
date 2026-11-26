@@ -1,8 +1,5 @@
 use crate::client::Ctx;
 
-use super::mock_router::remote_ctx;
-use super::mock_state::MockSekaiState;
-
 async fn assert_lease_lifecycle(mut ctx: Ctx) {
     let namespace = "tenkai";
     let key = "environment/conformance";
@@ -85,11 +82,4 @@ async fn embedded_ctx_conforms_to_lease_lifecycle() {
     let ctx = Ctx::embedded(&path).unwrap();
     assert_lease_lifecycle(ctx).await;
     std::fs::remove_file(path).unwrap();
-}
-
-#[tokio::test]
-async fn remote_ctx_conforms_to_lease_lifecycle() {
-    let (ctx, server) = remote_ctx(MockSekaiState::default()).await;
-    assert_lease_lifecycle(ctx).await;
-    server.abort();
 }

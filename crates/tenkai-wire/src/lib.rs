@@ -1,13 +1,12 @@
-//! Generated gRPC bindings for Tenkai-owned contracts and the Sekai-Chisei wire types.
-//!
-//! Sekai and Chisei messages come from `sekai-proto` at the same git revision
-//! Tenkai pins. Tenkai-owned graph-action and runtime v1 messages are generated
-//! here from `proto/tenkai/`.
+//! Generated bindings for Tenkai-owned contracts in `proto/tenkai/`.
 
-pub use sekai_proto::{chisei, sekai};
+/// Catalog records (`Object`, `Link`, `Lease`, `Decision`, ...). Field numbers
+/// match the records earlier releases stored, so old payloads decode unchanged.
+pub mod record {
+    tonic::include_proto!("tenkai.record.v1");
+}
 
-/// Tenkai-owned embedded graph-action definitions (not part of the Sekai wire
-/// contract after sekai-chisei removed the legacy Actions DSL).
+/// Embedded graph-action definitions.
 pub mod graph_action {
     tonic::include_proto!("tenkai.graph_action.v1");
 }

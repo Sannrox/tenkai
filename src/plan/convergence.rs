@@ -312,7 +312,7 @@ async fn refuse_unsupported_engines(
 /// what its install wrote and carries none.
 pub(crate) async fn step_identity(
     ctx: &mut Ctx,
-    env_obj: &crate::pb::sekai::Object,
+    env_obj: &crate::pb::record::Object,
     env: &str,
     release: &str,
     instance: &str,
@@ -347,7 +347,7 @@ pub(crate) async fn step_identity(
 async fn release_peers(
     ctx: &mut Ctx,
     env: &str,
-    env_obj: &crate::pb::sekai::Object,
+    env_obj: &crate::pb::record::Object,
     mut deployed: BTreeMap<String, crate::dependency_document::DeployedRelease>,
     instance: &str,
     release: &str,
@@ -444,7 +444,7 @@ async fn refuse_unadmitted_callers(ctx: &mut Ctx, env: &str, steps: &[Step]) -> 
 pub(crate) async fn current_peers(
     ctx: &mut Ctx,
     env: &str,
-    env_obj: &crate::pb::sekai::Object,
+    env_obj: &crate::pb::record::Object,
     instance: &str,
     release: &str,
 ) -> Result<crate::workload_identity::Peers> {
@@ -537,7 +537,7 @@ async fn removal_of(
 /// is taken as recorded.
 async fn failed_on_instance(
     ctx: &mut Ctx,
-    env_obj: &crate::pb::sekai::Object,
+    env_obj: &crate::pb::record::Object,
     instance: &str,
     release: &str,
 ) -> Result<bool> {
@@ -1843,7 +1843,7 @@ async fn compute_snapshot_with_policy(
 async fn attach_provision(
     ctx: &mut Ctx,
     env: &str,
-    env_obj: &crate::pb::sekai::Object,
+    env_obj: &crate::pb::record::Object,
     mut inputs: Vec<DesiredStateInput>,
     mut steps: Vec<Step>,
 ) -> Result<(Vec<DesiredStateInput>, Vec<Step>)> {
@@ -1887,7 +1887,7 @@ async fn attach_provision(
 /// Create and update cluster-namespace steps run before product steps; deletes after.
 fn with_cluster_namespace_steps(
     env: &str,
-    env_obj: &crate::pb::sekai::Object,
+    env_obj: &crate::pb::record::Object,
     steps: Vec<Step>,
 ) -> Result<Vec<Step>> {
     let ns_steps = crate::cluster_namespace::plan_steps(env_obj)?;
@@ -1962,7 +1962,7 @@ fn with_cluster_namespace_steps(
 async fn attach_target_changes(
     ctx: &mut Ctx,
     env: &str,
-    env_obj: &crate::pb::sekai::Object,
+    env_obj: &crate::pb::record::Object,
     executors: &crate::software_executor::SoftwareExecutors,
     steps: &mut [Step],
 ) -> Result<()> {
@@ -2062,7 +2062,7 @@ fn list_live_workloads(
 async fn persist_unmanaged_workloads(
     ctx: &mut Ctx,
     env: &str,
-    observed: &crate::pb::sekai::Object,
+    observed: &crate::pb::record::Object,
 ) -> Result<()> {
     let Some(value) = observed.properties.get("unmanaged_workloads") else {
         return Ok(());
@@ -2082,7 +2082,7 @@ async fn persist_unmanaged_workloads(
 async fn persist_spec_drift(
     ctx: &mut Ctx,
     env: &str,
-    observed: &crate::pb::sekai::Object,
+    observed: &crate::pb::record::Object,
     keys: &BTreeSet<String>,
 ) -> Result<()> {
     if keys.is_empty() {
@@ -2480,7 +2480,7 @@ type PendingEntry = PendingChange;
 async fn observed_for(
     ctx: &mut Ctx,
     env: &str,
-    env_obj: &crate::pb::sekai::Object,
+    env_obj: &crate::pb::record::Object,
     instance: &str,
 ) -> Result<BTreeMap<String, String>> {
     match crate::dependency_document::instance_release_digest(ctx, env_obj, instance).await? {
@@ -2538,7 +2538,7 @@ async fn schedule_dependency_rerenders(
     pending: &mut Vec<PendingEntry>,
     installed_profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
     target_profiles: &BTreeMap<String, crate::software_compatibility::CompatibilityProfile>,
-    env_obj: &crate::pb::sekai::Object,
+    env_obj: &crate::pb::record::Object,
     host_products: &std::collections::HashSet<String>,
 ) -> Result<(
     BTreeMap<String, crate::dependency_document::DeployedRelease>,
@@ -2722,7 +2722,7 @@ async fn schedule_dependency_rerenders(
 /// provider. Returns whether any caller was kept.
 fn retain_unmoved_callers(
     env: &str,
-    env_obj: &crate::pb::sekai::Object,
+    env_obj: &crate::pb::record::Object,
     stepping: &BTreeSet<&str>,
     graph: &mut BTreeMap<String, crate::workload_identity::Peers>,
 ) -> bool {
@@ -3200,7 +3200,7 @@ async fn admit_step_overlay_schema(ctx: &mut Ctx, env: &str, step: &Step) -> Res
 /// (#1095), comparing the candidate release with the one running.
 async fn config_presets(
     ctx: &mut Ctx,
-    env_obj: &crate::pb::sekai::Object,
+    env_obj: &crate::pb::record::Object,
     steps: &[Step],
 ) -> Result<Vec<crate::environment::ConfigPresetView>> {
     let mut views: Vec<crate::environment::ConfigPresetView> = Vec::new();
@@ -3454,7 +3454,7 @@ pub(super) async fn rollback_step_with_recovery(
 
 struct SameVersionPin<'a> {
     env: &'a str,
-    env_obj: &'a crate::pb::sekai::Object,
+    env_obj: &'a crate::pb::record::Object,
     instance: &'a str,
     product: String,
     current: String,
@@ -5191,7 +5191,7 @@ mod tests {
 
     /// Unix seconds strictly after `instance`'s last deployment. Reports at
     /// or before that second do not count as take-up.
-    fn observed_after_deployment(env: &crate::pb::sekai::Object, instance: &str, now: i64) -> i64 {
+    fn observed_after_deployment(env: &crate::pb::record::Object, instance: &str, now: i64) -> i64 {
         env.properties
             .get(&format!("{}{instance}", crate::environment::DEPLOYMENT_AT))
             .and_then(|at| at.parse::<i64>().ok())

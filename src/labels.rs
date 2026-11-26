@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::client::Ctx;
 use crate::ontology::{KIND_ENVIRONMENT, KIND_RELEASE, release_id, validate_identifier};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 const PROPERTY_PREFIX: &str = "label.";
 

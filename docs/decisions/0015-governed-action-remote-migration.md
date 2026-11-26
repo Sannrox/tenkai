@@ -85,5 +85,5 @@ trust boundaries or invalidating stored action-type payloads.
 - Client boundary: [`src/client/action_lifecycle.rs`](../../src/client/action_lifecycle.rs)
 - Bootstrap definitions: [`src/ontology.rs`](../../src/ontology.rs)
 - Embedded local store: [`crates/tenkai-sqlite/src/legacy.rs`](../../crates/tenkai-sqlite/src/legacy.rs)
-- Vendored contract: [`proto/vendor/sekai.proto`](../../proto/vendor/sekai.proto)
+- Vendored contract: `proto/vendor/sekai.proto` (removed by #1582)
 - Embedded-only wire types: [`proto/tenkai/graph_action.proto`](../../proto/tenkai/graph_action.proto)

@@ -15,7 +15,7 @@ use crate::criticality_store::{
 };
 use crate::deploy_webhook::{WebhookEndpoint, parse_endpoints};
 use crate::ontology::{KIND_PRODUCT, NS, product_id, validate_identifier};
-use crate::pb::sekai::Object;
+use crate::pb::record::Object;
 
 pub const OWNER_PROPERTY: &str = "owner";
 const MAX_CONTACT_BYTES: usize = 256;
@@ -680,7 +680,7 @@ mod tests {
             assert_eq!(entries.len(), 3, "{raw}");
             assert_eq!(&entries[..2], newer.as_array().unwrap().as_slice(), "{raw}");
 
-            let read = parse_endpoints(&crate::pb::sekai::Object {
+            let read = parse_endpoints(&crate::pb::record::Object {
                 properties: [(
                     crate::deploy_webhook::WEBHOOKS_PROPERTY.to_string(),
                     raw.to_string(),

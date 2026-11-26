@@ -4336,7 +4336,7 @@ health = "curl -f http://127.0.0.1:9/health"
 "#;
         let release_id = crate::ontology::release_id("api", "1.0.0");
         let now = crate::now_millis();
-        ctx.put(crate::pb::sekai::Object {
+        ctx.put(crate::pb::record::Object {
             id: release_id.clone(),
             kind: crate::ontology::KIND_RELEASE.into(),
             name: "api@1.0.0".into(),

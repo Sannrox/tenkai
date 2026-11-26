@@ -1,13 +1,7 @@
-//! Embedded blocking and remote unary transport helpers.
+//! Blocking adapters that run catalog and operational store calls off the async runtime.
 
 use anyhow::{Result, anyhow};
-use prost::Message;
 use std::sync::Arc;
-use tonic::Status;
-
-use sekai_client::{CallOptions, CoreLoopClient, GrpcTransport, SdkError, SdkErrorCode};
-
-pub(crate) type RemoteClient = CoreLoopClient<GrpcTransport>;
 
 pub(crate) async fn block_operational<T, F>(
     store: Arc<dyn crate::storage::OperationalStore>,
@@ -51,80 +45,4 @@ where
             )))
         })
         .map_err(super::ClientError::from)
-}
-
-pub(crate) async fn remote_unary<Req, Resp>(
-    client: &RemoteClient,
-    path: &str,
-    request: Req,
-) -> std::result::Result<Resp, tonic::Status>
-where
-    Req: Message + Default + Clone + Send + 'static,
-    Resp: Message + Default + Send + 'static,
-{
-    remote_unary_with_options(client, path, request, CallOptions::default()).await
-}
-
-pub(crate) async fn remote_unary_with_options<Req, Resp>(
-    client: &RemoteClient,
-    path: &str,
-    request: Req,
-    mut options: CallOptions,
-) -> std::result::Result<Resp, tonic::Status>
-where
-    Req: Message + Default + Clone + Send + 'static,
-    Resp: Message + Default + Send + 'static,
-{
-    // New RPCs inherit this: one injection on the shared unary path.
-    if let Some(trace) = crate::telemetry::current_trace() {
-        options.context = options
-            .context
-            .with_metadata("traceparent", trace.traceparent());
-    }
-    client
-        .raw()
-        .unary(path, request, options)
-        .await
-        .map_err(sdk_error_status)
-}
-
-fn sdk_error_status(error: SdkError) -> tonic::Status {
-    let code = match error.code {
-        SdkErrorCode::Cancelled => tonic::Code::Cancelled,
-        SdkErrorCode::Unknown => tonic::Code::Unknown,
-        SdkErrorCode::InvalidArgument => tonic::Code::InvalidArgument,
-        SdkErrorCode::DeadlineExceeded => tonic::Code::DeadlineExceeded,
-        SdkErrorCode::NotFound => tonic::Code::NotFound,
-        SdkErrorCode::AlreadyExists => tonic::Code::AlreadyExists,
-        SdkErrorCode::PermissionDenied => tonic::Code::PermissionDenied,
-        SdkErrorCode::ResourceExhausted => tonic::Code::ResourceExhausted,
-        SdkErrorCode::FailedPrecondition => tonic::Code::FailedPrecondition,
-        SdkErrorCode::Aborted => tonic::Code::Aborted,
-        SdkErrorCode::Unavailable => tonic::Code::Unavailable,
-        SdkErrorCode::Unimplemented => tonic::Code::Unimplemented,
-        SdkErrorCode::Internal => tonic::Code::Internal,
-        SdkErrorCode::Unauthenticated => tonic::Code::Unauthenticated,
-    };
-    Status::new(code, error.to_string())
-}
-
-pub(crate) fn token_transport_is_safe(url: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(url) else {
-        return false;
-    };
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return false;
-    }
-    if parsed.scheme() == "https" {
-        return true;
-    }
-    if parsed.scheme() != "http" {
-        return false;
-    }
-    match parsed.host() {
-        Some(url::Host::Domain("localhost")) => true,
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        _ => false,
-    }
 }

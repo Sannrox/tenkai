@@ -197,6 +197,16 @@ outbox. Both exports are removed, so delivery state stays in Tenkai:
   the local outbox whenever a model evidence signing key is configured
   ([model release evidence](model-release-evidence.md)).
 
+## Tenkai-owned records (#1582)
+
+Catalog records (`Object`, `Link`, `Lease`, `Decision`, `ObjectChange`,
+`ObjectType`) are defined by Tenkai in `proto/tenkai/record.proto`, not by a
+provider protocol. They keep the field numbers, types, and names earlier
+releases stored, so SQLite and PostgreSQL stores written by the previous
+release read back unchanged, and the previous release reads what this one
+writes. The remote provider client and its `TENKAI_SEKAI_URL`, `GRPC_PORT`,
+and `SEKAI_AUTH_TOKEN` settings are removed; nothing reads them.
+
 ## Standalone operation and external adapters
 
 The built-in local gate consumes explicitly configured evidence, and the local

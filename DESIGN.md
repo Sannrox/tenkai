@@ -156,7 +156,6 @@ depends on these integrations. Which ones Tenkai wires today is in
 
 | tenkai need | sekai-chisei API |
 | --- | --- |
-| Shared Rust transport, identity, deadlines, and sanitized SDK errors | Versioned `sekai-client` facade; unsupported RPCs use its bounded raw escape hatch |
 | Domain projections, links, lineage | `SekaiService` objects/links/`Traverse`, `CreateSchemaType` for the tenkai ontology |
 | Immutable audit of every publish/promote/plan/deploy | audit records + object history |
 | "Who may promote to prod-eu?" | `ResolvePolicy` / namespace policy |

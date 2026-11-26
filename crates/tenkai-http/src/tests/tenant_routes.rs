@@ -274,7 +274,7 @@ async fn call(
 /// channel `stable-a`; tenant B owns only `env-b`.
 fn tenant_hub() -> Router {
     use tenkai::ontology::{KIND_CHANNEL, KIND_RELEASE};
-    use tenkai::pb::sekai::Object;
+    use tenkai::pb::record::Object;
     use tenkai::runtime_capabilities::enterprise_auth_capabilities;
     use tenkai::storage::{CatalogGraph, EnvironmentRecord, MemoryCatalogGraph};
     use tenkai::tenant_store::tenant_memory_store_capabilities;

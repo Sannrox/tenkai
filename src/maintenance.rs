@@ -16,8 +16,8 @@ use crate::ontology::{
     ACTION_CONFIGURE_MAINTENANCE, ACTION_CONFIGURE_PRODUCT_MAINTENANCE, KIND_MAINTENANCE_CONFIG,
     KIND_PRODUCT_MAINTENANCE_CONFIG, NS, env_id, validate_identifier,
 };
-use crate::pb::sekai::Object;
-use crate::pb::sekai::{Decision, ObjectChange};
+use crate::pb::record::Object;
+use crate::pb::record::{Decision, ObjectChange};
 
 const WINDOWS_PROPERTY: &str = "windows";
 fn config_id(environment: &str) -> String {

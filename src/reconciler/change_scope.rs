@@ -246,7 +246,7 @@ async fn environments_of(ctx: &mut Ctx, rows: &[CatalogWrite]) -> Result<Touched
 
 /// The one environment an object belongs to: an environment itself, or an
 /// object that names it in its `environment` property.
-fn environment_of(object: &crate::pb::sekai::Object) -> Option<String> {
+fn environment_of(object: &crate::pb::record::Object) -> Option<String> {
     if object.kind == KIND_ENVIRONMENT {
         return Some(object.name.clone()).filter(|name| !name.is_empty());
     }
@@ -321,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn writes_map_to_the_environments_they_change() {
-        use crate::pb::sekai::Object;
+        use crate::pb::record::Object;
         let (database, mut ctx) =
             super::super::tests::registered_ctx("change-scope-map", &["stage", "env-b", "env-c"])
                 .await;
