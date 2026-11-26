@@ -158,6 +158,14 @@ impl SqliteStore {
 }
 
 fn delete_object_rows(tx: &rusqlite::Transaction<'_>, id: &str) -> AnyResult<()> {
+    record_stored_write(tx, id)?;
+    let links: Vec<String> = tx
+        .prepare("SELECT id FROM catalog_links WHERE from_id=?1 OR to_id=?1")?
+        .query_map([id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for link in links {
+        record_link_write(tx, &link)?;
+    }
     tx.execute("DELETE FROM plans WHERE id=?1", [id])?;
     tx.execute("DELETE FROM environments WHERE id=?1", [id])?;
     tx.execute("DELETE FROM releases WHERE id=?1", [id])?;

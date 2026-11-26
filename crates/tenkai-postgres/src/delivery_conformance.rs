@@ -54,6 +54,7 @@ implementation_sources![
     "postgres_imp/change_events.rs",
     "postgres_imp/grant_rules.rs",
     "postgres_imp/writer_lease.rs",
+    "postgres_imp/write_log.rs",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

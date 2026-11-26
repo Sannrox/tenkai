@@ -32,7 +32,10 @@ complete thousand-environment fleet. Recovery uses `tenkaictl backup` /
 
 Budget measurement uses the named `ci-embedded-sqlite` profile (#300). Gates stay
 enabled (`skip_gates=false`). Two reconcile ticks are timed; a miss names the
-limiting resource and fails closed.
+limiting resource and fails closed. The first evaluates the whole fleet; the
+second, with nothing changed, evaluates only environments that were not
+Current (#1569). Each sample's `environments` counts what its tick
+evaluated; `fleet_size` is the fleet.
 
 ```bash
 tenkaictl fleet measure \
@@ -68,7 +71,7 @@ keeps the same posture mix; it defaults to 1,000. A run always enforces
 the resource budget. The weekly rollout-time job
 (`scripts/check-rollout-time.sh`) runs a 100-environment fleet on the CI
 PostgreSQL 17 service with `TENKAI_ROLLOUT_GATE=regression`, which also
-compares every tick to `perf/hub-fleet-baseline.json` for its fleet size:
+compares every tick to `perf/hub-fleet-baseline.json` for the fleet size:
 more than `regression_ratio` over the stored time fails, and so does a size
 the baseline does not list. The stored times are from that runner class.
 

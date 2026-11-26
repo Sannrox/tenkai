@@ -131,6 +131,10 @@ pub struct BudgetReport {
     pub command: String,
     pub seed_digest: String,
     pub skip_gates: bool,
+    /// Environments in the measured fleet. A sample counts only those its
+    /// tick evaluated, which after the first tick are the ones still due
+    /// (#1569).
+    pub fleet_size: usize,
     pub samples: Vec<BudgetSample>,
     pub wall_ms_variance: u64,
     pub passed: bool,
@@ -142,9 +146,10 @@ pub struct BudgetReport {
 
 pub fn format_report(report: &BudgetReport) -> String {
     let mut lines = vec![format!(
-        "fleet budget profile={} seed_digest={} samples={} passed={} skip_gates={}",
+        "fleet budget profile={} seed_digest={} fleet_size={} samples={} passed={} skip_gates={}",
         report.profile,
         report.seed_digest,
+        report.fleet_size,
         report.samples.len(),
         report.passed,
         report.skip_gates
@@ -222,6 +227,7 @@ pub async fn measure(
         command: COMMAND.into(),
         seed_digest: plan.seed_digest.clone(),
         skip_gates: false,
+        fleet_size: plan.members.len(),
         samples,
         wall_ms_variance,
         passed: limiting.is_none(),
@@ -305,7 +311,7 @@ pub fn load_baseline(path: &Path) -> Result<FleetBaseline> {
     serde_json::from_str(&raw).with_context(|| format!("parsing fleet baseline {}", path.display()))
 }
 
-/// Compare every sample tick to the stored baseline for its fleet size. A
+/// Compare every sample tick to the stored baseline for the fleet size. A
 /// size with no stored time, or a baseline for another profile, fails closed.
 pub fn check_baseline(report: &BudgetReport, baseline: &FleetBaseline) -> Result<()> {
     if baseline.profile != report.profile {
@@ -319,12 +325,12 @@ pub fn check_baseline(report: &BudgetReport, baseline: &FleetBaseline) -> Result
         bail!("fleet baseline regression_ratio must be at least 1.0");
     }
     let mut failures = Vec::new();
+    let size = report.fleet_size.to_string();
+    let Some(stored) = baseline.tick_ms.get(&size) else {
+        bail!("fleet baseline has no tick time for {size} environments");
+    };
+    let limit = ((*stored as f64) * baseline.regression_ratio).ceil() as u64;
     for sample in &report.samples {
-        let size = sample.environments.to_string();
-        let Some(stored) = baseline.tick_ms.get(&size) else {
-            bail!("fleet baseline has no tick time for {size} environments");
-        };
-        let limit = ((*stored as f64) * baseline.regression_ratio).ceil() as u64;
         if sample.wall_ms > limit {
             failures.push(format!(
                 "tick at {size} environments took {} ms (limit {limit} ms from baseline {stored} ms)",
@@ -345,6 +351,32 @@ pub fn check_baseline(report: &BudgetReport, baseline: &FleetBaseline) -> Result
 /// One tick's resources. CPU and peak memory are this process's, so the
 /// sample means the tick's own cost only when nothing else runs in the
 /// process, as in `tenkaictl fleet measure` (#1235).
+/// Assert the change-driven tick scope (#1569): the first tick of a new
+/// reconciler evaluates the whole fleet, and a later tick with no change
+/// skips every environment that was Current and nothing touched since.
+#[cfg(any(test, feature = "test-support"))]
+pub fn assert_steady_tick(plan: &WorkloadPlan, report: &BudgetReport) {
+    let due = plan
+        .members
+        .iter()
+        .filter(|member| member.posture != fleet_workload::WorkloadPosture::Current)
+        .count();
+    let [first, rest @ ..] = report.samples.as_slice() else {
+        panic!("no samples");
+    };
+    assert_eq!(
+        first.environments, report.fleet_size,
+        "the first tick is full"
+    );
+    for sample in rest {
+        assert!(
+            sample.environments <= due,
+            "a steady tick evaluated {} environments; at most {due} are due",
+            sample.environments
+        );
+    }
+}
+
 async fn sample_tick(reconciler: &Reconciler, store: &impl StoreProbe) -> Result<BudgetSample> {
     let before = resource_usage()?;
     let started = Instant::now();
@@ -462,6 +494,7 @@ mod tests {
             command: COMMAND.into(),
             seed_digest: "sha256:seed".into(),
             skip_gates: false,
+            fleet_size: 100,
             samples: vec![sample.clone()],
             wall_ms_variance: 0,
             passed: true,
@@ -486,10 +519,7 @@ mod tests {
         check_baseline(&within, &baseline).unwrap();
 
         let unknown_size = BudgetReport {
-            samples: vec![BudgetSample {
-                environments: 5,
-                ..sample
-            }],
+            fleet_size: 5,
             ..report.clone()
         };
         let err = check_baseline(&unknown_size, &baseline)
@@ -561,12 +591,7 @@ mod tests {
         assert_eq!(report.profile, Profile::CiEmbeddedSqlite.name());
         assert_eq!(report.database_load, None);
         assert!(report.passed);
-        assert!(
-            report
-                .samples
-                .iter()
-                .all(|sample| sample.environments == WORKLOAD_SIZE as usize)
-        );
+        assert_steady_tick(&plan, &report);
         let text = format_report(&report);
         assert!(text.contains("passed=true"), "{text}");
         assert!(text.contains("skip_gates=false"), "{text}");

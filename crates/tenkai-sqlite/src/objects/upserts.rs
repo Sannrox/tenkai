@@ -12,6 +12,7 @@ pub(super) fn upsert_object_in(
         KIND_PLAN => upsert_plan_in(tx, object)?,
         _ => upsert_catalog_in(tx, object)?,
     }
+    record_write(tx, &object.id, &object.kind)?;
     Ok(())
 }
 

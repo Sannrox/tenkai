@@ -203,6 +203,47 @@ impl Ctx {
         }
     }
 
+    /// Store write-log rows after `after` (#1569). `None` when this context
+    /// has no catalog port (remote), so callers evaluate everything.
+    pub(crate) async fn writes_after(
+        &mut self,
+        after: i64,
+        limit: usize,
+    ) -> Result<Option<Vec<crate::storage::CatalogWrite>>> {
+        let Some((catalog, tenant)) = self.catalog_port() else {
+            return Ok(None);
+        };
+        super::block_catalog(catalog, move |catalog| {
+            catalog.writes_after(tenant.as_deref(), after, limit)
+        })
+        .await
+        .map(Some)
+    }
+
+    /// The newest write-log sequence, or `None` without a catalog port.
+    pub(crate) async fn latest_write(&mut self) -> Result<Option<i64>> {
+        let Some((catalog, tenant)) = self.catalog_port() else {
+            return Ok(None);
+        };
+        super::block_catalog(catalog, move |catalog| {
+            catalog.latest_write(tenant.as_deref())
+        })
+        .await
+        .map(Some)
+    }
+
+    /// Drop write-log rows recorded before `before_ms`; a no-op without a
+    /// catalog port.
+    pub(crate) async fn prune_writes(&mut self, before_ms: i64) -> Result<()> {
+        let Some((catalog, tenant)) = self.catalog_port() else {
+            return Ok(());
+        };
+        super::block_catalog(catalog, move |catalog| {
+            catalog.prune_writes(tenant.as_deref(), before_ms)
+        })
+        .await
+    }
+
     /// List ids of `kind` without materializing embedded object payloads.
     ///
     /// Remote adapters still page `ListObjects` and keep only ids; there is no

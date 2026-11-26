@@ -63,6 +63,8 @@ impl Inner {
                 lock_catalog_apply_leases(tx, &record.id)?;
             }
             lock_catalog_object(tx, &id)?;
+            super::write_log::record_stored_write(tx, &id)?;
+            super::write_log::record_object_link_writes(tx, &id)?;
             tx.execute("DELETE FROM plans WHERE id=$1", &[&id])
                 .map_err(pg)?;
             let environment_id = load_environment(tx, &id)?
@@ -194,6 +196,9 @@ impl Inner {
             if fail_if_exists && changed == 0 {
                 return Err(StoreError::already_exists("link", link.id.clone()));
             }
+            if changed > 0 {
+                super::write_log::record_link_write(tx, &link.id)?;
+            }
             Ok(())
         })
     }
@@ -201,6 +206,7 @@ impl Inner {
     pub fn catalog_unlink(&self, schema: &str, id: &str) -> Result<()> {
         let id = id.to_owned();
         self.with_writer_schema(schema, move |tx| {
+            super::write_log::record_link_write(tx, &id)?;
             tx.execute("DELETE FROM catalog_links WHERE id=$1", &[&id])
                 .map_err(pg)?;
             Ok(())
@@ -714,21 +720,26 @@ impl Inner {
                         tenkai::storage::ActionWrite::SetProperty { .. } => {}
                         tenkai::storage::ActionWrite::CreateLink(link) => {
                             let payload = link.encode_to_vec();
-                            tx.execute(
-                                "INSERT INTO catalog_links(id,from_id,to_id,relation,payload)
-                                 VALUES($1,$2,$3,$4,$5)
-                                 ON CONFLICT(id) DO NOTHING",
-                                &[
-                                    &link.id,
-                                    &link.from_id,
-                                    &link.to_id,
-                                    &link.relation,
-                                    &payload,
-                                ],
-                            )
-                            .map_err(pg)?;
+                            let changed = tx
+                                .execute(
+                                    "INSERT INTO catalog_links(id,from_id,to_id,relation,payload)
+                                     VALUES($1,$2,$3,$4,$5)
+                                     ON CONFLICT(id) DO NOTHING",
+                                    &[
+                                        &link.id,
+                                        &link.from_id,
+                                        &link.to_id,
+                                        &link.relation,
+                                        &payload,
+                                    ],
+                                )
+                                .map_err(pg)?;
+                            if changed > 0 {
+                                super::write_log::record_link_write(tx, &link.id)?;
+                            }
                         }
                         tenkai::storage::ActionWrite::DeleteLink(link_id) => {
+                            super::write_log::record_link_write(tx, link_id)?;
                             tx.execute("DELETE FROM catalog_links WHERE id=$1", &[link_id])
                                 .map_err(pg)?;
                         }
@@ -1135,12 +1146,14 @@ fn catalog_put_in(tx: &mut Transaction<'_>, object: &Object) -> Result<()> {
         KIND_RELEASE => upsert_release(tx, object)?,
         KIND_CHANNEL => {
             let object = upsert_channel(tx, object)?;
-            return upsert_catalog_sidecar(tx, &object);
+            upsert_catalog_sidecar(tx, &object)?;
+            return super::write_log::record_write(tx, &object.id, &object.kind);
         }
         KIND_PLAN => upsert_plan(tx, object)?,
         _ => {}
     }
-    upsert_catalog_sidecar(tx, object)
+    upsert_catalog_sidecar(tx, object)?;
+    super::write_log::record_write(tx, &object.id, &object.kind)
 }
 
 /// Write the sidecar payload and its property rows in three statements,

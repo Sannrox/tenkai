@@ -50,8 +50,36 @@ pub fn skip_execution_claim_heartbeat(previous: &Object, next: &Object) -> bool 
             })
 }
 
+/// One write-log row: an object a catalog write created, replaced, or deleted,
+/// or one endpoint of a link it added or removed (#1569). The reconciler maps
+/// rows to the environments it must evaluate again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogWrite {
+    /// Store-assigned and increasing. On Postgres a lower sequence can commit
+    /// after a higher one, so readers re-read a window behind their cursor.
+    pub seq: i64,
+    pub object_id: String,
+    /// The object's kind; empty when the store no longer knew it.
+    pub kind: String,
+}
+
+/// How long the write log keeps a row. A reader whose cursor is older than
+/// this must re-evaluate everything instead of reading the log.
+pub const CATALOG_WRITE_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// Catalog object, link, lease, schema, and action contract.
 pub trait CatalogGraph: Send + Sync {
+    /// Write-log rows with `seq > after`, oldest first, at most `limit`.
+    fn writes_after(
+        &self,
+        tenant: Option<&str>,
+        after: i64,
+        limit: usize,
+    ) -> AnyResult<Vec<CatalogWrite>>;
+    /// The highest write-log sequence assigned so far, or 0.
+    fn latest_write(&self, tenant: Option<&str>) -> AnyResult<i64>;
+    /// Drop write-log rows recorded before `before_ms`.
+    fn prune_writes(&self, tenant: Option<&str>, before_ms: i64) -> AnyResult<()>;
     fn get(&self, tenant: Option<&str>, id: &str) -> AnyResult<Option<Object>>;
     fn create(&self, tenant: Option<&str>, object: Object) -> Result<Object>;
     fn put(&self, tenant: Option<&str>, object: Object) -> AnyResult<Object>;
@@ -340,6 +368,9 @@ struct Partition {
     audit: Vec<super::AuditRecord>,
     change_events: Vec<crate::change_stream::ChangeEvent>,
     change_seq: i64,
+    /// Write log with each row's record time (#1569).
+    writes: Vec<(i64, CatalogWrite)>,
+    write_seq: i64,
     producer_sequences: BTreeMap<String, i64>,
     runtime_claims: BTreeMap<String, super::RuntimeClaim>,
     enrollments: BTreeMap<String, super::RuntimeEnrollmentRecord>,
@@ -374,6 +405,45 @@ impl MemoryCatalogGraph {
 }
 
 impl CatalogGraph for MemoryCatalogGraph {
+    fn writes_after(
+        &self,
+        tenant: Option<&str>,
+        after: i64,
+        limit: usize,
+    ) -> AnyResult<Vec<CatalogWrite>> {
+        let partitions = self.lock()?;
+        Ok(partitions
+            .get(&Self::key(tenant))
+            .map(|partition| {
+                partition
+                    .writes
+                    .iter()
+                    .map(|(_, row)| row)
+                    .filter(|row| row.seq > after)
+                    .take(limit)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    fn latest_write(&self, tenant: Option<&str>) -> AnyResult<i64> {
+        let partitions = self.lock()?;
+        Ok(partitions
+            .get(&Self::key(tenant))
+            .map_or(0, |partition| partition.write_seq))
+    }
+
+    fn prune_writes(&self, tenant: Option<&str>, before_ms: i64) -> AnyResult<()> {
+        let mut partitions = self.lock()?;
+        if let Some(partition) = partitions.get_mut(&Self::key(tenant)) {
+            partition
+                .writes
+                .retain(|(recorded_at, _)| *recorded_at >= before_ms);
+        }
+        Ok(())
+    }
+
     fn get(&self, tenant: Option<&str>, id: &str) -> AnyResult<Option<Object>> {
         let partitions = self.lock()?;
         Ok(partitions
@@ -412,6 +482,21 @@ impl CatalogGraph for MemoryCatalogGraph {
         let Some(partition) = partitions.get_mut(&Self::key(tenant)) else {
             return Ok(());
         };
+        let kind = partition
+            .objects
+            .get(id)
+            .map(|object| object.kind.clone())
+            .unwrap_or_default();
+        log_memory_write(partition, id, &kind);
+        let unlinked: Vec<Link> = partition
+            .links
+            .values()
+            .filter(|link| link.from_id == id || link.to_id == id)
+            .cloned()
+            .collect();
+        for link in &unlinked {
+            log_memory_link(partition, link);
+        }
         partition.objects.remove(id);
         partition.environments.remove(id);
         partition.releases.remove(id);
@@ -599,14 +684,17 @@ impl CatalogGraph for MemoryCatalogGraph {
             }
             return Ok(());
         }
+        log_memory_link(partition, &link);
         partition.links.insert(link.id.clone(), link);
         Ok(())
     }
 
     fn unlink(&self, tenant: Option<&str>, id: &str) -> AnyResult<()> {
         let mut partitions = self.lock()?;
-        if let Some(partition) = partitions.get_mut(&Self::key(tenant)) {
-            partition.links.remove(id);
+        if let Some(partition) = partitions.get_mut(&Self::key(tenant))
+            && let Some(link) = partition.links.remove(id)
+        {
+            log_memory_link(partition, &link);
         }
         Ok(())
     }
@@ -993,13 +1081,15 @@ impl CatalogGraph for MemoryCatalogGraph {
                 match write {
                     super::ActionWrite::SetProperty { .. } => {}
                     super::ActionWrite::CreateLink(link) => {
-                        partition
-                            .links
-                            .entry(link.id.clone())
-                            .or_insert_with(|| link.clone());
+                        if !partition.links.contains_key(&link.id) {
+                            log_memory_link(partition, link);
+                            partition.links.insert(link.id.clone(), link.clone());
+                        }
                     }
                     super::ActionWrite::DeleteLink(id) => {
-                        partition.links.remove(id);
+                        if let Some(link) = partition.links.remove(id) {
+                            log_memory_link(partition, &link);
+                        }
                     }
                 }
             }
@@ -1248,6 +1338,29 @@ fn integer_property(object: &Object, key: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// Append one write-log row, as the stores do inside the write's transaction.
+fn log_memory_write(partition: &mut Partition, object_id: &str, kind: &str) {
+    partition.write_seq += 1;
+    let row = CatalogWrite {
+        seq: partition.write_seq,
+        object_id: object_id.into(),
+        kind: kind.into(),
+    };
+    partition.writes.push((crate::now_millis(), row));
+}
+
+/// Log both endpoints of an added or removed link.
+fn log_memory_link(partition: &mut Partition, link: &Link) {
+    for id in [&link.from_id, &link.to_id] {
+        let kind = partition
+            .objects
+            .get(id)
+            .map(|object| object.kind.clone())
+            .unwrap_or_default();
+        log_memory_write(partition, id, &kind);
+    }
+}
+
 fn persist_memory_object(
     partition: &mut Partition,
     object: Object,
@@ -1258,6 +1371,7 @@ fn persist_memory_object(
     if let Some(previous) = previous {
         record_memory_changes(partition, previous, &object, principal);
     }
+    log_memory_write(partition, &object.id, &object.kind);
     partition.objects.insert(object.id.clone(), object.clone());
     Ok(object)
 }
@@ -1624,6 +1738,8 @@ fn record_memory_changes(
 }
 
 mod memory_operational;
+#[cfg(any(test, feature = "test-support"))]
+pub mod write_log_contract;
 
 #[cfg(test)]
 mod tests {
@@ -1715,6 +1831,11 @@ mod tests {
     #[test]
     fn memory_catalog_matches_sqlite_contract() {
         assert_graph(&MemoryCatalogGraph::new(), Some("tenant-a"));
+    }
+
+    #[test]
+    fn memory_catalog_logs_every_write() {
+        write_log_contract::assert_write_log(&MemoryCatalogGraph::new(), Some("tenant-a"));
     }
 
     #[test]

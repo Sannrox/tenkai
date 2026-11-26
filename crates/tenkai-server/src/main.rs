@@ -1678,8 +1678,10 @@ async fn main() -> Result<()> {
                     }
                 }
                 _ = timer.tick() => {
-                    // A standby leaves writes to the leader (#748).
+                    // A standby leaves writes to the leader (#748). What it knew
+                    // as leader is stale, so a takeover starts with a full tick.
                     if standby_fence.as_ref().is_some_and(|fence| !fence.is_leader()) {
+                        reconciler.reset_change_scope();
                         continue;
                     }
                     match reconciler.run_once().await {

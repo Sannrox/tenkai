@@ -33,6 +33,50 @@ impl PostgresTenantOperationalStore {
 }
 
 impl CatalogGraph for PostgresTenantOperationalStore {
+    fn writes_after(
+        &self,
+        tenant: Option<&str>,
+        after: i64,
+        limit: usize,
+    ) -> anyhow::Result<Vec<tenkai::storage::CatalogWrite>> {
+        let schema = self.catalog_schema(tenant)?;
+        #[cfg(feature = "postgres")]
+        {
+            Ok(self.inner.catalog_writes_after(&schema, after, limit)?)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (schema, after, limit);
+            Err(postgres_disabled().into())
+        }
+    }
+
+    fn latest_write(&self, tenant: Option<&str>) -> anyhow::Result<i64> {
+        let schema = self.catalog_schema(tenant)?;
+        #[cfg(feature = "postgres")]
+        {
+            Ok(self.inner.catalog_latest_write(&schema)?)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (schema, ());
+            Err(postgres_disabled().into())
+        }
+    }
+
+    fn prune_writes(&self, tenant: Option<&str>, before_ms: i64) -> anyhow::Result<()> {
+        let schema = self.catalog_schema(tenant)?;
+        #[cfg(feature = "postgres")]
+        {
+            Ok(self.inner.catalog_prune_writes(&schema, before_ms)?)
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (schema, before_ms);
+            Err(postgres_disabled().into())
+        }
+    }
+
     fn get(&self, tenant: Option<&str>, id: &str) -> anyhow::Result<Option<Object>> {
         let schema = self.catalog_schema(tenant)?;
         #[cfg(feature = "postgres")]

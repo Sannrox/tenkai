@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use tokio::sync::Semaphore;
 
+use super::change_scope::{self, ChangeScope, Touched};
 use super::environment_lifecycle;
 use super::*;
 use crate::ontology::{KIND_ENVIRONMENT, env_id};
@@ -186,6 +187,7 @@ pub(super) struct TickRequest<'a> {
     pub runtime_environments: Arc<HashSet<String>>,
     pub diagnostics: Arc<Mutex<ReconcileDiagnostics>>,
     pub allowed_environments: Option<HashSet<String>>,
+    pub change_scope: Arc<Mutex<ChangeScope>>,
 }
 
 pub(super) async fn run(request: TickRequest<'_>) -> Result<TickReport> {
@@ -216,6 +218,28 @@ async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport>
         request.allowed_environments.as_ref(),
     )
     .await?;
+    // A requested, scoped tick evaluates everything it names; the periodic
+    // tick evaluates only due environments (#1569).
+    let bounded = request.allowed_environments.is_some();
+    let touched = if bounded {
+        Touched::All
+    } else {
+        let touched = change_scope::touched(&mut listing, &request.change_scope).await?;
+        request
+            .change_scope
+            .lock()
+            .expect("change scope lock")
+            .retain(&names);
+        touched
+    };
+    let now = crate::now_millis();
+    let names: Vec<String> = {
+        let scope = request.change_scope.lock().expect("change scope lock");
+        names
+            .into_iter()
+            .filter(|name| bounded || scope.due(name, &touched, now))
+            .collect()
+    };
     let permits = Arc::new(Semaphore::new(request.config.max_concurrency));
     let mut jobs = tokio::task::JoinSet::new();
     // Which environment each task reconciles, so a panicked one is still
@@ -307,6 +331,14 @@ async fn run_admitted(request: &TickRequest<'_>, ctx: Ctx) -> Result<TickReport>
             environment,
             status,
         });
+    }
+    {
+        let now = crate::now_millis();
+        let mut scope = request.change_scope.lock().expect("change scope lock");
+        for result in &report.environments {
+            let current = result.status == EnvironmentStatus::Current;
+            scope.record(&result.environment, current, now);
+        }
     }
     report
         .environments

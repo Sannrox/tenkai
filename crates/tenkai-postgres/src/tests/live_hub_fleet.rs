@@ -57,9 +57,9 @@ async fn live_hub_fleet_measure() {
 
     assert_eq!(report.profile, "ci-hub-postgres");
     assert!(!report.skip_gates);
-    assert!(report.samples.iter().all(|sample| {
-        sample.environments == environments as usize && sample.storage_bytes > 0
-    }));
+    assert_eq!(report.fleet_size, environments as usize);
+    assert!(report.samples.iter().all(|sample| sample.storage_bytes > 0));
+    fleet_budget::assert_steady_tick(&plan, &report);
     let load = report.database_load.expect("hub reports database load");
     assert!(load.transactions > 0 && load.rows_read > 0, "{load:?}");
     if tenkai::rollout_time::Gate::from_env() == tenkai::rollout_time::Gate::Regression {

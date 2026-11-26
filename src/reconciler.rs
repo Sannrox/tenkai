@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::client::Ctx;
 use crate::plan;
 
+mod change_scope;
 mod environment_lifecycle;
 mod tick_admission;
 
@@ -214,6 +215,7 @@ pub struct Reconciler {
     tick_lock: Arc<tokio::sync::Mutex<()>>,
     runtime_environments: Arc<HashSet<String>>,
     diagnostics: Arc<Mutex<ReconcileDiagnostics>>,
+    change_scope: Arc<Mutex<change_scope::ChangeScope>>,
 }
 
 impl Reconciler {
@@ -235,7 +237,15 @@ impl Reconciler {
             tick_lock: Arc::new(tokio::sync::Mutex::new(())),
             runtime_environments: Arc::new(HashSet::new()),
             diagnostics: Arc::new(Mutex::new(ReconcileDiagnostics::default())),
+            change_scope: Arc::new(Mutex::new(change_scope::ChangeScope::default())),
         })
+    }
+
+    /// Forget which environments are quiet, so the next periodic tick
+    /// evaluates every environment. A host calls this while it is not the
+    /// writer, so a writer-lease takeover starts with a full tick (#1569).
+    pub fn reset_change_scope(&self) {
+        self.change_scope.lock().expect("change scope lock").reset();
     }
 
     pub fn with_runtime_environments(mut self, environments: HashSet<String>) -> Self {
@@ -302,6 +312,7 @@ impl Reconciler {
                 runtime_environments: Arc::clone(&self.runtime_environments),
                 diagnostics: Arc::clone(&self.diagnostics),
                 allowed_environments,
+                change_scope: Arc::clone(&self.change_scope),
             }),
         )
         .await;
@@ -419,7 +430,10 @@ mod tests {
         (database.clone(), Ctx::embedded(&database).unwrap())
     }
 
-    async fn registered_ctx(label: &str, environments: &[&str]) -> (std::path::PathBuf, Ctx) {
+    pub(super) async fn registered_ctx(
+        label: &str,
+        environments: &[&str],
+    ) -> (std::path::PathBuf, Ctx) {
         let (database, mut ctx) = temp_ctx(label);
         crate::ontology::register(&mut ctx).await.unwrap();
         for name in environments {
@@ -937,6 +951,8 @@ mod tests {
             .unwrap()
             .with_runtime_environments(["env-a".into()].into());
         for _ in 0..3 {
+            // Re-evaluate the quiet environment each time (#1569).
+            reconciler.reset_change_scope();
             let report = reconciler.run_once().await.unwrap();
             assert_eq!(report.environments.len(), 1);
             assert_eq!(report.environments[0].status, EnvironmentStatus::Current);
@@ -978,6 +994,8 @@ mod tests {
 
         let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
         for _ in 0..2 {
+            // Re-evaluate the quiet environment each time (#1569).
+            reconciler.reset_change_scope();
             let report = reconciler.run_once().await.unwrap();
             assert_eq!(report.environments.len(), 1);
             assert_eq!(report.environments[0].environment, "review");
@@ -1000,6 +1018,8 @@ mod tests {
         let (database, ctx) = registered_ctx("controller-noop-empty", &["env-a"]).await;
         let reconciler = Reconciler::new(ctx.clone(), config()).unwrap();
         for _ in 0..2 {
+            // Re-evaluate the quiet environment each time (#1569).
+            reconciler.reset_change_scope();
             let report = reconciler.run_once().await.unwrap();
             assert_eq!(report.environments[0].status, EnvironmentStatus::Current);
         }
@@ -1405,7 +1425,8 @@ mod tests {
         let (first, second) = reports;
 
         assert_eq!(first.environments.len(), 8);
-        assert_eq!(second.environments.len(), 8);
+        // Nothing changed, so the quiet environments are not evaluated (#1569).
+        assert!(second.environments.is_empty(), "{second:?}");
         assert_eq!(
             first
                 .environments
@@ -1495,7 +1516,8 @@ mod tests {
                 .iter()
                 .map(|row| row.environment.as_str())
                 .collect::<Vec<_>>(),
-            ["env-a", "env-b", "env-c"]
+            ["env-c"],
+            "only the new environment is due; the others stayed quiet (#1569)"
         );
         assert_eq!(log.list_kinds.len(), 1);
         assert_eq!(log.list_kind_ids.len(), 1);
@@ -1518,14 +1540,8 @@ mod tests {
         let (first, second) = reports;
 
         assert_eq!(first.environments.len(), 2);
-        assert_eq!(
-            second
-                .environments
-                .iter()
-                .map(|row| row.environment.as_str())
-                .collect::<Vec<_>>(),
-            ["env-a"]
-        );
+        // env-a stayed quiet and env-b is gone (#1569).
+        assert!(second.environments.is_empty(), "{second:?}");
         assert_eq!(log.list_kinds.len(), 1);
         assert_eq!(log.list_kind_ids.len(), 1);
         assert!(
@@ -1625,7 +1641,7 @@ mod tests {
     }
 
     /// `product/stable` at 2.0.0, subscribed by `stage`.
-    async fn put_product_channel(ctx: &mut Ctx, product: &str) {
+    pub(super) async fn put_product_channel(ctx: &mut Ctx, product: &str) {
         let channel_id = format!("tenkai:channel:{product}/stable");
         ctx.put(crate::pb::sekai::Object {
             id: channel_id.clone(),

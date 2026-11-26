@@ -200,6 +200,7 @@ mod rollbacks;
 mod runtime;
 mod runtime_enrollment;
 mod schema;
+mod write_log;
 mod writer_lease;
 
 pub(crate) use leases::{lock_lease, require_lease, require_plan_environment};

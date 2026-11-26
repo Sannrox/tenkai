@@ -10,7 +10,7 @@ use crate::environment::retirement_from_configuration_json;
 use crate::grant_rules::{
     GrantRuleStore, GrantRuleWrite, MAX_STORED_RULES, StoredGrantRule, StoredGrantRules, encode,
 };
-use crate::ontology::env_id;
+use crate::ontology::{KIND_CHANNEL, KIND_ENVIRONMENT, KIND_PLAN, KIND_RELEASE, env_id};
 use crate::runtime_capabilities::sqlite_store_capabilities;
 use crate::storage::{
     AuditRecord, ChannelRecord, EnvironmentRecord, LeaseRecord, OfflineImportRecord,
@@ -379,6 +379,7 @@ impl OperationalStore for MemoryCatalogGraph {
             partition
                 .releases
                 .insert(release.id.clone(), release.clone());
+            super::log_memory_write(partition, &release.id, KIND_RELEASE);
             Ok(())
         })
     }
@@ -447,6 +448,7 @@ impl OperationalStore for MemoryCatalogGraph {
             partition
                 .channels
                 .insert(channel.id.clone(), stored.clone());
+            super::log_memory_write(partition, &channel.id, KIND_CHANNEL);
             Ok(stored)
         })
     }
@@ -524,6 +526,7 @@ impl OperationalStore for MemoryCatalogGraph {
             partition
                 .environments
                 .insert(environment.id.clone(), stored.clone());
+            super::log_memory_write(partition, &environment.id, KIND_ENVIRONMENT);
             Ok(stored)
         })
     }
@@ -591,6 +594,7 @@ impl OperationalStore for MemoryCatalogGraph {
                 });
             }
             partition.plans.insert(plan.id.clone(), plan.clone());
+            super::log_memory_write(partition, &plan.id, KIND_PLAN);
             Ok(())
         })
     }
@@ -640,6 +644,7 @@ impl OperationalStore for MemoryCatalogGraph {
             stored.status = status;
             stored.status_detail = detail.into();
             partition.plans.insert(id.into(), stored.clone());
+            super::log_memory_write(partition, id, KIND_PLAN);
             Ok(stored)
         })
     }

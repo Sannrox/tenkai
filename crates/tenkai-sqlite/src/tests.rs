@@ -30,3 +30,9 @@ fn plan(store: &SqliteStore) -> PlanRecord {
     store.create_plan(&plan).unwrap();
     plan
 }
+
+#[test]
+fn sqlite_catalog_logs_every_write() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    tenkai::storage::write_log_contract::assert_write_log(&store, None);
+}

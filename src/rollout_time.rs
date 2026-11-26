@@ -510,6 +510,9 @@ async fn measure_reconcile_count(
     )?;
     let warmup = reconciler.run_once().await?;
     require_current_tick(&warmup, count, "reconcile warmup")?;
+    // Time a pass over every environment, not a change-driven tick that
+    // would skip the quiet ones (#1569); the baseline is per-pass cost.
+    reconciler.reset_change_scope();
     let ticked = Instant::now();
     let report = reconciler.run_once().await?;
     let tick_ms = ticked.elapsed().as_millis() as u64;
