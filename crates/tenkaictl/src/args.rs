@@ -91,8 +91,10 @@ pub(crate) enum RecoveryCommand {
         env: String,
         #[arg(long)]
         plan: String,
+        // Not `--output`: that name is the global output format (#1573).
+        /// File the bundle is written to.
         #[arg(long)]
-        output: PathBuf,
+        out: PathBuf,
     },
 }
 

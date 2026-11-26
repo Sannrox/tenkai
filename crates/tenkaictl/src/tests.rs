@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
@@ -1737,4 +1737,31 @@ fn parses_a_delivery_report_period() {
     let (env, query) = command.delivery();
     assert_eq!(env, "prod");
     assert_eq!((query.since_ms, query.until_ms), (Some(1_000), None));
+}
+
+/// #1573: `recovery export` names its file without colliding with the global
+/// `--output` format flag, which once panicked the parser.
+#[test]
+fn recovery_export_parses_its_file_beside_the_output_format() {
+    let cli = Cli::try_parse_from([
+        "tenkaictl",
+        "recovery",
+        "export",
+        "--env",
+        "prod",
+        "--plan",
+        "plan-1",
+        "--out",
+        "bundle.json",
+        "--output",
+        "json-v1",
+    ])
+    .unwrap();
+    assert_eq!(cli.output, crate::args::OutputFormat::JsonV1);
+    assert!(matches!(
+        cli.command,
+        Command::Recovery {
+            command: crate::args::RecoveryCommand::Export { env, plan, out },
+        } if env == "prod" && plan == "plan-1" && out.as_path() == Path::new("bundle.json")
+    ));
 }

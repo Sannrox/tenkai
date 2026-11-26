@@ -251,12 +251,12 @@ pub(crate) async fn run(
             }
         }
         Command::Recovery { command } => match command {
-            RecoveryCommand::Export { env, plan, output } => {
+            RecoveryCommand::Export { env, plan, out } => {
                 let bundle = tenkai::recovery_bundle::export(ctx, &env, &plan).await?;
-                tenkai::recovery_bundle::write_verified(&output, &bundle)?;
+                tenkai::recovery_bundle::write_verified(&out, &bundle)?;
                 println!(
                     "wrote recovery diagnostic {} (authority=none)",
-                    output.display()
+                    out.display()
                 );
             }
         },
