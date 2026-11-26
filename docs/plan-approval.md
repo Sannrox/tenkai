@@ -1,10 +1,9 @@
 # Plan approval format
 
 Tenkai requires authorization bound to the exact executable plan immediately
-before execution. Tenkai owns this contract so embedded operation does not
-depend on sekai-chisei. An environment policy may require a sekai-chisei
-decision, but its adapter supplies evidence through the same envelope used by
-the built-in standalone policy.
+before execution. Tenkai owns this contract. A policy adapter that an
+environment requires supplies evidence through the same envelope as the
+built-in standalone policy.
 
 The detached JSON envelope uses `schema: "tenkai.plan-approval.v1"`:
 

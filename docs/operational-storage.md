@@ -275,7 +275,7 @@ Development-only unsigned release
 permission is a per-publish CLI choice and is never enabled implicitly by
 server startup.
 
-Older sekai-backed v0 installations require an explicit republish and
+Older v0 installations backed by an external graph require an explicit republish and
 reconciliation cutover: archive the graph for audit, initialize embedded state,
 republish releases, recreate channels and environments, and record each
 verified deployed version with `tenkaictl env reconcile` before applying.

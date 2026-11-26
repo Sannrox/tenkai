@@ -44,4 +44,4 @@ Use unsigned local publish for demos only (`--allow-unsigned-development`).
 Production requires signed releases and the normal approval path.
 
 Mid-sequence failure remains recoverable with Tenkai rollback/restore of the
-last healthy generation; do not depend on `sekai-chisei` for recovery.
+last healthy generation; recovery needs no external service.

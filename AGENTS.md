@@ -4,10 +4,12 @@
 
 `tenkai` is a Rust 2024 local-first, constraint-based delivery control plane.
 It is the operational owner of releases, channels, environments, plans,
-execution, rollback, and recovery. `sekai-chisei` is an optional provider for
-graph projection, governance, evaluation, and learning; Tenkai must remain
-operable and recoverable without it unless an operation's policy explicitly
-requires provider evidence.
+execution, rollback, and recovery. Tenkai is self-contained: it owns all of its
+state, types, and contracts, and has no runtime, build, or wire dependency on
+an external graph or governance service. Evidence flows in: producers push
+signed evidence to Tenkai, which never pulls evidence from or exports delivery
+state to another system
+([ADR 0064](docs/decisions/0064-tenkai-stands-alone.md)).
 
 Source code lives in `src/` (application core) and `crates/` (`tenkai-wire`,
 `tenkai-http`, `tenkai-server`, `tenkaictl`, `tenkai-executor`, `tenkai-runtime`,
@@ -24,7 +26,7 @@ source-built.
 The Postgres delivery-effect harness is the `tenkai-delivery-conformance`
 binary in `crates/tenkai-postgres`, behind feature `postgres`; see
 [delivery-effect conformance](docs/delivery-effect-conformance.md). Keep domain
-logic in the library and treat CLI, HTTP, gRPC, SQLite, and provider clients as
+logic in the library and treat CLI, HTTP, gRPC, SQLite, and external-service clients as
 adapters around shared application contracts. Protocol definitions live in
 `proto/`, documentation in `docs/`, examples in `examples/`, and operational
 scripts in `scripts/`. The Rust toolchain is pinned at 1.96.1.
@@ -91,20 +93,21 @@ until the extraction criteria in ADR 0001 are met.
 
 Treat these boundaries as authoritative:
 
-- Tenkai owns operational persistence and recovery state.
-- `sekai-chisei` projections are derived, retryable integrations, not recovery
-  material.
-- Optional provider failures remain visible and durably retryable.
-- If policy or an approved plan requires provider evidence, the affected
-  operation fails closed when evidence is absent, stale, invalid, or
-  unavailable.
+- Tenkai owns operational persistence, recovery state, and the record types
+  it stores (`proto/tenkai/`).
+- Evidence is pushed in and stored signed. Optional integrations (gate
+  providers, webhooks, notifications) are adapters; their failures remain
+  visible and durably retryable, and they are never recovery material.
+- If policy or an approved plan requires evidence, the affected operation
+  fails closed when evidence is absent, stale, invalid, or unavailable.
 - Signed releases, executable plans, approval evidence, fencing generations,
   and environment scope must remain content-bound and versioned.
 - Remote and embedded modes must not acquire implicit development permissions.
-- Compatibility changes to vendored Sekai or Chisei protocols require explicit
-  versioning, migration, and failure semantics.
+- Stored formats stay readable: record field numbers and evidence schema
+  identifiers already on disk keep their meaning, including legacy
+  identifiers such as `chisei.model_evaluation_evidence.v1`.
 
-For provider work, read `docs/provider-contracts.md`. For transport work, read
+For integration and evidence work, read `docs/provider-contracts.md`. For transport work, read
 `docs/runtime-protocol-v1.md`. For signing or approval work, read
 `docs/release-signing.md` and `docs/plan-approval.md`. For persistence changes,
 read `docs/operational-storage.md`.
@@ -114,7 +117,7 @@ read `docs/operational-storage.md`.
 Tenkai's ontology is the closed set of schema kinds, relation names, and
 identifier rules in `src/ontology.rs`. Those names identify catalog, plan,
 environment, and execution records in the operational store. They are not a
-portable Sekai ontology database, and this repository has no tracked portable
+portable ontology database, and this repository has no tracked portable
 ontology artifact.
 
 Do not use Tenkai's operational SQLite database as a portable ontology
@@ -366,8 +369,8 @@ Feature: a new observable operator or integration outcome.
 
 Fresh and upgraded graph records and runtime state, audit coupling, old
 clients and manifests, error semantics, and rollback or recovery impact.
-Vendored Sekai and Chisei protocol changes need explicit versioning,
-migration, and failure semantics. Embedded and server hosts keep equivalent
+Record (`proto/tenkai/record.proto`) and evidence-schema changes need
+explicit versioning, migration, and failure semantics. Embedded and server hosts keep equivalent
 behavior.
 
 ### Additional impact boundaries
@@ -375,7 +378,7 @@ behavior.
 - immutable catalog facts versus mutable environment and deployment state;
 - planning and canary evidence versus apply, rollback, and reconciliation;
 - local execution versus the agent and disconnected execution paths;
-- Tenkai ontology records versus vendored `sekai-chisei` protocol contracts;
+- Tenkai ontology records versus their stored record and evidence formats;
 - signing, approval, namespace authorization, audit, lineage, gates, and
   secrets;
 - public `proto/`, manifest, CLI, configuration, status, and operator behavior.
@@ -388,10 +391,10 @@ Rows beyond `## Testing Guidelines`:
 | --- | --- |
 | public or multi-component behavior | affected integration test plus the normal suite |
 | CLI or apply flow | focused command/parser tests plus deterministic local behavior |
-| protocol (`proto/`) | generated build, client/example coverage, vendored compatibility review |
+| protocol (`proto/`) | generated build, client/example coverage, stored-record compatibility (`crates/tenkai-wire/tests/record_compat.rs`) |
 | ontology or state | fresh and upgrade behavior; graph and runtime-state compatibility |
 | configuration or manifest | parsing/default tests, examples, operator documentation |
-| `sekai-chisei` integration | deterministic CLI or local integration checks; live provider tests only with intentional prerequisites |
+| external integration (gate provider, webhook, notification) | deterministic CLI or local integration checks; live service tests only with intentional prerequisites |
 | packaging, features, or binaries | `cargo build --workspace --all-targets --locked` |
 | release scripts or workflows | `bash scripts/check-workflows.sh` and `python3 -m unittest discover -s scripts/tests -t .` |
 | any diff | no `.tenkai-state/`, databases, or runtime state staged |
@@ -406,7 +409,7 @@ Rows beyond `## Testing Guidelines`:
   takes only final `vX.Y.Z` tags), or a stated reason it stays;
 - operator notes `docs/releases/X.Y.Z.md`, linked from `docs/README.md` and
   `docs/release-readiness.md`;
-- public CLI, vendored protocol, manifest, and `sekai-chisei` compatibility;
+- public CLI, `proto/`, manifest, and stored-record compatibility;
 - ontology, graph-record, runtime-state, and configuration migration impact;
 - environment variables, defaults, examples, and operator documentation;
 - signing, approval, security, recovery, rollback, and operator actions;
@@ -427,7 +430,7 @@ must be scoped to exactly one environment, and management credentials must not
 be passed on command lines.
 
 Treat break-glass actions as separately authorized, reasoned, and auditable.
-Never make rollback or recovery depend on `sekai-chisei` availability.
+Never make rollback or recovery depend on an external service.
 Never put hostnames, FQDNs, home directories, absolute worktree paths, LAN
 or employer network names, or other private environment inventory on public
 Issues, Pull Requests, comments, or commit messages.

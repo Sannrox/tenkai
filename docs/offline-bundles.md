@@ -461,7 +461,7 @@ rename it into place. Interrupted or oversized exports are not bundles and may
 be removed. Keep the source plan pending until a valid receipt imports. If
 media is damaged or lost, create a new export; do not repair signed bytes.
 Operational recovery uses Tenkai state plus the signed archive and receipt and
-does not require Sekai Chisei.
+no external service.
 
 ## Content scanner
 

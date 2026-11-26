@@ -1,8 +1,8 @@
 # Model-release evidence
 
-Tenkai and Chisei exchange two versioned JSON records for the same model
-identity. Tenkai emits runtime health and canary evidence. Chisei emits an
-evaluation result. Promotion of that identity refuses when either record is
+Two versioned, signed JSON records describe the same model identity. Tenkai
+emits runtime health and canary evidence. An evaluation producer pushes an
+evaluation result to Tenkai. Promotion of that identity refuses when either record is
 missing, stale, or invalid. This is the schema contract
 ([ADR 0032](decisions/0032-model-release-evidence.md)). Tenkai signs and
 exports the runtime record through the integration outbox when a
@@ -36,7 +36,7 @@ Example identity:
 }
 ```
 
-## Tenkai → Chisei
+## Runtime evidence (Tenkai emits)
 
 Schema: `tenkai.model_runtime_evidence.v1`.
 
@@ -50,9 +50,10 @@ Unknown fields are rejected.
 
 Worked example: [runtime-health.json](examples/model-release-evidence/runtime-health.json).
 
-## Chisei → Tenkai
+## Evaluation evidence (pushed to Tenkai)
 
-Schema: `chisei.model_evaluation_evidence.v1`.
+Schema: `chisei.model_evaluation_evidence.v1`, an accepted legacy identifier
+([provider contracts](provider-contracts.md#legacy-evidence-identifiers)).
 
 Required fields: `schema`, `identity`, `eval_suite_id`, `eval_run_id`,
 `outcome` (`passed`, `failed`), `observed_at`, `expires_at`, `signer`.
@@ -120,8 +121,3 @@ or credential.
 Signing uses the 32-byte Ed25519 seed at `TENKAI_MODEL_EVIDENCE_KEY`. Tenkai
 records the signed evidence in its local outbox whenever that key is present
 (#1580).
-
-## Follow-on
-
-- Chisei companion: persist and return `chisei.model_evaluation_evidence.v1`
-  for the same identity.

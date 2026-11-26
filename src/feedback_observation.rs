@@ -4,7 +4,7 @@
 //! operation and stage, a typed reason, how long the step took, the
 //! controller version, and the lease generation it ran under. It is written
 //! in the same transaction as the outcome and never changes afterwards.
-//! Delivery to Sekai is a separate opt-in adapter (#783).
+//! Opt-in webhooks may deliver it; export to an external graph was removed (#1580).
 //! The terminal outcome event is unchanged.
 //!
 //! An observation carries no detail text: no command output, credentials,

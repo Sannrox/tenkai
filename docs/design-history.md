@@ -10,7 +10,7 @@ kept as history. The current architecture is explained in
 
 | Founding question or plan | Outcome |
 | --- | --- |
-| sekai-chisei as the operational store | Tenkai owns operational persistence; sekai-chisei is an optional provider ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md), [operational storage](operational-storage.md)) |
+| sekai-chisei as the operational store | Tenkai owns its state, types, and contracts, with no dependency on sekai-chisei ([ADR 0001](decisions/0001-standalone-core-and-service-evolution.md), [ADR 0064](decisions/0064-tenkai-stands-alone.md), [operational storage](operational-storage.md)) |
 | Plan/step format | Tenkai-owned, versioned plan and step formats ([runtime protocol v1](runtime-protocol-v1.md), [offline bundles](offline-bundles.md)) |
 | Executor strategy | Manifest shell commands plus in-tree Helm, native `kubectl`, and in-process server-side-apply executors ([software executors](software-executor.md)) |
 | Intelligence artifacts written through sekai-chisei APIs (Phase 4) | Tenkai delivers `routing_config` and other staged products itself ([ADR 0002](decisions/0002-tenkai-owned-routing-configuration.md), [staged products](staged-products.md)) |

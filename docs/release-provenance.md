@@ -52,7 +52,9 @@ approval, gate satisfaction, promotion authority, or execution authorization.
 
 - `example.governed-subject-receipt/v1` admits issuer `sekai-chisei`, receipt
   schema `chisei.governed-subject-receipt/v1`, and `operation` or `evidence`
-  references. It exercises `Sannrox/sekai-chisei#415`.
+  references. Both are accepted legacy identifiers
+  ([provider contracts](provider-contracts.md#legacy-evidence-identifiers));
+  verifying them needs only the configured trust roots.
 - `example.build-attestation/v1` admits issuer `example-builder`, receipt schema
   `example.build-attestation-receipt/v1`, and `build` or `material` references.
   It proves that registry and persistence machinery are not subject-specific.

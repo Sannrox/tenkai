@@ -1,7 +1,7 @@
 //! Fixed-replica Shikigami worker-pool lifecycle owned by Tenkai.
 //!
 //! Tenkai admits pool desired state, capacity, drain, health, and recovery.
-//! Sekai Chisei remains the work-admission authority; Shikigami executes runs.
+//! The worker system remains the work-admission authority; Shikigami executes runs.
 //! Unknown intake adapters and non-`plane` pools fail closed.
 
 use anyhow::{Result, bail};

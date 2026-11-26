@@ -1,11 +1,11 @@
 //! Versioned two-way model-release evidence schema (ADR 0032).
 //!
 //! Tenkai emits runtime health and canary evidence for a model identity.
-//! Chisei emits evaluation results for that same identity. Promotion refuses
-//! when either side is missing, stale, or invalid. Completed `model_runtime`
-//! canary and smoke results are signed and exported through the integration
-//! outbox. Channel promotion consumes stored evaluation records; operators
-//! install evaluation trust roots and record signed Chisei results through
+//! An evaluation producer pushes signed evaluation results for that same
+//! identity. Promotion refuses when either side is missing, stale, or invalid.
+//! Completed `model_runtime` canary and smoke results are signed and recorded
+//! on the integration outbox. Channel promotion consumes stored evaluation
+//! records; operators install evaluation trust roots and record signed results through
 //! the library, `tenkaictl eval-evidence`, or the HTTP ingest routes.
 
 use std::collections::HashMap;
@@ -58,7 +58,7 @@ pub struct ModelReleaseIdentity {
     pub endpoint: String,
 }
 
-/// Tenkai → Chisei runtime health and canary evidence.
+/// Runtime health and canary evidence Tenkai emits and signs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelRuntimeEvidence {
@@ -73,7 +73,7 @@ pub struct ModelRuntimeEvidence {
     pub signer: EvidenceSigner,
 }
 
-/// Chisei → Tenkai evaluation result for the same identity.
+/// Signed evaluation result pushed to Tenkai for the same identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelEvaluationEvidence {
@@ -691,7 +691,7 @@ fn software_gate_identity(
     Ok(identity)
 }
 
-/// Admit a model-runtime channel promotion from the Chisei evaluation half.
+/// Admit a model-runtime channel promotion from the stored evaluation half.
 pub fn admit_model_evaluation_evidence(
     evaluation: Option<&ModelEvaluationEvidence>,
     expected: &ModelReleaseIdentity,

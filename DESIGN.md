@@ -17,7 +17,7 @@ by health and eval checks, with automatic rollback.
 Two kinds of things are deployable, as equals:
 
 1. **Software** — services, containers, agent runtimes, edge binaries.
-2. **Intelligence artifacts** — model routing configs, chisei policies, eval
+2. **Intelligence artifacts** — model routing configs, governance policies, eval
    suites, action definitions, agent definitions, capability bundles.
 
 The second is the differentiator. Argo CD can ship a container; nothing today
@@ -27,12 +27,13 @@ tenkai treats a model migration and a service upgrade as the same governed
 operation.
 
 Tenkai is the operational system of record. It owns releases, channels,
-environments, plans, execution, rollback, and recovery, and stays operable and
-recoverable without any optional provider. `sekai-chisei` can supply graph
-projection, governance, evaluation, and learning; its evidence is required, and
-failure is closed, only when an environment policy or approved plan makes that
-evidence part of the operation's contract
-([ADR 0001](docs/decisions/0001-standalone-core-and-service-evolution.md)).
+environments, plans, execution, rollback, and recovery, and owns all of its
+state, types, and contracts. It has no runtime, build, or wire dependency on an
+external graph or governance service. Evidence flows in: producers push signed
+evidence (evaluation results, provenance, approvals) to Tenkai, and an
+operation fails closed only when an environment policy or approved plan makes
+that evidence part of its contract
+([ADR 0064](docs/decisions/0064-tenkai-stands-alone.md)).
 
 ## Why this product
 
@@ -42,13 +43,11 @@ evidence part of the operation's contract
   air-gapped — need a *catalog + constraints + planner* model, not a repo sync.
 - **Nobody governs intelligence rollout.** Model upgrades, prompt/policy
   changes, and agent definition changes ship today as config edits with no
-  channels, no gates, no rollback. sekai-chisei already has the eval and policy
-  machinery; tenkai gives it a delivery mechanism.
-- **Deployment outcomes are learning signal.** Tenkai records every rollout,
-  failure, and rollback in operational state. When configured, the durable
-  sekai projection feeds those outcomes to chisei's evolve/pattern-mining loop,
-  which can learn "upgrades of product P fail on environments with property X"
-  and feed that back into planning.
+  channels, no gates, no rollback. Tenkai gives them the same channels,
+  signed evaluation evidence gates, and rollback as software.
+- **Deployment outcomes are the record.** Tenkai records every rollout,
+  failure, and rollback in its own operational state, inspectable through the
+  CLI and HTTP API and delivered to opt-in webhooks.
 
 ## Non-goals
 
@@ -56,10 +55,9 @@ evidence part of the operation's contract
 - Not an orchestrator/scheduler of agent work: Tenkai may manage the
   deployment and lifecycle of a Shikigami worker pool, but admission, work
   selection, claims, leases, fencing, retry/park decisions, and receipts stay
-  with Sekai Chisei (ADR 0011).
+  with the worker system (ADR 0011).
 - Not a git replacement: desired state lives in the Tenkai Catalog and
-  environment constraints, with optional audit projection to sekai; git can
-  feed the Catalog.
+  environment constraints; git can feed the Catalog.
 - Not a hosted multi-tenant service: community profiles are tenant-free, and
   tenant isolation is an experimental enterprise profile
   ([ADR 0010](docs/decisions/0010-supported-operating-profiles.md)).
@@ -67,10 +65,9 @@ evidence part of the operation's contract
 ## Core concepts
 
 These are Tenkai domain types, persisted in Tenkai's own operational store (see
-[domain objects](docs/operational-storage.md#domain-objects)). An optional sekai
-graph projection may also represent lineage (release → artifacts → SBOM;
-deployment → plan → release → publisher) for audit, policy, and learning, but it
-is never needed to recover a deployment.
+[domain objects](docs/operational-storage.md#domain-objects)), with record
+types defined in `proto/tenkai/`. Lineage (release → artifacts → SBOM;
+deployment → plan → release → publisher) lives in the same store.
 
 | Concept | What it is |
 | --- | --- |
@@ -88,13 +85,13 @@ is never needed to recover a deployment.
  publishers (CI, humans)          operators: tenkaictl, web console
           │ publish / promote               │ HTTP management API
           ▼                                 ▼
- ┌────────────────────────────────────────────────────┐     ┌──────────────────┐
- │ Tenkai application core                            │     │ sekai-chisei     │
- │ Catalog · planner/reconciler · gates · approvals   │┄┄┄┄▶│ (optional)       │
- │ operational store (SQLite; Postgres hub)           │     │ projection, gate │
- │ hosted by: tenkaictl (embedded) or tenkai-server   │     │ evidence, policy,│
- └───────────┬───────────────────────┬────────────────┘     │ outcome learning │
-             │ executes in-process   │ plans pulled        └──────────────────┘
+ ┌────────────────────────────────────────────────────┐
+ │ Tenkai application core                            │◀┄┄ signed evidence
+ │ Catalog · planner/reconciler · gates · approvals   │    (evaluation results,
+ │ operational store (SQLite; Postgres hub)           │     provenance), pushed in
+ │ hosted by: tenkaictl (embedded) or tenkai-server   │
+ └───────────┬───────────────────────┬────────────────┘
+             │ executes in-process   │ plans pulled
              ▼                       ▼
      local executors          tenkai-runtime (one per environment)
      (shell, Helm,            ── or signed offline bundles for
@@ -145,26 +142,16 @@ Operating profiles (`local`, `fleet`, `enterprise-experimental`) fix which
 store, processes, and authentication a deployment uses
 ([ADR 0010](docs/decisions/0010-supported-operating-profiles.md)).
 
-### Optional sekai-chisei integrations
+### Evidence and integrations
 
-These capabilities exist on sekai-chisei's gRPC surface. A capability becomes
-required for an operation when policy or an approved plan requires its
-evidence; that operation then fails closed if the provider is unavailable or
-invalid. Optional failures remain visible and durably retryable. Recovery never
-depends on these integrations. Which ones Tenkai wires today is in
+Tenkai stores the evidence its gates read; it never pulls it from another
+system. Evaluation results arrive as signed evaluation evidence through the
+[model release evidence](docs/model-release-evidence.md) ingest path, and
+`[gate].eval_suite` blocks on missing, stale, or invalid recorded evidence.
+Gate providers, deploy webhooks, and notifications are optional adapters: their
+failures stay visible and durably retryable, and recovery never depends on
+them. The evidence identifiers and adapter contracts are in
 [provider contracts](docs/provider-contracts.md).
-
-| tenkai need | sekai-chisei API |
-| --- | --- |
-| Domain projections, links, lineage | `SekaiService` objects/links/`Traverse`, `CreateSchemaType` for the tenkai ontology |
-| Immutable audit of every publish/promote/plan/deploy | audit records + object history |
-| "Who may promote to prod-eu?" | `ResolvePolicy` / namespace policy |
-| Eval-gated apply | Stored signed `chisei.model_evaluation_evidence.v1` for `[gate].eval_suite` — Tenkai blocks on missing, stale, or invalid recorded evidence |
-| Governed execution of destructive steps | `PlanExecution` / `ExecutePlan(Stream)` — tenkai plan steps map onto governed actions (PR #57) |
-| Cost-aware rollout (esp. model rollouts) | `CheckBudget` / `RecordUsage` |
-| Learning from deployment outcomes | Sekai `SubmitEvidence` terminal-outcome envelopes and evolve/pattern APIs — mine failure patterns across the fleet |
-| Recurring operation-bound feedback | Opt-in `SubmitEvidence` + `SubmitActionInstance` of captured `tenkai.feedback_observation.v1` records through the evidence-and-finding package |
-| AI-assisted ops (plan explanation, incident triage, release notes) | `LlmService.Chat` through the governed gateway |
 
 ### Trust model
 
@@ -177,6 +164,5 @@ depends on these integrations. Which ones Tenkai wires today is in
   approval evidence is captured in the Tenkai-owned versioned plan before an
   environment runtime will execute it.
 - Air-gapped flow: export bundle = versioned plan + content-addressed payloads +
-  signatures + approval evidence. sekai projection data may be included as
-  optional metadata but is never verification or recovery material. Receipt
+  signatures + approval evidence. Receipt
   import targets the same Tenkai application contract as connected execution.
