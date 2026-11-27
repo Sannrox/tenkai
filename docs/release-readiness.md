@@ -70,8 +70,11 @@ cargo build --all-targets --locked
 
 - [ ] `tenkaictl`, `tenkai-server`, runtime/guard binaries build
 - [ ] Tag `vX.Y.Z` GitHub Release attaches community hosts and
-      `tenkai-server-postgres-<platform>` for `linux-x86_64` and
-      `darwin-aarch64` plus `SHA256SUMS` ([release binaries](release-binaries.md))
+      `tenkai-server-postgres-<platform>` for `linux-x86_64`,
+      `linux-aarch64` and `darwin-aarch64`, `tenkai-host-applier` for both
+      Linux platforms, `tenkai-<platform>.deb` and `.rpm` for each Linux
+      platform, the Homebrew formula `tenkai.rb`, and `SHA256SUMS`
+      ([release binaries](release-binaries.md))
 - [ ] Release dry run green: `linux-x86_64` hosts within the glibc floor and
       started on older distributions ([supported Linux](release-binaries.md#supported-linux))
 - [ ] GitHub attestations verify for downloaded executables against the

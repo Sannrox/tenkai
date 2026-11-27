@@ -415,7 +415,8 @@ Rows beyond `## Testing Guidelines`:
 - signing, approval, security, recovery, rollback, and operator actions;
 - after an authorized `vX.Y.Z` or `vX.Y.Z-rc.N` tag, the dispatcher starts
   the Release binaries workflow from main; it attaches the community hosts
-  for `linux-x86_64` and `darwin-aarch64`, `SHA256SUMS`, and the other assets
+  for `linux-x86_64`, `linux-aarch64` and `darwin-aarch64`, the `.deb` and
+  `.rpm` packages, the Homebrew formula, `SHA256SUMS`, and the other assets
   listed in `docs/release-binaries.md`; tags before that workflow have none. Do not
   rewrite existing Release notes when only uploading assets;
 - credit contributors through GitHub's generated release notes.
