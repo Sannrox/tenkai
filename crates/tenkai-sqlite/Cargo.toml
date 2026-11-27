@@ -1,13 +1,13 @@
 [package]
 name = "tenkai-sqlite"
-version = "0.9.1"
+version = "0.10.0-rc.1"
 edition = "2024"
 rust-version = "1.96.1"
 license = "Apache-2.0"
 description = "SQLite operational and catalog adapter for community Tenkai hosts."
 
 [dependencies]
-tenkai = { path = "../..", version = "0.9.1" }
+tenkai = { path = "../..", version = "0.10.0-rc.1" }
 anyhow = "1"
 prost = { version = "0.14", default-features = false, features = ["derive", "std"] }
 rusqlite = { version = "0.32", default-features = false, features = ["backup", "bundled"] }
@@ -18,5 +18,5 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-tenkai = { path = "../..", version = "0.9.1", features = ["test-support"] }
+tenkai = { path = "../..", version = "0.10.0-rc.1", features = ["test-support"] }
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
