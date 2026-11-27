@@ -6,6 +6,164 @@ pull request body, which becomes the squash commit; at release,
 
 ## [Unreleased]
 
+## v0.10.0-rc.1 (2026-11-27)
+
+Gate flags: breaking
+
+Release candidate for 0.10.0. Tenkai stands alone: it owns its record types
+and its store, refuses remote provider mode, and admits evaluation gates from
+signed evidence pushed to it. Operators can open time-boxed, audited debug
+sessions on an instance, stop and start instances, adopt unmanaged workloads,
+and limit a recall to named environments. Releases gain config presets,
+environment-wide config values, preview environments and cluster namespaces
+over HTTP v1, OS image updates across a reboot, and a provision executor
+bound to the saved plan. Hosts ship for `linux-aarch64` and as `.deb`, `.rpm`
+and a Homebrew formula. The server serves web console
+[v0.6.0](https://github.com/Sannrox/tenkai-console/releases/tag/v0.6.0) at
+`/ui/`. Operator notes:
+[docs/releases/0.10.0.md](https://github.com/Sannrox/tenkai/blob/v0.10.0-rc.1/docs/releases/0.10.0.md).
+
+### Upgrade
+- Install the 0.10.0-rc.1 hosts from the GitHub pre-release after verifying `SHA256SUMS` and the attestation. `tenkaictl --version` reports `tenkaictl 0.10.0-rc.1`.
+- Upgrade order: every runtime agent must be 0.7.0 or later before the server is upgraded. The server refuses runner attestation v1 with `403 attestation_schema_unsupported` (#1436). Upgrade runtimes with the server: older runtimes fail closed on the new plan actions (adopt, stop, start, cluster namespaces, provision, OS image).
+- Remote provider mode is gone (#1586, #1587, #1588). `tenkai-server` refuses `--provider-mode remote`, `--outcome-provider chisei` and `--feedback-provider chisei` with their settings, so unset them before upgrading or the server does not start. `TENKAI_SEKAI_URL`, `GRPC_PORT`, `SEKAI_AUTH_TOKEN` and the `TENKAI_OUTCOME_*` / `TENKAI_FEEDBACK_*` variables are no longer read. An operator still on remote mode initializes a Tenkai-owned store.
+- `[gate].eval_suite` now passes only on ingested signed evaluation evidence, on every host including embedded (#1586). Push that evidence before relying on the gate.
+- Store: SQLite `SCHEMA_VERSION` stays 14; new tables and columns (`catalog_writes`, `runtime_claims.progress_json`, debug session records) are added on open. The hub tenant schema stamp moves from 3 to 5 on start, and an older replica leaves the newer stamp in place. Stored record payloads are byte-compatible (`tenkai.record.v1` keeps the previous wire layout).
+- HTTP stays `tenkai.http.v1` and is additive against 0.9.1. Older servers refuse the new request fields (recall `environments`, range `exclusions`, policy `debug_sessions`) and answer 404 for new routes. Use these only after every replica runs 0.10: an older replica treats a scoped recall as fleet-wide and ignores range exclusions, so it recalls versions the operator meant to protect, and it refuses a policy file that sets `debug_sessions`.
+- Spoke-standby evidence is signed as v2 (#1439). Releases before 0.10 cannot verify v2; stored v1 statements still verify.
+- A federated replay cache full of live assertion ids now answers 401 until some expire, instead of accepting (#1387).
+- Rust library API: broad breaking changes. `tenkai::storage::SqliteStore` and `tenkai::embedded::EmbeddedStore` move to the new `tenkai-sqlite` crate (#1543), `tenkai::pb::sekai` becomes `tenkai::pb::record` and `tenkai::client::connect` is removed (#1588), and many public structs and exhaustive enums gained fields or variants. Each `!` pull request carries a Breaking section.
+- Source builds with feature `ui` download `tenkai-console-v0.6.0.zip` and check its SHA-256 against `ui/console.pin`. `TENKAI_UI_BUNDLE` must point at the v0.6.0 zip.
+- Rollback to 0.9.1: remove `debug_sessions` from the approval policy file first (0.9.1 refuses the field and would not start), then run the previous binary on the existing store. 0.9.1 ignores the new tables, columns and properties, so debug sessions, stop state, presets, environment config values, recall scope and exclusions, and cluster namespaces stop taking effect; 0.9.1 treats scoped recalls as fleet-wide, recalls excluded versions, and withholds grant rules that name `debug`. It serves console v0.4.0 again.
+
+### Added
+- feat(debug)!: durable, bounded and audited debug session records (#1562)
+- feat(auth)!: debug capability, debug_sessions policy and debug_elevate purpose (#1561)
+- feat(runtime): runtime pickup and runtime-owned bound for debug sessions (#1563)
+- feat(debug): WebSocket relay for debug session terminal I/O (#1564)
+- feat(executor): read-only debug attach and command audit per executor (#1565)
+- feat(debug): quorum-approved elevation of debug sessions (#1568)
+- feat(http)!: limit recall removal to named environments and widen it (#1550)
+- feat(http)!: exclude a version from a recall range (#1551)
+- feat(http): recall on an instance-count threshold (#1552)
+- feat(reconciler): retire queued plans for recalled releases before start (#1572)
+- feat(planner): admit an upgrade onto an advisory-recalled release that lowers exposure (#1535)
+- feat(planner)!: stop and start an instance as a recorded, planned state (#1529)
+- feat(planner): list unmanaged workloads and adopt them without redeploying (#1530)
+- feat(catalog)!: config presets with override conflict detection (#1458)
+- feat(catalog)!: environment-wide config values that every release can read (#1461)
+- feat(environment)!: create and close preview environments over HTTP v1 (#1549)
+- feat(executor)!: cluster namespaces as managed environment objects (#1537)
+- feat(http)!: record reconciled deployment state through the versioned API (#1465)
+- feat(release)!: the [os_image] manifest section and its publication check (#1416)
+- feat(host-applier)!: stage, reboot, verify, and confirm OS image updates (#1444)
+- feat(runtime)!: os_image capability with the awaiting_boot outcome and resume at verify (#1449)
+- feat(server): judge the boot deadline from durable state and fit OS image plans in windows (#1453)
+- feat(planner): plan stage, reboot, verify and confirm for an os_image release (#1504)
+- feat(executor)!: provision executor with saved-plan approval and risky-change codes (#1540)
+- feat(executor): run docker/host.json releases on the Apple container engine (#1539)
+- feat(planner)!: check artifact availability when planning (#1442)
+- feat(planner)!: include model engines in recorded execution capability sets (#1542)
+- feat(planner): advertise and refuse unsupported executors (#1525)
+- feat(ops): delivery metrics from recorded attempts (#1446)
+- feat(ops)!: link delivery spans into one trace and accept an inbound traceparent (#1448)
+- feat(trust)!: runway grades stored signed artifacts by their signer window (#1434)
+- feat(fleet): report plans awaiting approval, drift and certificates per row (#1518)
+- feat(cli): fleet watch reports terminal program status (#1409)
+- feat(reconciler): change-driven reconciliation evaluates only environments that changed (#1576)
+- feat(release): linux-aarch64 hosts, .deb/.rpm packages, formula, launchd runtime (#1447)
+- feat(integration): reusable CI step that publishes a signed release and optionally promotes it (#1506)
+- feat(ops): check reproducible Linux release builds in CI (#1517)
+- feat: list the 1.0 surface and gate HTTP and json-v1 schema breaks (#1531)
+- docs: add a system threat model, security overview and security policy (#1456)
+- docs: run Kubernetes releases on Apple container clusters (#1532)
+- docs(executor): record OpenShift compatibility without a new adapter (#1527)
+- docs(integration): request OpenShift cluster updates through CVO and MCO (#1528)
+
+### Changed
+- refactor(server)!: refuse remote provider mode and admit eval_suite from stored evidence (#1586)
+- refactor(providers)!: remove outcome and feedback export (#1587)
+- refactor(catalog)!: own the record types and drop the provider protocol (#1588)
+- refactor(keys): own the key-provider contract (#1585)
+- docs!: describe Tenkai without a provider (#1589)
+- refactor(storage)!: extract SQLite adapter into tenkai-sqlite (#1543)
+- refactor(runtime)!: stop accepting runner attestation v1 (#1436)
+- refactor(keys): drop cryptoki from the application core (#1541)
+- refactor!: stop embedding operator docs in the application core (#1521)
+- refactor(client): drive Ctx through CatalogGraph and OperationalStore (#1526)
+- refactor(catalog): verify each release once per reconcile pass (#1577)
+- chore(ui): serve web console v0.6.0 (#1590)
+- perf(catalog): flatten hub reads per environment as the fleet grows (#1570)
+- perf(fleet): measure the synthetic fleet on the Postgres hub (ci-hub-postgres) (#1553)
+- perf(planner): share one plan list per embedded reconcile tick for retarget detection (#1509)
+- perf(apply): renew in-process waits at a quarter of the lease TTL (#1440)
+- perf(postgres): rewrite only changed catalog property rows on put (#1433)
+- perf(postgres): list tenant catalog kinds in set-based reads (#1427)
+- perf(exposure): bound the plan-start gate to the plan's own releases (#1425)
+- perf(bundle): stream carried image blobs once during offline export (#1429)
+
+### Security
+- fix(tenant)!: keep tenant-scoped reconcile inside the caller's partition (#1420)
+- fix(postgres): bind each tenant schema to the one tenant id that owns it (#1422)
+- fix(imports): answer alike for every import id outside the caller's environment (#1428)
+- fix(security): harden local key material, sockets and state directory permissions (#1486)
+- fix(security): bind PKCS#11 module, embedded actors and widened grants to their owners (#1403)
+- fix(ops): check and read the signer seed through one open handle (#1388)
+- fix(integration): replay cache never evicts unexpired assertion ids (#1387)
+- fix(http): tighten runtime authentication matching and tenant error surfaces (#1494)
+- fix(http): encode client path segments, harden mirror, install, and pool checks (#1513)
+- fix(cli): bind the governed admission key to every parameter (#1472)
+- fix(cli): bound OIDC responses and release signature and train profile reads (#1480)
+- fix(ops)!: sign spoke-standby evidence over the bytes sent (#1439)
+- fix(executor): redact credential keys after flag dashes and after any colon (#1379)
+- fix(planner): refuse approval when a configured policy file is missing (#1380)
+- fix(catalog): re-check the accepted pin when planning and activating a workshop module (#1404)
+- fix(scripts): close install, secret-scan and log-redaction gaps (#1498)
+- fix(ci): fail closed in scope checks and harden repository scripts (#1514)
+
+### Fixed
+- fix(planner): index in-memory catalog objects by kind (#1584)
+- fix(cli): recovery export names its file with --out (#1574)
+- fix(catalog): make embedded actions atomic and check parameters first (#1567)
+- fix(planner): keep preview teardown residue until Remove succeeds (#1544)
+- fix: settle cancelled renewals, report downgrades, keep isolated pulls on mirrors (#1511)
+- fix: report, record, and attribute errors where they were swallowed or misnamed (#1510)
+- fix(storage): close the read-then-write gaps in catalog, receipt, canary, and tag checks (#1508)
+- fix(integration): send governed action parameters as their declared type (#1507)
+- fix(cli): accept IPv6 loopback, validate rollback flags before planning, refuse dropped remote reasons (#1501)
+- fix(spoke): the drill writer leads on the full lease until it is killed (#1499)
+- fix(audit): keep refusal trails and the audit cursor stable (#1497)
+- fix(integration): one bad record no longer strands or hides the others (#1493)
+- fix: a cleanup, audit, or lease-release failure no longer replaces the real result (#1492)
+- fix(executor): clock, signal, and lease-wait edge cases no longer end work early (#1491)
+- fix: close six consistency gaps in registration, transfer, and promotion paths (#1490)
+- fix: reject or normalize malformed reported and stored values (#1489)
+- fix: small correctness gaps in webhook delivery, memory facts, cancel result and channel revision floor (#1488)
+- fix: misleading errors, status codes, and outcome classification for operators (#1487)
+- fix(executor): executor, CLI and storage correctness fixes from review (#1482)
+- fix(executor): four rollback paths restore the prior state or report what they could not (#1478)
+- fix(planner): a lease-held completion never overrides a terminal plan or names another plan (#1476)
+- fix(executor): Helm and kubectl observe report Absent only on a definite not-found (#1475)
+- fix(integration): KMIP KEK state lives on the endpoint, so revoke and rotation reach every process's keys (#1474)
+- fix(executor): fence writes after an environment lease check against takeover (#1471)
+- fix(executor): a worker that died under an older fencing generation restarts under the current one (#1470)
+- fix(planner): refuse a wave plan that does not pin the wave product (#1469)
+- fix(executor)!: MLX redeploy never leaves nothing serving or signals a reused PID (#1468)
+- fix(executor): one bad stored record no longer blocks renewal or health (#1467)
+- fix(catalog): a panic in one Postgres operation no longer stops the worker (#1464)
+- fix(ops): webhook writes keep stored entries they cannot read (#1463)
+- fix(catalog): SQLite store transactions take the write lock when they begin (#1460)
+- fix(catalog): concurrent provider claims take disjoint events (#1457)
+- fix(integration): bound TLS handshakes and make OTLP export valid and timed (#1445)
+- fix(examples): cluster health waits out a k3s restart and names a down API server (#1441)
+- fix(planner): keep model-runtime variant selection at or below the channel head (#1430)
+- fix(ops): leave previous state or nothing when a local write fails (#1421)
+- fix(executor): deliver Helm overlay values through a generated values file (#1415)
+- fix(plan): validate lease-guarded plan transitions (#1400)
+- fix(ops): say when host identity is not set up on an upgraded host (#1369)
+- fix(release): cut the newest release from main; release lines only patch older lines (#1466)
+- fix(ops): HA qualification, crash-recovery, self-delivery, pin-conflict and dogfood drills prove what they claim (#1397, #1398, #1401, #1402, #1406, #1484, #1495)
+
 ## v0.9.1 (2026-11-15)
 
 Gate flags: none

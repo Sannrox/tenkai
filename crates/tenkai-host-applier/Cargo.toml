@@ -1,6 +1,6 @@
 [package]
 name = "tenkai-host-applier"
-version = "0.9.1"
+version = "0.10.0-rc.1"
 edition = "2024"
 rust-version = "1.96.1"
 license = "Apache-2.0"
@@ -11,7 +11,7 @@ name = "tenkai-host-applier"
 path = "src/bin/tenkai-host-applier.rs"
 
 [dependencies]
-tenkai = { path = "../..", version = "0.9.1" }
+tenkai = { path = "../..", version = "0.10.0-rc.1" }
 anyhow = "1"
 zeroize = "1"
 rustix = { version = "1", features = ["fs", "process"] }
@@ -24,6 +24,6 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 base64 = "0.22"
-tenkai-http = { path = "../tenkai-http", version = "0.9.1" }
+tenkai-http = { path = "../tenkai-http", version = "0.10.0-rc.1" }
 tokio = { version = "1", default-features = false, features = ["macros", "net", "rt-multi-thread"] }
-tenkai = { path = "../..", version = "0.9.1", features = ["test-support"] }
+tenkai = { path = "../..", version = "0.10.0-rc.1", features = ["test-support"] }
