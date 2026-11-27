@@ -177,6 +177,7 @@ will be split over time. Contributor and agent workflow live in
 - [1.0 listed surface](plans/1.0-surface.md)
 - [Family versioning and tagging](decisions/0040-family-versioning-and-release-policy.md)
 - [RELEASING.md](../RELEASING.md)
+- [Release 0.10.0 notes](releases/0.10.0.md)
 - [Release 0.9.1 notes](releases/0.9.1.md)
 - [Release 0.9.0 notes](releases/0.9.0.md)
 - [Release 0.8.0 notes](releases/0.8.0.md)
